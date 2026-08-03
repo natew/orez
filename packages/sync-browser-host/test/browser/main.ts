@@ -350,6 +350,75 @@ async function runSnapshotDeletionCase() {
   return { deletedTarget: true, preservedSibling: true }
 }
 
+async function runHybridCaptureCase() {
+  const connection = await openConnection(`hybrid-capture:${crypto.randomUUID()}`)
+  const exact = await post(
+    connection.client,
+    '/push',
+    mutation('helper-exact', 1, 'test.helperExact', { id: 'helper-exact' })
+  )
+  equal(exact.status, 200, 'browser exact raw write set commits')
+
+  for (const [clientID, name, status] of [
+    ['raw-write', 'test.rawWrite', 200],
+    ['mixed', 'test.mixedCapture', 200],
+    ['helper-wrong', 'test.helperWrong', 500],
+    ['raw-query', 'test.rawQueryWrite', 200],
+  ] as const) {
+    const response = await post(
+      connection.client,
+      '/push',
+      mutation(clientID, 1, name, { id: clientID })
+    )
+    equal(response.status, status, `browser ${clientID} uses its capture lane`)
+  }
+
+  await connection.client.exec(
+    'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
+    ['helper-direct-exact', 'direct exact', 0],
+    {
+      table: 'todo',
+      publicTable: 'todo',
+      kind: 'insert',
+      capture: 'exact',
+      primaryKeys: [{ after: { id: 'helper-direct-exact' } }],
+    }
+  )
+  await connection.client.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+    'raw-direct',
+    'direct raw trigger',
+    0,
+  ])
+
+  equal(
+    await connection.client.query('SELECT id FROM todo ORDER BY id'),
+    [
+      { id: 'helper-direct-exact' },
+      { id: 'helper-exact' },
+      { id: 'mixed-helper' },
+      { id: 'mixed-raw' },
+      { id: 'raw-direct' },
+      { id: 'raw-query' },
+      { id: 'raw-write' },
+    ],
+    'browser helper and raw writes commit while wrong helper keys roll back'
+  )
+  equal(
+    await connection.client.query(
+      "SELECT clientID FROM _zsync_clients WHERE clientID IN ('helper-exact', 'helper-wrong', 'mixed', 'raw-query', 'raw-write') ORDER BY clientID"
+    ),
+    [
+      { clientID: 'helper-exact' },
+      { clientID: 'mixed' },
+      { clientID: 'raw-query' },
+      { clientID: 'raw-write' },
+    ],
+    'browser wrong helper keys do not consume a mutation id'
+  )
+  connection.terminate()
+  return { helper: true, raw: true, wrongHelperRolledBack: true }
+}
+
 async function runBrowserHostSpike() {
   const storageKey = `browser-host:${crypto.randomUUID()}`
   let connection = await openConnection(storageKey)
@@ -736,6 +805,7 @@ async function runBrowserHostSpike() {
   for (const point of faultPoints) faults.push(await runFaultCase(point))
   const checkpointFailure = await runCheckpointFailureCase()
   const snapshotDeletion = await runSnapshotDeletionCase()
+  const hybridCapture = await runHybridCaptureCase()
 
   const result = {
     initialCookie: initial.body.cookie,
@@ -744,6 +814,7 @@ async function runBrowserHostSpike() {
     faults,
     checkpointFailure,
     snapshotDeletion,
+    hybridCapture,
     seedProbe: {
       sqlCounts: seedSqlCounts,
       changeCounts: seedChanges,

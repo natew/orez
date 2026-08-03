@@ -26,6 +26,29 @@ afterEach(() => {
 function sqliteDatabase(): { database: ApplicationDatabase; sqlite: DatabaseSync } {
   const sqlite = new DatabaseSync(':memory:')
   databases.push(sqlite)
+  sqlite.exec(`
+    CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE _zsync_changes (
+      watermark INTEGER PRIMARY KEY AUTOINCREMENT,
+      tableName TEXT NOT NULL,
+      op TEXT NOT NULL CHECK (op IN ('row', 'lmid', 'marker')),
+      pk TEXT
+    );
+    CREATE TRIGGER item_insert AFTER INSERT ON item BEGIN
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('item', 'row', json_object('id', NEW.id));
+    END;
+    CREATE TRIGGER item_update AFTER UPDATE ON item BEGIN
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('item', 'row', json_object('id', OLD.id));
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('item', 'row', json_object('id', NEW.id));
+    END;
+    CREATE TRIGGER item_delete AFTER DELETE ON item BEGIN
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('item', 'row', json_object('id', OLD.id));
+    END;
+  `)
 
   const applicationTransaction: ApplicationTransaction = {
     async exec(sql, params = []) {
@@ -78,7 +101,7 @@ const effects: EffectScheduler = {
   },
 }
 
-function push(name: string, id = 1) {
+function push(name: string, id = 1, clientID = 'client-1') {
   return {
     pushVersion: 1,
     schemaVersion: 1,
@@ -86,7 +109,7 @@ function push(name: string, id = 1) {
     mutations: [
       {
         type: 'custom',
-        clientID: 'client-1',
+        clientID,
         id,
         name,
         args: [{}],
@@ -97,9 +120,43 @@ function push(name: string, id = 1) {
 }
 
 describe('sync executor', () => {
+  test('helper shadowing adds no writes and the meter detects an extra logical row', async () => {
+    const measureRowsWritten = async (lane: 'raw' | 'helper', logicalRows: 1 | 2) => {
+      const { database, sqlite } = sqliteDatabase()
+      const mutators = {
+        create: async ({ tx }) => {
+          const write = async (id: string, value: string) => {
+            if (lane === 'helper') {
+              await tx.mutate.item.insert({ id, value })
+            } else {
+              await tx.dbTransaction.wrappedTransaction.exec(
+                'INSERT INTO item (id, value) VALUES (?, ?)',
+                [id, value]
+              )
+            }
+          }
+          await write('a', 'one')
+          if (logicalRows === 2) {
+            await write('b', 'two')
+          }
+        },
+      } satisfies MutatorRegistry<typeof schema>
+      const executor = createSyncExecutor({ database, effects, mutators, schema })
+      const before = Number(
+        sqlite.prepare('SELECT total_changes() AS total').get()!.total
+      )
+      await executor.push(push('create'), { userID: 'user-1' })
+      const after = Number(sqlite.prepare('SELECT total_changes() AS total').get()!.total)
+      return after - before
+    }
+
+    await expect(measureRowsWritten('raw', 1)).resolves.toBe(5)
+    await expect(measureRowsWritten('helper', 1)).resolves.toBe(5)
+    await expect(measureRowsWritten('helper', 2)).resolves.toBe(7)
+  })
+
   test('insert conflict keeps the existing row and commits the later insert', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
     sqlite.prepare('INSERT INTO item (id, value) VALUES (?, ?)').run('a', 'original')
 
     const mutators = {
@@ -126,7 +183,6 @@ describe('sync executor', () => {
 
   test('the push endpoint returns zero mutate response shape, not an internal wrapper', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
     let receivedClaims: unknown
     const mutators = {
       create: async ({ ctx, tx }) => {
@@ -158,7 +214,6 @@ describe('sync executor', () => {
 
   test('the push endpoint reports structured unsupported-version diagnostics', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
     const executor = createSyncExecutor({ database, effects, mutators: {}, schema })
     const callback = vi.fn()
     const body = { ...push('create'), pushVersion: 2 }
@@ -194,7 +249,6 @@ describe('sync executor', () => {
 
   test('a mutation naming an inherited key is rejected, not resolved off the prototype', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
     const executor = createSyncExecutor({ database, effects, mutators: {}, schema })
 
     await expect(executor.push(push('toString'), { userID: 'user-1' })).resolves.toEqual({
@@ -212,7 +266,6 @@ describe('sync executor', () => {
 
   test('a crud payload naming an inherited key is rejected as an unknown column', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
     const mutators = {
       sneak: async ({ tx }) => {
         await tx.mutate.item.insert({ id: 'a', value: 'v', toString: 'x' } as never)
@@ -227,9 +280,140 @@ describe('sync executor', () => {
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
   })
 
+  test('raw and helper writes share one transaction while wrong helper keys fail', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    const mutators = {
+      mixed: async ({ tx }) => {
+        const sql = tx.dbTransaction.wrappedTransaction
+        await sql.exec('INSERT INTO item (id, value) VALUES (?, ?)', ['raw', 'v'])
+        await tx.mutate.item.insert({ id: 'helper', value: 'v' })
+        await sql.query('INSERT INTO item (id, value) VALUES (?, ?) RETURNING id', [
+          'query-write',
+          'v',
+        ])
+      },
+      wrongAfterRaw: async ({ tx }) => {
+        const sql = tx.dbTransaction.wrappedTransaction
+        await sql.exec('INSERT INTO item (id, value) VALUES (?, ?)', [
+          'rolled-back-raw',
+          'v',
+        ])
+        try {
+          await sql.exec('INSERT INTO item (id, value) VALUES (?, ?)', ['actual', 'v'], {
+            table: 'item',
+            publicTable: 'item',
+            kind: 'insert',
+            capture: 'exact',
+            primaryKeys: [{ after: { id: 'claimed' } }],
+          })
+        } catch {}
+        await sql.exec('INSERT INTO item (id, value) VALUES (?, ?)', [
+          'after-caught-invariant',
+          'v',
+        ])
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(executor.push(push('mixed'), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: {
+        mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+      },
+    })
+    expect(sqlite.prepare('SELECT * FROM item ORDER BY id').all()).toEqual([
+      { id: 'helper', value: 'v' },
+      { id: 'query-write', value: 'v' },
+      { id: 'raw', value: 'v' },
+    ])
+    await expect(
+      executor.push(push('wrongAfterRaw', 1, 'wrong-client'), { userID: 'user-1' })
+    ).rejects.toThrow('does not match trigger write set')
+    expect(
+      sqlite
+        .prepare(
+          "SELECT id FROM item WHERE id IN ('actual', 'rolled-back-raw', 'after-caught-invariant')"
+        )
+        .all()
+    ).toEqual([])
+    expect(
+      sqlite.prepare("SELECT * FROM _zsync_clients WHERE clientID = 'wrong-client'").all()
+    ).toEqual([])
+  })
+
+  test('metadata-less SQL remains on the trigger lane', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    const mutators = {
+      legacy: async ({ tx }) => {
+        await tx.dbTransaction.wrappedTransaction.exec(
+          'INSERT INTO item (id, value) VALUES (?, ?)',
+          ['legacy', 'v']
+        )
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(executor.push(push('legacy'), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: {
+        mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+      },
+    })
+    expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([
+      { id: 'legacy', value: 'v' },
+    ])
+    expect(
+      sqlite.prepare("SELECT tableName, pk FROM _zsync_changes WHERE op = 'row'").all()
+    ).toEqual([{ tableName: 'item', pk: '{"id":"legacy"}' }])
+  })
+
+  test('helper shadowing matches primary-key changes, bulk writes, and repeated keys', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite
+      .prepare('INSERT INTO item (id, value) VALUES (?, ?), (?, ?), (?, ?)')
+      .run('old', 'v1', 'bulk-a', 'v2', 'bulk-b', 'v3')
+    const mutators = {
+      reshape: async ({ tx }) => {
+        const sql = tx.dbTransaction.wrappedTransaction
+        await sql.exec(
+          'UPDATE item SET id = ?, value = ? WHERE id = ?',
+          ['new', 'v4', 'old'],
+          {
+            table: 'item',
+            publicTable: 'item',
+            kind: 'update',
+            capture: 'exact',
+            primaryKeys: [{ before: { id: 'old' }, after: { id: 'new' } }],
+          }
+        )
+        await sql.exec('UPDATE item SET value = ? WHERE id = ?', ['v5', 'new'], {
+          table: 'item',
+          publicTable: 'item',
+          kind: 'update',
+          capture: 'exact',
+          primaryKeys: [{ before: { id: 'new' }, after: { id: 'new' } }],
+        })
+        await sql.exec('DELETE FROM item WHERE id IN (?, ?)', ['bulk-a', 'bulk-b'], {
+          table: 'item',
+          publicTable: 'item',
+          kind: 'delete',
+          capture: 'exact',
+          primaryKeys: [{ before: { id: 'bulk-a' } }, { before: { id: 'bulk-b' } }],
+        })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(executor.push(push('reshape'), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: {
+        mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+      },
+    })
+    expect(sqlite.prepare('SELECT * FROM item ORDER BY id').all()).toEqual([
+      { id: 'new', value: 'v5' },
+    ])
+  })
+
   test('wrapping an ordinary error keeps its structured details and name', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
 
     class ProfanityError extends Error {
       readonly details = { flaggedWords: ['badger'] }
@@ -285,7 +469,6 @@ describe('sync executor', () => {
 
   test('an ordinary mutator error rolls back, advances the ledger, and unblocks the next id', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
 
     const mutators = {
       reject: async ({ tx }) => {
@@ -329,7 +512,6 @@ describe('sync executor', () => {
 
   test('a retryable rejection writes nothing at all and keeps the mutation id', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
 
     let overBudget = true
     const mutators = {
@@ -379,7 +561,6 @@ describe('sync executor', () => {
 
   test('a retryable rejection answers the push endpoint with 429 and Retry-After', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
 
     const mutators = {
       spend: async () => {
@@ -414,7 +595,16 @@ describe('sync executor', () => {
 
   test('replay acknowledges without invoking the mutator or effects again', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const transaction = database.transaction.bind(database)
+    let transactionOpen = false
+    database.transaction = async (work) => {
+      transactionOpen = true
+      try {
+        return await transaction(work)
+      } finally {
+        transactionOpen = false
+      }
+    }
     let mutationRuns = 0
     let effectRuns = 0
     const mutators = {
@@ -422,6 +612,7 @@ describe('sync executor', () => {
         mutationRuns++
         await tx.mutate.item.insert({ id: 'a', value: 'once' })
         ctx.defer(() => {
+          expect(transactionOpen).toBe(false)
           effectRuns++
         })
       },
@@ -544,7 +735,6 @@ describe('sync executor', () => {
 
   test('accepts cleanup mutation id zero without dispatch or acknowledgement', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
     const executor = createSyncExecutor({
       database,
       effects,
@@ -574,7 +764,6 @@ describe('sync executor', () => {
 
   test('recognizes application errors created by another package instance', async () => {
     const { database, sqlite } = sqliteDatabase()
-    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
     class ForeignMutationApplicationError extends Error {
       readonly details = { reason: 'denied' }
 

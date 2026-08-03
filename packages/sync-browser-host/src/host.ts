@@ -1,6 +1,6 @@
 import createSqliteModule from 'bedrock-sqlite/browser'
 import { resolveQueryPatch } from 'orez-sync-cf-host/query-patch'
-import { createSyncExecutor } from 'orez-sync-executor/core'
+import { beginWriteSetCapture, createSyncExecutor } from 'orez-sync-executor/core'
 
 import {
   engine_compile_query,
@@ -475,9 +475,16 @@ class BrowserSyncHostImpl<
   ): Promise<ExecResult> {
     this.#assertAccepting()
     return await this.#queue.run(async () => {
-      const result = await this.#writeTransaction('direct', () =>
-        this.#directSql.exec(sql, params, metadata)
-      )
+      const result = await this.#writeTransaction('direct', async () => {
+        const writeSet = beginWriteSetCapture(
+          this.config.schema,
+          this.#mutatorSql,
+          'sqlite'
+        )
+        const value = await writeSet.transaction.exec(sql, params, metadata)
+        await writeSet.validate()
+        return value
+      })
       this.#notifyDataChanged()
       return result
     })

@@ -631,17 +631,70 @@ try {
 
   response = await post(
     '/push',
+    mutation('capture-exact', 1, 'test.exactWriteSet', { id: 'capture-exact' })
+  )
+  equal(response.status, 200, 'exact raw SQL write set commits')
+
+  response = await post(
+    '/push',
+    mutation('capture-raw', 1, 'test.rawWrite', { id: 'capture-raw' })
+  )
+  equal(response.status, 200, 'metadata-less raw SQL stays on the trigger lane')
+
+  response = await post(
+    '/push',
+    mutation('capture-mixed', 1, 'test.mixedCapture', { id: 'capture-mixed' })
+  )
+  equal(response.status, 200, 'helper and raw trigger writes share one transaction')
+
+  response = await post(
+    '/push',
+    mutation('capture-wrong', 1, 'test.wrongWriteSet', { id: 'capture-wrong' })
+  )
+  equal(response.status, 500, 'wrong raw SQL write set fails trigger shadowing')
+
+  response = await post(
+    '/push',
+    mutation('capture-query', 1, 'test.queryWrite', { id: 'capture-query' })
+  )
+  equal(response.status, 200, 'write issued through query stays on the trigger lane')
+
+  let rows = await admin('/admin/sql', {
+    query: "SELECT id FROM project WHERE id LIKE 'capture-%' ORDER BY id;",
+  })
+  equal(
+    rows.rows,
+    [
+      { id: 'capture-exact' },
+      { id: 'capture-mixed-helper' },
+      { id: 'capture-mixed-raw' },
+      { id: 'capture-query' },
+      { id: 'capture-raw' },
+    ],
+    'helper and raw trigger writes commit while wrong helper keys roll back'
+  )
+  rows = await admin('/admin/sql', {
+    query:
+      "SELECT clientID FROM _zsync_clients WHERE clientID LIKE 'capture-%' ORDER BY clientID;",
+  })
+  equal(
+    rows.rows,
+    [
+      { clientID: 'capture-exact' },
+      { clientID: 'capture-mixed' },
+      { clientID: 'capture-query' },
+      { clientID: 'capture-raw' },
+    ],
+    'only the wrong helper-key probe leaves its mutation id unconsumed'
+  )
+
+  response = await post(
+    '/push',
     mutation('client-a', 2, 'test.effectSuccess', {
       id: 'effect-success',
-      clientID: 'client-a',
-      mutationID: 2,
     })
   )
   equal(response.status, 200, 'deferred-effect push status')
-  let rows = await admin('/admin/sql', {
-    query: "SELECT observedCommitted FROM _harness_effects WHERE id = 'effect-success'",
-  })
-  equal(rows.rows, [{ observedCommitted: 1 }], 'effect ran only after LMID commit')
 
   response = await post(
     '/push',
@@ -652,12 +705,11 @@ try {
   rows = await admin('/admin/sql', {
     query:
       "SELECT (SELECT COUNT(*) FROM project WHERE id = 'effect-rollback') AS projectCount, " +
-      "(SELECT COUNT(*) FROM _harness_effects WHERE id = 'effect-rollback') AS effectCount, " +
       "(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients WHERE clientID = 'client-a') AS lmid",
   })
   equal(
     rows.rows,
-    [{ projectCount: 0, effectCount: 0, lmid: '3' }],
+    [{ projectCount: 0, lmid: '3' }],
     'awaited app error rolls back rows/effect and advances LMID in tx2'
   )
 

@@ -51,3 +51,10 @@ export class SyncExecutorRequestError extends Error {
     this.name = 'SyncExecutorRequestError'
   }
 }
+
+export class MutationWriteSetError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'MutationWriteSetError'
+  }
+}

@@ -50,11 +50,28 @@ export type TransactionQueryFormat = {
   readonly singular: boolean
 }
 
-export type SqlStatementMetadata = {
+type SqlStatementMetadataBase = {
   readonly table: string
   readonly publicTable: string
   readonly kind: 'delete' | 'insert' | 'update' | 'upsert'
 }
+
+export type SqlStatementMetadata = SqlStatementMetadataBase &
+  (
+    | {
+        /** omitted metadata keeps arbitrary SQL on the transparent trigger lane. */
+        readonly capture?: 'triggers'
+        readonly primaryKeys?: never
+      }
+    | {
+        /** generated `tx.mutate` helpers select the cheaper lane with exact keys. */
+        readonly capture: 'exact'
+        readonly primaryKeys: readonly {
+          readonly before?: Readonly<Record<string, JsonPrimitive>>
+          readonly after?: Readonly<Record<string, JsonPrimitive>>
+        }[]
+      }
+  )
 
 export type ExecResult = { readonly changes: number }
 

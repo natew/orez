@@ -1,5 +1,6 @@
 import type {
   ApplicationTransaction,
+  JsonPrimitive,
   JsonValue,
   SqlStatementMetadata,
   ZeroSchemaConfig,
@@ -77,7 +78,12 @@ export async function executeCrud(
     table: physicalTable,
     publicTable: tableName,
     kind,
+    capture: 'exact',
+    primaryKeys: [],
   }
+  const primaryKey = Object.fromEntries(
+    table.primaryKey.map((column) => [column, value[column] as JsonPrimitive])
+  ) as Readonly<Record<string, JsonPrimitive>>
   const primaryKeys = table.primaryKey.map((column) => physicalColumn(column))
   const whereParams = table.primaryKey.map((column) =>
     encodeValue(dialect, table.columns[column]!.type, value[column])
@@ -90,7 +96,10 @@ export async function executeCrud(
           `${quoteIdentifier(column)} = ${placeholder(dialect, index + 1)}`
       )
       .join(' AND ')
-    await tx.exec(`DELETE FROM ${quotedTable} WHERE ${where}`, whereParams, metadata)
+    await tx.exec(`DELETE FROM ${quotedTable} WHERE ${where}`, whereParams, {
+      ...metadata,
+      primaryKeys: [{ before: primaryKey }],
+    })
     return
   }
 
@@ -115,7 +124,10 @@ export async function executeCrud(
     await tx.exec(
       `UPDATE ${quotedTable} SET ${set} WHERE ${where}`,
       [...params, ...whereParams],
-      metadata
+      {
+        ...metadata,
+        primaryKeys: [{ before: primaryKey, after: primaryKey }],
+      }
     )
     return
   }
@@ -132,7 +144,10 @@ export async function executeCrud(
   const conflict = primaryKeys.map(quoteIdentifier).join(', ')
 
   if (kind === 'insert') {
-    await tx.exec(`${insert} ON CONFLICT (${conflict}) DO NOTHING`, params, metadata)
+    await tx.exec(`${insert} ON CONFLICT (${conflict}) DO NOTHING`, params, {
+      ...metadata,
+      primaryKeys: [{ after: primaryKey }],
+    })
     return
   }
 
@@ -146,7 +161,10 @@ export async function executeCrud(
             return `${physical} = excluded.${physical}`
           })
           .join(', ')}`
-  await tx.exec(`${insert} ON CONFLICT (${conflict}) ${action}`, params, metadata)
+  await tx.exec(`${insert} ON CONFLICT (${conflict}) ${action}`, params, {
+    ...metadata,
+    primaryKeys: [{ before: primaryKey, after: primaryKey }],
+  })
 }
 
 export function isJsonValue(value: unknown): value is JsonValue {

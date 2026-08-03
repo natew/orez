@@ -181,6 +181,68 @@ const mutators = Object.freeze({
     })
     throw new Error('rollback requested')
   },
+  async 'test.helperExact'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.exec(
+      'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
+      [value.id, 'helper exact', 0],
+      {
+        table: 'todo',
+        publicTable: 'todo',
+        kind: 'insert',
+        capture: 'exact',
+        primaryKeys: [{ after: { id: value.id } }],
+      }
+    )
+  },
+  async 'test.rawWrite'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.exec(
+      'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
+      [value.id, 'raw trigger', 0]
+    )
+  },
+  async 'test.mixedCapture'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.exec(
+      'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
+      [`${value.id}-raw`, 'mixed raw trigger', 0]
+    )
+    await tx.mutate.todo.insert({
+      id: `${value.id}-helper`,
+      title: 'mixed helper',
+      done: false,
+    })
+  },
+  async 'test.helperWrong'({ tx, args }) {
+    const value = args as { id: string }
+    const sql = tx.dbTransaction.wrappedTransaction
+    await sql.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+      `${value.id}-raw`,
+      'must roll back with wrong helper keys',
+      0,
+    ])
+    await sql.exec(
+      'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
+      [value.id, 'helper wrong', 0],
+      {
+        table: 'todo',
+        publicTable: 'todo',
+        kind: 'insert',
+        capture: 'exact',
+        primaryKeys: [{ after: { id: `${value.id}-wrong` } }],
+      }
+    )
+  },
+  async 'test.rawQueryWrite'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.query(
+      `WITH input(id, title, done) AS (VALUES (?, ?, ?))
+       INSERT INTO todo (id, title, done)
+       SELECT id, title, done FROM input RETURNING id`,
+      [value.id, 'raw query', 0]
+    )
+  },
 } satisfies MutatorRegistry<typeof schema>)
 
 type WorkerMessage =

@@ -1,6 +1,7 @@
 export {
   MutationApplicationError,
   MutationRetryError,
+  MutationWriteSetError,
   SyncExecutorRequestError,
 } from './errors.js'
 export {
@@ -10,6 +11,7 @@ export {
   registerMutators,
 } from './executor.js'
 export { reportPushDiagnostics, summarizePushRequest } from './diagnostics.js'
+export { beginWriteSetCapture } from './write-set.js'
 
 export type {
   PushDiagnostic,

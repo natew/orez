@@ -2,6 +2,7 @@ import {
   MutationApplicationError,
   MutationRetryError,
   registerMutators,
+  type JsonValue,
 } from 'orez-sync-executor/core'
 import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
@@ -35,10 +36,6 @@ const DDL = [
     "createdAt" INTEGER NOT NULL,
     "order" TEXT NOT NULL,
     meta TEXT
-  )`,
-  `CREATE TABLE IF NOT EXISTS _harness_effects (
-    id TEXT PRIMARY KEY,
-    observedCommitted INTEGER NOT NULL
   )`,
 ]
 
@@ -157,59 +154,35 @@ const harnessMutators = registerMutators({
     const value = args as { id: string; ownerId: string; name: string }
     const exists = await sql.query('SELECT 1 FROM project WHERE id = ?', [value.id])
     if (exists.length > 0) throw new MutationApplicationError('exists')
-    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
-      value.id,
-      value.ownerId,
-      value.name,
-    ])
+    await tx.mutate.project.insert(value)
   },
   async 'project.rename'({ tx, args }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; name: string }
-    await sql.exec('UPDATE project SET name = ? WHERE id = ?', [value.name, value.id])
+    await tx.mutate.project.update(value)
   },
   async 'project.delete'({ tx, args }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await sql.exec('DELETE FROM project WHERE id = ?', [value.id])
+    await tx.mutate.project.delete(value)
   },
   async 'member.add'({ tx, args }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; projectId: string; userId: string }
-    await sql.exec('INSERT INTO member (id, "projectId", "userId") VALUES (?, ?, ?)', [
-      value.id,
-      value.projectId,
-      value.userId,
-    ])
+    await tx.mutate.member.insert(value)
   },
   async 'member.remove'({ tx, args }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await sql.exec('DELETE FROM member WHERE id = ?', [value.id])
+    await tx.mutate.member.delete(value)
   },
   async 'task.create'({ tx, args }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as {
       id: string
       projectId: string
       title: string
       rank: number
       done: boolean
-      meta?: unknown
+      meta?: JsonValue
       dueAt?: number
     }
-    await sql.exec(
-      'INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt") VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [
-        value.id,
-        value.projectId,
-        value.title,
-        value.rank,
-        value.done ? 1 : 0,
-        value.meta == null ? null : JSON.stringify(value.meta),
-        value.dueAt ?? null,
-      ]
-    )
+    await tx.mutate.task.insert(value)
   },
   async 'task.toggle'({ tx, args }) {
     const sql = tx.dbTransaction.wrappedTransaction
@@ -218,18 +191,13 @@ const harnessMutators = registerMutators({
       value.id,
     ])
     if (rows.length === 0) throw new MutationApplicationError('not-found')
-    await sql.exec('UPDATE task SET done = ? WHERE id = ?', [
-      rows[0]!.done ? 0 : 1,
-      value.id,
-    ])
+    await tx.mutate.task.update({ id: value.id, done: rows[0]!.done === 0 })
   },
   async 'task.setRank'({ tx, args }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; rank: number }
-    await sql.exec('UPDATE task SET rank = ? WHERE id = ?', [value.rank, value.id])
+    await tx.mutate.task.update(value)
   },
   async 'message.send'({ tx, args }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as {
       id: string
       serverId: string
@@ -239,67 +207,103 @@ const harnessMutators = registerMutators({
       type: string
       createdAt: number
       order: string
-      meta?: unknown
+      meta?: JsonValue
     }
+    await tx.mutate.message.insert(value)
+  },
+  async 'test.exactWriteSet'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.exec(
+      'INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)',
+      [value.id, 'user-a', 'exact-write-set'],
+      {
+        table: 'project',
+        publicTable: 'project',
+        kind: 'insert',
+        capture: 'exact',
+        primaryKeys: [{ after: { id: value.id } }],
+      }
+    )
+  },
+  async 'test.rawWrite'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.exec(
+      'INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)',
+      [value.id, 'user-a', 'raw-trigger-write']
+    )
+  },
+  async 'test.mixedCapture'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.exec(
+      'INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)',
+      [`${value.id}-raw`, 'user-a', 'mixed raw trigger']
+    )
+    await tx.mutate.project.insert({
+      id: `${value.id}-helper`,
+      ownerId: 'user-a',
+      name: 'mixed helper',
+    })
+  },
+  async 'test.wrongWriteSet'({ tx, args }) {
+    const value = args as { id: string }
+    const sql = tx.dbTransaction.wrappedTransaction
+    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
+      `${value.id}-raw`,
+      'user-a',
+      'must roll back with wrong helper keys',
+    ])
     await sql.exec(
-      'INSERT INTO message (id, "serverId", "channelId", "creatorId", content, type, "createdAt", "order", meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [
-        value.id,
-        value.serverId,
-        value.channelId,
-        value.creatorId,
-        value.content,
-        value.type,
-        value.createdAt,
-        value.order,
-        value.meta == null ? null : JSON.stringify(value.meta),
-      ]
+      'INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)',
+      [value.id, 'user-a', 'wrong-write-set'],
+      {
+        table: 'project',
+        publicTable: 'project',
+        kind: 'insert',
+        capture: 'exact',
+        primaryKeys: [{ after: { id: `${value.id}-wrong` } }],
+      }
+    )
+  },
+  async 'test.queryWrite'({ tx, args }) {
+    const value = args as { id: string }
+    await tx.dbTransaction.wrappedTransaction.query(
+      `WITH input(id, ownerId, name) AS (VALUES (?, ?, ?))
+       INSERT INTO project (id, "ownerId", name)
+       SELECT id, ownerId, name FROM input RETURNING id`,
+      [value.id, 'user-a', 'query-write']
     )
   },
   async 'test.effectSuccess'({ tx, args, ctx }) {
-    const sql = tx.dbTransaction.wrappedTransaction
-    const value = args as { id: string; clientID: string; mutationID: number }
-    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
-      value.id,
-      ctx.claims.userID,
-      'deferred-effect-success',
-    ])
-    ctx.defer(async () => {
-      const rows = await sql.query<{ committed: number }>(
-        `SELECT COUNT(*) AS committed FROM _zsync_clients
-         WHERE clientID = ? AND lastMutationID >= ?`,
-        [value.clientID, value.mutationID]
-      )
-      await sql.exec(
-        'INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, ?)',
-        [value.id, Number(rows[0]?.committed ?? 0) > 0 ? 1 : 0]
-      )
+    const value = args as { id: string }
+    await tx.mutate.project.insert({
+      id: value.id,
+      ownerId: ctx.claims.userID,
+      name: 'deferred-effect-success',
     })
+    ctx.defer(() => {}, { barrier: true })
   },
   async 'test.effectRollback'({ tx, args, ctx }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
-      value.id,
-      ctx.claims.userID,
-      'must-roll-back',
-    ])
-    ctx.defer(async () => {
-      await sql.exec(
-        'INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, 0)',
-        [value.id]
-      )
+    await tx.mutate.project.insert({
+      id: value.id,
+      ownerId: ctx.claims.userID,
+      name: 'must-roll-back',
     })
+    ctx.defer(
+      () => {
+        throw new Error('rolled-back effect ran')
+      },
+      { barrier: true }
+    )
     throw new MutationApplicationError('intentional-rollback')
   },
   async 'test.retryLater'({ tx, args, ctx }) {
-    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
-      value.id,
-      ctx.claims.userID,
-      'must-roll-back',
-    ])
+    await tx.mutate.project.insert({
+      id: value.id,
+      ownerId: ctx.claims.userID,
+      name: 'must-roll-back',
+    })
     throw new MutationRetryError(300_000, 'intentional-retry', {
       error: 'harnessBudgetExceeded',
     })

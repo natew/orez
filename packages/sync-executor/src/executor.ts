@@ -7,6 +7,7 @@ import {
 } from './effects.js'
 import { MutationApplicationError, SyncExecutorRequestError } from './errors.js'
 import { createServerTransaction } from './transaction.js'
+import { beginWriteSetCapture } from './write-set.js'
 
 import type {
   ApplicationDatabase,
@@ -59,6 +60,10 @@ function isMutationApplicationError(
     typeof error.message === 'string' &&
     (error.details === undefined || isJsonValue(error.details))
   )
+}
+
+function isMutationWriteSetError(error: unknown): error is Error {
+  return isRecord(error) && error.name === 'MutationWriteSetError'
 }
 
 // exported because the durable-object host answers the same rejection over
@@ -127,6 +132,7 @@ function validatePushBody(value: unknown): PushBody {
 // charge for every refusal. it travels out of the push untouched instead.
 function toApplicationError(error: unknown): unknown {
   if (isMutationRetryError(error)) return error
+  if (isMutationWriteSetError(error)) return error
   if (isMutationApplicationError(error)) return error
   if (error instanceof SyncExecutorRequestError) return error
   const message = error instanceof Error ? error.message : String(error)
@@ -315,6 +321,8 @@ export function createSyncExecutor<S extends Schema>(
   const { database, effects, mutators, schema } = options
   let ledgerInitialization: Promise<void> | undefined
   const ensureLedger = () => (ledgerInitialization ??= initializeLedger(database))
+  const beginApplicationWrite = (applicationTx: ApplicationTransaction) =>
+    beginWriteSetCapture(schema, applicationTx, database.dialect)
 
   async function runMutation(
     mutator: MutatorRegistry<S>[string],
@@ -322,12 +330,14 @@ export function createSyncExecutor<S extends Schema>(
     claims: NormalizedClaims,
     identity: { clientGroupID: string; clientID: string; mutationID: number } | undefined
   ): Promise<readonly ReturnType<EffectAttempt['entries']>[number][]> {
+    await ensureLedger()
     let committedEffects: ReturnType<EffectAttempt['entries']> = []
     await database.transaction(async (applicationTx) => {
+      const writeSet = await beginApplicationWrite(applicationTx)
       const attempt = createEffectAttempt()
       const tx = createServerTransaction(
         schema,
-        applicationTx,
+        writeSet.transaction,
         database.dialect,
         identity?.clientID,
         identity?.mutationID
@@ -346,6 +356,7 @@ export function createSyncExecutor<S extends Schema>(
           }
       try {
         await mutator({ tx, args, ctx })
+        await writeSet.validate()
         attempt.close()
         committedEffects = attempt.entries()
       } catch (error) {
@@ -396,10 +407,11 @@ export function createSyncExecutor<S extends Schema>(
             )
             if (current.kind === 'replay') return current
 
+            const writeSet = await beginApplicationWrite(applicationTx)
             const attempt = createEffectAttempt()
             const tx = createServerTransaction(
               schema,
-              applicationTx,
+              writeSet.transaction,
               database.dialect,
               mutation.clientID,
               mutation.id
@@ -427,6 +439,7 @@ export function createSyncExecutor<S extends Schema>(
               } catch (error) {
                 throw toApplicationError(error)
               }
+              await writeSet.validate()
               await advanceLMID(
                 database,
                 applicationTx,
@@ -501,9 +514,15 @@ export function createSyncExecutor<S extends Schema>(
       work: (tx: ServerTransaction<S>) => Value | Promise<Value>
     ): Promise<Value> {
       validateClaims(claims)
-      return database.transaction((applicationTx) =>
-        work(createServerTransaction(schema, applicationTx, database.dialect))
-      )
+      await ensureLedger()
+      return database.transaction(async (applicationTx) => {
+        const writeSet = await beginApplicationWrite(applicationTx)
+        const value = await work(
+          createServerTransaction(schema, writeSet.transaction, database.dialect)
+        )
+        await writeSet.validate()
+        return value
+      })
     },
 
     async query<Result>(
@@ -511,9 +530,15 @@ export function createSyncExecutor<S extends Schema>(
       work: (tx: ServerTransaction<S>) => Result | Promise<Result>
     ): Promise<Result> {
       validateClaims(claims)
-      return database.transaction((applicationTx) =>
-        work(createServerTransaction(schema, applicationTx, database.dialect))
-      )
+      await ensureLedger()
+      return database.transaction(async (applicationTx) => {
+        const writeSet = await beginApplicationWrite(applicationTx)
+        const value = await work(
+          createServerTransaction(schema, writeSet.transaction, database.dialect)
+        )
+        await writeSet.validate()
+        return value
+      })
     },
   }
 }
