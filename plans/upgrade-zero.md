@@ -1,42 +1,86 @@
 # Upgrading `@rocicorp/zero` in orez — runbook
 
-orez does not just _depend_ on `@rocicorp/zero`; it **patches zero-cache's
-compiled internals** at startup (node, browser, and Cloudflare paths) and speaks
-zero's wire/sync protocol directly. That makes a Zero bump "a whole process,"
-not a one-line version change. This doc is the reusable runbook: the exact
-coupling points to re-validate, the staged cross-repo validation pipeline, and
-the per-version gotchas.
-
+> **Read this first (rewritten 2026-08-03, owner call).** A Zero bump used to be
+> invasive because orez patched zero-cache's compiled internals to run it under
+> PGlite and inside a browser. **Both of those are being deprecated.** Going
+> forward orez is the Rust sync host in two runtimes, browser and Cloudflare, and
+> a Zero bump is **mostly a client update**. Treat §1 and §3.B-§3.F as the legacy
+> path: they still describe real code, but that code is on its way out and is not
+> worth spending an upgrade's budget on.
+>
+> What still genuinely matters on every bump:
+>
+> 1. **The protocol version.** If it moves, the Rust host has to move with it.
+>    Read it out of the tarball, never the release notes.
+> 2. **The tests pass on the new client.** This is the point of the doc. A green
+>    unit suite is not the gate; the consumer e2e suites are.
+> 3. **One manual smoke pass** for console errors and warnings that leak in and
+>    that no assertion catches (§4.5).
+>
 > Keep this updated on every upgrade. Add a new entry under **Worked examples**
 > each time, and fix any coupling point whose file:line drifted.
+
+## What orez is now (and what is going away)
+
+| runtime                              | status                                                |
+| ------------------------------------ | ----------------------------------------------------- |
+| Rust sync host, browser              | **keep** — the browser story going forward             |
+| Rust sync host, Cloudflare DO        | **keep** — the deploy story going forward              |
+| Embedded (real zero-cache + postgres) | **keep** — the batteries-included local dev option     |
+| PGlite-backed orez                   | **deprecating** — no longer worth validating on a bump |
+| Browser-adapted zero-cache (orez-web) | **deprecating** — replaced by the Rust browser host    |
+
+Both consumers have already moved: `~/chat` and `~/soot` run the Rust host. The
+only way to keep validating the PGlite and browser-adapted paths would be to
+check out old consumer versions that still use them, which is not worth the
+tokens. Do not treat a failure in those paths as a release blocker.
 
 ---
 
 ## 0. TL;DR runbook
 
-1. **Find the new protocol version.** `PROTOCOL_VERSION` lives in
-   `@rocicorp/zero/out/zero-protocol/src/protocol-version.d.ts`. orez's
-   `/sync/v<N>/connect` strings must match it. (1.5 = 50, 1.6 = 51.)
-2. **Find the matching `@rocicorp/zero-sqlite3`.** `npm view @rocicorp/zero@<v>
-dependencies.@rocicorp/zero-sqlite3`. Pin orez's _direct_ devDep to that
-   **exact** version so there is a single copy in the tree (orez patches the
-   one it resolves; zero-cache loads the one _it_ resolves — they must be the
-   same instance).
-3. **Bump `package.json`** (`@rocicorp/zero`, `@rocicorp/zero-sqlite3`) and
-   `bun install`. See **§2 release-age gotcha** if bun blocks a fresh version.
-4. **Rebuild the native binding:** `bun run native:bootstrap` (see **§5** — it
-   has a downgrade footgun under the release-age policy).
-5. **Bump every protocol string** (see **§3 coupling map**, category A).
-6. **Re-validate every patch anchor** against the freshly installed compiled
-   code (see **§3**, categories B–E). The fastest pre-check is
-   `bun run cf-patches.test.ts` + the litestream-patch path. Each patch _fails
-   loud_ if its anchor is gone — trust those warnings.
-7. **Run the staged pipeline (§4):** orez unit → orez integration (native) →
-   chat e2e → orez-node ✅ → orez-web → orez-cf (+ ~/soot).
+1. **Read `PROTOCOL_VERSION` out of the packed tarball, not the release notes.**
+   ```sh
+   npm pack @rocicorp/zero@<v> && tar xzf rocicorp-zero-<v>.tgz
+   cat package/out/zero-protocol/src/protocol-version.d.ts
+   ```
+   (1.5 = 50, 1.6 = 51, 1.7 = 51, 1.8 = 51.) Release notes have said "no
+   protocol changes" while other compiled details moved, so read the file.
+   **If it changed, the Rust host (`crates/sync-core`, `crates/sync-native`) and
+   every `/sync/v<N>/connect` string in §3.A move with it.** If it did not
+   change, §3.A needs no edits at all.
+2. **Check `@rocicorp/zero-sqlite3`:** `npm view @rocicorp/zero@<v>
+dependencies.@rocicorp/zero-sqlite3`. Only relevant to the legacy embedded
+   path; if it did not move, skip §5 entirely.
+3. **Bump the exact pins and `bun install`.** Leave `>=x.y.z` peer ranges alone
+   unless you start using a new API, so consumers are not forced to upgrade.
+   In orez that is 5 exact pins: root, `harness`, `sync-executor`,
+   `drizzle-zero-sqlite`, `orez-lite`.
+4. **Bump every consumer in the same pass.** `~/chat`, `~/soot`, `~/agentbus`.
+   Mixing client minors across a client and its host is not a tested
+   configuration. **`~/chat` also pins orez's RUST crates by git rev
+   (`rust-sync/chat-native/Cargo.toml`) — that drifts independently of its npm
+   pin and nothing checks the two against each other. Bump both, and pin the rev
+   to a SHA that is actually pushed.** `~/soot` has generated `ZERO_VERSION`
+   markers in CI that `bun run env:update` regenerates; its own
+   `chk:zero-version` gate catches them.
+5. **Run the pipeline (§4)** and **do the manual smoke pass (§4.5)**.
+6. _Legacy path only, and only if you are deliberately keeping it alive:_
+   rebuild the native binding (`bun run native:bootstrap`, §5) and re-validate
+   the patch anchors in §3.B-§3.F against the freshly packed tarball. Each patch
+   fails loud when its anchor moves. A failure here is not a release blocker for
+   the Rust runtimes.
 
 ---
 
-## 1. Why a Zero bump is invasive here
+## 1. Why a Zero bump WAS invasive here — ⚠️ LEGACY
+
+> **This section describes the deprecating paths (PGlite-backed orez and the
+> browser-adapted zero-cache).** It is kept because the code still exists and
+> because the failure *shape* it documents (compiled-output anchors drifting
+> between releases with no source change) is a real hazard anywhere you patch a
+> bundled dependency. It is no longer the main story of an upgrade. The Rust
+> host does not patch zero-cache's internals at all; it speaks the protocol.
 
 zero-cache ships as compiled ESM under `@rocicorp/zero/out/`. orez:
 
@@ -186,8 +230,81 @@ wording. `src/recovery.test.ts` covers the classifier with sample tails.
 
 ## 4. Staged validation pipeline (do in order)
 
-Each stage gates the next. Don't skip ahead — a green unit suite does not mean
-sync works end-to-end.
+**This is the point of the document.** A Zero bump is now mostly a client
+update, which means the version numbers are the easy part and the only thing
+that actually tells you it worked is running the suites. Do not stop after the
+unit suite and report the bump as done: a green unit suite does not mean sync
+works end to end, and every real regression found in this doc's history was
+found by a consumer e2e suite or a browser probe, never by unit tests.
+
+Current pipeline (Rust runtimes):
+
+1. **orez unit + Rust** — `bun run test` and `cargo test -p sync-native`, plus
+   `cargo clippy`, `bun run lint`, `bun run format:check` (lint and format are
+   separate CI gates).
+2. **chat** — `bun run check`, `bun run test unit`, and the e2e integration lane
+   `bun tko test e2e`. This is the strongest single gate: it drives a real
+   browser against the Rust host over the full sync path. See §4.4 for the two
+   traps that make it look broken when it is not.
+3. **soot browser-host** — `bun run check`, then `test:orez:smoke` → `test:orez`
+   → `test:orez:robust`, then `test:ultimate:quick`. See §4.4.
+4. **Manual smoke pass (§4.5).** Non-optional. Nothing above catches a console
+   error.
+
+_Legacy stages, run only if deliberately keeping those paths alive:_ orez
+integration/native (`native:bootstrap && test:integration`), orez-web, orez-cf.
+See §7 for the historical soot plan.
+
+### 4.4 Running the consumer suites without fooling yourself
+
+Three traps have each cost a full misdiagnosis:
+
+- **soot's browser-host tests need `NODE_EXTRA_CA_CERTS`.** The stack serves
+  HTTPS with a mkcert cert; Node's `fetch` uses its bundled CA list, not the
+  system store, so a direct `bun run test:orez` dies at login with
+  `SELF_SIGNED_CERT_IN_CHAIN` before running a single check. `createPortScopedEnv`
+  sets it, so go through `scripts/test-stack.ts`, or export it yourself:
+  `NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"`. Boot the stack with
+  `bun scripts/test-stack.ts start` (NOT bare `ci-dev start`) and pass the same
+  `PORT_OFFSET`.
+- **These suites fail under machine contention, and the failure looks like a
+  real regression.** On a box with other agents running, `10-mixed-flow` failed
+  0/5 checks after a 132s timeout under `concurrency=2`, then passed **5/5 in
+  7.5s** run alone. Before attributing any failure to the new Zero, **re-run the
+  single failing case in isolation.** A test that passes alone and fails under
+  load is telling you about the box.
+- **chat's unit lane can abort the e2e lane before it runs.** `runParallel`
+  tears down siblings, so one flaky unit test (`runAppQuickjs.test.ts`
+  "does not time out while an already-started host mutation settles" is a known
+  offender under load) kills playwright at ~7s and the summary reads as a total
+  e2e failure with zero tests run. If the e2e lane dies suspiciously fast, run
+  `bun tko test e2e --skip-unit` to get a clean read, and run the unit lane
+  separately.
+
+Also check the real exit code. `cmd > log 2>&1; echo "exit=$?"` reports the
+**echo's** status in some shells if you are not careful — append the status
+inside the redirect (`echo "EXIT=$?" >> log`) and read it back.
+
+### 4.5 Manual smoke pass (required)
+
+The suites assert behavior. They do not assert the absence of console noise, and
+warnings leak in steadily and then need a cleanup pass nobody scheduled. So
+after the automated stages, drive it yourself once with the devtools console
+open, and **restart any dev server that was running before the bump** — a server
+started pre-upgrade is still running the old client and will give you a
+confusing, meaningless result.
+
+1. Boot the dev server fresh.
+2. Open a project **anonymously**. Confirm it loads and renders.
+3. Do a test sign-on.
+4. Make one real mutation and confirm it round-trips: edit a file, or add and
+   toggle a todo in the todo app.
+5. **Read the console for the whole pass.** Any new error or warning is in scope
+   for the upgrade even if every suite is green. Note what you find; fix it or
+   file it, do not silently accept it.
+
+Deeper correctness is already covered by the suites above, so keep this to one
+pass. Its whole job is the noise the assertions cannot see.
 
 1. **orez unit** — `bun run test` (excludes `src/integration/`, wasm). Fast.
 2. **orez integration (native)** — build the native binding then run the
