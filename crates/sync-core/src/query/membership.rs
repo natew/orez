@@ -442,8 +442,8 @@ pub(crate) fn client_query_version(
     }
 }
 
-// drop a group's entire durable membership + reference counts. used when a fresh
-// or reset client (null / below-floor cookie) must be re-synced from scratch.
+// drop a group's entire durable membership + reference counts after a server
+// transform invalidates its authorization state.
 pub(crate) fn reset_group(db: &mut dyn SyncDb, group: &str) -> Result<(), EngineError> {
     db.exec(
         "DELETE FROM _zsync_query_rows WHERE clientGroupID = ?",
@@ -461,6 +461,9 @@ pub(crate) fn reset_group(db: &mut dyn SyncDb, group: &str) -> Result<(), Engine
     Ok(())
 }
 
+// invalidate durable group state only when the server-owned group version
+// changes. the return value is narrower: this replica's local query state needs
+// a clear, including when a new client joins a group already on this version.
 pub(crate) fn prepare_transform_version(
     db: &mut dyn SyncDb,
     group: &str,
@@ -511,8 +514,8 @@ pub(crate) fn prepare_transform_version(
             SqlValue::Text(value) => value.parse::<i64>().ok(),
             _ => None,
         });
-    let reset_client = client_version != Some(version);
-    if reset_client {
+    let reset_client_store = client_version != Some(version);
+    if reset_client_store {
         db.exec(
             "INSERT INTO _zsync_query_transform_client (clientGroupID, clientID, version)
              VALUES (?, ?, ?)
@@ -520,7 +523,7 @@ pub(crate) fn prepare_transform_version(
             &[text(group), text(client), SqlValue::Integer(version)],
         )?;
     }
-    Ok(reset_client)
+    Ok(reset_client_store)
 }
 
 // canonicalize a change-log pk (json_object text) to the membership key form.
@@ -869,7 +872,7 @@ pub fn recompute_group(
     group: &str,
     changed: &BTreeSet<(String, String)>,
 ) -> Result<Vec<Value>, EngineError> {
-    recompute_group_with_rehydrate(db, tables, group, changed, &BTreeSet::new())
+    recompute_group_with_rehydrate(db, tables, group, changed, &BTreeSet::new(), false)
 }
 
 pub(crate) fn recompute_group_with_rehydrate(
@@ -878,6 +881,7 @@ pub(crate) fn recompute_group_with_rehydrate(
     group: &str,
     changed: &BTreeSet<(String, String)>,
     rehydrate: &BTreeSet<String>,
+    rehydrate_all: bool,
 ) -> Result<Vec<Value>, EngineError> {
     let queries = active_queries(db, group)?;
     validate_queries(tables, &queries)?;
@@ -904,7 +908,8 @@ pub(crate) fn recompute_group_with_rehydrate(
     let mut rehydrate_rows: BTreeSet<(String, String)> = BTreeSet::new();
 
     for q in &queries {
-        if computed.contains(&q.hash) && !rehydrate.contains(&q.hash) {
+        let rehydrate_query = rehydrate_all || rehydrate.contains(&q.hash);
+        if computed.contains(&q.hash) && !rehydrate_query {
             // (a) dependency-intersection: skip if no dependency table was touched
             let dep_touched = q.deps.iter().any(|t| touched.contains(t.as_str()));
             if !dep_touched {
@@ -957,7 +962,7 @@ pub(crate) fn recompute_group_with_rehydrate(
             &mut values,
         )?;
 
-        if rehydrate.contains(&q.hash) {
+        if rehydrate_query {
             rehydrate_rows.extend(live.iter().cloned());
         }
 

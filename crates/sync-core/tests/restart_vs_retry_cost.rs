@@ -10,7 +10,8 @@
 //   retry   same client, same cookie          nothing written, nothing sent
 //   restart new client, same group and cookie 4 rows of per-client bookkeeping
 //                                             written, EVERY row sent
-//   reset   no cookie at all                  whole group rebuilt and resent
+//   cold    new client, same group, no cookie 4 rows of per-client bookkeeping
+//                                             written, EVERY row sent
 //
 // A restart looks cheap on a write meter and is not: a client that has never
 // desired these queries before gets a full rehydrate, because the group's
@@ -109,20 +110,16 @@ fn a_restart_resends_every_row_while_a_retry_sends_nothing() {
 }
 
 #[test]
-fn a_restart_that_also_lost_its_cookie_rebuilds_the_group() {
-    // The worst shape, for completeness: no cookie means `fresh`, which resets
-    // the group's durable membership and writes it back. This is the only one
-    // of the three that costs writes, and it is what a client with no
-    // persistent store does on every restart.
+fn a_restart_that_lost_its_cookie_preserves_group_membership() {
     let mut h = seeded(1_000);
     h.pull_as("c1", "g1", json!(null), "u1").unwrap();
 
     let (written, response) = writes(&mut h, |h| {
         h.pull_as("c-cold", "g1", json!(null), "u1").unwrap()
     });
-    assert!(
-        written > 0,
-        "a cookieless pull rebuilds durable membership, so it must write"
+    assert_eq!(
+        written, 4,
+        "only the new client's bookkeeping should be written"
     );
     assert_eq!(rows_sent(&response), 1_000);
     println!(

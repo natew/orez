@@ -21,7 +21,7 @@ use crate::wire;
 use super::membership::{
     advance_query_ack, canonical_pk_text, clear_desires, client_query_version, desired_hashes,
     prepare_transform_version, recompute_group_with_rehydrate, register_query, remove_desire,
-    reset_group, set_desire, validate_active_queries,
+    set_desire, validate_active_queries,
 };
 
 // apply the desiredQueriesPatch and return queries newly desired by this client.
@@ -144,7 +144,7 @@ pub fn handle_query_pull(
 
     store::claim_client(db, group, client_id, user_id)?;
 
-    let transform_reset = match body.get("_serverQueryTransformVersion") {
+    let transform_client_reset = match body.get("_serverQueryTransformVersion") {
         None => false,
         Some(version) => {
             let version = wire::non_negative_safe_int(version).ok_or_else(|| {
@@ -158,7 +158,7 @@ pub fn handle_query_pull(
     // preserve the old hashes long enough to send targeted gotQueries dels.
     // this makes Zero resend each named query without clearing its local
     // custom-query mapping.
-    let invalidated_hashes = if transform_reset {
+    let invalidated_hashes = if transform_client_reset {
         let hashes = desired_hashes(db, group, client_id)?
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -195,32 +195,34 @@ pub fn handle_query_pull(
         )));
     }
 
-    // a fresh or reset client (null / below-floor cookie) is re-synced from
-    // scratch: reset the group membership, clear the client store, re-send all
-    // current members. otherwise diff incrementally.
+    // a replica with no usable cookie needs a full response, but that says
+    // nothing about the group's durable membership. preserve the membership,
+    // recompute every active query against it, and write only genuine deltas.
+    // a server transform reset remains a fail-closed group invalidation.
     let below_floor = match cookie {
         Some(c) => c < store::floor(db)?,
         None => true,
     };
-    let fresh = cookie.is_none() || below_floor || transform_reset;
+    let full_response = cookie.is_none() || below_floor || transform_client_reset;
 
     // fast path: caught up and no desired-query change -> unchanged
-    if !fresh && cookie == Some(current) && applied_queries.is_none() {
+    if !full_response && cookie == Some(current) && applied_queries.is_none() {
         validate_active_queries(db, tables, group)?;
         return Ok(json!({ "cookie": wire::counter_to_json(current)?, "unchanged": true }));
     }
 
-    if fresh {
-        reset_group(db, group)?;
-    }
-    let changed = if fresh {
+    let changed = if full_response {
         BTreeSet::new()
     } else {
         scan_changed(db, tables, cookie.unwrap())?
     };
     let rehydrate = applied_queries.as_ref().cloned().unwrap_or_default();
-    let mut rows_patch = recompute_group_with_rehydrate(db, tables, group, &changed, &rehydrate)?;
-    if fresh {
+    let mut rows_patch =
+        recompute_group_with_rehydrate(db, tables, group, &changed, &rehydrate, full_response)?;
+    if full_response {
+        // membership departures were already applied durably. after a clear,
+        // only the current union belongs in the snapshot response.
+        rows_patch.retain(|op| op.get("op").and_then(Value::as_str) != Some("del"));
         // wipe the client store before the full re-send
         rows_patch.insert(0, json!({ "op": "clear" }));
     }

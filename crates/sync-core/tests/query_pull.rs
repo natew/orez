@@ -184,6 +184,128 @@ fn caught_up_pull_with_unchanged_transform_version_writes_no_rows() {
 }
 
 #[test]
+fn new_client_with_current_transform_version_preserves_group_membership() {
+    let mut h = QHost::new();
+    let first_body = json!({
+        "clientID": "c1",
+        "clientGroupID": "g1",
+        "cookie": null,
+        "_serverQueryTransformVersion": 7,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q_open",
+                "ast": open_query(),
+                "transformVersion": 7,
+            }],
+        },
+    });
+    let tables = h.tables.clone();
+    h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &first_body, "u1"))
+        .unwrap();
+    let membership_before =
+        h.db.query(
+            "SELECT rowPk FROM _zsync_query_rows
+             WHERE clientGroupID = 'g1' ORDER BY rowPk",
+            &[],
+        )
+        .unwrap();
+
+    let second_body = json!({
+        "clientID": "c2",
+        "clientGroupID": "g1",
+        "cookie": null,
+        "_serverQueryTransformVersion": 7,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q_open",
+                "ast": open_query(),
+                "transformVersion": 7,
+            }],
+        },
+    });
+    let before = h.db.conn.total_changes();
+    let tables = h.tables.clone();
+    let second =
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &second_body, "u1"))
+            .unwrap();
+
+    assert_eq!(put_ids(&second), vec!["i1", "i3"]);
+    assert_eq!(
+        h.db.conn.total_changes() - before,
+        5,
+        "only the new client's claim, transform, query definition, desire, and ack rows should be written"
+    );
+    let membership_after =
+        h.db.query(
+            "SELECT rowPk FROM _zsync_query_rows
+             WHERE clientGroupID = 'g1' ORDER BY rowPk",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        membership_after.len(),
+        membership_before.len(),
+        "the new client must not rebuild group membership"
+    );
+    for (before, after) in membership_before.iter().zip(&membership_after) {
+        assert_eq!(before.get("rowPk"), after.get("rowPk"));
+    }
+}
+
+#[test]
+fn transform_version_change_still_rebuilds_fail_closed() {
+    let mut h = QHost::new();
+    let first_body = json!({
+        "clientID": "c1",
+        "clientGroupID": "g1",
+        "cookie": null,
+        "_serverQueryTransformVersion": 1,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q_perm",
+                "ast": { "table": "issue" },
+                "transformVersion": 1,
+            }],
+        },
+    });
+    let tables = h.tables.clone();
+    let first =
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &first_body, "u1"))
+            .unwrap();
+    assert_eq!(put_ids(&first), vec!["i1", "i2", "i3"]);
+
+    let tightened_body = json!({
+        "clientID": "c1",
+        "clientGroupID": "g1",
+        "cookie": first["cookie"],
+        "_serverQueryTransformVersion": 2,
+        "queries": {
+            "version": 2,
+            "patch": [{
+                "op": "put",
+                "hash": "q_perm",
+                "ast": open_query(),
+                "transformVersion": 2,
+            }],
+        },
+    });
+    let tables = h.tables.clone();
+    let tightened =
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &tightened_body, "u1"))
+            .unwrap();
+
+    assert!(has_clear(&tightened));
+    assert_eq!(put_ids(&tightened), vec!["i1", "i3"]);
+    assert!(!put_ids(&tightened).contains(&"i2".to_string()));
+}
+
+#[test]
 fn settled_update_migrating_between_queries_is_reemitted_without_snapshot() {
     let mut h = QHost::new();
     let closed_query = json!({ "table": "issue", "where": {
