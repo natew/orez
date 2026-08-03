@@ -1365,7 +1365,12 @@ export class ZeroDO extends DurableObject {
       ? this.applicationSqlReaders.has(session)
       : this.applicationSqlWriter === session
     if (session.state !== 'active' || !admitted) {
-      throw new Error('application SQLite session is not active')
+      // the three fields distinguish the failure modes: a stale session that
+      // already closed, a reader evicted from the set, and a writer displaced
+      // by a newer one all read identically without them
+      throw new Error(
+        `application SQLite session is not active (state=${session.state}, admitted=${admitted}, readOnly=${session.readOnly})`
+      )
     }
   }
 
