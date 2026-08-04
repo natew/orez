@@ -17,17 +17,18 @@ const OREZ_MARKER = '/* orez: host argv belongs only to forked workers */'
 const MAIN_OREZ_MARKER = '/* orez: embedded main ignores host argv */'
 
 const CHILD_WORKER_ANCHOR = `function childWorker(moduleUrl, env, ...args) {
-\targs.push(...process.argv.slice(2));
+\targs = workerArgs(args);
 \tif (singleProcessMode()) {`
 
 const CHILD_WORKER_REPLACEMENT = `function childWorker(moduleUrl, env, ...args) {
+\t${OREZ_MARKER}
 \tif (singleProcessMode()) {`
 
-const FORK_ANCHOR = `\treturn wrap(fork(moduleUrl, args, {`
+const FORK_ANCHOR = `\treturn forkChildWorkerWithArgs(moduleUrl, env, args);
+}`
 
-const FORK_REPLACEMENT = `\t${OREZ_MARKER}
-\targs.push(...process.argv.slice(2));
-\treturn wrap(fork(moduleUrl, args, {`
+const FORK_REPLACEMENT = `\treturn forkChildWorkerWithArgs(moduleUrl, env, workerArgs(args));
+}`
 
 const MAIN_CONFIG_ANCHOR = '\tconst config = getNormalizedZeroConfig({ env });'
 

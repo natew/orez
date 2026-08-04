@@ -18,7 +18,6 @@ import assert from 'node:assert/strict'
 import { createSocketProducer, encodeFrame } from 'orez-sync-executor/realtime'
 
 import { harnessStreaming } from '../../packages/sync-cf-host/src/harness-schema.js'
-import { mintHarnessWakeToken } from '../../packages/sync-cf-host/src/harness-wake-token.js'
 import { queries } from './fixture.js'
 
 import type { RealtimeTopic } from 'orez-sync-executor/realtime'
@@ -40,8 +39,8 @@ assert(adminKey, 'an admin key is required (--admin-key or ZHARNESS_CF_ADMIN_KEY
 const { startRustCf } = await import('./targets/rust-cf.js')
 
 // A socket that collects decoded frames and can be waited on for one.
-function collector(url: string) {
-  const socket = new WebSocket(url)
+function collector(url: string, protocols?: string | string[]) {
+  const socket = new WebSocket(url, protocols)
   const frames: [string, Record<string, unknown>][] = []
   const waiters: { match: (kind: string) => boolean; resolve: () => void }[] = []
   socket.addEventListener('message', (event) => {
@@ -136,11 +135,11 @@ try {
   const subscribeFrame = encodeFrame(['subscribe', { topic }])
 
   const openSubscriber = async (userID: string, clientID: string, group: string) => {
-    const { token } = await mintHarnessWakeToken(namespace, userID, adminKey)
     const url =
       `${wsOrigin}/wake?clientID=${encodeURIComponent(clientID)}` +
-      `&clientGroupID=${encodeURIComponent(group)}&wakeToken=${encodeURIComponent(token)}`
-    const client = collector(url)
+      `&clientGroupID=${encodeURIComponent(group)}`
+    const protocol = `orez-auth.${Buffer.from(`token-${userID}`).toString('base64url')}`
+    const client = collector(url, protocol)
     sockets.push(client)
     await client.open()
     return client
