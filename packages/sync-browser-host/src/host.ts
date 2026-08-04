@@ -490,7 +490,7 @@ class BrowserSyncHostImpl<
       })
     }
     try {
-      await this.snapshots.checkpoint(this.module)
+      const stats = await this.snapshots.checkpoint(this.module)
       if (this.#diagnostics.enabled()) {
         this.#diagnostics.emit({
           stage: 'checkpoint',
@@ -501,6 +501,7 @@ class BrowserSyncHostImpl<
           queueDepth: this.#queue.depth,
           waitMs: null,
           durationMs: performance.now() - startedAt,
+          ...stats,
         })
       }
     } catch (error) {

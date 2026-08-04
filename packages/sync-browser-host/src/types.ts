@@ -53,6 +53,10 @@ export type BrowserSyncHostDiagnostic = {
   queueDepth: number
   waitMs: number | null
   durationMs: number | null
+  snapshotBytes?: number
+  writtenBytes?: number
+  snapshotChunks?: number
+  writtenChunks?: number
   error?: string
 }
 
