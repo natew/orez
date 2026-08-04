@@ -22,12 +22,12 @@
 
 ## What orez is now (and what is going away)
 
-| runtime                              | status                                                |
-| ------------------------------------ | ----------------------------------------------------- |
-| Rust sync host, browser              | **keep** — the browser story going forward             |
-| Rust sync host, Cloudflare DO        | **keep** — the deploy story going forward              |
+| runtime                               | status                                                 |
+| ------------------------------------- | ------------------------------------------------------ |
+| Rust sync host, browser               | **keep** — the browser story going forward             |
+| Rust sync host, Cloudflare DO         | **keep** — the deploy story going forward              |
 | Embedded (real zero-cache + postgres) | **keep** — the batteries-included local dev option     |
-| PGlite-backed orez                   | **deprecating** — no longer worth validating on a bump |
+| PGlite-backed orez                    | **deprecating** — no longer worth validating on a bump |
 | Browser-adapted zero-cache (orez-web) | **deprecating** — replaced by the Rust browser host    |
 
 Both consumers have already moved: `~/chat` and `~/soot` run the Rust host. The
@@ -77,7 +77,7 @@ dependencies.@rocicorp/zero-sqlite3`. Only relevant to the legacy embedded
 
 > **This section describes the deprecating paths (PGlite-backed orez and the
 > browser-adapted zero-cache).** It is kept because the code still exists and
-> because the failure *shape* it documents (compiled-output anchors drifting
+> because the failure _shape_ it documents (compiled-output anchors drifting
 > between releases with no source change) is a real hazard anywhere you patch a
 > bundled dependency. It is no longer the main story of an upgrade. The Rust
 > host does not patch zero-cache's internals at all; it speaks the protocol.
@@ -163,7 +163,7 @@ literals in `pg-proxy*.ts` / `proxy-throughput.bench.ts` /
 > **Stale as of the 1.8 upgrade (2026-08-03).** This file no longer exists. The
 > Cloudflare overlay moved to `packages/sync-cf-host` and the DO backend is now
 > PG-protocol over DO SQLite, so none of the five anchors or `cf-patches.test.ts`
-> below are real. Left in place because the *shape* of the problem (bundled
+> below are real. Left in place because the _shape_ of the problem (bundled
 > identifiers drifting) still applies. Rewrite for the current CF stack before
 > trusting any of it.
 
