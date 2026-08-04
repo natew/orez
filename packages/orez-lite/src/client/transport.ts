@@ -163,8 +163,10 @@ export type HttpPullTransportOptions = {
   /**
    * opens a notification-only socket to <origin>/wake and pulls immediately on
    * any wake, demoting interval polling to a safety net.
-   * createZeroClientTransport enables this by default and carries Zero's
-   * existing auth token in a WebSocket subprotocol. pass false to disable it.
+   * createZeroClientTransport leaves this disabled unless the consumer opts in
+   * with true, which carries Zero's existing auth token in a WebSocket
+   * subprotocol. this keeps clients from retrying a route their host does not
+   * implement.
    * custom capability deployments can pass getToken; each socket attempt calls
    * it afresh and appends the result as wakeToken.
    */
@@ -451,7 +453,7 @@ export function createZeroClientTransport(
         ...options,
         origin,
         pullIntervalMs: options.pullIntervalMs ?? STANDARD_SAFETY_PULL_INTERVAL_MS,
-        wake: options.wake ?? true,
+        wake: options.wake ?? false,
       })
     },
   })

@@ -1364,7 +1364,7 @@ describe('Orez HTTP transport', () => {
     first.uninstall()
   })
 
-  test('createZeroClientTransport defaults to authenticated wake with a five-minute safety pull', async () => {
+  test('createZeroClientTransport defaults to polling without opening wake', async () => {
     vi.useFakeTimers()
     const origin = 'https://127.0.0.1:65504'
     const wakeSockets = useFakeNativeWebSocket()
@@ -1383,17 +1383,11 @@ describe('Orez HTTP transport', () => {
 
     await vi.advanceTimersByTimeAsync(1)
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(wakeSockets).toEqual([
-      expect.objectContaining({
-        url: 'wss://127.0.0.1:65504/wake?clientID=c1',
-        protocols: 'orez-auth.dG9rZW4tdTE',
-      }),
-    ])
+    expect(wakeSockets).toEqual([])
 
     socket.send(JSON.stringify(['updateAuth', { auth: 'token-u2' }]))
     await vi.advanceTimersByTimeAsync(1)
-    expect(wakeSockets).toHaveLength(2)
-    expect(wakeSockets[1].protocols).toBe('orez-auth.dG9rZW4tdTI')
+    expect(wakeSockets).toEqual([])
 
     await vi.advanceTimersByTimeAsync(299_997)
     expect(fetch).toHaveBeenCalledTimes(1)

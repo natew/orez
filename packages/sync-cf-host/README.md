@@ -90,12 +90,13 @@ must not run the Vite loader.
 
 ## Wake channel and eviction
 
-`createZeroClientTransport()` opens `GET /<namespace>/wake?clientID=<id>` by
-default and keeps a five-minute pull as a safety check. It carries the auth token
-Zero already supplied in a WebSocket subprotocol. The sync worker converts that
-credential to the ordinary `Authorization` header before calling
-`authorizeWake`, so the standard setup reuses the application's existing
-authentication:
+`createZeroClientTransport({ wake: true })` opens
+`GET /<namespace>/wake?clientID=<id>` and keeps a five-minute pull as a safety
+check. Wake is opt-in because the client cannot know whether its host deployed
+the route. When enabled, it carries the auth token Zero already supplied in a
+WebSocket subprotocol. The sync worker converts that credential to the ordinary
+`Authorization` header before calling `authorizeWake`, so the standard setup
+reuses the application's existing authentication:
 
 ```ts
 authorizeWake: async (request, env) => {
@@ -161,10 +162,10 @@ authorizeWake(request, env) {
 }
 ```
 
-Treat the URL token as a narrowly scoped capability and avoid logging it. If
-minting or wake authorization is unavailable, the wake channel retries in the
-background while HTTP pulls and the safety poll continue to provide
-convergence.
+Treat the URL token as a narrowly scoped capability and avoid logging it. Enable
+wake only when minting and authorization are deployed together. When an enabled
+channel disconnects, it retries in the background while the safety poll
+continues to provide convergence.
 
 `/admin/status` reports a boot ID, hibernation simulation count, connected wake
 sockets, durable database size, engine watermark/floor, and aggregate counters.

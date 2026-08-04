@@ -50,9 +50,9 @@ the database change feed.
 Install the `orez-lite/client` transport with the deployed Orez Lite address, then
 set the existing Zero client's server to that address. Components keep using
 the same `@rocicorp/zero` queries, mutators, hooks, and optimistic local state.
-The standard transport opens the wake channel with Zero's existing auth and
-keeps a five-minute pull as a safety check, so applications do not configure a
-second realtime path.
+The standard transport polls every five minutes. Applications whose sync host
+implements the wake route opt in with `wake: true`, which carries Zero's
+existing auth and triggers immediate pulls after changes.
 
 ## Namespaces and authorization
 
