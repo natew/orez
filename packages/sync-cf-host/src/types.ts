@@ -55,7 +55,12 @@ export type DelegatedPushRetryConfig = {
   initialBackoffMs?: number
   /** Delay cap. Defaults to 1,000ms. */
   maxBackoffMs?: number
-  /** Per-attempt service-binding timeout. Defaults to 5,000ms. */
+  /**
+   * Per-attempt service-binding timeout. Defaults to 30,000ms. Delegate wall
+   * time under write-lane contention is queueing rather than compute, and the
+   * abort cancels the app invocation mid-transaction, so a short timeout
+   * cancels real pushes on any nontrivial seed.
+   */
   timeoutMs?: number
 }
 

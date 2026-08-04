@@ -86,7 +86,7 @@ export function validateSyncHostConfig<
       maxAttempts: config.delegatedPushRetry.maxAttempts ?? 3,
       initialBackoffMs: config.delegatedPushRetry.initialBackoffMs ?? 100,
       maxBackoffMs: config.delegatedPushRetry.maxBackoffMs ?? 1_000,
-      timeoutMs: config.delegatedPushRetry.timeoutMs ?? 5_000,
+      timeoutMs: config.delegatedPushRetry.timeoutMs ?? 30_000,
     })) {
       if (!Number.isSafeInteger(value) || value < 1)
         throw new TypeError(`delegatedPushRetry.${name} must be a positive safe integer`)

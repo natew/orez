@@ -448,7 +448,12 @@ export function createSyncDurableObject<
   const delegateMaxAttempts = config.delegatedPushRetry?.maxAttempts ?? 3
   const delegateInitialBackoffMs = config.delegatedPushRetry?.initialBackoffMs ?? 100
   const delegateMaxBackoffMs = config.delegatedPushRetry?.maxBackoffMs ?? 1_000
-  const delegateTimeoutMs = config.delegatedPushRetry?.timeoutMs ?? 5_000
+  // 30s, not a snappier number: delegate wall time under write-lane contention
+  // is queueing, not compute (measured ~5s wall at ~90ms cpu), and an abort
+  // cancels the app invocation mid-transaction. 5s canceled real pushes on any
+  // seed heavier than trivial and each retry re-queued more contention
+  // (production example apps, 2026-08-03).
+  const delegateTimeoutMs = config.delegatedPushRetry?.timeoutMs ?? 30_000
 
   return class SyncDurableObject extends DurableObject<Env> {
     readonly #engineDb: SqlStorageSyncDb
