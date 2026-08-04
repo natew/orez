@@ -90,11 +90,21 @@ must not run the Vite loader.
 
 ## Wake channel and eviction
 
-`GET /<namespace>/wake?clientID=<id>&wakeToken=<capability>` upgrades to a
-Durable Object hibernating WebSocket after `authorizeWake` accepts the
-capability. Browser consumers should mint a short-lived, namespace-scoped token
-at their authenticated edge because the native WebSocket constructor cannot set
-an authorization header. Socket attachments carry only the client ID. A
+`createZeroClientTransport()` opens `GET /<namespace>/wake?clientID=<id>` by
+default and keeps a five-minute pull as a safety check. It carries the auth token
+Zero already supplied in a WebSocket subprotocol. The sync worker converts that
+credential to the ordinary `Authorization` header before calling
+`authorizeWake`, so the standard setup reuses the application's existing
+authentication:
+
+```ts
+authorizeWake: async (request, env) => {
+  const claims = await authenticate(request, env)
+  return claims ? { userID: claims.userID } : false
+}
+```
+
+Socket attachments carry only the client ID and normalized user identity. A
 committed push sends a text `wake` frame to all connected clients except the
 pusher; a scheduler window
 coalesces a burst into one frame per socket. `ping` receives `pong`. The message
@@ -102,12 +112,10 @@ contains no state and carries no correctness weight: clients pull after a wake
 and retain their safety poll. `ctx.getWebSockets()` plus serialized attachments
 means sockets remain discoverable after hibernation/re-instantiation.
 
-### Consumer-minted wake capabilities
+### Custom wake capabilities
 
-The consumer Worker owns both token minting and verification. Add an
-authenticated edge route that signs the namespace and a short expiry, typically
-30 to 60 seconds, with a secret that never reaches the browser. Return only the
-signed token:
+Deployments that cannot reuse Zero's bearer token can provide a custom
+short-lived capability. The consumer Worker owns both minting and verification:
 
 ```ts
 // consumer edge route, after normal session authentication
@@ -116,7 +124,7 @@ const token = await signWakeToken({ namespace, userID, expiresAt }, env.WAKE_SEC
 return Response.json({ token, expiresAt })
 ```
 
-Pass a mint callback to the canonical HTTP transport. It calls `getToken()` for
+Pass a mint callback to the low-level HTTP transport. It calls `getToken()` for
 every socket attempt, including reconnects, so short-lived tokens are never
 reused after the wake connection drops:
 
@@ -125,7 +133,7 @@ import { ensureHttpPullTransport } from 'orez-lite/client'
 
 ensureHttpPullTransport({
   origin: syncOrigin,
-  pullIntervalMs: 5_000,
+  pullIntervalMs: 300_000,
   wake: {
     async getToken() {
       const response = await fetch(`/api/sync/${namespace}/wake-token`, {

@@ -19,7 +19,7 @@ immediately rather than failing at request time.
 | `initialize(sql)`               | `(sql: SyncSql) => void`                      | Application DDL and optional seed. Runs inside the boot transaction, before sync-core initializes its own schema.             |
 | `authenticate(request, env)`    | `=> NormalizedClaims \| null \| Promise<...>` | Edge authentication. Returns normalized claims (a stable `userID` plus anything else) or `null` to reject with 401.           |
 | `namespace(request)`            | `(request) => string \| null`                 | Resolves the Durable Object partition key. Returning `null` makes the worker answer a plain health string instead of routing. |
-| `authorizeWake(request, env)`   | `=> boolean \| Promise<boolean>`              | Authorizes the advisory wake WebSocket before a namespace object is selected. Required and fail-closed.                       |
+| `authorizeWake(request, env)`   | `=> boolean \| { userID } \| Promise<...>`    | Authorizes the advisory wake WebSocket before a namespace object is selected. Receives Zero auth as `Authorization`.          |
 | `authorizeNotify(request, env)` | `=> boolean \| Promise<boolean>`              | Authorizes upstream change notifications before a namespace object is selected. Required and fail-closed.                     |
 
 `NormalizedClaims` must carry a non-empty `userID`; it owns client-group
@@ -118,10 +118,12 @@ projecting the full namespace.
 | `wakeCoalesceMs`               | `number`     | 25                | Batching window for the wake fan-out. A storm of writes produces one pull wave instead of one per write.                      |
 | `authorizeAdmin(request, env)` | `=> boolean` | `ADMIN_KEY` check | Authorizes `/admin/*` routes. The default requires `env.ADMIN_KEY` set and a matching `x-admin-key` header.                   |
 
-`authorizeWake` and `authorizeNotify` have no permissive default. If an outer
-application router applies its own namespace authorization, bypass only
-`/wake` and `/notify` there so these inner callbacks can validate their
-capabilities. Do not bypass pull, push, or admin routes.
+`authorizeWake` and `authorizeNotify` have no permissive default. The standard
+client carries its existing Zero auth token in the wake socket's subprotocol;
+the worker converts it to `Authorization` before `authorizeWake` runs. If an
+outer application router applies its own namespace authorization, bypass only
+`/wake` and `/notify` there so these inner callbacks can validate them. Do not
+bypass pull, push, or admin routes.
 
 ## The environment (`SyncHostEnv`)
 

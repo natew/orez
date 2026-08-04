@@ -344,7 +344,35 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
       const isAdmin = route.startsWith('/admin/')
       let wakeUserID: string | null = null
       if (route === '/wake') {
-        const wake = await config.authorizeWake(request, env)
+        let wakeRequest: Request = request
+        const protocol = request.headers.get('sec-websocket-protocol')?.trim()
+        const encodedAuth =
+          protocol?.startsWith('orez-auth.') === true
+            ? protocol.slice('orez-auth.'.length)
+            : null
+        if (
+          !request.headers.has('authorization') &&
+          encodedAuth &&
+          /^[A-Za-z0-9_-]+$/.test(encodedAuth)
+        ) {
+          try {
+            const base64 = encodedAuth.replaceAll('-', '+').replaceAll('_', '/')
+            const binary = globalThis.atob(
+              base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')
+            )
+            const authToken = new TextDecoder().decode(
+              Uint8Array.from(binary, (character) => character.charCodeAt(0))
+            )
+            if (authToken) {
+              const wakeHeaders = new Headers(request.headers)
+              wakeHeaders.set('authorization', `Bearer ${authToken}`)
+              wakeRequest = new Request(request, { headers: wakeHeaders })
+            }
+          } catch {
+            // malformed subprotocol credentials remain unauthenticated
+          }
+        }
+        const wake = await config.authorizeWake(wakeRequest, env)
         if (!wake) return json({ error: 'missing wake capability' }, 401)
         if (typeof wake === 'object') wakeUserID = wake.userID
         // A namespace that streams fields authorizes every subscription against
@@ -370,10 +398,10 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
       headers.delete(UPSTREAM_PATH_HEADER)
       headers.delete(IDENTITY_HEADER)
       let forwardedBody: ForwardedSyncBody | null = null
-      // /wake and /realtime/produce are both websocket upgrades, which cannot
-      // carry an Authorization header from a browser and have no body to put
-      // claims in. Each has its own capability check above and in the DO, so
-      // neither passes through the bearer-token gate below.
+      // /wake and /realtime/produce are both websocket upgrades and have no
+      // body to put claims in. wake authentication is normalized from its
+      // WebSocket subprotocol above; each route has its own authorization check
+      // before either reaches the Durable Object.
       if (
         !isAdmin &&
         route !== '/wake' &&
@@ -1840,7 +1868,12 @@ export function createSyncDurableObject<
       // namespace poll upstream forever after its first request, even across
       // DO eviction, producing a permanent rows-written floor at zero traffic.
       this.#armUpstreamAlarm()
-      return new Response(null, { status: 101, webSocket: client })
+      const protocol = request.headers.get('sec-websocket-protocol')
+      return new Response(null, {
+        status: 101,
+        headers: protocol ? { 'Sec-WebSocket-Protocol': protocol } : undefined,
+        webSocket: client,
+      } as ResponseInit & { webSocket: WebSocket })
     }
 
     #admin(

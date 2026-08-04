@@ -100,6 +100,7 @@ const MAX_PUSH_BATCH_MUTATIONS = 64
 // @rocicorp/zero 1.6 starts this deadline before its async createSocket work.
 // the connect URL's `ts` is captured at the same attempt boundary.
 const ZERO_CONNECT_TIMEOUT_MS = 10_000
+const STANDARD_SAFETY_PULL_INTERVAL_MS = 5 * 60_000
 // ceiling on a server-supplied Retry-After. a daily quota can report a reset
 // hours out; honoring that verbatim would leave the client dark until then.
 const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
@@ -156,19 +157,16 @@ export type HttpPullTransportOptions = {
   pullOrigin?: string
   pushOrigin?: string
   fetch?: typeof fetch
-  // when set, every open connection also pulls on this interval so
-  // server-initiated changes arrive without a client-side trigger
+  // safety-poll interval. createZeroClientTransport defaults this to five
+  // minutes; wake notifications normally trigger pulls immediately.
   pullIntervalMs?: number
   /**
    * opens a notification-only socket to <origin>/wake and pulls immediately on
-   * any wake, demoting interval polling to a safety net. true preserves the
-   * bare unauthenticated URL. for an authenticated host, pass getToken: each
-   * socket attempt calls it afresh and appends the result as wakeToken because
-   * browser WebSockets cannot send headers. consumers should implement
-   * getToken by calling an authenticated edge route that mints a short-lived,
-   * namespace-scoped signed token; the consumer's authorizeWake callback must
-   * verify that token. mint failures leave this advisory channel down and retry
-   * with backoff; pulls remain the source of correctness.
+   * any wake, demoting interval polling to a safety net.
+   * createZeroClientTransport enables this by default and carries Zero's
+   * existing auth token in a WebSocket subprotocol. pass false to disable it.
+   * custom capability deployments can pass getToken; each socket attempt calls
+   * it afresh and appends the result as wakeToken.
    */
   wake?: boolean | { getToken(): Promise<string> }
   // when provided, named desired queries are resolved client-side to an AST
@@ -449,7 +447,12 @@ export function createZeroClientTransport(
   return Object.freeze({
     type: 'orez-client' as const,
     install(origin: string) {
-      return ensureHttpPullTransport({ ...options, origin })
+      return ensureHttpPullTransport({
+        ...options,
+        origin,
+        pullIntervalMs: options.pullIntervalMs ?? STANDARD_SAFETY_PULL_INTERVAL_MS,
+        wake: options.wake ?? true,
+      })
     },
   })
 }
@@ -603,6 +606,10 @@ class ZeroHttpSocket {
       case 'updateAuth':
         this.flushGeneration++
         this.authToken = (message[1] as { auth?: string }).auth
+        if (this.state.wake === true) {
+          this.closeWakeChannel()
+          this.openWakeChannel()
+        }
         return
       case 'push':
         this.enqueuePush(message[1])
@@ -730,7 +737,11 @@ class ZeroHttpSocket {
         const url =
           `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}` +
           (wakeToken === undefined ? '' : `&wakeToken=${encodeURIComponent(wakeToken)}`)
-        socket = new Native(url) as unknown as typeof socket
+        const protocol =
+          this.state.wake === true && this.authToken
+            ? `orez-auth.${encodeBase64URL(this.authToken)}`
+            : undefined
+        socket = new Native(url, protocol) as unknown as typeof socket
       } catch {
         this.scheduleWakeReconnect()
         return
@@ -1294,6 +1305,17 @@ function toHttpURL(url: string | URL) {
 
 function trimTrailingSlash(value: string) {
   return value.endsWith('/') ? value.slice(0, -1) : value
+}
+
+function encodeBase64URL(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return globalThis
+    .btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '')
 }
 
 function decodeSecProtocol(protocols: WebSocketProtocols):

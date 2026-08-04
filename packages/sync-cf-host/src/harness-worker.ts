@@ -1,5 +1,4 @@
 import { harnessConfig } from './harness-config.js'
-import { mintHarnessWakeToken } from './harness-wake-token.js'
 import { createSyncDurableObject, createSyncWorker } from './index.js'
 
 import type { SyncHostEnv } from './index.js'
@@ -14,21 +13,6 @@ const syncWorker = createSyncWorker(config)
 export const SyncDurableObject = createSyncDurableObject(config)
 export default {
   async fetch(request, env, ctx): Promise<Response> {
-    const url = new URL(request.url)
-    const namespace = config.namespace(request)
-    const route = url.pathname.split('/').slice(2).join('/')
-    if (namespace && route === 'auth/wake-token') {
-      const claims = await config.authenticate(request, env)
-      if (!claims) {
-        return Response.json({ error: 'missing authentication' }, { status: 401 })
-      }
-      if (!env.ADMIN_KEY) {
-        return Response.json({ error: 'wake token minting unavailable' }, { status: 503 })
-      }
-      return Response.json(
-        await mintHarnessWakeToken(namespace, claims.userID, env.ADMIN_KEY)
-      )
-    }
     const headers = new Headers(request.headers)
     headers.set('x-harness-request-gate', '1')
     const gatedRequest = new Request(request, { headers }) as typeof request

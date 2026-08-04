@@ -102,16 +102,16 @@ export type SyncHostConfig<
     env: Env
   ): boolean | Promise<boolean>
   /** Authorize the advisory wake socket before selecting a namespace DO.
-   * Browser clients should present a short-lived, namespace-scoped capability
-   * in the query string because WebSocket cannot set request headers.
+   * The standard client carries its existing Zero auth token in a WebSocket
+   * subprotocol. The host normalizes that to the ordinary Authorization header
+   * before this callback runs.
    *
    * Return `{ userID }` instead of `true` to also identify the socket, which is
    * what a namespace serving `streamingManifest` must do: field subscriptions
    * ride this socket and are authorized against that userID. Returning bare
    * `true` there is refused rather than quietly downgraded to a wake-only
    * socket, because the failure would otherwise look like streaming that just
-   * never arrives. The capability is the only credential available here, so the
-   * userID belongs inside it. */
+   * never arrives. */
   authorizeWake(
     request: Request,
     env: Env

@@ -214,7 +214,7 @@ createSyncWorker({
   // Server-side producers only. Absent means the namespace accepts none.
   authorizeProduce: (request, env) => request.headers.get('x-internal') === env.SECRET,
   authorizeWake: async (request, env) => {
-    const claims = await verifyCapability(request, env)
+    const claims = await authenticate(request, env)
     // `{ userID }` rather than `true`: subscriptions ride this socket
     return claims && { userID: claims.userID }
   },
@@ -222,9 +222,10 @@ createSyncWorker({
 ```
 
 Subscriptions ride the existing wake socket rather than opening a second one.
-That socket is a `GET` upgrade, so it can carry neither an `Authorization`
-header nor a body, which is why identity comes back from `authorizeWake`
-instead: the capability in the query string is the only credential available.
+That socket is a `GET` upgrade, so the client carries its existing Zero auth in
+the WebSocket subprotocol. The worker presents it to `authorizeWake` as the
+ordinary `Authorization` header, and the callback returns the normalized
+identity.
 Returning bare `true` from a namespace that sets `streamingManifest` is refused
 rather than downgraded, because a wake-only socket whose subscriptions never
 deliver looks exactly like a stream that is merely slow.

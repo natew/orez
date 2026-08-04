@@ -8,7 +8,6 @@ import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
 import { queries } from '../../../harness/src/query-resolver.mjs'
 import { harnessSchema, harnessStreaming } from './harness-schema.js'
-import { verifyHarnessWakeToken } from './harness-wake-token.js'
 import { type SyncHostConfig, type SyncHostEnv, type SyncSql } from './index.js'
 
 import type { AnyQueryRegistry, Schema } from '@rocicorp/zero'
@@ -38,6 +37,11 @@ const DDL = [
     meta TEXT
   )`,
 ]
+
+function authenticateHarness(request: Request) {
+  const userID = request.headers.get('authorization')?.match(/^Bearer token-(.+)$/)?.[1]
+  return userID ? { userID } : null
+}
 
 function mulberry32(seed: number) {
   let value = seed
@@ -348,24 +352,13 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     namespace(request) {
       return new URL(request.url).pathname.split('/')[1] || null
     },
-    authenticate(request) {
-      const userID = request.headers
-        .get('authorization')
-        ?.match(/^Bearer token-(.+)$/)?.[1]
-      return userID ? { userID } : null
-    },
+    authenticate: authenticateHarness,
     authorize() {
       return true
     },
-    authorizeWake(request, env) {
-      const url = new URL(request.url)
-      const namespace = url.pathname.split('/')[1]
-      if (!namespace || !env.ADMIN_KEY) return false
-      return verifyHarnessWakeToken(
-        url.searchParams.get('wakeToken') ?? '',
-        namespace,
-        env.ADMIN_KEY
-      )
+    authorizeWake(request) {
+      const claims = authenticateHarness(request)
+      return claims ? { userID: claims.userID } : false
     },
     authorizeNotify(request, env) {
       return (

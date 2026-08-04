@@ -1295,7 +1295,7 @@ describe('Orez HTTP transport', () => {
     expect(transport.connections).toBe(1)
   })
 
-  test('wake true preserves the bare unauthenticated socket URL', async () => {
+  test('wake true carries the intercepted Zero auth in the socket protocol', async () => {
     const wakeSockets = useFakeNativeWebSocket()
     const transport = installHttpPullTransport({
       origin: ORIGIN,
@@ -1308,6 +1308,7 @@ describe('Orez HTTP transport', () => {
 
     await eventually(() => expect(wakeSockets).toHaveLength(1))
     expect(wakeSockets[0].url).toBe('wss://orez-http.local/wake?clientID=c1')
+    expect(wakeSockets[0].protocols).toBe('orez-auth.dG9rZW4tdTE')
   })
 
   test('non-origin WebSockets pass through to the native implementation', () => {
@@ -1361,6 +1362,43 @@ describe('Orez HTTP transport', () => {
     const first = plugin.install(origin)
     expect(plugin.install(origin)).toBe(first)
     first.uninstall()
+  })
+
+  test('createZeroClientTransport defaults to authenticated wake with a five-minute safety pull', async () => {
+    vi.useFakeTimers()
+    const origin = 'https://127.0.0.1:65504'
+    const wakeSockets = useFakeNativeWebSocket()
+    const fetch = unchangedPullFetch()
+    const transport = createZeroClientTransport({ fetch }).install(origin)
+    transports.push(transport)
+
+    const url = new URL(`${origin}/sync/v51/connect`)
+    url.protocol = 'wss:'
+    url.searchParams.set('clientID', 'c1')
+    url.searchParams.set('clientGroupID', 'cg1')
+    const socket = new WebSocket(
+      url,
+      encodeSecProtocol(['initConnection', { desiredQueriesPatch: [] }], 'token-u1')
+    )
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(wakeSockets).toEqual([
+      expect.objectContaining({
+        url: 'wss://127.0.0.1:65504/wake?clientID=c1',
+        protocols: 'orez-auth.dG9rZW4tdTE',
+      }),
+    ])
+
+    socket.send(JSON.stringify(['updateAuth', { auth: 'token-u2' }]))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(wakeSockets).toHaveLength(2)
+    expect(wakeSockets[1].protocols).toBe('orez-auth.dG9rZW4tdTI')
+
+    await vi.advanceTimersByTimeAsync(299_997)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   test('ensureHttpPullTransport rejects a conflicting codec for one origin', () => {
@@ -1625,6 +1663,7 @@ function useFakeNativeWebSocket() {
   const previous = globalThis.WebSocket
   const sockets: Array<{
     url: string
+    protocols: string | string[] | undefined
     onmessage: (() => void) | null
     onclose: (() => void) | null
     onerror: (() => void) | null
@@ -1641,7 +1680,10 @@ function useFakeNativeWebSocket() {
     onclose: (() => void) | null = null
     onerror: (() => void) | null = null
 
-    constructor(url: string | URL) {
+    constructor(
+      url: string | URL,
+      readonly protocols?: string | string[]
+    ) {
       this.url = String(url)
       sockets.push(this)
     }
