@@ -77,6 +77,19 @@ export const PENDING_CHANGES_TABLE = '_zero_pending_changes'
  */
 export const ZSYNC_CHANGES_TABLE = '_zsync_changes'
 
+/**
+ * the packed mutation ledger. the sync executor toggles its captureMode column
+ * mid-transaction through plain sql with no statement metadata, so no tracked
+ * write ever registers it for capture, and its identity is fixed and orez-owned
+ * like `_zsync_changes` above. the worker registers it rollback-only before any
+ * statement that writes it: an application session abandoned mid-transaction (a
+ * delegated push canceled by the sync host's per-attempt timeout) must restore
+ * captureMode, or every later push fails preparePackedLedger with "packed
+ * ledger has uncommitted capture state" and the namespace never recovers
+ * (production example apps, 2026-08-03).
+ */
+export const ZSYNC_LOG_SEGMENTS_TABLE = '_zsync_log_segments'
+
 const INTERNAL_TABLES = new Set([
   TX_MANIFEST_TABLE,
   TX_SCHEMA_TABLE,

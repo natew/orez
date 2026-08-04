@@ -38,6 +38,7 @@ import {
   snapshotTxSchema,
   upgradeToTableSnapshot,
   ZSYNC_CHANGES_TABLE,
+  ZSYNC_LOG_SEGMENTS_TABLE,
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 
@@ -1657,6 +1658,17 @@ export class ZeroDO extends DurableObject {
       beginTxJournal(this.sql, sessionID, 'application')
       snapshotTxSchema(this.sql, sessionID, 'application', targets)
       return true
+    }
+    // register the packed ledger for rollback-only row undo before the
+    // statement that writes it runs, in the same storage transaction. see
+    // ZSYNC_LOG_SEGMENTS_TABLE for why nothing else registers it and what an
+    // unrestored captureMode does to the namespace.
+    if (sql.includes(ZSYNC_LOG_SEGMENTS_TABLE)) {
+      this.cdc.ensureTable({
+        physicalTableName: ZSYNC_LOG_SEGMENTS_TABLE,
+        tableName: ZSYNC_LOG_SEGMENTS_TABLE,
+        publish: false,
+      })
     }
     beginTxJournal(this.sql, sessionID, 'application')
     return true
