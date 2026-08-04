@@ -442,6 +442,224 @@ async function runLegacySnapshotDeletionCase() {
   return { discarded: true, sharedDatabasesDeleted: true, bootedFresh: true }
 }
 
+async function runChunkChangeDetectionCase() {
+  const zeroStorageKey = `chunk-zero-growth:${crypto.randomUUID()}`
+  const zeroStore = new IndexedDbSnapshotStore(zeroStorageKey)
+  const zeroData = new Uint8Array(SNAPSHOT_CHUNK_BYTES)
+  const zeroPrefix = 0xc9dc5
+  zeroData[0] = zeroPrefix & 0xff
+  zeroData[1] = (zeroPrefix >>> 8) & 0xff
+  zeroData[2] = (zeroPrefix >>> 16) & 0xff
+  zeroData[3] = (zeroPrefix >>> 24) & 0xff
+  const zeroModule = {
+    _memfs: {
+      files: { '/project.db': { data: zeroData, size: 4 } },
+      fds: {},
+      nextFd: 1,
+    },
+  }
+  await zeroStore.checkpoint(zeroModule)
+  zeroModule._memfs.files['/project.db'].size = 4 + 4096
+  const zeroGrowth = await zeroStore.checkpoint(zeroModule)
+  await zeroStore.close()
+  let zeroGrowthRestored = false
+  const zeroRestore = new IndexedDbSnapshotStore(zeroStorageKey)
+  const zeroRestoredModule = {
+    _memfs: {
+      files: {} as Record<string, { data: Uint8Array; size: number }>,
+      fds: {},
+      nextFd: 1,
+    },
+  }
+  try {
+    zeroGrowthRestored = await zeroRestore.restore(zeroRestoredModule)
+  } catch {}
+  await zeroRestore.close()
+
+  const collisionStorageKey = `chunk-collision:${crypto.randomUUID()}`
+  const collisionStore = new IndexedDbSnapshotStore(collisionStorageKey)
+  const oldBytes = new Uint8Array([35, 67, 0, 0, 51, 246, 110, 38])
+  const newBytes = new Uint8Array([175, 150, 0, 0, 255, 229, 57, 169])
+  const collisionModule = {
+    _memfs: {
+      files: { '/project.db': { data: oldBytes.slice(), size: oldBytes.length } },
+      fds: {},
+      nextFd: 1,
+    },
+  }
+  await collisionStore.checkpoint(collisionModule)
+  collisionModule._memfs.files['/project.db'].data.set(newBytes)
+  const collision = await collisionStore.checkpoint(collisionModule)
+  await collisionStore.close()
+  const collisionRestore = new IndexedDbSnapshotStore(collisionStorageKey)
+  const collisionRestoredModule = {
+    _memfs: {
+      files: {} as Record<string, { data: Uint8Array; size: number }>,
+      fds: {},
+      nextFd: 1,
+    },
+  }
+  const collisionRestored = await collisionRestore.restore(collisionRestoredModule)
+  await collisionRestore.close()
+  const collisionBytesMatch =
+    collisionRestored &&
+    collisionRestoredModule._memfs.files['/project.db'].data.every(
+      (byte, index) => byte === newBytes[index]
+    )
+
+  await deleteBrowserSyncHostSnapshot(zeroStorageKey)
+  await deleteBrowserSyncHostSnapshot(collisionStorageKey)
+  assert(
+    zeroGrowth.writtenChunks === 1 &&
+      zeroGrowthRestored &&
+      collision.writtenChunks === 1 &&
+      collisionBytesMatch,
+    `chunk detector missed changes: ${JSON.stringify({
+      zeroGrowthWritten: zeroGrowth.writtenChunks,
+      zeroGrowthRestored,
+      collisionWritten: collision.writtenChunks,
+      collisionBytesMatch,
+    })}`
+  )
+  return { zeroGrowth: true, collision: true }
+}
+
+async function runSnapshotStoreSerializationCase() {
+  const storageKey = `snapshot-store-lock:${crypto.randomUUID()}`
+  const first = new IndexedDbSnapshotStore(storageKey)
+  const module = {
+    _memfs: {
+      files: {
+        '/project.db': { data: new Uint8Array([1, 2, 3, 4]), size: 4 },
+      },
+      fds: {},
+      nextFd: 1,
+    },
+  }
+  await first.checkpoint(module)
+  const second = new IndexedDbSnapshotStore(storageKey)
+  const restoredModule = {
+    _memfs: {
+      files: {} as Record<string, { data: Uint8Array; size: number }>,
+      fds: {},
+      nextFd: 1,
+    },
+  }
+  const restore = second.restore(restoredModule)
+  const beforeClose = await Promise.race([
+    restore.then(() => 'restored'),
+    new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 50)),
+  ])
+  equal(beforeClose, 'waiting', 'second snapshot store waits for the first store lock')
+  await first.close()
+  equal(await restore, true, 'second snapshot store restores after the first closes')
+  equal(
+    Array.from(restoredModule._memfs.files['/project.db'].data),
+    [1, 2, 3, 4],
+    'serialized snapshot store restores complete bytes'
+  )
+  await second.close()
+  await deleteBrowserSyncHostSnapshot(storageKey)
+  return { waitedForClose: true, restored: true }
+}
+
+async function runInvalidSnapshotCacheMissCase() {
+  const storageKey = `invalid-snapshot:${crypto.randomUUID()}`
+  const databaseName = `${BROWSER_SYNC_HOST_DATABASE_PREFIX}${storageKey}`
+  const first = new IndexedDbSnapshotStore(storageKey)
+  await first.checkpoint({
+    _memfs: {
+      files: {
+        '/project.db': { data: new Uint8Array([1, 2, 3, 4]), size: 4 },
+      },
+      fds: {},
+      nextFd: 1,
+    },
+  })
+  await first.close()
+
+  const database = await openIndexedDb(databaseName, 'unused')
+  const corrupt = database.transaction('snapshot-chunks', 'readwrite')
+  corrupt.objectStore('snapshot-chunks').clear()
+  await indexedDbTransaction(corrupt)
+  database.close()
+
+  const cacheMiss = new IndexedDbSnapshotStore(storageKey)
+  const restored = await cacheMiss.restore({
+    _memfs: { files: {}, fds: {}, nextFd: 1 },
+  })
+  equal(restored, false, 'invalid snapshot is discarded as a cache miss')
+  const freshBytes = new Uint8Array([5, 6, 7, 8])
+  await cacheMiss.checkpoint({
+    _memfs: {
+      files: { '/project.db': { data: freshBytes, size: freshBytes.length } },
+      fds: {},
+      nextFd: 1,
+    },
+  })
+  await cacheMiss.close()
+
+  const reopened = new IndexedDbSnapshotStore(storageKey)
+  const reopenedModule = {
+    _memfs: {
+      files: {} as Record<string, { data: Uint8Array; size: number }>,
+      fds: {},
+      nextFd: 1,
+    },
+  }
+  equal(await reopened.restore(reopenedModule), true, 'fresh checkpoint restores')
+  equal(
+    Array.from(reopenedModule._memfs.files['/project.db'].data),
+    Array.from(freshBytes),
+    'fresh checkpoint replaces the discarded cache'
+  )
+  await reopened.close()
+  await deleteBrowserSyncHostSnapshot(storageKey)
+  return { discarded: true, rebuilt: true }
+}
+
+async function runSteadyStateDatabaseDiscoveryCase() {
+  const storageKey = `steady-state-discovery:${crypto.randomUUID()}`
+  const first = new IndexedDbSnapshotStore(storageKey)
+  await first.checkpoint({
+    _memfs: {
+      files: {
+        '/project.db': { data: new Uint8Array([1, 2, 3, 4]), size: 4 },
+      },
+      fds: {},
+      nextFd: 1,
+    },
+  })
+  await first.close()
+
+  const originalDatabases = indexedDB.databases
+  let calls = 0
+  Object.defineProperty(indexedDB, 'databases', {
+    configurable: true,
+    value: () => {
+      calls++
+      throw new Error('steady-state boot called indexedDB.databases()')
+    },
+  })
+  try {
+    const reopened = new IndexedDbSnapshotStore(storageKey)
+    equal(
+      await reopened.restore({ _memfs: { files: {}, fds: {}, nextFd: 1 } }),
+      true,
+      'steady-state snapshot restores without origin database discovery'
+    )
+    await reopened.close()
+  } finally {
+    Object.defineProperty(indexedDB, 'databases', {
+      configurable: true,
+      value: originalDatabases,
+    })
+  }
+  equal(calls, 0, 'steady-state boot makes no origin database discovery call')
+  await deleteBrowserSyncHostSnapshot(storageKey)
+  return { databaseDiscoveryCalls: calls }
+}
+
 async function runIncrementalCheckpointCase() {
   const entries = Array.from({ length: 8 }, (_, index) => {
     const storageKey = `incremental-checkpoint:${index}:${crypto.randomUUID()}`
@@ -962,6 +1180,10 @@ async function runBrowserHostSpike() {
   const checkpointFailure = await runCheckpointFailureCase()
   const snapshotDeletion = await runSnapshotDeletionCase()
   const legacySnapshotDeletion = await runLegacySnapshotDeletionCase()
+  const chunkChangeDetection = await runChunkChangeDetectionCase()
+  const snapshotStoreSerialization = await runSnapshotStoreSerializationCase()
+  const invalidSnapshotCacheMiss = await runInvalidSnapshotCacheMissCase()
+  const steadyStateDatabaseDiscovery = await runSteadyStateDatabaseDiscoveryCase()
   const incrementalCheckpoint = await runIncrementalCheckpointCase()
   const hybridCapture = await runHybridCaptureCase()
 
@@ -973,6 +1195,10 @@ async function runBrowserHostSpike() {
     checkpointFailure,
     snapshotDeletion,
     legacySnapshotDeletion,
+    chunkChangeDetection,
+    snapshotStoreSerialization,
+    invalidSnapshotCacheMiss,
+    steadyStateDatabaseDiscovery,
     incrementalCheckpoint,
     hybridCapture,
     seedProbe: {

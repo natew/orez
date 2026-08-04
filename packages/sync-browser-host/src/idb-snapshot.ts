@@ -12,7 +12,12 @@ export const SNAPSHOT_CHUNK_BYTES = 64 * 1024
 type SnapshotManifestFile = {
   path: string
   size: number
-  hashes: number[]
+  hashes: ChunkHash[]
+}
+
+type ChunkHash = {
+  first: number
+  second: number
 }
 
 type SnapshotManifest = {
@@ -66,26 +71,28 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   })
 }
 
-async function deleteObsoleteSnapshotDatabases(storageKey: string): Promise<void> {
-  const databaseName = snapshotDatabaseName(storageKey)
+async function deleteLegacySnapshotDatabases(): Promise<void> {
   const databases = await indexedDB.databases()
   const obsoleteNames = databases.flatMap((database) => {
     if (database.name === LEGACY_DATABASE_NAME) return [database.name]
     if (database.name === MIGRATION_DATABASE_NAME) return [database.name]
-    if (database.name === databaseName && database.version === 1) {
-      return [database.name]
-    }
     return []
   })
   await Promise.all(obsoleteNames.map((name) => deleteDatabase(name)))
 }
 
-async function openSnapshotDatabase(storageKey: string): Promise<IDBDatabase> {
-  await deleteObsoleteSnapshotDatabases(storageKey)
+async function openCurrentSnapshotDatabase(
+  storageKey: string
+): Promise<IDBDatabase | null> {
   const databaseName = snapshotDatabaseName(storageKey)
-
+  let obsolete = false
   const request = indexedDB.open(databaseName, DATABASE_VERSION)
-  request.addEventListener('upgradeneeded', () => {
+  request.addEventListener('upgradeneeded', (event) => {
+    if (event.oldVersion === 1) {
+      obsolete = true
+      request.transaction?.abort()
+      return
+    }
     if (!request.result.objectStoreNames.contains(MANIFEST_STORE_NAME)) {
       request.result.createObjectStore(MANIFEST_STORE_NAME, {
         keyPath: 'storageKey',
@@ -95,8 +102,31 @@ async function openSnapshotDatabase(storageKey: string): Promise<IDBDatabase> {
       request.result.createObjectStore(CHUNK_STORE_NAME, { keyPath: 'key' })
     }
   })
-  const database = await requestResult(request)
-  database.addEventListener('versionchange', () => database.close())
+  try {
+    const database = await requestResult(request)
+    database.addEventListener('versionchange', () => database.close())
+    return database
+  } catch (error) {
+    if (obsolete) return null
+    throw error
+  }
+}
+
+async function openSnapshotDatabase(storageKey: string): Promise<IDBDatabase> {
+  let database = await openCurrentSnapshotDatabase(storageKey)
+  if (!database) {
+    await deleteDatabase(snapshotDatabaseName(storageKey))
+    await deleteLegacySnapshotDatabases()
+    database = await openCurrentSnapshotDatabase(storageKey)
+    if (!database) throw new Error(`could not replace obsolete snapshot ${storageKey}`)
+  }
+  const transaction = database.transaction(MANIFEST_STORE_NAME, 'readonly')
+  const done = transactionDone(transaction)
+  const manifest = await requestResult(
+    transaction.objectStore(MANIFEST_STORE_NAME).get(storageKey)
+  )
+  await done
+  if (manifest === undefined) await deleteLegacySnapshotDatabases()
   return database
 }
 
@@ -108,18 +138,27 @@ function chunkKey(path: string, index: number): string {
   return `${path.length}:${path}:${index}`
 }
 
-function chunkHash(data: Uint8Array, start: number, end: number): number {
-  let hash = 0x811c9dc5
+function chunkHash(data: Uint8Array, start: number, end: number): ChunkHash {
+  let first = 0x811c9dc5
+  let second = 0x9e3779b9
   const view = new DataView(data.buffer, data.byteOffset + start, end - start)
   const wordBytes = view.byteLength & ~3
   let offset = 0
   for (; offset < wordBytes; offset += 4) {
-    hash = Math.imul(hash ^ view.getUint32(offset, true), 0x01000193)
+    const word = view.getUint32(offset, true)
+    first = Math.imul(first ^ word, 0x01000193)
+    second = Math.imul(second ^ word, 0x27d4eb2d)
   }
   for (; offset < view.byteLength; offset++) {
-    hash = Math.imul(hash ^ view.getUint8(offset), 0x01000193)
+    const byte = view.getUint8(offset)
+    first = Math.imul(first ^ byte, 0x01000193)
+    second = Math.imul(second ^ byte, 0x27d4eb2d)
   }
-  return hash >>> 0
+  return { first: first >>> 0, second: second >>> 0 }
+}
+
+function chunkHashesEqual(left: ChunkHash, right: ChunkHash): boolean {
+  return left.first === right.first && left.second === right.second
 }
 
 async function deleteDatabase(name: string): Promise<void> {
@@ -130,8 +169,10 @@ async function deleteDatabase(name: string): Promise<void> {
 export async function deleteBrowserSyncHostSnapshot(storageKey: string): Promise<void> {
   if (!storageKey) throw new TypeError('storageKey must not be empty')
 
-  await deleteObsoleteSnapshotDatabases(storageKey)
-  await deleteDatabase(snapshotDatabaseName(storageKey))
+  await navigator.locks.request(snapshotDatabaseName(storageKey), async () => {
+    await deleteLegacySnapshotDatabases()
+    await deleteDatabase(snapshotDatabaseName(storageKey))
+  })
 }
 
 function validateManifest(value: unknown, storageKey: string): SnapshotManifest {
@@ -160,7 +201,15 @@ function validateManifest(value: unknown, storageKey: string): SnapshotManifest 
       !Array.isArray(file.hashes) ||
       file.hashes.length !== Math.ceil(file.size / SNAPSHOT_CHUNK_BYTES) ||
       file.hashes.some(
-        (hash) => !Number.isSafeInteger(hash) || hash < 0 || hash > 0xffffffff
+        (hash) =>
+          !hash ||
+          typeof hash !== 'object' ||
+          !Number.isSafeInteger(Reflect.get(hash, 'first')) ||
+          Reflect.get(hash, 'first') < 0 ||
+          Reflect.get(hash, 'first') > 0xffffffff ||
+          !Number.isSafeInteger(Reflect.get(hash, 'second')) ||
+          Reflect.get(hash, 'second') < 0 ||
+          Reflect.get(hash, 'second') > 0xffffffff
       ) ||
       paths.has(file.path)
     ) {
@@ -197,7 +246,7 @@ function manifestFor(module: BedrockSnapshotModule, storageKey: string) {
     ) {
       throw new Error(`invalid Bedrock VFS file ${path}`)
     }
-    const hashes: number[] = []
+    const hashes: ChunkHash[] = []
     for (let offset = 0; offset < file.size; offset += SNAPSHOT_CHUNK_BYTES) {
       hashes.push(
         chunkHash(file.data, offset, Math.min(offset + SNAPSHOT_CHUNK_BYTES, file.size))
@@ -216,10 +265,25 @@ function manifestFor(module: BedrockSnapshotModule, storageKey: string) {
 export class IndexedDbSnapshotStore {
   readonly #database: Promise<IDBDatabase>
   #manifest: SnapshotManifest | null = null
+  #releaseLock: (() => void) | null = null
 
   constructor(readonly storageKey: string) {
     if (!storageKey) throw new TypeError('storageKey must not be empty')
-    this.#database = openSnapshotDatabase(storageKey)
+    const lockReleased = new Promise<void>((resolve) => {
+      this.#releaseLock = resolve
+    })
+    this.#database = new Promise((resolve, reject) => {
+      navigator.locks
+        .request(snapshotDatabaseName(storageKey), async () => {
+          try {
+            resolve(await openSnapshotDatabase(storageKey))
+            await lockReleased
+          } catch (error) {
+            reject(error)
+          }
+        })
+        .catch(reject)
+    })
   }
 
   async restore(module: BedrockSnapshotModule): Promise<boolean> {
@@ -236,39 +300,52 @@ export class IndexedDbSnapshotStore {
     await done
 
     if (manifestValue !== undefined) {
-      const manifest = validateManifest(manifestValue, this.storageKey)
-      const chunks = new Map<string, unknown>()
-      for (const value of chunkValues) {
-        if (value && typeof value === 'object') {
-          const key = Reflect.get(value, 'key')
-          if (typeof key === 'string') chunks.set(key, value)
-        }
-      }
-      const files: BedrockBrowserModule['_memfs']['files'] = {}
-      for (const file of manifest.files) {
-        const data = new Uint8Array(file.size)
-        for (const [index, hash] of file.hashes.entries()) {
-          const offset = index * SNAPSHOT_CHUNK_BYTES
-          const size = Math.min(SNAPSHOT_CHUNK_BYTES, file.size - offset)
-          const chunk = validateChunk(
-            chunks.get(chunkKey(file.path, index)),
-            file.path,
-            index,
-            size
-          )
-          const bytes = new Uint8Array(chunk)
-          if (chunkHash(bytes, 0, bytes.byteLength) !== hash) {
-            throw new Error(
-              `browser database snapshot chunk hash mismatch ${file.path}:${index}`
-            )
+      try {
+        const manifest = validateManifest(manifestValue, this.storageKey)
+        const chunks = new Map<string, unknown>()
+        for (const value of chunkValues) {
+          if (value && typeof value === 'object') {
+            const key = Reflect.get(value, 'key')
+            if (typeof key === 'string') chunks.set(key, value)
           }
-          data.set(bytes, offset)
         }
-        files[file.path] = { data, size: file.size }
+        const files: BedrockBrowserModule['_memfs']['files'] = {}
+        for (const file of manifest.files) {
+          const data = new Uint8Array(file.size)
+          for (const [index, hash] of file.hashes.entries()) {
+            const offset = index * SNAPSHOT_CHUNK_BYTES
+            const size = Math.min(SNAPSHOT_CHUNK_BYTES, file.size - offset)
+            const chunk = validateChunk(
+              chunks.get(chunkKey(file.path, index)),
+              file.path,
+              index,
+              size
+            )
+            const bytes = new Uint8Array(chunk)
+            if (!chunkHashesEqual(chunkHash(bytes, 0, bytes.byteLength), hash)) {
+              throw new Error(
+                `browser database snapshot chunk hash mismatch ${file.path}:${index}`
+              )
+            }
+            data.set(bytes, offset)
+          }
+          files[file.path] = { data, size: file.size }
+        }
+        module._memfs.files = files
+        this.#manifest = manifest
+        return true
+      } catch {
+        const discard = database.transaction(
+          [MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
+          'readwrite'
+        )
+        const discarded = transactionDone(discard)
+        discard.objectStore(MANIFEST_STORE_NAME).clear()
+        discard.objectStore(CHUNK_STORE_NAME).clear()
+        await discarded
+        this.#manifest = null
+        return false
       }
-      module._memfs.files = files
-      this.#manifest = manifest
-      return true
     }
     return false
   }
@@ -291,18 +368,27 @@ export class IndexedDbSnapshotStore {
     const done = transactionDone(transaction)
     const chunkStore = transaction.objectStore(CHUNK_STORE_NAME)
 
+    // keep this diff and the manifest put synchronous; an await can auto-commit the atomic transaction early
     for (const file of manifest.files) {
       snapshotBytes += file.size
       snapshotChunks += file.hashes.length
       const previous = previousFiles.get(file.path)
       const source = module._memfs.files[file.path]
       for (let index = 0; index < file.hashes.length; index++) {
-        if (previous?.hashes[index] === file.hashes[index]) continue
         const offset = index * SNAPSHOT_CHUNK_BYTES
-        const data = source.data.slice(
-          offset,
-          Math.min(offset + SNAPSHOT_CHUNK_BYTES, file.size)
-        ).buffer
+        const currentSize = Math.min(SNAPSHOT_CHUNK_BYTES, file.size - offset)
+        const previousHash = previous?.hashes[index]
+        const previousSize = previous
+          ? Math.min(SNAPSHOT_CHUNK_BYTES, previous.size - offset)
+          : -1
+        if (
+          previousHash &&
+          previousSize === currentSize &&
+          chunkHashesEqual(previousHash, file.hashes[index])
+        ) {
+          continue
+        }
+        const data = source.data.slice(offset, offset + currentSize).buffer
         const chunk: SnapshotChunk = {
           key: chunkKey(file.path, index),
           path: file.path,
@@ -335,6 +421,11 @@ export class IndexedDbSnapshotStore {
   }
 
   async close(): Promise<void> {
-    ;(await this.#database).close()
+    try {
+      ;(await this.#database).close()
+    } finally {
+      this.#releaseLock?.()
+      this.#releaseLock = null
+    }
   }
 }
