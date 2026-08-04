@@ -1,6 +1,11 @@
 import type { BedrockBrowserModule } from './sqlite-adapter.js'
 
-const DATABASE_NAME = 'orez-sync-browser-host'
+const LEGACY_DATABASE_NAME = 'orez-sync-browser-host'
+export const BROWSER_SYNC_HOST_DATABASE_PREFIX = 'orez-sync-browser-host:'
+const MIGRATION_DATABASE_NAME = 'orez-sync-browser-host-migrations'
+const MIGRATION_STORE_NAME = 'migrations'
+const PER_STORAGE_DATABASE_MIGRATION = 'per-storage-database-v1'
+const MIGRATION_LOCK_NAME = `orez:${PER_STORAGE_DATABASE_MIGRATION}`
 const DATABASE_VERSION = 1
 const STORE_NAME = 'snapshots'
 const SNAPSHOT_FORMAT_VERSION = 1
@@ -15,6 +20,11 @@ type SnapshotRecord = {
   storageKey: string
   formatVersion: number
   files: SnapshotFile[]
+}
+
+type MigrationRecord = {
+  id: string
+  completedAt: number
 }
 
 function requestResult<Value>(request: IDBRequest<Value>): Promise<Value> {
@@ -44,8 +54,8 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   })
 }
 
-async function openSnapshotDatabase(): Promise<IDBDatabase> {
-  const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION)
+async function openSnapshotDatabase(databaseName: string): Promise<IDBDatabase> {
+  const request = indexedDB.open(databaseName, DATABASE_VERSION)
   request.addEventListener('upgradeneeded', () => {
     if (!request.result.objectStoreNames.contains(STORE_NAME)) {
       request.result.createObjectStore(STORE_NAME, { keyPath: 'storageKey' })
@@ -54,10 +64,139 @@ async function openSnapshotDatabase(): Promise<IDBDatabase> {
   return requestResult(request)
 }
 
+async function openMigrationDatabase(): Promise<IDBDatabase> {
+  const request = indexedDB.open(MIGRATION_DATABASE_NAME, DATABASE_VERSION)
+  request.addEventListener('upgradeneeded', () => {
+    if (!request.result.objectStoreNames.contains(MIGRATION_STORE_NAME)) {
+      request.result.createObjectStore(MIGRATION_STORE_NAME, { keyPath: 'id' })
+    }
+  })
+  return requestResult(request)
+}
+
+function snapshotDatabaseName(storageKey: string): string {
+  return `${BROWSER_SYNC_HOST_DATABASE_PREFIX}${storageKey}`
+}
+
+async function readRecord(
+  database: IDBDatabase,
+  storeName: string,
+  key: IDBValidKey
+): Promise<unknown> {
+  const transaction = database.transaction(storeName, 'readonly')
+  const value = await requestResult(transaction.objectStore(storeName).get(key))
+  await transactionDone(transaction)
+  return value
+}
+
+async function writeSnapshotRecord(
+  database: IDBDatabase,
+  record: SnapshotRecord
+): Promise<void> {
+  const transaction = database.transaction(STORE_NAME, 'readwrite')
+  transaction.objectStore(STORE_NAME).put(record)
+  await transactionDone(transaction)
+}
+
+async function migrationCompleted(database: IDBDatabase): Promise<boolean> {
+  return (
+    (await readRecord(database, MIGRATION_STORE_NAME, PER_STORAGE_DATABASE_MIGRATION)) !==
+    undefined
+  )
+}
+
+async function markMigrationCompleted(database: IDBDatabase): Promise<void> {
+  const record: MigrationRecord = {
+    id: PER_STORAGE_DATABASE_MIGRATION,
+    completedAt: Date.now(),
+  }
+  const transaction = database.transaction(MIGRATION_STORE_NAME, 'readwrite')
+  transaction.objectStore(MIGRATION_STORE_NAME).put(record)
+  await transactionDone(transaction)
+}
+
+async function openExistingLegacyDatabase(): Promise<IDBDatabase | null> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(LEGACY_DATABASE_NAME)
+    let missing = false
+    request.addEventListener('upgradeneeded', () => {
+      missing = true
+      request.transaction?.abort()
+    })
+    request.addEventListener(
+      'success',
+      () => {
+        resolve(request.result)
+      },
+      { once: true }
+    )
+    request.addEventListener(
+      'error',
+      () => {
+        if (missing && request.error?.name === 'AbortError') {
+          resolve(null)
+          return
+        }
+        reject(request.error ?? new Error('failed to open legacy snapshot database'))
+      },
+      { once: true }
+    )
+  })
+}
+
+async function migrateLegacySnapshotDatabase(): Promise<void> {
+  const migrationDatabase = await openMigrationDatabase()
+  try {
+    if (await migrationCompleted(migrationDatabase)) return
+  } finally {
+    migrationDatabase.close()
+  }
+
+  await navigator.locks.request(MIGRATION_LOCK_NAME, async () => {
+    const lockedMigrationDatabase = await openMigrationDatabase()
+    try {
+      if (await migrationCompleted(lockedMigrationDatabase)) return
+
+      const legacyDatabase = await openExistingLegacyDatabase()
+      if (legacyDatabase) {
+        try {
+          const transaction = legacyDatabase.transaction(STORE_NAME, 'readonly')
+          const values = await requestResult(transaction.objectStore(STORE_NAME).getAll())
+          await transactionDone(transaction)
+          for (const value of values) {
+            if (!value || typeof value !== 'object') {
+              throw new Error('invalid legacy browser database snapshot')
+            }
+            const storageKey = Reflect.get(value, 'storageKey')
+            if (typeof storageKey !== 'string') {
+              throw new Error('invalid legacy browser database snapshot key')
+            }
+            const snapshot = validateSnapshot(value, storageKey)
+            const database = await openSnapshotDatabase(snapshotDatabaseName(storageKey))
+            try {
+              if ((await readRecord(database, STORE_NAME, storageKey)) === undefined) {
+                await writeSnapshotRecord(database, snapshot)
+              }
+            } finally {
+              database.close()
+            }
+          }
+        } finally {
+          legacyDatabase.close()
+        }
+      }
+      await markMigrationCompleted(lockedMigrationDatabase)
+    } finally {
+      lockedMigrationDatabase.close()
+    }
+  })
+}
+
 export async function deleteBrowserSyncHostSnapshot(storageKey: string): Promise<void> {
   if (!storageKey) throw new TypeError('storageKey must not be empty')
 
-  const database = await openSnapshotDatabase()
+  await migrateLegacySnapshotDatabase()
+  const database = await openSnapshotDatabase(snapshotDatabaseName(storageKey))
   try {
     const transaction = database.transaction(STORE_NAME, 'readwrite')
     transaction.objectStore(STORE_NAME).delete(storageKey)
@@ -106,7 +245,9 @@ export class IndexedDbSnapshotStore {
 
   constructor(readonly storageKey: string) {
     if (!storageKey) throw new TypeError('storageKey must not be empty')
-    this.#database = openSnapshotDatabase()
+    this.#database = migrateLegacySnapshotDatabase().then(() =>
+      openSnapshotDatabase(snapshotDatabaseName(storageKey))
+    )
   }
 
   async restore(module: BedrockBrowserModule): Promise<boolean> {
@@ -152,9 +293,7 @@ export class IndexedDbSnapshotStore {
     }
 
     const database = await this.#database
-    const transaction = database.transaction(STORE_NAME, 'readwrite')
-    transaction.objectStore(STORE_NAME).put(record)
-    await transactionDone(transaction)
+    await writeSnapshotRecord(database, record)
   }
 
   async close(): Promise<void> {

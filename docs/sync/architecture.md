@@ -129,10 +129,14 @@ an advisory `data-changed` event after a durable mutation or direct write.
 One operation queue owns the database. A mutation runs its generated application
 code and Rust last-mutation-id finalization inside one explicit SQLite
 transaction. The host then snapshots Bedrock's complete in-memory VFS into one
-versioned IndexedDB record and waits for that transaction before replying. If
-the IndexedDB commit fails, the live database is closed and the host rejects all
-later work. A new worker restores the previous complete snapshot before opening
-SQLite. There is no in-memory fallback.
+versioned IndexedDB record in a database owned by that host's `storageKey`, and
+waits for that transaction before replying. Separate hosts therefore never
+share an IndexedDB transaction queue. The first host after the per-storage
+database cutover copies every record from the former shared database before
+recording the migration as complete. If the IndexedDB commit fails, the live
+database is closed and the host rejects all later work. A new worker restores
+the previous complete snapshot before opening SQLite. There is no in-memory
+fallback.
 
 The host accepts the application's mutator registry and named-query resolver so
 generated validators, permissions, transaction helpers, and deferred effects

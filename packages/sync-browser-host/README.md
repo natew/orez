@@ -4,7 +4,11 @@
 browser worker. It exposes authenticated Zero `/pull` and `/push` handlers,
 direct SQL for the generated project backend, and a MessagePort client/server
 pair. Every operation is serialized. Every transaction that can write SQLite
-is checkpointed to IndexedDB before its response succeeds.
+is checkpointed to IndexedDB before its response succeeds. Each `storageKey`
+owns a separate IndexedDB database, so persistence for one host cannot delay
+another host's startup or operation queue. The first host after this storage
+change copies every record from the former shared database before recording the
+migration as complete.
 
 Applications keep the real Zero schema, named queries, mutators, and client API.
 The application adapter supplies this host's mutator registry and named-query
@@ -29,6 +33,12 @@ const host = await createBrowserSyncHost({
 
 serveBrowserSyncHostPort(host, port)
 ```
+
+For an on-demand timing trace, pass `diagnostics` with an `enabled()` predicate
+and callback. The host checks the predicate before allocating each event and
+reports queue wait, operation duration, restore duration, and checkpoint
+duration. Turning the predicate off stops the trace without restarting the
+host; callback failures never affect database work.
 
 Run the package test lane with `bun run test:sync-browser-host` from the Orez
 root. It builds the current Rust WASM and drives a real Chromium worker through

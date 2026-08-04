@@ -1,4 +1,5 @@
 import {
+  BROWSER_SYNC_HOST_DATABASE_PREFIX,
   createBrowserSyncHostPortClient,
   deleteBrowserSyncHostSnapshot,
 } from 'orez-lite/browser'
@@ -57,6 +58,29 @@ function equal(actual: unknown, expected: unknown, message: string): void {
       `${message}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
     )
   }
+}
+
+function indexedDbRequest<Value>(request: IDBRequest<Value>): Promise<Value> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+function indexedDbTransaction(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve()
+    transaction.onabort = () => reject(transaction.error)
+    transaction.onerror = () => reject(transaction.error)
+  })
+}
+
+async function openIndexedDb(name: string, storeName: string): Promise<IDBDatabase> {
+  const request = indexedDB.open(name, 1)
+  request.onupgradeneeded = () => {
+    request.result.createObjectStore(storeName, { keyPath: 'storageKey' })
+  }
+  return indexedDbRequest(request)
 }
 
 async function openConnection(
@@ -348,6 +372,61 @@ async function runSnapshotDeletionCase() {
   await deleteBrowserSyncHostSnapshot(targetStorageKey)
   await deleteBrowserSyncHostSnapshot(siblingStorageKey)
   return { deletedTarget: true, preservedSibling: true }
+}
+
+async function runLegacySnapshotMigrationCase() {
+  const storageKey = `legacy-migration:${crypto.randomUUID()}`
+  const source = await openConnection(storageKey)
+  const seeded = await post(
+    source.client,
+    '/push',
+    mutation('legacy-migration', 1, 'todo.create', {
+      id: 'migrated',
+      title: 'preserve this snapshot',
+    })
+  )
+  equal(seeded.status, 200, 'legacy migration seed status')
+  source.terminate()
+
+  const databaseName = `${BROWSER_SYNC_HOST_DATABASE_PREFIX}${storageKey}`
+  const sourceDatabase = await openIndexedDb(databaseName, 'snapshots')
+  const sourceTransaction = sourceDatabase.transaction('snapshots', 'readonly')
+  const snapshot = await indexedDbRequest(
+    sourceTransaction.objectStore('snapshots').get(storageKey)
+  )
+  await indexedDbTransaction(sourceTransaction)
+  sourceDatabase.close()
+  assert(snapshot !== undefined, 'per-storage snapshot exists before legacy migration')
+
+  const legacyDatabase = await openIndexedDb('orez-sync-browser-host', 'snapshots')
+  const legacyTransaction = legacyDatabase.transaction('snapshots', 'readwrite')
+  legacyTransaction.objectStore('snapshots').put(snapshot)
+  await indexedDbTransaction(legacyTransaction)
+  legacyDatabase.close()
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(databaseName)
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error)
+  })
+
+  const migrationDatabase = await openIndexedDb(
+    'orez-sync-browser-host-migrations',
+    'migrations'
+  )
+  const migrationTransaction = migrationDatabase.transaction('migrations', 'readwrite')
+  migrationTransaction.objectStore('migrations').delete('per-storage-database-v1')
+  await indexedDbTransaction(migrationTransaction)
+  migrationDatabase.close()
+
+  const migrated = await openConnection(storageKey)
+  equal(
+    await migrated.client.query('SELECT id, title FROM todo WHERE id = ?', ['migrated']),
+    [{ id: 'migrated', title: 'preserve this snapshot' }],
+    'legacy shared snapshot migrates without losing rows'
+  )
+  migrated.terminate()
+  await deleteBrowserSyncHostSnapshot(storageKey)
+  return { preserved: true }
 }
 
 async function runHybridCaptureCase() {
@@ -808,6 +887,7 @@ async function runBrowserHostSpike() {
   for (const point of faultPoints) faults.push(await runFaultCase(point))
   const checkpointFailure = await runCheckpointFailureCase()
   const snapshotDeletion = await runSnapshotDeletionCase()
+  const legacySnapshotMigration = await runLegacySnapshotMigrationCase()
   const hybridCapture = await runHybridCaptureCase()
 
   const result = {
@@ -817,6 +897,7 @@ async function runBrowserHostSpike() {
     faults,
     checkpointFailure,
     snapshotDeletion,
+    legacySnapshotMigration,
     hybridCapture,
     seedProbe: {
       sqlCounts: seedSqlCounts,

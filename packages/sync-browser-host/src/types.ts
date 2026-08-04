@@ -25,6 +25,42 @@ export type BrowserSyncHostAssets = {
   syncWasmUrl?: string | URL
 }
 
+export type BrowserSyncHostOperation =
+  | 'executor-push'
+  | 'executor-execute'
+  | 'executor-transaction'
+  | 'executor-query'
+  | 'pull'
+  | 'push'
+  | 'query'
+  | 'exec'
+
+export type BrowserSyncHostTransaction =
+  | 'bootstrap'
+  | 'mutation'
+  | 'pull'
+  | 'maintenance'
+  | 'direct'
+
+export type BrowserSyncHostDiagnostic = {
+  stage: 'operation' | 'checkpoint' | 'restore'
+  phase: 'queued' | 'started' | 'completed' | 'failed'
+  storageKey: string
+  operation: BrowserSyncHostOperation | null
+  operationId: number | null
+  transaction: BrowserSyncHostTransaction | null
+  timestamp: number
+  queueDepth: number
+  waitMs: number | null
+  durationMs: number | null
+  error?: string
+}
+
+export type BrowserSyncHostDiagnostics = {
+  enabled(): boolean
+  callback(diagnostic: BrowserSyncHostDiagnostic): void
+}
+
 export type BrowserSyncHostConfig<
   S extends Schema = Schema,
   A extends AuthData = AuthData,
@@ -50,6 +86,11 @@ export type BrowserSyncHostConfig<
   retainChanges?: number
   transactionQueryBudget?: Partial<TransactionQueryBudget>
   onDataChanged?: () => void
+  /**
+   * Start/stop-gated operation timing. `enabled()` is checked before an event
+   * is allocated, and callback failures never affect database work.
+   */
+  diagnostics?: BrowserSyncHostDiagnostics
 }
 
 export interface BrowserSyncHost<S extends Schema = Schema> {
