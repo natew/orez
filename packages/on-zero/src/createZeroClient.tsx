@@ -71,6 +71,7 @@ import type {
   ZeroOptions,
   Schema as ZeroSchema,
 } from '@rocicorp/zero'
+import type { RollupSet } from 'orez-lite/rollup'
 
 type PreloadOptions = { ttl?: 'always' | 'never' | number | undefined }
 
@@ -100,6 +101,7 @@ export type CreateZeroClientOptions<
   schema: Schema
   models: Models
   groupedQueries: GroupedQueries
+  rollups?: RollupSet<Schema>
   permissionStrategy?: PermissionStrategy
   // repeated server acknowledgement timeouts reconnect with the existing local
   // state. one timeout remains a normal slow-server failure.
@@ -159,6 +161,7 @@ export function createZeroClientInternal<
   schema,
   models,
   groupedQueries,
+  rollups,
   permissionStrategy = 'optimistic',
   instanceName = 'default',
   serverAckTimeoutRecoveryThreshold = 2,
@@ -302,6 +305,7 @@ export function createZeroClientInternal<
       environment: 'client',
       authData: null,
       can: permissionsHelpers.can,
+      rollups,
     })
     return clientMutators
   }

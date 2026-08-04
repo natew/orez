@@ -9,6 +9,8 @@
   Zero schema, SQLite initializer, and HTTP policy callbacks.
 - `orez-lite/local` prepares SQLite and owns the local native process.
 - `orez-lite/vite` starts the local host only while Vite is serving.
+- `orez-lite/rollup` generates count and sum migrations and projects their
+  optimistic client updates.
 - `orez-lite/cloudflare` provides the Cloudflare runtime and data-worker factory.
 - `orez-lite/cloudflare/build` provides Node-side worker build and deployment tools.
 

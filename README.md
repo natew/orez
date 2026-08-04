@@ -22,6 +22,11 @@ hosts. It replaces Zero's server side and speaks the Zero protocol to the real
 forking Zero's query or mutation API. See the
 [Orez Lite server documentation](docs/sync/README.md).
 
+`orez-lite/rollup` maintains queryable count and sum columns until Zero ships
+aggregate queries. One declaration generates the SQLite migration and triggers
+and projects the same change during optimistic on-zero mutations. See the
+[rollup documentation](docs/rollups.md).
+
 ## Cloudflare
 
 `orez-lite/cloudflare` is the workerd runtime. A complete data worker is one factory

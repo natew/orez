@@ -1,8 +1,10 @@
+import { createSchema, number, string, table } from '@rocicorp/zero'
 // @ts-expect-error - CJS module
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
 import { RollingRowWriteBudget } from '../do-sql-tracking.js'
+import { count, defineRollups, rollupMigrationStatements } from '../rollup.js'
 import { TransactionalCdc } from './cdc.js'
 import { beginTxJournal, commitTxJournal, TX_MANIFEST_DDL } from './tx-journal.js'
 import { DurableWatermarkState } from './watermark.js'
@@ -227,6 +229,61 @@ async function controlNamespace() {
 }
 
 describe('billable write amplification on a synced namespace', () => {
+  it('keeps generated rollup triggers on the bounded captured-row path', async () => {
+    const ns = await controlNamespace()
+    ns.sql.exec('CREATE TABLE rollupSource (id TEXT PRIMARY KEY, groupId TEXT NOT NULL)')
+    ns.sql.exec(
+      'CREATE TABLE rollupTarget (groupId TEXT PRIMARY KEY, itemCount INTEGER NOT NULL)'
+    )
+    const source = table('rollupSource')
+      .columns({ id: string(), groupId: string() })
+      .primaryKey('id')
+    const target = table('rollupTarget')
+      .columns({ groupId: string(), itemCount: number() })
+      .primaryKey('groupId')
+    const schema = createSchema({ tables: [source, target] })
+    const rollups = defineRollups(schema, {
+      itemCount: {
+        source: 'rollupSource',
+        target: 'rollupTarget',
+        mode: 'materialized',
+        groupBy: { groupId: 'groupId' },
+        aggregates: { itemCount: count() },
+      },
+    })
+    ns.zero.cdc.syncTables([
+      { physicalTableName: 'user', tableName: 'user' },
+      { physicalTableName: 'project', tableName: 'project' },
+      { physicalTableName: 'file', tableName: 'file' },
+      {
+        physicalTableName: 'rollupSource',
+        tableName: 'rollupSource',
+      },
+      {
+        physicalTableName: 'rollupTarget',
+        tableName: 'rollupTarget',
+      },
+    ])
+    for (const statement of rollupMigrationStatements(rollups)) {
+      ns.sql.exec(statement)
+    }
+    ns.zero.cdc.drain()
+
+    const write = ns.syncedWrite(
+      'tx-rollup',
+      "INSERT INTO rollupSource VALUES ('r1', 'g1')",
+      {
+        physicalTableName: 'rollupSource',
+        tableName: 'rollupSource',
+        operation: 'INSERT',
+        rowColumns: ['id', 'groupId'],
+      }
+    )
+
+    expect(write.snapshots).toEqual([])
+    expect(write.billed).toBeLessThan(50)
+  })
+
   it('bills a synced write for itself, not for the tables it never touched', async () => {
     const ns = await controlNamespace()
 

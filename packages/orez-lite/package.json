@@ -38,6 +38,11 @@
       "import": "./dist/client/encrypted-column-conformance.js",
       "default": "./dist/client/encrypted-column-conformance.js"
     },
+    "./rollup": {
+      "types": "./dist/rollup.d.ts",
+      "import": "./dist/rollup.js",
+      "default": "./dist/rollup.js"
+    },
     "./browser": {
       "types": "./dist/browser/index.d.ts",
       "import": "./dist/browser/index.js",

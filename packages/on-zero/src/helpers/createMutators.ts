@@ -1,3 +1,5 @@
+import { withOptimisticRollups } from 'orez-lite/rollup'
+
 import { getAuthData } from '../state'
 import { mapObject } from './mapObject'
 import { runWithContext } from './mutatorContext'
@@ -11,6 +13,7 @@ import type {
   MutatorContext,
   Transaction,
 } from '../types'
+import type { RollupSet } from 'orez-lite/rollup'
 
 export type ValidateMutationFn = (args: {
   authData: AuthData | null
@@ -32,6 +35,7 @@ export function createMutators<Models extends GenericModels>({
   validateMutation,
   mutationValidators,
   resolveAuthData,
+  rollups,
 }: {
   environment: 'server' | 'client'
   authData: AuthData | null
@@ -44,6 +48,7 @@ export function createMutators<Models extends GenericModels>({
   /** valibot schemas keyed by model.mutationName, auto-validates args before running */
   mutationValidators?: Record<string, Record<string, any>>
   resolveAuthData?: () => AuthData | null
+  rollups?: RollupSet
 }): GetZeroMutators<Models> {
   const serverActions = createServerActions?.()
 
@@ -54,8 +59,10 @@ export function createMutators<Models extends GenericModels>({
 
   function withContext<Args extends any[]>(fn: (...args: Args) => Promise<void>) {
     return async (tx: Transaction, ...args: Args): Promise<void> => {
+      const transaction =
+        environment === 'client' && rollups ? withOptimisticRollups(tx, rollups) : tx
       const mutationContext: MutatorContext = {
-        tx,
+        tx: transaction,
         // on client, read authData dynamically to avoid stale closure during auth transitions
         // (ZeroProvider recreates Zero instance in useEffect, but mutations can run before that)
         authData:
