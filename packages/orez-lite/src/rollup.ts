@@ -71,7 +71,7 @@ type CompiledAggregate =
       readonly target: RollupColumn
     }
 
-export type CompiledRollup = {
+type CompiledRollup = {
   readonly name: string
   readonly source: {
     readonly logical: string
@@ -88,11 +88,17 @@ export type CompiledRollup = {
   readonly aggregates: readonly CompiledAggregate[]
 }
 
-export type RollupSet<S extends Schema = Schema> = {
+type RollupRuntime<S extends Schema> = {
   readonly schema: S
   readonly definitions: readonly CompiledRollup[]
   readonly queryBuilder: object
   readonly bySource: ReadonlyMap<string, readonly CompiledRollup[]>
+}
+
+const ROLLUP_RUNTIME: unique symbol = Symbol.for('orez-lite:rollup-runtime')
+
+export type RollupSet<S extends Schema = Schema> = {
+  readonly [ROLLUP_RUNTIME]: RollupRuntime<S>
 }
 
 export function count(): CountRollup {
@@ -371,10 +377,12 @@ export function defineRollups<
   }
 
   return {
-    schema,
-    definitions: compiled,
-    queryBuilder: createBuilder(schema),
-    bySource,
+    [ROLLUP_RUNTIME]: {
+      schema,
+      definitions: compiled,
+      queryBuilder: createBuilder(schema),
+      bySource,
+    },
   }
 }
 
@@ -582,7 +590,7 @@ function triggerStatements(rollup: CompiledRollup): string[] {
 }
 
 export function rollupMigrationStatements(rollups: RollupSet): readonly string[] {
-  return rollups.definitions.flatMap((rollup) => {
+  return rollups[ROLLUP_RUNTIME].definitions.flatMap((rollup) => {
     const triggerNames = ['insert', 'update', 'delete'].map((operation) =>
       quoteIdentifier(`_orez_rollup_${rollup.name}_${operation}`)
     )
@@ -833,15 +841,16 @@ async function updateRollupContribution(
  * triggers own the authoritative write.
  */
 export function withOptimisticRollups<T extends object>(tx: T, rollups: RollupSet): T {
-  if (Reflect.get(tx, 'location') !== 'client' || rollups.definitions.length === 0) {
+  const runtime = rollups[ROLLUP_RUNTIME]
+  if (Reflect.get(tx, 'location') !== 'client' || runtime.definitions.length === 0) {
     return tx
   }
   const baseMutate = Reflect.get(tx, 'mutate')
   if (!baseMutate || typeof baseMutate !== 'object') {
     throw new TypeError(`rollup transaction has no mutate object`)
   }
-  const builder = rollups.queryBuilder
-  const bySource = rollups.bySource
+  const builder = runtime.queryBuilder
+  const bySource = runtime.bySource
   const tableProxies = new Map<PropertyKey, object>()
   const wrappedMutate = new Proxy(baseMutate, {
     get(target, tableName, receiver) {
