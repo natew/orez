@@ -376,152 +376,70 @@ async function runSnapshotDeletionCase() {
   return { deletedTarget: true, preservedSibling: true }
 }
 
-async function runLegacySnapshotMigrationCase() {
-  const storageKey = `legacy-migration:${crypto.randomUUID()}`
-  const source = await openConnection(storageKey)
-  const seeded = await post(
-    source.client,
-    '/push',
-    mutation('legacy-migration', 1, 'todo.create', {
-      id: 'migrated',
-      title: 'preserve this snapshot',
-    })
-  )
-  equal(seeded.status, 200, 'legacy migration seed status')
-  source.terminate()
-
+async function runLegacySnapshotDeletionCase() {
+  const storageKey = `legacy-deletion:${crypto.randomUUID()}`
   const databaseName = `${BROWSER_SYNC_HOST_DATABASE_PREFIX}${storageKey}`
-  const sourceDatabase = await openIndexedDb(databaseName, 'snapshots')
-  const sourceTransaction = sourceDatabase.transaction(
-    ['snapshot-manifests', 'snapshot-chunks'],
-    'readonly'
-  )
-  const [manifest, chunks] = await Promise.all([
-    indexedDbRequest(sourceTransaction.objectStore('snapshot-manifests').get(storageKey)),
-    indexedDbRequest(sourceTransaction.objectStore('snapshot-chunks').getAll()),
-  ])
-  await indexedDbTransaction(sourceTransaction)
-  sourceDatabase.close()
-  assert(manifest && typeof manifest === 'object', 'v2 manifest exists before migration')
-  const manifestFiles = Reflect.get(manifest, 'files')
-  assert(Array.isArray(manifestFiles), 'v2 manifest files exist before migration')
-  const chunksByKey = new Map(
-    chunks.map((chunk) => [Reflect.get(chunk, 'key'), Reflect.get(chunk, 'data')])
-  )
   const snapshot = {
     storageKey,
     formatVersion: 1,
-    files: manifestFiles.map((file) => {
-      const path = Reflect.get(file, 'path')
-      const size = Reflect.get(file, 'size')
-      const hashes = Reflect.get(file, 'hashes')
-      assert(typeof path === 'string', 'v2 manifest path is valid')
-      assert(Number.isSafeInteger(size), 'v2 manifest size is valid')
-      assert(Array.isArray(hashes), 'v2 manifest hashes are valid')
-      const data = new Uint8Array(size)
-      for (let index = 0; index < hashes.length; index++) {
-        const value = chunksByKey.get(`${path.length}:${path}:${index}`)
-        assert(value instanceof ArrayBuffer, 'v2 chunk exists before migration')
-        data.set(new Uint8Array(value), index * SNAPSHOT_CHUNK_BYTES)
-      }
-      return { path, size, data: data.buffer }
-    }),
+    files: [{ path: '/project.db', size: 4, data: new Uint8Array([1, 2, 3, 4]) }],
   }
+
+  const isolatedLegacyDatabase = await openIndexedDb(databaseName, 'snapshots')
+  const isolatedLegacyTransaction = isolatedLegacyDatabase.transaction(
+    'snapshots',
+    'readwrite'
+  )
+  isolatedLegacyTransaction.objectStore('snapshots').put(snapshot)
+  await indexedDbTransaction(isolatedLegacyTransaction)
+  isolatedLegacyDatabase.close()
 
   const legacyDatabase = await openIndexedDb('orez-sync-browser-host', 'snapshots')
   const legacyTransaction = legacyDatabase.transaction('snapshots', 'readwrite')
   legacyTransaction.objectStore('snapshots').put(snapshot)
   await indexedDbTransaction(legacyTransaction)
   legacyDatabase.close()
-  await new Promise<void>((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(databaseName)
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
-  })
 
   const migrationDatabase = await openIndexedDb(
     'orez-sync-browser-host-migrations',
     'migrations'
   )
   const migrationTransaction = migrationDatabase.transaction('migrations', 'readwrite')
-  migrationTransaction.objectStore('migrations').delete('per-storage-database-v1')
+  migrationTransaction.objectStore('migrations').put({ storageKey: 'legacy-marker' })
   await indexedDbTransaction(migrationTransaction)
   migrationDatabase.close()
 
-  const migrated = await openConnection(storageKey)
+  const fresh = await openConnection(storageKey)
   equal(
-    await migrated.client.query('SELECT id, title FROM todo WHERE id = ?', ['migrated']),
-    [{ id: 'migrated', title: 'preserve this snapshot' }],
-    'legacy shared snapshot migrates without losing rows'
+    await fresh.client.query('SELECT id, title FROM todo'),
+    [],
+    'legacy snapshot is discarded instead of restored'
   )
-  migrated.terminate()
-  const convertedDatabase = await openIndexedDb(databaseName, 'snapshots')
-  const convertedTransaction = convertedDatabase.transaction(
-    ['snapshots', 'snapshot-manifests'],
-    'readonly'
-  )
-  const [convertedLegacy, convertedManifest] = await Promise.all([
-    indexedDbRequest(convertedTransaction.objectStore('snapshots').get(storageKey)),
-    indexedDbRequest(
-      convertedTransaction.objectStore('snapshot-manifests').get(storageKey)
-    ),
-  ])
-  await indexedDbTransaction(convertedTransaction)
-  convertedDatabase.close()
-  assert(convertedLegacy === undefined, 'v1 snapshot is removed after v2 checkpoint')
-  assert(convertedManifest !== undefined, 'v2 manifest replaces the restored v1 snapshot')
-  assert(
-    !(await indexedDB.databases()).some(({ name }) => name === 'orez-sync-browser-host'),
-    'legacy shared database is deleted after migration'
-  )
-  assert(
-    !(await indexedDB.databases()).some(
-      ({ name }) => name === 'orez-sync-browser-host-migrations'
-    ),
-    'migration marker database is deleted after migration'
-  )
-  await deleteBrowserSyncHostSnapshot(storageKey)
-  return { preserved: true, converted: true, sharedDatabasesDeleted: true }
-}
+  fresh.terminate()
 
-async function runMigrationDatabaseBlockingProbe() {
-  const source = `
-    self.onmessage = () => {
-      const request = indexedDB.open('orez-sync-browser-host-migrations', 1)
-      request.onupgradeneeded = () => {
-        if (!request.result.objectStoreNames.contains('migrations')) {
-          request.result.createObjectStore('migrations', { keyPath: 'id' })
-        }
-      }
-      request.onsuccess = () => {
-        const transaction = request.result.transaction('migrations', 'readwrite')
-        const put = transaction.objectStore('migrations').put({
-          id: 'per-storage-database-v1',
-          completedAt: Date.now(),
-        })
-        put.onsuccess = () => {
-          self.postMessage('held')
-          const deadline = performance.now() + 35_000
-          while (performance.now() < deadline) {}
-        }
-      }
-    }
-  `
-  const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }))
-  const blocker = new Worker(url)
-  await new Promise<void>((resolve, reject) => {
-    blocker.onerror = reject
-    blocker.onmessage = () => resolve()
-    blocker.postMessage('start')
-  })
-  const startedAt = performance.now()
-  const connection = await openConnection(`migration-block:${crypto.randomUUID()}`)
-  const elapsedMs = performance.now() - startedAt
-  connection.terminate()
-  blocker.terminate()
-  URL.revokeObjectURL(url)
-  assert(elapsedMs < 1_000, `migration database blocked isolated boot: ${elapsedMs}ms`)
-  return { elapsedMs }
+  const databases = await indexedDB.databases()
+  assert(
+    !databases.some(({ name }) => name === 'orez-sync-browser-host'),
+    'legacy shared database is deleted'
+  )
+  assert(
+    !databases.some(({ name }) => name === 'orez-sync-browser-host-migrations'),
+    'legacy marker database is deleted'
+  )
+  const v2Database = await openIndexedDb(databaseName, 'unused')
+  assert(v2Database.version === 2, 'fresh snapshot database uses v2 schema')
+  assert(
+    !v2Database.objectStoreNames.contains('snapshots'),
+    'fresh snapshot database has no legacy store'
+  )
+  assert(
+    v2Database.objectStoreNames.contains('snapshot-manifests') &&
+      v2Database.objectStoreNames.contains('snapshot-chunks'),
+    'fresh snapshot database has v2 stores'
+  )
+  v2Database.close()
+  await deleteBrowserSyncHostSnapshot(storageKey)
+  return { discarded: true, sharedDatabasesDeleted: true, bootedFresh: true }
 }
 
 async function runIncrementalCheckpointCase() {
@@ -1043,8 +961,7 @@ async function runBrowserHostSpike() {
   for (const point of faultPoints) faults.push(await runFaultCase(point))
   const checkpointFailure = await runCheckpointFailureCase()
   const snapshotDeletion = await runSnapshotDeletionCase()
-  const migrationDatabaseBlocking = await runMigrationDatabaseBlockingProbe()
-  const legacySnapshotMigration = await runLegacySnapshotMigrationCase()
+  const legacySnapshotDeletion = await runLegacySnapshotDeletionCase()
   const incrementalCheckpoint = await runIncrementalCheckpointCase()
   const hybridCapture = await runHybridCaptureCase()
 
@@ -1055,8 +972,7 @@ async function runBrowserHostSpike() {
     faults,
     checkpointFailure,
     snapshotDeletion,
-    migrationDatabaseBlocking,
-    legacySnapshotMigration,
+    legacySnapshotDeletion,
     incrementalCheckpoint,
     hybridCapture,
     seedProbe: {

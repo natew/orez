@@ -3,26 +3,11 @@ import type { BedrockBrowserModule } from './sqlite-adapter.js'
 const LEGACY_DATABASE_NAME = 'orez-sync-browser-host'
 export const BROWSER_SYNC_HOST_DATABASE_PREFIX = 'orez-sync-browser-host:'
 const MIGRATION_DATABASE_NAME = 'orez-sync-browser-host-migrations'
-const MIGRATION_LOCK_NAME = 'orez:per-storage-database-v1'
 const DATABASE_VERSION = 2
-const LEGACY_STORE_NAME = 'snapshots'
 const MANIFEST_STORE_NAME = 'snapshot-manifests'
 const CHUNK_STORE_NAME = 'snapshot-chunks'
-const LEGACY_SNAPSHOT_FORMAT_VERSION = 1
 const SNAPSHOT_FORMAT_VERSION = 2
 export const SNAPSHOT_CHUNK_BYTES = 64 * 1024
-
-type LegacySnapshotFile = {
-  path: string
-  size: number
-  data: ArrayBuffer
-}
-
-type LegacySnapshotRecord = {
-  storageKey: string
-  formatVersion: number
-  files: LegacySnapshotFile[]
-}
 
 type SnapshotManifestFile = {
   path: string
@@ -81,14 +66,26 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   })
 }
 
-async function openSnapshotDatabase(databaseName: string): Promise<IDBDatabase> {
+async function deleteObsoleteSnapshotDatabases(storageKey: string): Promise<void> {
+  const databaseName = snapshotDatabaseName(storageKey)
+  const databases = await indexedDB.databases()
+  const obsoleteNames = databases.flatMap((database) => {
+    if (database.name === LEGACY_DATABASE_NAME) return [database.name]
+    if (database.name === MIGRATION_DATABASE_NAME) return [database.name]
+    if (database.name === databaseName && database.version === 1) {
+      return [database.name]
+    }
+    return []
+  })
+  await Promise.all(obsoleteNames.map((name) => deleteDatabase(name)))
+}
+
+async function openSnapshotDatabase(storageKey: string): Promise<IDBDatabase> {
+  await deleteObsoleteSnapshotDatabases(storageKey)
+  const databaseName = snapshotDatabaseName(storageKey)
+
   const request = indexedDB.open(databaseName, DATABASE_VERSION)
   request.addEventListener('upgradeneeded', () => {
-    if (!request.result.objectStoreNames.contains(LEGACY_STORE_NAME)) {
-      request.result.createObjectStore(LEGACY_STORE_NAME, {
-        keyPath: 'storageKey',
-      })
-    }
     if (!request.result.objectStoreNames.contains(MANIFEST_STORE_NAME)) {
       request.result.createObjectStore(MANIFEST_STORE_NAME, {
         keyPath: 'storageKey',
@@ -125,144 +122,16 @@ function chunkHash(data: Uint8Array, start: number, end: number): number {
   return hash >>> 0
 }
 
-async function readRecord(
-  database: IDBDatabase,
-  storeName: string,
-  key: IDBValidKey
-): Promise<unknown> {
-  const transaction = database.transaction(storeName, 'readonly')
-  const done = transactionDone(transaction)
-  const value = await requestResult(transaction.objectStore(storeName).get(key))
-  await done
-  return value
-}
-
-async function writeLegacySnapshotRecord(
-  database: IDBDatabase,
-  record: LegacySnapshotRecord
-): Promise<void> {
-  const transaction = database.transaction(LEGACY_STORE_NAME, 'readwrite')
-  const done = transactionDone(transaction)
-  transaction.objectStore(LEGACY_STORE_NAME).put(record)
-  await done
-}
-
-async function databaseExists(name: string): Promise<boolean> {
-  return (await indexedDB.databases()).some((database) => database.name === name)
-}
-
 async function deleteDatabase(name: string): Promise<void> {
   const request = indexedDB.deleteDatabase(name)
   await requestResult(request)
 }
 
-async function openExistingLegacyDatabase(): Promise<IDBDatabase | null> {
-  if (!(await databaseExists(LEGACY_DATABASE_NAME))) return null
-  const request = indexedDB.open(LEGACY_DATABASE_NAME)
-  return requestResult(request)
-}
-
-async function migrateLegacySnapshotDatabase(): Promise<void> {
-  if (!(await databaseExists(LEGACY_DATABASE_NAME))) return
-
-  await navigator.locks.request(MIGRATION_LOCK_NAME, async () => {
-    const legacyDatabase = await openExistingLegacyDatabase()
-    if (!legacyDatabase) return
-    try {
-      if (!legacyDatabase.objectStoreNames.contains(LEGACY_STORE_NAME)) {
-        throw new Error('legacy browser database has no snapshot store')
-      }
-      const transaction = legacyDatabase.transaction(LEGACY_STORE_NAME, 'readonly')
-      const done = transactionDone(transaction)
-      const values = await requestResult(
-        transaction.objectStore(LEGACY_STORE_NAME).getAll()
-      )
-      await done
-      for (const value of values) {
-        if (!value || typeof value !== 'object') {
-          throw new Error('invalid legacy browser database snapshot')
-        }
-        const storageKey = Reflect.get(value, 'storageKey')
-        if (typeof storageKey !== 'string') {
-          throw new Error('invalid legacy browser database snapshot key')
-        }
-        const snapshot = validateLegacySnapshot(value, storageKey)
-        const database = await openSnapshotDatabase(snapshotDatabaseName(storageKey))
-        try {
-          const manifest = await readRecord(database, MANIFEST_STORE_NAME, storageKey)
-          const legacy = await readRecord(database, LEGACY_STORE_NAME, storageKey)
-          if (manifest === undefined && legacy === undefined) {
-            await writeLegacySnapshotRecord(database, snapshot)
-          }
-        } finally {
-          database.close()
-        }
-      }
-    } finally {
-      legacyDatabase.close()
-    }
-    await deleteDatabase(LEGACY_DATABASE_NAME)
-    if (await databaseExists(MIGRATION_DATABASE_NAME)) {
-      await deleteDatabase(MIGRATION_DATABASE_NAME)
-    }
-  })
-}
-
 export async function deleteBrowserSyncHostSnapshot(storageKey: string): Promise<void> {
   if (!storageKey) throw new TypeError('storageKey must not be empty')
 
-  await migrateLegacySnapshotDatabase()
-  const database = await openSnapshotDatabase(snapshotDatabaseName(storageKey))
-  try {
-    const transaction = database.transaction(
-      [LEGACY_STORE_NAME, MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
-      'readwrite'
-    )
-    const done = transactionDone(transaction)
-    transaction.objectStore(LEGACY_STORE_NAME).delete(storageKey)
-    transaction.objectStore(MANIFEST_STORE_NAME).delete(storageKey)
-    transaction.objectStore(CHUNK_STORE_NAME).clear()
-    await done
-  } finally {
-    database.close()
-  }
-}
-
-function validateLegacySnapshot(
-  value: unknown,
-  storageKey: string
-): LegacySnapshotRecord {
-  if (!value || typeof value !== 'object') {
-    throw new Error(`invalid browser database snapshot for ${storageKey}`)
-  }
-  const record = value as Partial<LegacySnapshotRecord>
-  if (record.storageKey !== storageKey) {
-    throw new Error(`browser database snapshot key mismatch for ${storageKey}`)
-  }
-  if (record.formatVersion !== LEGACY_SNAPSHOT_FORMAT_VERSION) {
-    throw new Error(
-      `unsupported browser database snapshot format ${String(record.formatVersion)}`
-    )
-  }
-  if (!Array.isArray(record.files)) {
-    throw new Error(`browser database snapshot has no files for ${storageKey}`)
-  }
-  const paths = new Set<string>()
-  for (const file of record.files) {
-    if (
-      !file ||
-      typeof file.path !== 'string' ||
-      !Number.isSafeInteger(file.size) ||
-      file.size < 0 ||
-      !(file.data instanceof ArrayBuffer) ||
-      file.size > file.data.byteLength ||
-      paths.has(file.path)
-    ) {
-      throw new Error(`invalid browser database snapshot file for ${storageKey}`)
-    }
-    paths.add(file.path)
-  }
-  return record as LegacySnapshotRecord
+  await deleteObsoleteSnapshotDatabases(storageKey)
+  await deleteDatabase(snapshotDatabaseName(storageKey))
 }
 
 function validateManifest(value: unknown, storageKey: string): SnapshotManifest {
@@ -347,25 +216,21 @@ function manifestFor(module: BedrockSnapshotModule, storageKey: string) {
 export class IndexedDbSnapshotStore {
   readonly #database: Promise<IDBDatabase>
   #manifest: SnapshotManifest | null = null
-  #legacyRecordPresent = false
 
   constructor(readonly storageKey: string) {
     if (!storageKey) throw new TypeError('storageKey must not be empty')
-    this.#database = migrateLegacySnapshotDatabase().then(() =>
-      openSnapshotDatabase(snapshotDatabaseName(storageKey))
-    )
+    this.#database = openSnapshotDatabase(storageKey)
   }
 
   async restore(module: BedrockSnapshotModule): Promise<boolean> {
     const database = await this.#database
     const transaction = database.transaction(
-      [LEGACY_STORE_NAME, MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
+      [MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
       'readonly'
     )
     const done = transactionDone(transaction)
-    const [manifestValue, legacyValue, chunkValues] = await Promise.all([
+    const [manifestValue, chunkValues] = await Promise.all([
       requestResult(transaction.objectStore(MANIFEST_STORE_NAME).get(this.storageKey)),
-      requestResult(transaction.objectStore(LEGACY_STORE_NAME).get(this.storageKey)),
       requestResult(transaction.objectStore(CHUNK_STORE_NAME).getAll()),
     ])
     await done
@@ -403,21 +268,9 @@ export class IndexedDbSnapshotStore {
       }
       module._memfs.files = files
       this.#manifest = manifest
-      this.#legacyRecordPresent = legacyValue !== undefined
       return true
     }
-
-    if (legacyValue === undefined) return false
-    const snapshot = validateLegacySnapshot(legacyValue, this.storageKey)
-    const files: BedrockBrowserModule['_memfs']['files'] = {}
-    for (const file of snapshot.files) {
-      const data = new Uint8Array(file.data.slice(0, file.size))
-      files[file.path] = { data, size: file.size }
-    }
-    module._memfs.files = files
-    this.#manifest = null
-    this.#legacyRecordPresent = true
-    return true
+    return false
   }
 
   async checkpoint(module: BedrockSnapshotModule): Promise<SnapshotCheckpointStats> {
@@ -432,7 +285,7 @@ export class IndexedDbSnapshotStore {
 
     const database = await this.#database
     const transaction = database.transaction(
-      [LEGACY_STORE_NAME, MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
+      [MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
       'readwrite'
     )
     const done = transactionDone(transaction)
@@ -476,12 +329,8 @@ export class IndexedDbSnapshotStore {
     }
 
     transaction.objectStore(MANIFEST_STORE_NAME).put(manifest)
-    if (this.#legacyRecordPresent) {
-      transaction.objectStore(LEGACY_STORE_NAME).delete(this.storageKey)
-    }
     await done
     this.#manifest = manifest
-    this.#legacyRecordPresent = false
     return { snapshotBytes, writtenBytes, snapshotChunks, writtenChunks }
   }
 

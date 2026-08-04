@@ -6,9 +6,9 @@ direct SQL for the generated project backend, and a MessagePort client/server
 pair. Every operation is serialized. Every transaction that can write SQLite
 is checkpointed to IndexedDB before its response succeeds. Each `storageKey`
 owns a separate IndexedDB database, so persistence for one host cannot delay
-another host's startup or operation queue. The first host after this storage
-change copies every record from the former shared database before recording the
-migration as complete.
+another host's startup or operation queue. Browser snapshots are rebuildable
+cache state, so the host deletes obsolete shared and v1 snapshot databases and
+starts with an empty v2 store.
 
 Applications keep the real Zero schema, named queries, mutators, and client API.
 The application adapter supplies this host's mutator registry and named-query

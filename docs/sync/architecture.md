@@ -132,12 +132,12 @@ transaction. The host hashes Bedrock's in-memory VFS in fixed-size chunks, then
 writes only changed chunks plus one manifest in a single IndexedDB transaction
 owned by that host's `storageKey`. It waits for that transaction before replying.
 Separate hosts therefore never share an IndexedDB transaction queue, and a small
-SQLite write does not rewrite the full database. The first host that finds the
-former shared snapshot database moves its records into isolated databases, then
-deletes the shared database and its migration marker. Normal boots never open a
-shared migration database. If an IndexedDB commit fails, the live database is
-closed and the host rejects all later work. A new worker restores the manifest
-and chunks before opening SQLite. There is no in-memory fallback.
+SQLite write does not rewrite the full database. Browser snapshots are
+rebuildable cache state, so a host deletes obsolete shared, marker, and v1
+snapshot databases instead of converting them. If an IndexedDB commit fails,
+the live database is closed and the host rejects all later work. A new worker
+restores the manifest and chunks before opening SQLite. There is no in-memory
+fallback.
 
 The host accepts the application's mutator registry and named-query resolver so
 generated validators, permissions, transaction helpers, and deferred effects
