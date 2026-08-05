@@ -537,6 +537,20 @@ describe('realtime store', () => {
     expect(errors).toEqual([])
   })
 
+  it('a released topic stays ack-tolerant through heavy churn of other releases', () => {
+    // w-fixround1 regression: a count-capped tombstone was evicted by chat
+    // churn before the late ack landed and the race surfaced as an error.
+    const { release } = mount()
+    release()
+    for (let i = 0; i < 200; i++) {
+      const topic = { table: 'message', key: { id: `mchurn${i}` }, field: 'content' } as const
+      const churn = mount(contentSpec, topic)
+      churn.release()
+    }
+    store.handleSubscribed(id, 'active')
+    expect(errors).toEqual([])
+  })
+
   it('reports a refused subscription', () => {
     mount()
     store.handleSubscribeError(id, 'row is not in your authorized query membership')
