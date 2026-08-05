@@ -451,7 +451,7 @@ export function createZeroClientTransport(
         ...options,
         origin,
         pullIntervalMs: options.pullIntervalMs ?? STANDARD_SAFETY_PULL_INTERVAL_MS,
-        wake: options.wake ?? true,
+        wake: options.wake ?? false,
       })
     },
   })

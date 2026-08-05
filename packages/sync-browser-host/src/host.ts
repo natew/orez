@@ -18,7 +18,14 @@ import {
   type BedrockBrowserModule,
 } from './sqlite-adapter.js'
 
-import type { BrowserSyncHost, BrowserSyncHostConfig } from './types.js'
+import type {
+  BrowserSyncHost,
+  BrowserSyncHostConfig,
+  BrowserSyncHostDiagnostic,
+  BrowserSyncHostDiagnostics,
+  BrowserSyncHostOperation,
+  BrowserSyncHostTransaction,
+} from './types.js'
 import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
@@ -110,11 +117,112 @@ function validateConfig<S extends Schema, A extends AuthData>(
   }
 }
 
+class BrowserSyncHostDiagnosticSink {
+  constructor(
+    private readonly storageKey: string,
+    private readonly diagnostics: BrowserSyncHostDiagnostics | undefined
+  ) {}
+
+  enabled(): boolean {
+    try {
+      return this.diagnostics?.enabled() === true
+    } catch (error) {
+      console.error('browser sync host diagnostics enabled check failed', error)
+      return false
+    }
+  }
+
+  emit(diagnostic: Omit<BrowserSyncHostDiagnostic, 'storageKey' | 'timestamp'>): void {
+    try {
+      this.diagnostics?.callback({
+        ...diagnostic,
+        storageKey: this.storageKey,
+        timestamp: Date.now(),
+      })
+    } catch (error) {
+      console.error('browser sync host diagnostics callback failed', error)
+    }
+  }
+}
+
 class OperationQueue {
   #tail = Promise.resolve()
+  #depth = 0
+  #nextOperationId = 0
 
-  run<Value>(operation: () => Value | Promise<Value>): Promise<Value> {
-    const result = this.#tail.then(operation)
+  constructor(private readonly diagnostics: BrowserSyncHostDiagnosticSink) {}
+
+  get depth(): number {
+    return this.#depth
+  }
+
+  run<Value>(
+    kind: BrowserSyncHostOperation,
+    operation: (operationId: number) => Value | Promise<Value>
+  ): Promise<Value> {
+    const operationId = ++this.#nextOperationId
+    const queuedAt = performance.now()
+    this.#depth++
+    if (this.diagnostics.enabled()) {
+      this.diagnostics.emit({
+        stage: 'operation',
+        phase: 'queued',
+        operation: kind,
+        operationId,
+        transaction: null,
+        queueDepth: this.#depth,
+        waitMs: null,
+        durationMs: null,
+      })
+    }
+    const result = this.#tail.then(async () => {
+      const startedAt = performance.now()
+      if (this.diagnostics.enabled()) {
+        this.diagnostics.emit({
+          stage: 'operation',
+          phase: 'started',
+          operation: kind,
+          operationId,
+          transaction: null,
+          queueDepth: this.#depth,
+          waitMs: startedAt - queuedAt,
+          durationMs: null,
+        })
+      }
+      try {
+        const value = await operation(operationId)
+        if (this.diagnostics.enabled()) {
+          this.diagnostics.emit({
+            stage: 'operation',
+            phase: 'completed',
+            operation: kind,
+            operationId,
+            transaction: null,
+            queueDepth: this.#depth,
+            waitMs: startedAt - queuedAt,
+            durationMs: performance.now() - startedAt,
+          })
+        }
+        return value
+      } catch (error) {
+        if (this.diagnostics.enabled()) {
+          this.diagnostics.emit({
+            stage: 'operation',
+            phase: 'failed',
+            operation: kind,
+            operationId,
+            transaction: null,
+            queueDepth: this.#depth,
+            waitMs: startedAt - queuedAt,
+            durationMs: performance.now() - startedAt,
+            error: errorMessage(error),
+          })
+        }
+        throw error
+      } finally {
+        this.#depth--
+      }
+    })
     this.#tail = result.then(
       () => undefined,
       () => undefined
@@ -132,13 +240,15 @@ class BrowserSyncHostImpl<
   A extends AuthData,
 > implements BrowserSyncHost<S> {
   readonly executor: SyncExecutor<S>
-  readonly #queue = new OperationQueue()
+  readonly #queue: OperationQueue
+  readonly #diagnostics: BrowserSyncHostDiagnosticSink
   readonly #listeners = new Set<() => void>()
   readonly #directSql: BedrockDirectSql
   readonly #engineDb: BedrockSyncDb
   readonly #mutatorSql: BedrockMutatorSql
   readonly #rawExecutor: SyncExecutor<S>
   readonly #retainChanges: string
+  #activeOperation: { id: number; kind: BrowserSyncHostOperation } | null = null
   #executorTransactionKind: 'direct' | 'mutation' = 'direct'
   #fatalError: Error | undefined
   #closed = false
@@ -151,6 +261,11 @@ class BrowserSyncHostImpl<
     private readonly snapshots: IndexedDbSnapshotStore,
     private readonly hooks?: BrowserHostTestHooks
   ) {
+    this.#diagnostics = new BrowserSyncHostDiagnosticSink(
+      config.storageKey,
+      config.diagnostics
+    )
+    this.#queue = new OperationQueue(this.#diagnostics)
     this.#directSql = new BedrockDirectSql(db)
     this.#engineDb = new BedrockSyncDb(db)
     this.#mutatorSql = new BedrockMutatorSql(
@@ -205,11 +320,13 @@ class BrowserSyncHostImpl<
       schema: config.schema,
       push: (body, claims) => {
         this.#assertAccepting()
-        return this.#queue.run(() => this.#runExecutorPush(body, claims, false))
+        return this.#runQueued('executor-push', () =>
+          this.#runExecutorPush(body, claims, false)
+        )
       },
       execute: (name, args, claims) => {
         this.#assertAccepting()
-        return this.#queue.run(async () => {
+        return this.#runQueued('executor-execute', async () => {
           this.#executorTransactionKind = 'direct'
           await this.#rawExecutor.execute(name, args, claims)
           this.#notifyDataChanged()
@@ -217,7 +334,7 @@ class BrowserSyncHostImpl<
       },
       transaction: (claims, work) => {
         this.#assertAccepting()
-        return this.#queue.run(async () => {
+        return this.#runQueued('executor-transaction', async () => {
           this.#executorTransactionKind = 'direct'
           const value = await this.#rawExecutor.transaction(claims, work)
           this.#notifyDataChanged()
@@ -226,7 +343,9 @@ class BrowserSyncHostImpl<
       },
       query: (claims, work) => {
         this.#assertAccepting()
-        return this.#queue.run(() => this.#rawExecutor.query(claims, work))
+        return this.#runQueued('executor-query', () =>
+          this.#rawExecutor.query(claims, work)
+        )
       },
     }
     this.#retainChanges = String(config.retainChanges ?? 4_096)
@@ -253,8 +372,54 @@ class BrowserSyncHostImpl<
       throw new Error('Bedrock browser build does not expose its VFS snapshot surface')
     }
 
+    const diagnostics = new BrowserSyncHostDiagnosticSink(
+      config.storageKey,
+      config.diagnostics
+    )
     const snapshots = new IndexedDbSnapshotStore(config.storageKey)
-    await snapshots.restore(module)
+    const restoreStartedAt = performance.now()
+    if (diagnostics.enabled()) {
+      diagnostics.emit({
+        stage: 'restore',
+        phase: 'started',
+        operation: null,
+        operationId: null,
+        transaction: null,
+        queueDepth: 0,
+        waitMs: null,
+        durationMs: null,
+      })
+    }
+    try {
+      await snapshots.restore(module)
+      if (diagnostics.enabled()) {
+        diagnostics.emit({
+          stage: 'restore',
+          phase: 'completed',
+          operation: null,
+          operationId: null,
+          transaction: null,
+          queueDepth: 0,
+          waitMs: null,
+          durationMs: performance.now() - restoreStartedAt,
+        })
+      }
+    } catch (error) {
+      if (diagnostics.enabled()) {
+        diagnostics.emit({
+          stage: 'restore',
+          phase: 'failed',
+          operation: null,
+          operationId: null,
+          transaction: null,
+          queueDepth: 0,
+          waitMs: null,
+          durationMs: performance.now() - restoreStartedAt,
+          error: errorMessage(error),
+        })
+      }
+      throw error
+    }
     const db = new module.Database('/project.db')
     const journalMode = String(db.pragma('journal_mode = DELETE', { simple: true }))
     if (journalMode.toLowerCase() !== 'delete') {
@@ -292,10 +457,64 @@ class BrowserSyncHostImpl<
     await this.hooks?.reach(point)
   }
 
-  async #checkpoint(): Promise<void> {
+  async #runQueued<Value>(
+    kind: BrowserSyncHostOperation,
+    operation: () => Value | Promise<Value>
+  ): Promise<Value> {
+    return this.#queue.run(kind, async (operationId) => {
+      this.#activeOperation = { id: operationId, kind }
+      try {
+        return await operation()
+      } finally {
+        this.#activeOperation = null
+      }
+    })
+  }
+
+  async #checkpoint(transaction: BrowserSyncHostTransaction): Promise<void> {
+    const startedAt = performance.now()
+    const operation = this.#activeOperation
+    if (this.#diagnostics.enabled()) {
+      this.#diagnostics.emit({
+        stage: 'checkpoint',
+        phase: 'started',
+        operation: operation?.kind ?? null,
+        operationId: operation?.id ?? null,
+        transaction,
+        queueDepth: this.#queue.depth,
+        waitMs: null,
+        durationMs: null,
+      })
+    }
     try {
-      await this.snapshots.checkpoint(this.module)
+      const stats = await this.snapshots.checkpoint(this.module)
+      if (this.#diagnostics.enabled()) {
+        this.#diagnostics.emit({
+          stage: 'checkpoint',
+          phase: 'completed',
+          operation: operation?.kind ?? null,
+          operationId: operation?.id ?? null,
+          transaction,
+          queueDepth: this.#queue.depth,
+          waitMs: null,
+          durationMs: performance.now() - startedAt,
+          ...stats,
+        })
+      }
     } catch (error) {
+      if (this.#diagnostics.enabled()) {
+        this.#diagnostics.emit({
+          stage: 'checkpoint',
+          phase: 'failed',
+          operation: operation?.kind ?? null,
+          operationId: operation?.id ?? null,
+          transaction,
+          queueDepth: this.#queue.depth,
+          waitMs: null,
+          durationMs: performance.now() - startedAt,
+          error: errorMessage(error),
+        })
+      }
       const fatal = new Error(
         `browser database checkpoint failed; host terminated: ${errorMessage(error)}`,
         { cause: error }
@@ -330,7 +549,7 @@ class BrowserSyncHostImpl<
     if (completedKind === 'mutation') {
       await this.#reach('after_sqlite_commit_before_idb_commit')
     }
-    await this.#checkpoint()
+    await this.#checkpoint(completedKind)
     return value
   }
 
@@ -404,7 +623,7 @@ class BrowserSyncHostImpl<
       this.#assertAccepting()
       const { authData, claims } = await this.#auth(request)
       const input = await requestObject(request)
-      return await this.#queue.run(async () => {
+      return await this.#runQueued('pull', async () => {
         this.#assertAvailable()
         const transformVersion =
           typeof this.config.queryTransformVersion === 'function'
@@ -436,7 +655,7 @@ class BrowserSyncHostImpl<
       this.#assertAccepting()
       const { claims } = await this.#auth(request)
       const body = await requestObject(request)
-      return await this.#queue.run(async () => {
+      return await this.#runQueued('push', async () => {
         this.#assertAvailable()
         await this.#reach('before_mutation')
         return json(await this.#runExecutorPush(body, claims, true))
@@ -462,7 +681,7 @@ class BrowserSyncHostImpl<
     params: readonly unknown[] = []
   ): Promise<Row[]> {
     this.#assertAccepting()
-    return await this.#queue.run(() => {
+    return await this.#runQueued('query', () => {
       this.#assertAvailable()
       return this.#directSql.query<Row>(sql, params)
     })
@@ -474,7 +693,7 @@ class BrowserSyncHostImpl<
     metadata?: SqlStatementMetadata
   ): Promise<ExecResult> {
     this.#assertAccepting()
-    return await this.#queue.run(async () => {
+    return await this.#runQueued('exec', async () => {
       const result = await this.#writeTransaction('direct', async () => {
         const writeSet = await beginWriteSetCapture(
           this.config.schema,
