@@ -529,6 +529,14 @@ describe('realtime store', () => {
     ])
   })
 
+  it('drops an ack or refusal that raced the release, like a late update frame', () => {
+    const { release } = mount()
+    release()
+    store.handleSubscribed(id, 'active')
+    store.handleSubscribeError(id, 'row is not in your authorized query membership')
+    expect(errors).toEqual([])
+  })
+
   it('reports a refused subscription', () => {
     mount()
     store.handleSubscribeError(id, 'row is not in your authorized query membership')
