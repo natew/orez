@@ -189,6 +189,14 @@ class OperationQueue {
           durationMs: null,
         })
       }
+      // a never-settling operation wedges every later queued call while the
+      // event loop stays responsive, so the holder is named unconditionally
+      // rather than behind the opt-in diagnostics sink. silent under 30s.
+      const stallTimer = setInterval(() => {
+        console.error(
+          `[browser-sync-host] operation ${kind}#${operationId} has held the queue for ${Math.round((performance.now() - startedAt) / 1000)}s (depth ${this.#depth})`
+        )
+      }, 30_000)
       try {
         const value = await operation(operationId)
         if (this.diagnostics.enabled()) {
@@ -220,6 +228,7 @@ class OperationQueue {
         }
         throw error
       } finally {
+        clearInterval(stallTimer)
         this.#depth--
       }
     })
