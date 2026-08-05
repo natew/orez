@@ -149,7 +149,7 @@ describe('TransactionalCdc', () => {
     sql.exec("INSERT INTO item VALUES (1, 'captured')")
 
     expect(sql.exec('SELECT schema_version FROM _orez_cdc_tables').toArray()).toEqual([
-      { schema_version: 2 },
+      { schema_version: 3 },
     ])
     expect(cdc.drain()).toMatchObject([
       { tableName: 'public.item', op: 'INSERT', rowData: { id: 1, body: 'captured' } },

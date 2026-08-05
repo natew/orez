@@ -118,6 +118,47 @@ function activeSegment(sql: { exec: (s: string, ...p: unknown[]) => any }) {
 }
 
 describe('abandoned application session and the packed ledger', () => {
+  it('keeps rollback capture below the Durable Object SQLite row limit', async () => {
+    const core = await createWorkerCore()
+    createPackedLedger(core.sql)
+    const payload = JSON.stringify({
+      format: 1,
+      lmids: {},
+      transactions: [
+        {
+          version: '1',
+          changes: [['item', { id: 'x'.repeat(760_000) }]],
+        },
+      ],
+    })
+    core.sql.exec(
+      `UPDATE "_zsync_log_segments" SET "endVersion" = 1, "payload" = ?
+       WHERE "startVersion" = 1`,
+      payload
+    )
+
+    const session = await core.zero.applicationSqlSession('push-near-rotation')
+    await session.begin()
+    await session.exec(
+      `UPDATE "_zsync_log_segments" SET "captureMode" = 1
+       WHERE "startVersion" = (SELECT MAX("startVersion") FROM "_zsync_log_segments")`
+    )
+
+    const capture = core.sql
+      .exec(
+        `SELECT length(coalesce(row_data, '')) + length(coalesce(old_data, '')) +
+                length(coalesce(row_journal, '')) + length(coalesce(old_journal, ''))
+                AS bytes
+         FROM _zero_pending_changes
+         WHERE transaction_id = 'push-near-rotation'`
+      )
+      .one() as { bytes: number }
+    expect(Number(capture.bytes)).toBeLessThan(2_000_000)
+
+    session[Symbol.dispose]()
+    expect(Number(activeSegment(core.sql).captureMode)).toBe(0)
+  })
+
   it('restores captureMode when the session is disposed without commit', async () => {
     const core = await createWorkerCore()
     core.sql.exec('CREATE TABLE todo (id TEXT PRIMARY KEY, title TEXT)')

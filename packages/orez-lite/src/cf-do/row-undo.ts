@@ -240,8 +240,14 @@ export function rollbackPendingChanges(
             `cannot be rolled back (pending row predates the typed journal)`
         )
       }
-      if (op === 'INSERT' || op === 'UPDATE') {
-        requireCompleteImage(next, identity, table, 'new image')
+      if ((op === 'INSERT' || op === 'UPDATE') && newRowid === null) {
+        if (!next) throw new Error(`cdc undo: ${table} has no new image`)
+        const missing = identity.keyColumns.filter((column) => next[column] === undefined)
+        if (missing.length > 0) {
+          throw new Error(
+            `cdc undo: ${table} new image is missing key column(s): ${missing.join(', ')}`
+          )
+        }
       }
       if (op === 'DELETE' || op === 'UPDATE') {
         requireCompleteImage(old, identity, table, 'old image')

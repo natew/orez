@@ -3,7 +3,7 @@ import { stripPublicPrefix } from '../do-sql-tracking.js'
 import type { DurableSqlStorage } from './watermark.js'
 
 /** Bump whenever the generated trigger bodies or buffer shape change. */
-export const CDC_SCHEMA_VERSION = 2
+export const CDC_SCHEMA_VERSION = 3
 
 const CDC_TABLES = '_orez_cdc_tables'
 const CDC_BUFFER = '_orez_cdc_buffer'
@@ -767,7 +767,11 @@ export class TransactionalCdc {
   }
 
   private installTriggers(
-    registration: { physicalTableName: string; tableName: string },
+    registration: {
+      physicalTableName: string
+      tableName: string
+      publish: boolean
+    },
     identity: TableIdentity
   ): void {
     const physicalTable = quoteIdent(registration.physicalTableName)
@@ -776,7 +780,12 @@ export class TransactionalCdc {
       registration.physicalTableName
     ).map(quoteIdent)
     const columns = identity.columns
-    const newRow = jsonObject('NEW', columns)
+    // rollback-only tables never enter the changefeed. Their new image is used
+    // only to find the row during undo, so capture its primary key instead of
+    // duplicating every value. The old image stays complete because UPDATE and
+    // DELETE rollback restore it. This keeps wide internal rows such as the
+    // packed ledger below Durable Object SQLite's 2 MB row limit.
+    const newRow = jsonObject('NEW', registration.publish ? columns : identity.keyColumns)
     const oldRow = jsonObject('OLD', columns)
     const newRowid = rowidSql('NEW', identity)
     const oldRowid = rowidSql('OLD', identity)
@@ -839,7 +848,7 @@ export class TransactionalCdc {
       this.triggersExist(physicalTableName)
     if (!unchanged) {
       this.dropTriggers(physicalTableName)
-      this.installTriggers({ physicalTableName, tableName }, identity)
+      this.installTriggers({ physicalTableName, tableName, publish }, identity)
       this.sql.exec(
         `INSERT OR REPLACE INTO ${quoteIdent(CDC_TABLES)} ` +
           '(physical_table, table_name, columns_json, publish, schema_version) VALUES (?, ?, ?, ?, ?)',
@@ -916,17 +925,18 @@ export class TransactionalCdc {
       const registration = this.#registrations.get(physicalTableName)
       const rowJournal = parseJournalRecord(row.row_json)
       const oldJournal = parseJournalRecord(row.old_json)
+      const publish = registration?.publish !== false
       return {
         physicalTableName,
         tableName,
         op: String(row.op) as CapturedRowChange['op'],
-        rowData: journalToWire(rowJournal),
-        oldData: journalToWire(oldJournal),
+        rowData: publish ? journalToWire(rowJournal) : null,
+        oldData: publish ? journalToWire(oldJournal) : null,
         rowJournal,
         oldJournal,
         newRowid: row.new_rowid === null ? null : String(row.new_rowid),
         oldRowid: row.old_rowid === null ? null : String(row.old_rowid),
-        ...(registration?.publish === false ? { publish: false } : null),
+        ...(publish ? null : { publish: false }),
       }
     })
   }
