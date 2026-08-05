@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os'
 import { resolve, join, relative } from 'node:path'
 
 import {
+  assertLocalReleaseVersions,
   orderReleasePackages,
   selectLocalReleasePackages,
 } from './release-package-order.js'
@@ -181,6 +182,19 @@ function installedCopies(targetDir: string, name: string): string[] {
   return found
 }
 
+function installedCopyVersions(
+  targetDir: string,
+  name: string
+): { dir: string; version: string }[] {
+  return installedCopies(targetDir, name).map((dir) => {
+    const installedPkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    if (typeof installedPkg.version !== 'string') {
+      throw new Error(`${name}: installed package at ${dir} has no version`)
+    }
+    return { dir, version: installedPkg.version }
+  })
+}
+
 // --into <dir>: quick local release, packs each package and unpacks into target node_modules
 if (into) {
   if (!into || into.startsWith('--')) {
@@ -188,12 +202,6 @@ if (into) {
     process.exit(1)
   }
   const targetDir = resolve(into.replace(/^~/, process.env.HOME!))
-
-  console.info('building...')
-  cleanRootDist()
-  run('bun run build')
-  run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
-  const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
 
   // gather packages the same way the normal flow does
   const pkgDirs: { name: string; dir: string; pkg: any }[] = []
@@ -255,6 +263,21 @@ if (into) {
     pkgDirs.push({ name: onZeroPkg.name, dir: onZeroDir, pkg: onZeroPkg })
   }
 
+  const sourcePackageCopies = pkgDirs.map(({ name, pkg }) => ({
+    pkg,
+    copies: installedCopyVersions(targetDir, name),
+  }))
+  assertLocalReleaseVersions(sourcePackageCopies)
+  const sourceCopies = new Map(
+    sourcePackageCopies.map(({ pkg, copies }) => [pkg.name, copies])
+  )
+
+  console.info('building...')
+  cleanRootDist()
+  run('bun run build')
+  run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
+  const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
+
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
     throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
@@ -283,8 +306,13 @@ if (into) {
     pkg: nativeLauncherPkg,
   })
 
+  const packageCopies = pkgDirs.map(({ name, pkg }) => ({
+    pkg,
+    copies: sourceCopies.get(name) ?? installedCopyVersions(targetDir, name),
+  }))
+  assertLocalReleaseVersions(packageCopies)
   const copies = new Map(
-    pkgDirs.map(({ name }) => [name, installedCopies(targetDir, name)])
+    packageCopies.map(({ pkg, copies }) => [pkg.name, copies.map(({ dir }) => dir)])
   )
   const installed = new Set(
     pkgDirs.filter(({ name }) => copies.get(name)!.length > 0).map(({ name }) => name)

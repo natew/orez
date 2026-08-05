@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import {
+  assertLocalReleaseVersions,
   orderReleasePackages,
   selectLocalReleasePackages,
 } from './release-package-order.js'
@@ -64,5 +65,29 @@ describe('orderReleasePackages', () => {
       'orez-sync-native-darwin-arm64',
       'orez-sync-native',
     ])
+  })
+})
+
+describe('assertLocalReleaseVersions', () => {
+  it('refuses to replace an installed package with a different local version', () => {
+    expect(() =>
+      assertLocalReleaseVersions([
+        {
+          pkg: { name: 'on-zero', version: '0.12.5' },
+          copies: [{ dir: '/app/node_modules/on-zero', version: '0.12.6' }],
+        },
+      ])
+    ).toThrow('on-zero: --into would replace installed 0.12.6 with local 0.12.5')
+  })
+
+  it('allows local source to replace the same installed version', () => {
+    expect(() =>
+      assertLocalReleaseVersions([
+        {
+          pkg: { name: 'on-zero', version: '0.12.6' },
+          copies: [{ dir: '/app/node_modules/on-zero', version: '0.12.6' }],
+        },
+      ])
+    ).not.toThrow()
   })
 })

@@ -4,6 +4,22 @@ type PackageManifest = {
   optionalDependencies?: Record<string, string>
 }
 
+export function assertLocalReleaseVersions(
+  packages: {
+    pkg: { name: string; version: string }
+    copies: readonly { dir: string; version: string }[]
+  }[]
+): void {
+  for (const { pkg, copies } of packages) {
+    for (const copy of copies) {
+      if (copy.version === pkg.version) continue
+      throw new Error(
+        `${pkg.name}: --into would replace installed ${copy.version} with local ${pkg.version} at ${copy.dir}; check out Orez ${copy.version} or update the consumer before using --into`
+      )
+    }
+  }
+}
+
 /**
  * Put published workspace dependencies before their consumers while keeping
  * unrelated packages in their original order. This avoids exposing a package
