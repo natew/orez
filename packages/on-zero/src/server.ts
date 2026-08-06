@@ -305,7 +305,7 @@ export function createZeroServerBindings<
   }
   const decoratedMutators = createMutators({
     authData: null,
-    can: permissions.can,
+    bindCan: permissions.bindCan,
     createServerActions: options.createServerActions,
     environment: 'server',
     models: options.models,

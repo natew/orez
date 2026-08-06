@@ -1,5 +1,4 @@
 import { ensure } from './helpers/ensure'
-import { mutatorContext } from './helpers/mutatorContext'
 import { prettyFormatZeroQuery } from './helpers/prettyFormatZeroQuery'
 import { getZQL } from './state'
 import { getWhereTableName } from './where'
@@ -95,17 +94,21 @@ export function createPermissions<Schema extends ZeroSchema>({
     return eb.and(permissionReturn, ...primaryKeyWheres)
   }
 
-  const can: Can = async (where, obj) => {
-    // on client we always allow! we only check on server (like zero does)
-    if (environment === 'server') {
-      const ctx = mutatorContext()
+  // bound to the transaction that will call it, never read from ambient state.
+  // an ambient lookup checks permissions against whichever mutator happens to be
+  // in flight, and only a real AsyncLocalStorage makes that the calling one — a
+  // browser-hosted server has none.
+  const bindCan =
+    (tx: Transaction, authData: AuthData | null): Can =>
+    async (where, obj) => {
+      // on client we always allow! we only check on server (like zero does)
+      if (environment !== 'server') return
       const tableName = getWhereTableName(where)
       if (!tableName) {
         throw new Error(`Must use where('table') style where to pass to can()`)
       }
-      await ensurePermission(ctx.tx, ctx.authData, tableName, where, obj)
+      await ensurePermission(tx, authData, tableName, where, obj)
     }
-  }
 
   async function ensurePermission(
     tx: Transaction,
@@ -148,7 +151,7 @@ export function createPermissions<Schema extends ZeroSchema>({
   }
 
   return {
-    can,
+    bindCan,
     buildPermissionQuery,
   }
 }

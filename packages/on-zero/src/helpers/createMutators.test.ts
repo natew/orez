@@ -15,7 +15,7 @@ describe('createMutators timeout guard', () => {
     const mutators = createMutators({
       environment: 'server',
       authData: null,
-      can: {} as never,
+      bindCan: () => async () => {},
       models: {
         task: {
           mutate: {
@@ -35,7 +35,7 @@ describe('createMutators timeout guard', () => {
     const mutators = createMutators({
       environment: 'server',
       authData: null,
-      can: {} as never,
+      bindCan: () => async () => {},
       models: {
         task: {
           mutate: {
@@ -121,7 +121,7 @@ test('createMutators installs optimistic rollups on client transactions', async 
   const mutators = createMutators({
     environment: 'client',
     authData: null,
-    can: async () => {},
+    bindCan: () => async () => {},
     rollups,
     models: {
       comment: {
@@ -140,4 +140,52 @@ test('createMutators installs optimistic rollups on client transactions', async 
   ])
 
   expect(rows.post).toEqual([{ id: 'p1', commentCount: 1 }])
+})
+
+test('each mutator permission check runs against its own transaction', async () => {
+  // two mutations overlap, which is the ordinary case anywhere several writes
+  // are in flight. a permission check that reached for an ambient context would
+  // check one mutator's rows through the other's transaction, and on a
+  // browser-hosted server (no AsyncLocalStorage) it always would.
+  const checked: Array<{ mutation: string; tx: string }> = []
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const mutators = createMutators({
+    environment: 'server',
+    authData: null,
+    bindCan:
+      (tx) =>
+      async (_where, obj) => {
+        checked.push({
+          mutation: String(obj),
+          tx: (tx as unknown as { name: string }).name,
+        })
+      },
+    models: {
+      task: {
+        mutate: {
+          touch: async (ctx, input: { label: string; delay: number }) => {
+            await sleep(input.delay)
+            await ctx.can({} as never, input.label)
+          },
+        },
+      },
+    } as never,
+  }) as any
+
+  await Promise.all([
+    Reflect.apply(mutators.task.touch, null, [
+      { name: 'tx-A' },
+      { label: 'A', delay: 20 },
+    ]),
+    Reflect.apply(mutators.task.touch, null, [
+      { name: 'tx-B' },
+      { label: 'B', delay: 5 },
+    ]),
+  ])
+
+  expect(checked.sort((l, r) => l.mutation.localeCompare(r.mutation))).toEqual([
+    { mutation: 'A', tx: 'tx-A' },
+    { mutation: 'B', tx: 'tx-B' },
+  ])
 })

@@ -304,7 +304,7 @@ export function createZeroClientInternal<
       models,
       environment: 'client',
       authData: null,
-      can: permissionsHelpers.can,
+      bindCan: permissionsHelpers.bindCan,
       rollups,
     })
     return clientMutators

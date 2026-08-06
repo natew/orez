@@ -30,7 +30,7 @@ export function createMutators<Models extends GenericModels>({
   createServerActions,
   enqueueTask = () => {},
   enqueueAction = () => {},
-  can,
+  bindCan,
   models,
   validateMutation,
   mutationValidators,
@@ -39,7 +39,7 @@ export function createMutators<Models extends GenericModels>({
 }: {
   environment: 'server' | 'client'
   authData: AuthData | null
-  can: Can
+  bindCan: (tx: Transaction, authData: AuthData | null) => Can
   models: Models
   enqueueTask?: NonNullable<MutatorContext['server']>['enqueueTask']
   enqueueAction?: NonNullable<MutatorContext['server']>['enqueueAction']
@@ -61,14 +61,18 @@ export function createMutators<Models extends GenericModels>({
     return async (tx: Transaction, ...args: Args): Promise<void> => {
       const transaction =
         environment === 'client' && rollups ? withOptimisticRollups(tx, rollups) : tx
+      // on client, read authData dynamically to avoid stale closure during auth
+      // transitions (ZeroProvider recreates Zero instance in useEffect, but
+      // mutations can run before that)
+      const contextAuthData =
+        environment === 'client' ? getAuthData() : (resolveAuthData?.() ?? authData)
       const mutationContext: MutatorContext = {
         tx: transaction,
-        // on client, read authData dynamically to avoid stale closure during auth transitions
-        // (ZeroProvider recreates Zero instance in useEffect, but mutations can run before that)
-        authData:
-          environment === 'client' ? getAuthData() : (resolveAuthData?.() ?? authData),
+        authData: contextAuthData,
         environment,
-        can,
+        // bound to THIS transaction. a permission check must run against the
+        // mutator that asked for it, and ambient lookup cannot promise that.
+        can: bindCan(transaction, contextAuthData),
         server:
           environment === 'server'
             ? ({
