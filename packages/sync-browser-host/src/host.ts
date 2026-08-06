@@ -11,7 +11,6 @@ import {
 } from './generated/sync_wasm.js'
 import initSyncWasm from './generated/sync_wasm.js'
 import { IndexedDbSnapshotStore } from './idb-snapshot.js'
-import type { SnapshotCheckpointPlan } from './idb-snapshot.js'
 import {
   BedrockDirectSql,
   BedrockMutatorSql,
@@ -19,6 +18,7 @@ import {
   type BedrockBrowserModule,
 } from './sqlite-adapter.js'
 
+import type { SnapshotCheckpointPlan } from './idb-snapshot.js'
 import type {
   BrowserSyncHost,
   BrowserSyncHostConfig,
@@ -516,9 +516,15 @@ class BrowserSyncHostImpl<
     operation: { id: number; kind: BrowserSyncHostOperation } | null,
     startedAt: number
   ): Error {
-    this.#emitCheckpoint('failed', transaction, operation, performance.now() - startedAt, {
-      error: errorMessage(error),
-    })
+    this.#emitCheckpoint(
+      'failed',
+      transaction,
+      operation,
+      performance.now() - startedAt,
+      {
+        error: errorMessage(error),
+      }
+    )
     const fatal = new Error(
       `browser database checkpoint failed; host terminated: ${errorMessage(error)}`,
       { cause: error }

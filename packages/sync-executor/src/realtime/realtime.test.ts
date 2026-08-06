@@ -543,7 +543,11 @@ describe('realtime store', () => {
     const { release } = mount()
     release()
     for (let i = 0; i < 200; i++) {
-      const topic = { table: 'message', key: { id: `mchurn${i}` }, field: 'content' } as const
+      const topic = {
+        table: 'message',
+        key: { id: `mchurn${i}` },
+        field: 'content',
+      } as const
       const churn = mount(contentSpec, topic)
       churn.release()
     }

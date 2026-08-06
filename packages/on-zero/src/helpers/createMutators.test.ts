@@ -153,14 +153,12 @@ test('each mutator permission check runs against its own transaction', async () 
   const mutators = createMutators({
     environment: 'server',
     authData: null,
-    bindCan:
-      (tx) =>
-      async (_where, obj) => {
-        checked.push({
-          mutation: String(obj),
-          tx: (tx as unknown as { name: string }).name,
-        })
-      },
+    bindCan: (tx) => async (_where, obj) => {
+      checked.push({
+        mutation: String(obj),
+        tx: (tx as unknown as { name: string }).name,
+      })
+    },
     models: {
       task: {
         mutate: {
