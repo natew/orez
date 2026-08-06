@@ -29,6 +29,8 @@ type Connection = {
   client: BrowserSyncHostPortClient
   attachClient(): Promise<BrowserSyncHostPortClient>
   waitForFault(point: BrowserHostTestFaultPoint): Promise<void>
+  countFaults(point: BrowserHostTestFaultPoint): number
+  waitForFaultCount(point: BrowserHostTestFaultPoint, count: number): Promise<void>
   waitForEffect(id: string): Promise<void>
   runApplicationTransaction(): Promise<{ rows: unknown[]; effectBeforeResolve: boolean }>
   seedWaveFinance(): Promise<void>
@@ -88,7 +90,8 @@ async function openIndexedDb(name: string, storeName: string): Promise<IDBDataba
 async function openConnection(
   storageKey: string,
   faultPoint?: BrowserHostTestFaultPoint,
-  checkpointFailure = false
+  checkpointFailure = false,
+  slowCheckpointMs = 0
 ): Promise<Connection> {
   const worker = new Worker('/worker.js', { type: 'module' })
   const channel = new MessageChannel()
@@ -119,6 +122,7 @@ async function openConnection(
       storageKey,
       faultPoint,
       checkpointFailure,
+      slowCheckpointMs,
       port: channel.port1,
     },
     [channel.port1]
@@ -147,6 +151,26 @@ async function openConnection(
       await waitFor(
         (message) => message.type === 'fault-reached' && message.point === point
       )
+    },
+    countFaults(point) {
+      return messages.filter(
+        (message) => message.type === 'fault-reached' && message.point === point
+      ).length
+    },
+    async waitForFaultCount(point, count) {
+      for (;;) {
+        const seen = messages.filter(
+          (message) => message.type === 'fault-reached' && message.point === point
+        ).length
+        if (seen >= count) return
+        await new Promise<void>((resolve) => {
+          const wake = () => {
+            waiters.delete(wake)
+            resolve()
+          }
+          waiters.add(wake)
+        })
+      }
     },
     async waitForEffect(id) {
       await waitFor((message) => message.type === 'effect-complete' && message.id === id)
@@ -306,7 +330,7 @@ async function runCheckpointFailureCase() {
   equal(failed.status, 500, 'checkpoint failure rejects push')
   assert(
     String(failed.body.error).includes('host terminated'),
-    'checkpoint failure returns a fatal durability error'
+    `checkpoint failure returns a fatal durability error, got: ${String(failed.body.error)}`
   )
   let rejectedAfterFailure = false
   try {
@@ -719,6 +743,109 @@ async function runIncrementalCheckpointCase() {
     await deleteBrowserSyncHostSnapshot(entry.storageKey)
   }
   return { initialBytes, snapshotBytes, writtenBytes, writtenChunks }
+}
+
+// a checkpoint that promises durability to nobody must not sit on the operation
+// queue. w156 measured 25-68s IndexedDB commits for an unchanged 172KB snapshot,
+// and every read, pull and forwarded auth request queued behind them; both ends
+// of the native auth bridge give up at 30s.
+async function runCheckpointDecouplingCase() {
+  const slowMs = 600
+  const storageKey = `checkpoint-decoupling:${crypto.randomUUID()}`
+  const connection = await openConnection(storageKey, undefined, false, slowMs)
+  const readCount = async () => {
+    const rows = await connection.client.query<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM todo'
+    )
+    return rows[0]!.count
+  }
+
+  // the first checkpoint writes the whole database; everything below measures
+  // steady state, where only changed chunks move
+  const warmup = await post(
+    connection.client,
+    '/push',
+    mutation('decoupling-warmup', 1, 'todo.create', {
+      id: 'decoupling-warmup',
+      title: 'warmup',
+    })
+  )
+  equal(warmup.status, 200, 'decoupling warmup push status')
+
+  // a pull writes and snapshots, and a lost pull simply re-pulls. the read below
+  // is issued only after the worker reports that pull's commit has begun, so it
+  // cannot win a race into the operation queue ahead of the pull.
+  const seenCommits = connection.countFaults('before_snapshot_commit')
+  const pull = post(connection.client, '/pull', {
+    clientID: 'decoupling-client',
+    clientGroupID: 'decoupling-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [{ op: 'put', hash: 'q-all-todos', name: 'allTodos', args: [] }],
+    },
+  })
+  await connection.waitForFaultCount('before_snapshot_commit', seenCommits + 1)
+  const readStartedAt = performance.now()
+  await readCount()
+  const readBehindPullMs = performance.now() - readStartedAt
+  equal((await pull).status, 200, 'decoupling pull status')
+
+  // a push is acked to its client as durable, so it still waits for its snapshot
+  const pushStartedAt = performance.now()
+  const push = await post(
+    connection.client,
+    '/push',
+    mutation('decoupling-push', 1, 'todo.create', {
+      id: 'decoupling-push',
+      title: 'push',
+    })
+  )
+  const pushMs = performance.now() - pushStartedAt
+  equal(push.status, 200, 'decoupling push status')
+
+  assert(
+    readBehindPullMs < slowMs / 2,
+    `a read must not wait for a pull's snapshot commit (waited ${readBehindPullMs.toFixed(0)}ms of a ${slowMs}ms commit)`
+  )
+  assert(
+    pushMs >= slowMs,
+    `a push must still wait for its own snapshot commit (returned after ${pushMs.toFixed(0)}ms of a ${slowMs}ms commit)`
+  )
+
+  // captures pile up ahead of their commits here. every one of them copied the
+  // wasm heap while the next write was already queued, so a torn capture would
+  // restore a database state that never existed.
+  for (let index = 0; index < 3; index++) {
+    const response = await post(
+      connection.client,
+      '/push',
+      mutation(`decoupling-load-${index}`, 1, 'todo.create', {
+        id: `decoupling-load-${index}`,
+        title: `load ${index}`,
+      })
+    )
+    equal(response.status, 200, `decoupling load push ${index} status`)
+  }
+  // commits land in capture order, so the last push's awaited snapshot proves
+  // every handed-off one before it already landed
+  const written = await readCount()
+  connection.terminate()
+
+  const restarted = await openConnection(storageKey)
+  const restored = await restarted.client.query<{ count: number }>(
+    'SELECT COUNT(*) AS count FROM todo'
+  )
+  equal(restored, [{ count: written }], 'handed-off snapshots restore every row')
+  restarted.terminate()
+  await deleteBrowserSyncHostSnapshot(storageKey)
+
+  return {
+    slowMs,
+    readBehindPullMs: Math.round(readBehindPullMs),
+    pushMs: Math.round(pushMs),
+    restoredRows: written,
+  }
 }
 
 async function runHybridCaptureCase() {
@@ -1185,6 +1312,7 @@ async function runBrowserHostSpike() {
   const invalidSnapshotCacheMiss = await runInvalidSnapshotCacheMissCase()
   const steadyStateDatabaseDiscovery = await runSteadyStateDatabaseDiscoveryCase()
   const incrementalCheckpoint = await runIncrementalCheckpointCase()
+  const checkpointDecoupling = await runCheckpointDecouplingCase()
   const hybridCapture = await runHybridCaptureCase()
 
   const result = {
@@ -1200,6 +1328,7 @@ async function runBrowserHostSpike() {
     invalidSnapshotCacheMiss,
     steadyStateDatabaseDiscovery,
     incrementalCheckpoint,
+    checkpointDecoupling,
     hybridCapture,
     seedProbe: {
       sqlCounts: seedSqlCounts,

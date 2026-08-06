@@ -251,6 +251,7 @@ type WorkerMessage =
       storageKey: string
       faultPoint?: BrowserHostTestFaultPoint
       checkpointFailure?: boolean
+      slowCheckpointMs?: number
       port: MessagePort
     }
   | { type: 'connect'; id: string; port: MessagePort }
@@ -436,9 +437,16 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
     return
   }
   void (async () => {
-    const { storageKey, faultPoint, checkpointFailure, port } = message
+    const { storageKey, faultPoint, checkpointFailure, slowCheckpointMs, port } = message
     const hooks = {
       async reach(point: BrowserHostTestFaultPoint) {
+        // stands in for a slow disk: the wave saw a 172KB IndexedDB commit take
+        // up to 68s, and this makes that duration deterministic
+        if (slowCheckpointMs && point === 'before_snapshot_commit') {
+          self.postMessage({ type: 'fault-reached', point })
+          await new Promise((resolve) => setTimeout(resolve, slowCheckpointMs))
+          return
+        }
         if (point !== faultPoint) return
         self.postMessage({ type: 'fault-reached', point })
         await new Promise<never>(() => {})
@@ -490,9 +498,10 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       mutators,
       queries: queries as never,
     } satisfies BrowserSyncHostConfig<typeof schema, { id: string }>
-    const createdHost = faultPoint
-      ? await createBrowserSyncHostInternal(config, hooks)
-      : await createBrowserSyncHost(config)
+    const createdHost =
+      faultPoint || slowCheckpointMs
+        ? await createBrowserSyncHostInternal(config, hooks)
+        : await createBrowserSyncHost(config)
     host = createdHost
     if (checkpointFailure) {
       const originalPut = IDBObjectStore.prototype.put

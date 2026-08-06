@@ -11,6 +11,7 @@ import {
 } from './generated/sync_wasm.js'
 import initSyncWasm from './generated/sync_wasm.js'
 import { IndexedDbSnapshotStore } from './idb-snapshot.js'
+import type { SnapshotCheckpointPlan } from './idb-snapshot.js'
 import {
   BedrockDirectSql,
   BedrockMutatorSql,
@@ -43,6 +44,7 @@ export type BrowserHostTestFaultPoint =
   | 'before_mutation'
   | 'after_app_write_before_sqlite_commit'
   | 'after_sqlite_commit_before_idb_commit'
+  | 'before_snapshot_commit'
   | 'after_idb_commit_before_response'
   | 'during_response_delivery'
 
@@ -258,6 +260,10 @@ class BrowserSyncHostImpl<
   readonly #rawExecutor: SyncExecutor<S>
   readonly #retainChanges: string
   #activeOperation: { id: number; kind: BrowserSyncHostOperation } | null = null
+  // each capture diffs against the previous one, so the IndexedDB commits have
+  // to land in capture order. this chain serializes them without holding the
+  // operation queue.
+  #checkpointChain: Promise<unknown> = Promise.resolve()
   #executorTransactionKind: 'direct' | 'mutation' = 'direct'
   #fatalError: Error | undefined
   #closed = false
@@ -480,58 +486,87 @@ class BrowserSyncHostImpl<
     })
   }
 
-  async #checkpoint(transaction: BrowserSyncHostTransaction): Promise<void> {
+  #emitCheckpoint(
+    phase: 'started' | 'completed' | 'failed',
+    transaction: BrowserSyncHostTransaction,
+    operation: { id: number; kind: BrowserSyncHostOperation } | null,
+    durationMs: number | null,
+    extra?: Pick<
+      BrowserSyncHostDiagnostic,
+      'snapshotBytes' | 'writtenBytes' | 'snapshotChunks' | 'writtenChunks' | 'error'
+    >
+  ): void {
+    if (!this.#diagnostics.enabled()) return
+    this.#diagnostics.emit({
+      stage: 'checkpoint',
+      phase,
+      operation: operation?.kind ?? null,
+      operationId: operation?.id ?? null,
+      transaction,
+      queueDepth: this.#queue.depth,
+      waitMs: null,
+      durationMs,
+      ...extra,
+    })
+  }
+
+  #checkpointFailed(
+    error: unknown,
+    transaction: BrowserSyncHostTransaction,
+    operation: { id: number; kind: BrowserSyncHostOperation } | null,
+    startedAt: number
+  ): Error {
+    this.#emitCheckpoint('failed', transaction, operation, performance.now() - startedAt, {
+      error: errorMessage(error),
+    })
+    const fatal = new Error(
+      `browser database checkpoint failed; host terminated: ${errorMessage(error)}`,
+      { cause: error }
+    )
+    // the host is finished, but the sqlite handle stays open until close().
+    // a deferred commit can fail while an operation is still running, and
+    // closing the database under it turns a durability failure into an
+    // unrelated "connection is not open". #assertAvailable rejects everything
+    // from here on, including the rest of the operation in flight.
+    this.#fatalError = fatal
+    return fatal
+  }
+
+  // must be called in the same turn as the sqlite COMMIT it snapshots. the
+  // capture is synchronous so nothing can write between the two; only the
+  // IndexedDB commit is deferred.
+  #checkpoint(transaction: BrowserSyncHostTransaction): Promise<void> {
     const startedAt = performance.now()
     const operation = this.#activeOperation
-    if (this.#diagnostics.enabled()) {
-      this.#diagnostics.emit({
-        stage: 'checkpoint',
-        phase: 'started',
-        operation: operation?.kind ?? null,
-        operationId: operation?.id ?? null,
-        transaction,
-        queueDepth: this.#queue.depth,
-        waitMs: null,
-        durationMs: null,
-      })
-    }
+    this.#emitCheckpoint('started', transaction, operation, null)
+    let plan: SnapshotCheckpointPlan
     try {
-      const stats = await this.snapshots.checkpoint(this.module)
-      if (this.#diagnostics.enabled()) {
-        this.#diagnostics.emit({
-          stage: 'checkpoint',
-          phase: 'completed',
-          operation: operation?.kind ?? null,
-          operationId: operation?.id ?? null,
-          transaction,
-          queueDepth: this.#queue.depth,
-          waitMs: null,
-          durationMs: performance.now() - startedAt,
-          ...stats,
-        })
-      }
+      plan = this.snapshots.capture(this.module)
     } catch (error) {
-      if (this.#diagnostics.enabled()) {
-        this.#diagnostics.emit({
-          stage: 'checkpoint',
-          phase: 'failed',
-          operation: operation?.kind ?? null,
-          operationId: operation?.id ?? null,
-          transaction,
-          queueDepth: this.#queue.depth,
-          waitMs: null,
-          durationMs: performance.now() - startedAt,
-          error: errorMessage(error),
-        })
-      }
-      const fatal = new Error(
-        `browser database checkpoint failed; host terminated: ${errorMessage(error)}`,
-        { cause: error }
+      return Promise.reject(
+        this.#checkpointFailed(error, transaction, operation, startedAt)
       )
-      this.#fatalError = fatal
-      this.db.close()
-      throw fatal
     }
+    const commit = async () => {
+      await this.#reach('before_snapshot_commit')
+      try {
+        const stats = await this.snapshots.commit(plan)
+        this.#emitCheckpoint(
+          'completed',
+          transaction,
+          operation,
+          performance.now() - startedAt,
+          stats
+        )
+      } catch (error) {
+        throw this.#checkpointFailed(error, transaction, operation, startedAt)
+      }
+    }
+    const started = this.#checkpointChain.then(commit, commit)
+    // the chain must outlive a failure so close() can still await it, and so a
+    // later commit is not stranded behind a rejected link.
+    this.#checkpointChain = started.catch(() => {})
+    return started
   }
 
   async #writeTransaction<Value>(
@@ -558,7 +593,24 @@ class BrowserSyncHostImpl<
     if (completedKind === 'mutation') {
       await this.#reach('after_sqlite_commit_before_idb_commit')
     }
-    await this.#checkpoint(completedKind)
+    const landed = this.#checkpoint(completedKind)
+    // a write whose completion is REPORTED as durable waits for its snapshot: a
+    // client push is acked to that client, and a server-initiated write returns
+    // to code that believes it landed. bootstrap runs once and is cheap.
+    if (completedKind !== 'pull' && completedKind !== 'maintenance') {
+      await landed
+      return value
+    }
+    // a pull and a prune promise durability to nobody — a lost pull re-pulls and
+    // a lost prune re-prunes — so their IndexedDB commit is handed off instead
+    // of held. it used to run inside this queued operation, so every later read,
+    // query and forwarded request waited out a disk write that owed them
+    // nothing. commits of an unchanged 172KB snapshot have been measured at 25
+    // to 68 seconds on a loaded machine, well past what callers wait for.
+    //
+    // the failure is already recorded as fatal and surfaces on the next
+    // operation, so this handler only keeps the rejection from going unhandled.
+    void landed.catch(() => {})
     return value
   }
 
@@ -747,6 +799,8 @@ class BrowserSyncHostImpl<
 
   async #finishClose(): Promise<void> {
     await this.#queue.drain()
+    // a handed-off snapshot has to land before the database goes away
+    await this.#checkpointChain
     this.#closed = true
     await this.#closeResources()
   }

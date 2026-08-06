@@ -40,6 +40,13 @@ export type SnapshotCheckpointStats = {
   writtenChunks: number
 }
 
+export type SnapshotCheckpointPlan = {
+  manifest: SnapshotManifest
+  chunks: SnapshotChunk[]
+  deletions: string[]
+  stats: SnapshotCheckpointStats
+}
+
 type BedrockSnapshotModule = Pick<BedrockBrowserModule, '_memfs'>
 
 function requestResult<Value>(request: IDBRequest<Value>): Promise<Value> {
@@ -361,24 +368,22 @@ export class IndexedDbSnapshotStore {
     return false
   }
 
-  async checkpoint(module: BedrockSnapshotModule): Promise<SnapshotCheckpointStats> {
+  // no await anywhere in here, deliberately. this hashes and copies out of the
+  // live wasm heap, so a single suspension would let the next sqlite write
+  // change the file underneath the copy and produce a snapshot of a database
+  // state that never existed on disk.
+  capture(module: BedrockSnapshotModule): SnapshotCheckpointPlan {
     const manifest = manifestFor(module, this.storageKey)
     const previousFiles = new Map(
       (this.#manifest?.files ?? []).map((file) => [file.path, file])
     )
+    const chunks: SnapshotChunk[] = []
+    const deletions: string[] = []
     let snapshotBytes = 0
     let snapshotChunks = 0
     let writtenBytes = 0
     let writtenChunks = 0
-    const database = await this.#database
-    const transaction = database.transaction(
-      [MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
-      'readwrite'
-    )
-    const done = transactionDone(transaction)
-    const chunkStore = transaction.objectStore(CHUNK_STORE_NAME)
 
-    // keep this diff and the manifest put synchronous; an await can auto-commit the atomic transaction early
     for (const file of manifest.files) {
       snapshotBytes += file.size
       snapshotChunks += file.hashes.length
@@ -399,13 +404,7 @@ export class IndexedDbSnapshotStore {
           continue
         }
         const data = source.data.slice(offset, offset + currentSize).buffer
-        const chunk: SnapshotChunk = {
-          key: chunkKey(file.path, index),
-          path: file.path,
-          index,
-          data,
-        }
-        chunkStore.put(chunk)
+        chunks.push({ key: chunkKey(file.path, index), path: file.path, index, data })
         writtenBytes += data.byteLength
         writtenChunks++
       }
@@ -414,19 +413,45 @@ export class IndexedDbSnapshotStore {
         index < (previous?.hashes.length ?? 0);
         index++
       ) {
-        chunkStore.delete(chunkKey(file.path, index))
+        deletions.push(chunkKey(file.path, index))
       }
       previousFiles.delete(file.path)
     }
     for (const previous of previousFiles.values()) {
       for (let index = 0; index < previous.hashes.length; index++) {
-        chunkStore.delete(chunkKey(previous.path, index))
+        deletions.push(chunkKey(previous.path, index))
       }
     }
-    transaction.objectStore(MANIFEST_STORE_NAME).put(manifest)
-    await done
+    // the next capture diffs against this one. commits run in order and a failed
+    // commit terminates the host, so there is no state where a later capture
+    // trusts a manifest that never landed.
     this.#manifest = manifest
-    return { snapshotBytes, writtenBytes, snapshotChunks, writtenChunks }
+    return {
+      manifest,
+      chunks,
+      deletions,
+      stats: { snapshotBytes, writtenBytes, snapshotChunks, writtenChunks },
+    }
+  }
+
+  async commit(plan: SnapshotCheckpointPlan): Promise<SnapshotCheckpointStats> {
+    const database = await this.#database
+    const transaction = database.transaction(
+      [MANIFEST_STORE_NAME, CHUNK_STORE_NAME],
+      'readwrite'
+    )
+    const done = transactionDone(transaction)
+    const chunkStore = transaction.objectStore(CHUNK_STORE_NAME)
+    // keep these puts and the manifest put synchronous; an await can auto-commit the atomic transaction early
+    for (const chunk of plan.chunks) chunkStore.put(chunk)
+    for (const key of plan.deletions) chunkStore.delete(key)
+    transaction.objectStore(MANIFEST_STORE_NAME).put(plan.manifest)
+    await done
+    return plan.stats
+  }
+
+  checkpoint(module: BedrockSnapshotModule): Promise<SnapshotCheckpointStats> {
+    return this.commit(this.capture(module))
   }
 
   async close(): Promise<void> {
