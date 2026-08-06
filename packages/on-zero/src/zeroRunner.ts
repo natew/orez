@@ -21,6 +21,12 @@ export function setRunner(r: ZeroRunner | null) {
 }
 
 export function getRunner(instance?: { runner: ZeroRunner | null }): ZeroRunner {
+  // only the server has a real async context, so only there can "am I inside a
+  // mutator" be answered for the CALLER rather than for the page. on the client
+  // isInZeroMutation() is always false by construction (see asyncContext.ts):
+  // ordinary async code that happens to overlap a mutator must not be handed
+  // that mutator's transaction, and a client mutator that needs a transactional
+  // read uses its own `tx.run(zql...)`.
   if (isInZeroMutation()) {
     return (q, o) => mutatorContext().tx.run(q, o)
   }
