@@ -434,6 +434,80 @@ describe('Orez HTTP transport', () => {
     )
   })
 
+  test('a wake storm coalesces into a leading pull plus one trailing pull', async () => {
+    const wakeSockets = useFakeNativeWebSocket()
+    const fetch = unchangedPullFetch()
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      wake: true,
+    })
+    transports.push(transport)
+    openRawSocketWithMessages()
+
+    await eventually(() => expect(fetch).toHaveBeenCalledTimes(1))
+    await eventually(() => expect(wakeSockets).toHaveLength(1))
+    // let the connect pull age past the spacing window so the first wake of
+    // the storm pulls immediately (leading edge)
+    await sleep(300)
+
+    for (let i = 0; i < 5; i++) wakeSockets[0].onmessage?.()
+
+    // one immediate pull, and the four wakes that landed during it coalesce
+    // into ONE trailing pull after the spacing window — never one per wake
+    await eventually(() => expect(fetch).toHaveBeenCalledTimes(3))
+    await sleep(400)
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  test('a push burst schedules one ack pull after the drain, not one per batch', async () => {
+    const firstPushStarted = defer<void>()
+    const releaseFirstPush = defer<void>()
+    const pushRequests: number[][] = []
+    let pulls = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        pulls++
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      const mutationIDs = request.body.mutations.map((mutation: any) => mutation.id)
+      pushRequests.push(mutationIDs)
+      if (mutationIDs[0] === 1) {
+        firstPushStarted.resolve()
+        await releaseFirstPush.promise
+      }
+      return jsonResponse({
+        pushResponse: {
+          mutations: request.body.mutations.map((mutation: any) => ({
+            id: { clientID: mutation.clientID, id: mutation.id },
+            result: {},
+          })),
+        },
+      })
+    })
+    const transport = installHttpPullTransport({ origin: ORIGIN, fetch })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+    )
+    await eventually(() => expect(pulls).toBe(1))
+
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+    await firstPushStarted.promise
+    socket.send(JSON.stringify(['push', pushBody(2)]))
+    socket.send(JSON.stringify(['push', pushBody(3)]))
+    releaseFirstPush.resolve()
+    await eventually(() => expect(pushRequests).toEqual([[1], [2, 3]]))
+
+    // both batches drained in one pass — their lastMutationIDChanges arrive
+    // via a single ack pull, so the rebase replays an emptied queue once
+    await eventually(() => expect(pulls).toBe(2))
+    await sleep(400)
+    expect(pulls).toBe(2)
+  })
+
   test('pullOrigin and pushOrigin route sync through the authoritative application server', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

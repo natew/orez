@@ -101,6 +101,17 @@ const MAX_PUSH_BATCH_MUTATIONS = 64
 // the connect URL's `ts` is captured at the same attempt boundary.
 const ZERO_CONNECT_TIMEOUT_MS = 10_000
 const STANDARD_SAFETY_PULL_INTERVAL_MS = 5 * 60_000
+// every poke makes the stock zero client rebase: it replays each pending
+// (un-acked) mutation on top of the new snapshot, so main-thread cost is
+// pulls × pending-queue depth. back-to-back wake/ack pulls against a deep
+// queue measured 7,926 mutator invocations for 400 real mutations on one soot
+// board. space triggered pulls apart (first one immediate, the rest coalesce
+// into one trailing pull), and space them wider while the push pipeline is
+// still draining — the queue is deepest exactly then, and the drain's own
+// completion requests the ack pull anyway. direct pull()/flush() calls and
+// the safety interval stay immediate.
+const MIN_PULL_SPACING_MS = 250
+const MIN_PULL_SPACING_WHILE_PUSHING_MS = 1_000
 // ceiling on a server-supplied Retry-After. a daily quota can report a reset
 // hours out; honoring that verbatim would leave the client dark until then.
 const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
@@ -512,6 +523,8 @@ class ZeroHttpSocket {
   private sentQueryPatchLen = 0
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
+  private nextPullTimer: ReturnType<typeof setTimeout> | undefined
+  private lastPullEndedAt = Number.NEGATIVE_INFINITY
   private pendingPushes: unknown[] = []
   private pushInFlight = false
   private pushCompletion: Promise<void> = Promise.resolve()
@@ -642,6 +655,11 @@ class ZeroHttpSocket {
   pull(): Promise<void> {
     if (this.readyState !== this.OPEN) return Promise.resolve()
     if (this.pullInFlight) return this.pullInFlight
+    // a starting pull satisfies any pull the spacing timer was holding
+    if (this.nextPullTimer !== undefined) {
+      clearTimeout(this.nextPullTimer)
+      this.nextPullTimer = undefined
+    }
     this.pullInFlight = this.fetchPull(this.clientGroupID, this.cookie, true)
       .then((response) => {
         this.applyServerGotQueries(response)
@@ -655,11 +673,14 @@ class ZeroHttpSocket {
         this.fail(error)
         throw error
       })
-      .finally(async () => {
+      .finally(() => {
+        this.lastPullEndedAt = performance.now()
         const pullAgain = this.pullAfterCurrent
         this.pullAfterCurrent = false
         this.pullInFlight = undefined
-        if (pullAgain && this.readyState !== this.CLOSED) await this.pull()
+        if (pullAgain && this.readyState !== this.CLOSED) {
+          this.requestPullAfterCurrent()
+        }
       })
     return this.pullInFlight
   }
@@ -848,7 +869,6 @@ class ZeroHttpSocket {
         this.clientID
       ),
     ])
-    this.requestPullAfterCurrent()
   }
 
   private enqueuePush(body: unknown) {
@@ -870,6 +890,16 @@ class ZeroHttpSocket {
     } finally {
       this.pushInFlight = false
     }
+    // the ack pull runs once per DRAIN, not once per batch: the server's
+    // lastMutationIDChanges for the whole burst arrive in one poke, so the
+    // rebase replays an emptied queue instead of a deep one after every batch.
+    // reached only on success — a failed push propagates to fail() and must
+    // not pull a failing server (the 429/500 storm tests pin this).
+    if (this.nextPullTimer !== undefined) {
+      clearTimeout(this.nextPullTimer)
+      this.nextPullTimer = undefined
+    }
+    this.requestPullAfterCurrent()
   }
 
   private takePushBatch(): PushBatch {
@@ -915,7 +945,22 @@ class ZeroHttpSocket {
       this.pullAfterCurrent = true
       return
     }
-    this.run(this.pull())
+    if (this.nextPullTimer !== undefined) return
+    const spacing =
+      this.pushInFlight || this.pendingPushes.length > 0
+        ? MIN_PULL_SPACING_WHILE_PUSHING_MS
+        : MIN_PULL_SPACING_MS
+    const wait = this.lastPullEndedAt + spacing - performance.now()
+    if (wait <= 0) {
+      this.run(this.pull())
+      return
+    }
+    // re-enter instead of pulling directly so the wait is recomputed against
+    // the push/pull state at fire time, not the state when it was scheduled
+    this.nextPullTimer = setTimeout(() => {
+      this.nextPullTimer = undefined
+      this.requestPullAfterCurrent()
+    }, wait)
   }
 
   // the got-query ack is authoritative from the server. take the server's
@@ -1232,6 +1277,7 @@ class ZeroHttpSocket {
     this.settled = true
     if (this.openTimer !== undefined) clearTimeout(this.openTimer)
     if (this.pullTimer !== undefined) clearInterval(this.pullTimer)
+    if (this.nextPullTimer !== undefined) clearTimeout(this.nextPullTimer)
     this.closeWakeChannel()
     this.readyState = this.CLOSED
     this.state.sockets.delete(this)
