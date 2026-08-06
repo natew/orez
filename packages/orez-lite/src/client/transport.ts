@@ -111,7 +111,24 @@ const STANDARD_SAFETY_PULL_INTERVAL_MS = 5 * 60_000
 // completion requests the ack pull anyway. direct pull()/flush() calls and
 // the safety interval stay immediate.
 const MIN_PULL_SPACING_MS = 250
-const MIN_PULL_SPACING_WHILE_PUSHING_MS = 1_000
+// while the push pipeline drains, every pull rebases the ENTIRE pending queue,
+// so pulls during a drain are almost pure replay cost. measured on one soot
+// board with the server's event loop under load: a 64-mutation push frame took
+// 44.4s (1.15s idle), and pulls at the old 1s spacing replayed a ~530-deep
+// queue into 11,028 mutator runs for 600 real mutations. wave w165 sustained a
+// 200-400 deep queue for minutes the same way (~100k replays). the drain's own
+// completion requests the ack pull immediately, so wider spacing here only
+// delays OTHER actors' rows while a drain is actually in flight.
+const MIN_PULL_SPACING_WHILE_PUSHING_MS = 5_000
+// a push or pull whose response headers never arrive would otherwise wait
+// forever: drainPushes serializes on the in-flight push, so one lost response
+// wedges the queue permanently with no failure logged anywhere (observed shape
+// of wave w165's unacked-for-minutes queue). the deadline covers headers only —
+// clearing on arrival keeps a legitimately slow LARGE body (initial hydration
+// pull) safe — and firing routes through the existing transient-failure path:
+// clean close, reconnect, re-push, with already-applied mutations answered as
+// alreadyProcessed by protocol design.
+const REQUEST_HEADER_DEADLINE_MS = 60_000
 // ceiling on a server-supplied Retry-After. a daily quota can report a reset
 // hours out; honoring that verbatim would leave the client dark until then.
 const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
@@ -1030,14 +1047,20 @@ class ZeroHttpSocket {
       url.searchParams.set('schema', `${this.state.appID}_${this.state.shardNum}`)
       url.searchParams.set('appID', this.state.appID)
     }
-    const response = await this.state.fetch(url, {
-      method: 'POST',
-      headers: {
-        authorization: this.authToken ? `Bearer ${this.authToken}` : '',
-        'content-type': 'application/json',
+    const response = await fetchWithHeaderDeadline(
+      this.state.fetch,
+      path,
+      url,
+      {
+        method: 'POST',
+        headers: {
+          authorization: this.authToken ? `Bearer ${this.authToken}` : '',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    })
+      REQUEST_HEADER_DEADLINE_MS
+    )
     if (!response.ok) {
       let body = ''
       try {
@@ -1320,6 +1343,37 @@ class ZeroHttpSocket {
       attemptAgeMs: this.getAttemptAgeMs(),
       ...detail,
     })
+  }
+}
+
+// abort only when response HEADERS miss the deadline; once they arrive the
+// timer is cleared so a slow body (a large initial pull) streams unbounded.
+// exported for its own unit tests: the transport suites run real timers and a
+// real Zero client, where a 60s wait per case is not testable.
+export async function fetchWithHeaderDeadline(
+  fetchImpl: typeof fetch,
+  path: '/pull' | '/push',
+  url: URL,
+  init: RequestInit,
+  deadlineMs: number
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(
+      new Error(`Orez HTTP ${path} response headers missed ${deadlineMs}ms deadline`)
+    )
+  }, deadlineMs)
+  try {
+    return await fetchImpl(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    // surface the deadline as the failure instead of a generic AbortError so
+    // logs name what actually happened
+    if (controller.signal.aborted && controller.signal.reason instanceof Error) {
+      throw controller.signal.reason
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
   }
 }
 

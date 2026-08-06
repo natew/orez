@@ -6,6 +6,7 @@ import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema
 import {
   createZeroClientTransport,
   ensureHttpPullTransport,
+  fetchWithHeaderDeadline,
   installHttpPullTransport,
 } from './transport.js'
 
@@ -1631,6 +1632,48 @@ describe('Orez HTTP transport', () => {
       zero.connection.state.current.name
     )
   }, 20_000)
+})
+
+describe('fetchWithHeaderDeadline', () => {
+  // the transport suites above run real timers and a real Zero client, so the
+  // 60s production deadline is exercised here directly with a short one.
+  test('a response whose headers never arrive rejects at the deadline, named', async () => {
+    const neverRespond = vi.fn(
+      (_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+        })
+    )
+    await expect(
+      fetchWithHeaderDeadline(
+        neverRespond as unknown as typeof fetch,
+        '/push',
+        new URL('https://orez-http.local/push'),
+        { method: 'POST' },
+        50
+      )
+    ).rejects.toThrow('Orez HTTP /push response headers missed 50ms deadline')
+  })
+
+  test('headers in time clear the deadline; a body slower than it still streams', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        setTimeout(() => {
+          controller.enqueue(new TextEncoder().encode('{"ok":true}'))
+          controller.close()
+        }, 150)
+      },
+    })
+    const slowBody = vi.fn(async () => new Response(body, { status: 200 }))
+    const response = await fetchWithHeaderDeadline(
+      slowBody as unknown as typeof fetch,
+      '/pull',
+      new URL('https://orez-http.local/pull'),
+      { method: 'POST' },
+      50
+    )
+    await expect(response.json()).resolves.toEqual({ ok: true })
+  })
 })
 
 function install(fetch: typeof globalThis.fetch) {
