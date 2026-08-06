@@ -41,6 +41,7 @@ const manifest = {
 
 const expectedCodecID =
   'orez-e1:network-test:schema-test:4KUOl_sd4WpwfoFkSXWiwGE048vkbpVkd34DFjHUUAE'
+const expectedCompatibilityID = 'orez-e1:network-test:schema-test'
 const expectedColumnEnvelope =
   'orez-e1.3.QHCGUMBeRxu6O1-3.JcHJvjKg96SntU4Pt99PhB236MEWjrltO5klR6_Ome8iP6agq3ERGk2GiaL15prxFIxDUWfgekJWLFYK-TY8'
 const expectedRecipientPrivateKey =
@@ -62,6 +63,11 @@ export async function runEncryptionConformance(): Promise<EncryptionConformanceR
     },
   })
   assertEqual('codec identity', codec.id, expectedCodecID)
+  assertEqual(
+    'codec compatibility identity',
+    codec.compatibilityID,
+    expectedCompatibilityID
+  )
 
   const encoded = await codec.encodePush(columnVectorPush())
   const batch = encoded.mutations[0].args?.[0]

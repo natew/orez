@@ -93,10 +93,19 @@ type ParsedEnvelope = {
   readonly payload: Uint8Array
 }
 
+export type EncryptedColumnCodec = PayloadCodec & {
+  /**
+   * Wire-compatibility class for deployment admission. Manifests may add
+   * encrypted tables, columns, or row mutators without changing this value.
+   * Breaking encryption mappings must use a new schemaID.
+   */
+  readonly compatibilityID: string
+}
+
 export function createEncryptedColumnCodec(options: {
   readonly manifest: EncryptedColumnManifest
   readonly keyring: EncryptionKeyring
-}): PayloadCodec {
+}): EncryptedColumnCodec {
   if (
     !options.keyring ||
     typeof options.keyring.current !== 'function' ||
@@ -110,9 +119,11 @@ export function createEncryptedColumnCodec(options: {
     sha256(text(canonicalJSON(options.manifest as JSONValue)))
   )
   const id = `orez-e1:${manifest.networkID}:${manifest.schemaID}:${manifestHash}`
+  const compatibilityID = `orez-e1:${manifest.networkID}:${manifest.schemaID}`
 
   return Object.freeze({
     id,
+    compatibilityID,
     async encodePush(body: PushRequest): Promise<PushRequest> {
       assertPushRequest(body)
       rejectConflictingDuplicateMutations(body.mutations)

@@ -416,6 +416,35 @@ describe('orez-e1 encrypted column codec', () => {
       'orez-e1:network-test:schema-test:4KUOl_sd4WpwfoFkSXWiwGE048vkbpVkd34DFjHUUAE'
     )
   })
+
+  test('keeps one compatibility identity across additive encrypted schema changes', () => {
+    const base = createEncryptedColumnCodec({
+      manifest,
+      keyring: keyring(contentKey),
+    })
+    const additive = createEncryptedColumnCodec({
+      manifest: {
+        ...manifest,
+        tables: {
+          ...manifest.tables,
+          inbox_item: {
+            primaryKey: ['itemID'],
+            columns: { payload: {} },
+          },
+        },
+      },
+      keyring: keyring(contentKey),
+    })
+    const breakingEpoch = createEncryptedColumnCodec({
+      manifest: { ...manifest, schemaID: 'schema-test-v2' },
+      keyring: keyring(contentKey),
+    })
+
+    expect(additive.id).not.toBe(base.id)
+    expect(additive.compatibilityID).toBe(base.compatibilityID)
+    expect(base.compatibilityID).toBe('orez-e1:network-test:schema-test')
+    expect(breakingEpoch.compatibilityID).toBe('orez-e1:network-test:schema-test-v2')
+  })
 })
 
 describe('RFC 9180 key wrapping', () => {

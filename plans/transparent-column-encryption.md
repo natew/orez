@@ -152,15 +152,16 @@ export interface HttpPullTransportOptions {
 
 Normalize an omitted codec to a module-level identity codec. Internal transport code always calls one codec path.
 
-`ensureHttpPullTransport` currently caches the transport by origin. Retain one transport per origin and record its codec ID. A second install for the same origin with a different codec ID is a configuration error. Silently retaining the first codec could send plaintext or decrypt with the wrong network key.
+`ensureHttpPullTransport` currently caches the transport by origin. Retain one transport per origin and record its exact codec ID. A second install for the same origin with a different exact ID is a configuration error. Silently retaining the first codec could send plaintext or decrypt with the wrong network key.
 
-The encryption codec ID is deterministic, for example:
+The encryption codec exposes two deterministic identities:
 
 ```text
-orez-e1:<networkID>:<schemaID>:<manifest-sha256>
+id               = orez-e1:<networkID>:<schemaID>:<manifest-sha256>
+compatibilityID  = orez-e1:<networkID>:<schemaID>
 ```
 
-It contains no key material or key fingerprint.
+The exact `id` protects one process from reusing a transport with different mappings. Deployment admission uses `compatibilityID`, so a newer manifest may add encrypted tables, columns, or row mutators without forcing every older writer to rotate configuration at once. A breaking mapping change must use a new `schemaID`. Neither identity contains key material or a key fingerprint.
 
 ## Exact `transport.ts` flow
 
@@ -375,7 +376,7 @@ type ZeroColumn = {
 }
 ```
 
-`encrypted` is omitted for ordinary columns. It is part of the schema sent to Rust and must agree with the client manifest during deployment. Deployment tooling compares the manifest hash or schema ID and refuses a mismatch.
+`encrypted` is omitted for ordinary columns. It is part of the schema sent to Rust and must agree with the server manifest in the deployed bundle. Older clients may use an additive subset with the same codec `compatibilityID`. The server opacity guard still rejects plaintext whenever a row contains a field that the server declares encrypted.
 
 In `crates/sync-core/src/schema.rs`:
 
@@ -516,7 +517,9 @@ Deployment requires one versioned bundle containing:
 - visibility column references
 - codec version and supported key epochs
 
-The deployment tool computes and compares the schema/manifest identity used by clients and the Durable Object. A mismatch stops deployment. A server must not accept a schema that marks a column encrypted while the client manifest leaves it clear, or the inverse.
+The deployment tool records both codec identities. It compares the exact `id` inside one deployed bundle and admits clients by `compatibilityID`. A different `compatibilityID` stops deployment. A server must not accept plaintext for a field its own manifest marks encrypted, including a field absent from an older client's additive subset.
+
+Changing an existing table name, column name, primary key, encryption requirement, or row-mutator argument contract is breaking and requires a new `schemaID`. Adding a table, column, or row mutator is compatible under the existing `schemaID`. This rule keeps additive rollouts live while making the compatibility boundary explicit and reviewable.
 
 Before enabling encryption for an existing plaintext column:
 
