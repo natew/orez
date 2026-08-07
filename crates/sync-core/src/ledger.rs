@@ -245,6 +245,11 @@ pub(crate) fn watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
     )
 }
 
+// the packed ledger is the ONLY live lmid store. _zsync_clients.lastMutationID
+// is imported once when the packed ledger is created (see the seeding above)
+// and never read again: a fallback read of that column is how an executor/host
+// format skew serves lmid 0 forever instead of failing loudly. a client with
+// no packed entry has simply never had a mutation applied, and its lmid is 0.
 pub(crate) fn read_lmid(
     db: &mut dyn SyncDb,
     client_group_id: &str,
@@ -262,20 +267,7 @@ pub(crate) fn read_lmid(
             .ok()
             .filter(|value| *value >= 0)
             .ok_or_else(|| EngineError::internal("packed ledger lmid is invalid")),
-        None => {
-            let rows = db.query(
-                "SELECT CAST(lastMutationID AS TEXT) AS lmid FROM _zsync_clients
-                 WHERE clientGroupID = ? AND clientID = ?",
-                &[text(client_group_id), text(client_id)],
-            )?;
-            match rows.first().and_then(|row| row.get("lmid")) {
-                Some(SqlValue::Text(value)) => value
-                    .parse::<i64>()
-                    .map_err(|_| EngineError::internal("legacy client lmid is invalid")),
-                Some(SqlValue::Integer(value)) => Ok(*value),
-                _ => Ok(0),
-            }
-        }
+        None => Ok(0),
     }
 }
 
@@ -285,21 +277,6 @@ pub(crate) fn all_lmids(
 ) -> Result<BTreeMap<String, i64>, EngineError> {
     let segment = active(db)?;
     let mut out = BTreeMap::new();
-    for row in db.query(
-        "SELECT clientID, CAST(lastMutationID AS TEXT) AS lmid FROM _zsync_clients
-         WHERE clientGroupID = ?",
-        &[text(client_group_id)],
-    )? {
-        let Some(SqlValue::Text(client)) = row.get("clientID") else {
-            continue;
-        };
-        let lmid = match row.get("lmid") {
-            Some(SqlValue::Text(value)) => value.parse::<i64>().unwrap_or(0),
-            Some(SqlValue::Integer(value)) => *value,
-            _ => 0,
-        };
-        out.insert(client.clone(), lmid);
-    }
     for (client, value) in segment
         .payload
         .lmids

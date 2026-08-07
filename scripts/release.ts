@@ -7,6 +7,7 @@
 
 import { execSync } from 'node:child_process'
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -531,6 +532,47 @@ if (!packOnly) {
       run('bun install', { cwd: sqliteWasmDir })
       run('bun run test', { cwd: sqliteWasmDir })
     }
+  }
+}
+
+// the npm sync-native host must read the same durable contract as this tree.
+// a version string cannot prove that: npm 0.1.2 shipped without the packed
+// ledger while a source build calling itself 0.1.2 shipped with it, and the
+// skew served lastMutationID 0 to every local client with nothing failing
+// (soot factory defect #49, 2026-08-06). compare the schema revision the two
+// binaries actually report, and hold the stable release until the dispatched
+// sync-native release catches npm up.
+if (!packOnly && !canary) {
+  console.info('\nchecking npm sync-native contract...')
+  const nativePlatform = currentSyncNativePlatform()
+  if (!nativePlatform) {
+    throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
+  }
+  run('cargo build --release -p sync-native --bin sync-native')
+  // "sync-native <pkg version> <schema revision>"; an old binary prints no
+  // revision at all, which compares as a mismatch, which is correct.
+  const revisionOf = (versionOutput: string) =>
+    versionOutput.trim().split(/\s+/).slice(2).join(' ')
+  const localRevision = revisionOf(
+    execSync(
+      `${resolve(root, 'target', 'release', nativePlatform.executable)} --version`,
+      { encoding: 'utf8' }
+    )
+  )
+  const guardDir = mkdtempSync(join(tmpdir(), 'orez-sync-native-guard-'))
+  run(`npm pack ${nativePlatform.npmPackage}@latest --silent`, { cwd: guardDir })
+  run('tar -xzf *.tgz', { cwd: guardDir })
+  const publishedBinary = resolve(guardDir, 'package', 'bin', nativePlatform.executable)
+  chmodSync(publishedBinary, 0o755)
+  const publishedRevision = revisionOf(
+    execSync(`${publishedBinary} --version`, { encoding: 'utf8' })
+  )
+  rmSync(guardDir, { recursive: true, force: true })
+  if (publishedRevision !== localRevision) {
+    throw new Error(
+      `npm ${nativePlatform.npmPackage} reads contract '${publishedRevision || 'none'}' but this tree needs '${localRevision}'. ` +
+        'Dispatch the release-sync-native workflow from this commit, wait for it to publish, then re-run the release.'
+    )
   }
 }
 
