@@ -79,11 +79,17 @@ runs:
       run: |
         binary='target/${{ inputs.target }}/release/${{ inputs.executable }}'
         actual="$($binary --version)"
-        expected='sync-native ${{ inputs.version }}'
-        if [ "$actual" != "$expected" ]; then
-          echo "expected '$expected', got '$actual'" >&2
-          exit 1
-        fi
+        # the trailing schema revision is REQUIRED: release tooling verifies
+        # the durable contract a binary reads from this output, because the
+        # bare version has shipped stale (two binaries both claiming 0.1.2,
+        # only one able to read packed-ledger acks).
+        case "$actual" in
+          'sync-native ${{ inputs.version }} core'*) ;;
+          *)
+            echo "expected 'sync-native ${{ inputs.version }} core<schema revision>', got '$actual'" >&2
+            exit 1
+            ;;
+        esac
 
     - name: Prepare platform npm package
       shell: bash
@@ -124,11 +130,13 @@ runs:
         test -s "$platform_package_dir/LICENSE"
         test -s "$platform_package_dir/LICENSES.txt"
         actual="$($platform_package_dir/bin/${{ inputs.executable }} --version)"
-        expected='sync-native ${{ inputs.version }}'
-        if [ "$actual" != "$expected" ]; then
-          echo "expected '$expected', got '$actual'" >&2
-          exit 1
-        fi
+        case "$actual" in
+          'sync-native ${{ inputs.version }} core'*) ;;
+          *)
+            echo "expected 'sync-native ${{ inputs.version }} core<schema revision>', got '$actual'" >&2
+            exit 1
+            ;;
+        esac
         if [ '${{ inputs.libc }}' != 'musl' ]; then
           npm install \
             --prefix .release/packed-smoke/install \

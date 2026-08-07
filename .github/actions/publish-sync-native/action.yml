@@ -32,8 +32,10 @@ runs:
           --ignore-scripts \
           'orez-sync-native@${{ inputs.version }}'
         actual="$(.release/smoke/node_modules/.bin/sync-native --version)"
-        expected='sync-native ${{ inputs.version }}'
-        if [ "$actual" != "$expected" ]; then
-          echo "expected '$expected', got '$actual'" >&2
-          exit 1
-        fi
+        case "$actual" in
+          'sync-native ${{ inputs.version }} core'*) ;;
+          *)
+            echo "expected 'sync-native ${{ inputs.version }} core<schema revision>', got '$actual'" >&2
+            exit 1
+            ;;
+        esac
