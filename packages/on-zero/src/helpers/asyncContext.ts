@@ -20,6 +20,13 @@ let configuredAsyncLocalStorage: AsyncLocalStorageConstructor | null = null
 // hide from vite/esbuild static analysis to avoid browser compat warning
 const nodeModuleId = ['node', 'async_hooks'].join(':')
 
+// install an AsyncLocalStorage for a host that runs the server bindings on a
+// runtime this build is not compiled as: Contrast's web preview, for instance,
+// runs a tenant's server in a browser worker, where `node:async_hooks` cannot be
+// imported but the host can supply an equivalent. the caller is responsible for
+// the guarantee node gives for free — at most one region per context open at a
+// time — because a userland implementation has a single slot and cannot follow a
+// native `await`. a host without that guarantee must install nothing.
 export function setupAsyncLocalStorage(
   AsyncLocalStorage: AsyncLocalStorageConstructor | null
 ): void {
@@ -39,59 +46,50 @@ async function getNodeAsyncLocalStorage(): Promise<AsyncLocalStorageConstructor 
   return nodeAsyncLocalStorageCache
 }
 
+// which storage backs a context is decided at FIRST USE, never here. these
+// contexts are created while on-zero's own modules load, so a host can only call
+// setupAsyncLocalStorage() afterwards; deciding at construction time made that
+// injection point unreachable and silently dropped every server mutator's
+// authData to null on runtimes that report themselves as non-server.
 export function createAsyncContext<T>(): AsyncContext<T> {
-  if (IS_SERVER_RUNTIME) {
-    let storage: NodeAsyncLocalStorage<T> | null = null
+  let storage: NodeAsyncLocalStorage<T> | null = null
+  let nodeStorageReady: Promise<void> | null = null
 
-    const storageReady = Promise.resolve(configuredAsyncLocalStorage)
-      .then((AsyncLocalStorage) => AsyncLocalStorage || getNodeAsyncLocalStorage())
-      .then((AsyncLocalStorage) => {
-        if (AsyncLocalStorage && !storage) {
-          storage = new AsyncLocalStorage<T>()
-        }
-      })
-
-    return {
-      get(): T | undefined {
-        if (!storage) {
-          throw new Error(`AsyncContext storage not initialized`)
-        }
-        return storage.getStore()
-      },
-
-      async run<R>(value: T, fn: () => R | Promise<R>): Promise<R> {
-        if (!storage) {
-          await storageReady
-        }
-        if (!storage) {
-          throw new Error(`AsyncContext storage unavailable in server runtime`)
-        }
-        return storage.run(value, fn)
-      },
+  // returns a promise only while the node storage still has to be imported
+  const resolveStorage = (): Promise<void> | null => {
+    if (storage) return null
+    const configured = configuredAsyncLocalStorage
+    if (configured) {
+      storage = new configured<T>()
+      return null
     }
+    if (!IS_SERVER_RUNTIME) return null
+    nodeStorageReady ??= getNodeAsyncLocalStorage().then((AsyncLocalStorage) => {
+      if (AsyncLocalStorage && !storage) storage = new AsyncLocalStorage<T>()
+    })
+    return nodeStorageReady
   }
 
-  return createJsRuntimeAsyncContext<T>()
-}
-
-// browsers and the react-native JS runtime have no AsyncLocalStorage, and an
-// ambient mutator context cannot be emulated soundly on them. a module-level
-// "current context" is visible to every other task that runs while a mutator
-// awaits, and patching Promise.prototype does not follow a native `await` at
-// all. the emulation that used to live here handed a mutator a *different*
-// mutator's transaction whenever two overlapped, and left Promise.prototype
-// patched for the life of the page once two runs interleaved.
-//
-// so on these runtimes there is no ambient mutator context. createMutators
-// already passes each mutator its own context, and transactional reads go
-// through that transaction (`tx.run(zql...)`) rather than through ambient
-// state.
-function createJsRuntimeAsyncContext<T>(): AsyncContext<T> {
   return {
     get(): T | undefined {
-      return undefined
+      resolveStorage()
+      return storage?.getStore()
     },
-    async run<R>(_value: T, fn: () => R | Promise<R>): Promise<R> {
+
+    async run<R>(value: T, fn: () => R | Promise<R>): Promise<R> {
+      const pending = resolveStorage()
+      if (pending) await pending
+      if (storage) return storage.run(value, fn)
+      if (IS_SERVER_RUNTIME) {
+        throw new Error(`AsyncContext storage unavailable in server runtime`)
+      }
+      // browsers and the react-native JS runtime have no AsyncLocalStorage of
+      // their own, and an ambient context cannot be emulated soundly on them: a
+      // module-level "current context" is visible to every other task that runs
+      // while a mutator awaits, and patching Promise.prototype does not follow a
+      // native `await` at all. so there is no ambient context here unless a host
+      // installed one. createMutators still passes each mutator its own context,
+      // and transactional reads go through that transaction (`tx.run(zql...)`).
       return await fn()
     },
   }

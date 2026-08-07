@@ -2,7 +2,7 @@ import { createBuilder, mustGetQuery } from '@rocicorp/zero'
 import { asQueryInternals } from '@rocicorp/zero/bindings'
 
 import { createPermissions } from './createPermissions'
-import { createAsyncContext } from './helpers/asyncContext'
+import { createAsyncContext, setupAsyncLocalStorage } from './helpers/asyncContext'
 import { createMutators } from './helpers/createMutators'
 import { getScopedAuthData, runWithAuthScope } from './helpers/mutatorContext'
 import { runWithQueryContext, runWithSyncQueryContext } from './helpers/queryContext'
@@ -33,6 +33,10 @@ import type {
 // browser worker. the real import happens inside transformQueryRequest, which
 // only ever runs on a server.
 import type { handleQueryRequest as zeroHandleQueryRequest } from '@rocicorp/zero/server'
+
+// a host that runs these bindings off node supplies its own AsyncLocalStorage;
+// without one, every server mutator's authData and ambient context are null.
+export { setupAsyncLocalStorage }
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue =
