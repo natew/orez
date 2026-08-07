@@ -146,8 +146,8 @@ runs:
             "$PWD/.release/packed/$platform_tgz" \
             "$PWD/.release/packed/$launcher_tgz"
           launcher_actual="$(node .release/packed-smoke/install/node_modules/orez-sync-native/bin/sync-native.cjs --version)"
-          if [ "$launcher_actual" != "$expected" ]; then
-            echo "expected launcher '$expected', got '$launcher_actual'" >&2
+          if [ "$launcher_actual" != "$actual" ]; then
+            echo "launcher printed '$launcher_actual', platform binary printed '$actual'" >&2
             exit 1
           fi
         fi
