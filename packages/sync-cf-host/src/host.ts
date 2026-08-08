@@ -1,19 +1,16 @@
-import { DurableObject } from "cloudflare:workers";
-import {
-  createSyncExecutor,
-  isMutationRetryError,
-} from "orez-sync-executor/core";
-import { createSocketHost } from "orez-sync-executor/realtime";
+import { DurableObject } from 'cloudflare:workers'
+import { createSyncExecutor, isMutationRetryError } from 'orez-sync-executor/core'
+import { createSocketHost } from 'orez-sync-executor/realtime'
 
-import { validateSyncHostConfig } from "./config.js";
-import { createQueryCompiler } from "./query-compiler.js";
-import { resolveQueryPatch } from "./query-patch.js";
+import { validateSyncHostConfig } from './config.js'
+import { createQueryCompiler } from './query-compiler.js'
+import { resolveQueryPatch } from './query-patch.js'
 import {
   decodeSqlParams,
   SqlStorageDirect,
   SqlStorageMutatorTransaction,
   SqlStorageSyncDb,
-} from "./sql-storage-adapter.js";
+} from './sql-storage-adapter.js'
 import {
   engine_authorize_realtime_subscription,
   engine_apply_snapshot_changes,
@@ -34,131 +31,131 @@ import {
   engine_schema_revision,
   engine_state,
   engine_version,
-} from "./wasm.js";
+} from './wasm.js'
 import {
   IngestBreakerError,
   IngestCircuitBreaker,
   retryDelayMs,
   shouldRetryDelegatedPush,
-} from "./write-safeguards.js";
+} from './write-safeguards.js'
 
-import type { SyncHostConfig, SyncHostEnv } from "./types.js";
-import type { Schema } from "@rocicorp/zero";
+import type { SyncHostConfig, SyncHostEnv } from './types.js'
+import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
   ApplicationTransaction,
   JsonValue,
   NormalizedClaims,
   SyncExecutor,
-} from "orez-sync-executor";
+} from 'orez-sync-executor'
 import type {
   HostConnection,
   RealtimeIdentity,
   RealtimeSocketHost,
   RealtimeTopic,
-} from "orez-sync-executor/realtime";
+} from 'orez-sync-executor/realtime'
 
-const NAMESPACE_HEADER = "x-orez-sync-namespace";
-const UPSTREAM_PATH_HEADER = "x-orez-sync-upstream-path";
+const NAMESPACE_HEADER = 'x-orez-sync-namespace'
+const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
 // A websocket upgrade is a GET, so the authenticated identity cannot ride the
 // body the way /pull and /push carry their claims. It rides a private header
 // the worker always deletes from the incoming request before setting its own,
 // so a client cannot present one.
-const IDENTITY_HEADER = "x-orez-sync-identity";
-const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000;
-const MIN_SNAPSHOT_PAGE_ROWS = 100;
+const IDENTITY_HEADER = 'x-orez-sync-identity'
+const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
+const MIN_SNAPSHOT_PAGE_ROWS = 100
 
 type PushMutation = {
-  id: string;
-  clientID: string;
-  name: string;
-  args: JsonValue[];
-};
+  id: string
+  clientID: string
+  name: string
+  args: JsonValue[]
+}
 
 type PushPlan =
-  | { kind: "respond"; response: unknown }
-  | { kind: "process"; clientGroupID: string; mutations: PushMutation[] };
+  | { kind: 'respond'; response: unknown }
+  | { kind: 'process'; clientGroupID: string; mutations: PushMutation[] }
 
-type Preflight = { kind: "applied" } | { kind: "replay"; expected: string };
+type Preflight = { kind: 'applied' } | { kind: 'replay'; expected: string }
 
-type DelegatedMutationResult = { id?: { clientID?: unknown; id?: unknown } };
+type DelegatedMutationResult = { id?: { clientID?: unknown; id?: unknown } }
 type DelegatedPushBody = {
-  mutations?: DelegatedMutationResult[];
-  pushResponse?: unknown;
-  [key: string]: unknown;
-};
+  mutations?: DelegatedMutationResult[]
+  pushResponse?: unknown
+  [key: string]: unknown
+}
 
 type EngineState = {
-  watermark: string;
-  floor: string;
-  upstreamWatermark: string;
-};
+  watermark: string
+  floor: string
+  upstreamWatermark: string
+}
 type UpstreamBatch = {
-  watermark: number;
+  watermark: number
   changes: Array<{
-    watermark: number;
-    tableName: string;
-    op: string;
-    rowData: Record<string, unknown> | null;
-    oldData: Record<string, unknown> | null;
-  }>;
-};
+    watermark: number
+    tableName: string
+    op: string
+    rowData: Record<string, unknown> | null
+    oldData: Record<string, unknown> | null
+  }>
+}
 type ApplyUpstreamResult = {
-  watermark: number | string;
-  applied: number;
-  caughtUp: boolean;
-};
+  watermark: number | string
+  applied: number
+  caughtUp: boolean
+}
 type SnapshotProgress = {
-  generation: string;
-  startWatermark: string;
-  table: string | null;
-  cursor: string | null;
-  state: "paging" | "catching_up";
-  catchupWatermark: string;
-};
+  generation: string
+  startWatermark: string
+  table: string | null
+  cursor: string | null
+  state: 'paging' | 'catching_up'
+  catchupWatermark: string
+}
 type SnapshotPage = {
-  watermark: number;
-  rows: Record<string, unknown>[];
-  nextCursor: string | null;
-};
+  watermark: number
+  rows: Record<string, unknown>[]
+  nextCursor: string | null
+}
 // A hibernatable socket outlives the object holding the hub, so anything the
 // hub must not lose lives here. Identity is recorded at the authenticated
 // upgrade and never read from a frame; topics are what `rehydrate` replays
 // after an eviction, in the shape it accepts.
 type SocketAttachment = {
-  clientID: string;
-  identity?: RealtimeIdentity;
-  topics?: RealtimeTopic[];
+  clientID: string
+  identity?: RealtimeIdentity
+  topics?: RealtimeTopic[]
   // A producer socket, which has no identity and no topics: it holds
   // generations, and generations deliberately do not survive an eviction.
-  producerID?: string;
-};
+  producerID?: string
+}
 type FaultPoint =
-  | "push_before_mutation"
-  | "push_after_write_before_commit"
-  | "push_after_commit_before_response"
-  | "pull_during_tx"
-  | "pull_after_commit";
-type FaultKind = "error" | "quota";
+  | 'push_before_mutation'
+  | 'push_after_write_before_commit'
+  | 'push_after_commit_before_response'
+  | 'pull_during_tx'
+  | 'pull_after_commit'
+type FaultKind = 'error' | 'quota'
 
 type ForwardedSyncBody = {
-  claims: NormalizedClaims;
-  body: Record<string, unknown>;
-};
+  claims: NormalizedClaims
+  body: Record<string, unknown>
+}
 
 type Counters = {
-  pulls: number;
-  pushes: number;
-  resets: number;
-  applicationErrors: number;
-  invariantFailures: number;
-  retentionRuns: number;
-  queryRecompilations: number;
-  wasmBoundaryCalls: number;
-  wakeFrames: number;
-  wakeBatches: number;
-  externalEffectFailures: number;
-};
+  pulls: number
+  pushes: number
+  resets: number
+  applicationErrors: number
+  invariantFailures: number
+  retentionRuns: number
+  queryRecompilations: number
+  wasmBoundaryCalls: number
+  wakeFrames: number
+  wakeBatches: number
+  externalEffectFailures: number
+}
 
 function freshCounters(): Counters {
   return {
@@ -173,45 +170,38 @@ function freshCounters(): Counters {
     wakeFrames: 0,
     wakeBatches: 0,
     externalEffectFailures: 0,
-  };
+  }
 }
 
-function json(
-  value: unknown,
-  status = 200,
-  headers?: Record<string, string>,
-): Response {
+function json(value: unknown, status = 200, headers?: Record<string, string>): Response {
   return Response.json(value, {
     status,
-    headers: { "cache-control": "no-store", ...headers },
-  });
+    headers: { 'cache-control': 'no-store', ...headers },
+  })
 }
 
-function isStructuredPushFailed(
-  value: unknown,
-): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const body = value as Record<string, unknown>;
+function isStructuredPushFailed(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const body = value as Record<string, unknown>
   return (
-    body.kind === "PushFailed" &&
-    typeof body.origin === "string" &&
-    typeof body.reason === "string" &&
-    typeof body.message === "string" &&
+    body.kind === 'PushFailed' &&
+    typeof body.origin === 'string' &&
+    typeof body.reason === 'string' &&
+    typeof body.message === 'string' &&
     Array.isArray(body.mutationIDs)
-  );
+  )
 }
 
 function statusOf(error: unknown): number {
-  if (typeof error === "object" && error !== null && "status" in error) {
-    const status = Number(error.status);
-    if (Number.isInteger(status) && status >= 400 && status <= 599)
-      return status;
+  if (typeof error === 'object' && error !== null && 'status' in error) {
+    const status = Number(error.status)
+    if (Number.isInteger(status) && status >= 400 && status <= 599) return status
   }
-  return 500;
+  return 500
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return error instanceof Error ? error.message : String(error)
 }
 
 function errorBody(error: unknown): Record<string, unknown> {
@@ -221,7 +211,7 @@ function errorBody(error: unknown): Record<string, unknown> {
       windowRows: error.windowRows,
       budget: error.budget,
       retryAfterMs: error.retryAfterMs,
-    };
+    }
   }
   if (isMutationRetryError(error)) {
     // the reason travels in `details` so a caller can pace on why it was
@@ -231,126 +221,110 @@ function errorBody(error: unknown): Record<string, unknown> {
       error: errorMessage(error),
       ...(error.details === undefined ? {} : { details: error.details }),
       retryAfterMs: error.retryAfterMs,
-    };
+    }
   }
-  return { error: errorMessage(error) };
+  return { error: errorMessage(error) }
 }
 
 // one response builder for every refusal, so a rejection that tells the caller
 // when to come back always says so in the header an HTTP client already reads.
 function errorResponse(error: unknown): Response {
-  const body = errorBody(error);
-  const retryAfterMs = body.retryAfterMs;
+  const body = errorBody(error)
+  const retryAfterMs = body.retryAfterMs
   // whole seconds on the wire, rounded up: rounding down invites the caller
   // back while the window it has to wait out is still open.
   return json(
     body,
     statusOf(error),
-    typeof retryAfterMs === "number"
-      ? { "retry-after": String(Math.ceil(retryAfterMs / 1000)) }
-      : undefined,
-  );
+    typeof retryAfterMs === 'number'
+      ? { 'retry-after': String(Math.ceil(retryAfterMs / 1000)) }
+      : undefined
+  )
 }
 
-function requestError(
-  message: string,
-  status = 400,
-): Error & { status: number } {
-  return Object.assign(new Error(message), { status });
+function requestError(message: string, status = 400): Error & { status: number } {
+  return Object.assign(new Error(message), { status })
 }
 
 async function requestJson(request: Request): Promise<unknown> {
   try {
-    return await request.json();
+    return await request.json()
   } catch {
-    throw requestError("invalid JSON request body");
+    throw requestError('invalid JSON request body')
   }
 }
 
-async function requestObject(
-  request: Request,
-): Promise<Record<string, unknown>> {
-  const value = await requestJson(request);
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw requestError("request body must be a JSON object");
-  return value as Record<string, unknown>;
+async function requestObject(request: Request): Promise<Record<string, unknown>> {
+  const value = await requestJson(request)
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw requestError('request body must be a JSON object')
+  return value as Record<string, unknown>
 }
 
 function routeAfterNamespace(pathname: string): string {
-  const [, , ...parts] = pathname.split("/");
-  return `/${parts.join("/")}`;
+  const [, , ...parts] = pathname.split('/')
+  return `/${parts.join('/')}`
 }
 
-function jsonBodyRequest(
-  request: Request,
-  headers: Headers,
-  body: unknown,
-): Request {
-  headers.delete("content-encoding");
-  headers.delete("content-length");
-  headers.set("content-type", "application/json");
+function jsonBodyRequest(request: Request, headers: Headers, body: unknown): Request {
+  headers.delete('content-encoding')
+  headers.delete('content-length')
+  headers.set('content-type', 'application/json')
   return new Request(request.url, {
     method: request.method,
     headers,
     body: JSON.stringify(body),
-  });
+  })
 }
 
 async function forwardedSyncRequest(
-  request: Request,
+  request: Request
 ): Promise<{ claims: NormalizedClaims; request: Request }> {
-  const value = await requestObject(request);
-  const claims = value.claims;
-  const body = value.body;
+  const value = await requestObject(request)
+  const claims = value.claims
+  const body = value.body
   const userID =
-    claims && typeof claims === "object" && !Array.isArray(claims)
+    claims && typeof claims === 'object' && !Array.isArray(claims)
       ? (claims as Record<string, unknown>).userID
-      : null;
+      : null
   if (
     !claims ||
-    typeof claims !== "object" ||
+    typeof claims !== 'object' ||
     Array.isArray(claims) ||
-    typeof userID !== "string" ||
+    typeof userID !== 'string' ||
     userID.length === 0
   ) {
-    throw requestError("missing normalized claims", 401);
+    throw requestError('missing normalized claims', 401)
   }
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw requestError("request body must be a JSON object");
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw requestError('request body must be a JSON object')
   }
 
-  const headers = new Headers(request.headers);
+  const headers = new Headers(request.headers)
   return {
     claims: claims as NormalizedClaims,
     request: jsonBodyRequest(request, headers, body),
-  };
+  }
 }
 
 async function namespaceHash(namespace: string): Promise<string> {
-  const bytes = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(namespace),
-  );
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(namespace))
   return Array.from(new Uint8Array(bytes).slice(0, 8), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+    byte.toString(16).padStart(2, '0')
+  ).join('')
 }
 
 function socketAttachment(socket: WebSocket): SocketAttachment | null {
-  const value = socket.deserializeAttachment() as SocketAttachment | null;
-  return value && typeof value.clientID === "string" ? value : null;
+  const value = socket.deserializeAttachment() as SocketAttachment | null
+  return value && typeof value.clientID === 'string' ? value : null
 }
 
 // Closing a socket that is already closed/closing throws, and a throw inside a
 // hibernatable WebSocket handler aborts the DO. Swallow it: the socket is going
 // away regardless.
-function socketCloseQuietly(
-  socket: WebSocket,
-  code: number,
-  reason: string,
-): void {
+function socketCloseQuietly(socket: WebSocket, code: number, reason: string): void {
   try {
-    socket.close(code, reason);
+    socket.close(code, reason)
   } catch {
     // already closing/closed, or workerd rejected the code — nothing to do
   }
@@ -361,152 +335,141 @@ function socketCloseQuietly(
  * Durable Object receives normalized claims inside the binding request body so
  * observability systems cannot record them as request-header metadata.
  */
-export function createSyncWorker<
-  Env extends SyncHostEnv,
-  S extends Schema = Schema,
->(config: SyncHostConfig<Env, S>): ExportedHandler<Env> {
-  validateSyncHostConfig(config);
-  const allowedOrigins = new Set(config.allowedOrigins ?? []);
+export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Schema>(
+  config: SyncHostConfig<Env, S>
+): ExportedHandler<Env> {
+  validateSyncHostConfig(config)
+  const allowedOrigins = new Set(config.allowedOrigins ?? [])
   const corsHeaders = (origin: string): Record<string, string> => ({
-    "access-control-allow-origin": origin,
-    vary: "origin",
-  });
+    'access-control-allow-origin': origin,
+    vary: 'origin',
+  })
   return {
     async fetch(request, env): Promise<Response> {
-      const requestOrigin = request.headers.get("origin");
+      const requestOrigin = request.headers.get('origin')
       const corsOrigin =
-        requestOrigin && allowedOrigins.has(requestOrigin)
-          ? requestOrigin
-          : null;
+        requestOrigin && allowedOrigins.has(requestOrigin) ? requestOrigin : null
 
       // answer allowed preflights before any routing or authentication: a
       // preflight carries no Authorization header, so the auth wall below 401s
       // it and the browser never sends the real request.
       if (
         corsOrigin &&
-        request.method === "OPTIONS" &&
-        request.headers.has("access-control-request-method")
+        request.method === 'OPTIONS' &&
+        request.headers.has('access-control-request-method')
       ) {
         return new Response(null, {
           status: 204,
           headers: {
             ...corsHeaders(corsOrigin),
-            "access-control-allow-methods": "GET, POST, OPTIONS",
-            "access-control-allow-headers": "authorization, content-type",
-            "access-control-max-age": "86400",
+            'access-control-allow-methods': 'GET, POST, OPTIONS',
+            'access-control-allow-headers': 'authorization, content-type',
+            'access-control-max-age': '86400',
           },
-        });
+        })
       }
 
       const withCors = (response: Response): Response => {
         // a websocket upgrade has an immutable response; the socket handshake
         // is not CORS-gated anyway.
-        if (!corsOrigin || response.webSocket) return response;
-        const wrapped = new Response(response.body, response);
+        if (!corsOrigin || response.webSocket) return response
+        const wrapped = new Response(response.body, response)
         for (const [name, value] of Object.entries(corsHeaders(corsOrigin))) {
-          wrapped.headers.set(name, value);
+          wrapped.headers.set(name, value)
         }
-        return wrapped;
-      };
+        return wrapped
+      }
 
       const handle = async (): Promise<Response> => {
-        const namespace = config.namespace(request);
-        if (!namespace)
-          return new Response("orez sync-cf-host", { status: 200 });
+        const namespace = config.namespace(request)
+        if (!namespace) return new Response('orez sync-cf-host', { status: 200 })
 
-        const route = routeAfterNamespace(new URL(request.url).pathname);
-        const isAdmin = route.startsWith("/admin/");
-        let wakeUserID: string | null = null;
-        if (route === "/wake") {
-          let wakeRequest: Request = request;
-          const protocol = request.headers
-            .get("sec-websocket-protocol")
-            ?.trim();
+        const route = routeAfterNamespace(new URL(request.url).pathname)
+        const isAdmin = route.startsWith('/admin/')
+        let wakeUserID: string | null = null
+        if (route === '/wake') {
+          let wakeRequest: Request = request
+          const protocol = request.headers.get('sec-websocket-protocol')?.trim()
           const encodedAuth =
-            protocol?.startsWith("orez-auth.") === true
-              ? protocol.slice("orez-auth.".length)
-              : null;
+            protocol?.startsWith('orez-auth.') === true
+              ? protocol.slice('orez-auth.'.length)
+              : null
           if (
-            !request.headers.has("authorization") &&
+            !request.headers.has('authorization') &&
             encodedAuth &&
             /^[A-Za-z0-9_-]+$/.test(encodedAuth)
           ) {
             try {
-              const base64 = encodedAuth
-                .replaceAll("-", "+")
-                .replaceAll("_", "/");
+              const base64 = encodedAuth.replaceAll('-', '+').replaceAll('_', '/')
               const binary = globalThis.atob(
-                base64.padEnd(Math.ceil(base64.length / 4) * 4, "="),
-              );
+                base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')
+              )
               const authToken = new TextDecoder().decode(
-                Uint8Array.from(binary, (character) => character.charCodeAt(0)),
-              );
+                Uint8Array.from(binary, (character) => character.charCodeAt(0))
+              )
               if (authToken) {
-                const wakeHeaders = new Headers(request.headers);
-                wakeHeaders.set("authorization", `Bearer ${authToken}`);
-                wakeRequest = new Request(request, { headers: wakeHeaders });
+                const wakeHeaders = new Headers(request.headers)
+                wakeHeaders.set('authorization', `Bearer ${authToken}`)
+                wakeRequest = new Request(request, { headers: wakeHeaders })
               }
             } catch {
               // malformed subprotocol credentials remain unauthenticated
             }
           }
-          const wake = await config.authorizeWake(wakeRequest, env);
-          if (!wake) return json({ error: "missing wake capability" }, 401);
-          if (typeof wake === "object") wakeUserID = wake.userID;
+          const wake = await config.authorizeWake(wakeRequest, env)
+          if (!wake) return json({ error: 'missing wake capability' }, 401)
+          if (typeof wake === 'object') wakeUserID = wake.userID
           // A namespace that streams fields authorizes every subscription against
           // this userID, so a capability that does not carry one cannot open the
           // socket. Failing here names the cause; accepting it would produce a
           // wake-only socket whose subscriptions silently never deliver.
           if (config.streamingManifest && !wakeUserID) {
-            return json({ error: "wake capability must identify a user" }, 401);
+            return json({ error: 'wake capability must identify a user' }, 401)
           }
-        } else if (route === "/notify") {
+        } else if (route === '/notify') {
           if (!(await config.authorizeNotify(request, env))) {
-            return json({ error: "forbidden" }, 403);
+            return json({ error: 'forbidden' }, 403)
           }
         } else if (isAdmin) {
           const authorized = config.authorizeAdmin
             ? await config.authorizeAdmin(request, env)
             : Boolean(env.ADMIN_KEY) &&
-              request.headers.get("x-admin-key") === env.ADMIN_KEY;
-          if (!authorized) return json({ error: "forbidden" }, 403);
+              request.headers.get('x-admin-key') === env.ADMIN_KEY
+          if (!authorized) return json({ error: 'forbidden' }, 403)
         }
 
-        const headers = new Headers(request.headers);
-        headers.delete(NAMESPACE_HEADER);
-        headers.delete(UPSTREAM_PATH_HEADER);
-        headers.delete(IDENTITY_HEADER);
-        let forwardedBody: ForwardedSyncBody | null = null;
+        const headers = new Headers(request.headers)
+        headers.delete(NAMESPACE_HEADER)
+        headers.delete(UPSTREAM_PATH_HEADER)
+        headers.delete(IDENTITY_HEADER)
+        let forwardedBody: ForwardedSyncBody | null = null
         // /wake and /realtime/produce are both websocket upgrades and have no
         // body to put claims in. wake authentication is normalized from its
         // WebSocket subprotocol above; each route has its own authorization check
         // before either reaches the Durable Object.
         if (
           !isAdmin &&
-          route !== "/wake" &&
-          route !== "/notify" &&
-          route !== "/realtime/produce"
+          route !== '/wake' &&
+          route !== '/notify' &&
+          route !== '/realtime/produce'
         ) {
-          const claims = await config.authenticate(request, env);
+          const claims = await config.authenticate(request, env)
           if (
             !claims ||
-            typeof claims.userID !== "string" ||
+            typeof claims.userID !== 'string' ||
             claims.userID.length === 0
           ) {
-            return json({ error: "missing authentication" }, 401);
+            return json({ error: 'missing authentication' }, 401)
           }
           if (!(await config.authorize(request, claims, namespace, env))) {
-            return json({ error: "forbidden" }, 403);
+            return json({ error: 'forbidden' }, 403)
           }
-          if (
-            (route === "/pull" || route === "/push") &&
-            request.method === "POST"
-          ) {
+          if ((route === '/pull' || route === '/push') && request.method === 'POST') {
             try {
-              const body = await requestObject(request);
-              forwardedBody = { claims, body };
+              const body = await requestObject(request)
+              forwardedBody = { claims, body }
             } catch (error) {
-              return errorResponse(error);
+              return errorResponse(error)
             }
           }
         }
@@ -515,36 +478,32 @@ export function createSyncWorker<
         // but those are the client's own assertion and the engine checks the
         // group against this userID before it will read a single row, so there is
         // nothing gained by moving them here.
-        if (wakeUserID)
-          headers.set(IDENTITY_HEADER, encodeURIComponent(wakeUserID));
-        headers.set(NAMESPACE_HEADER, await namespaceHash(namespace));
+        if (wakeUserID) headers.set(IDENTITY_HEADER, encodeURIComponent(wakeUserID))
+        headers.set(NAMESPACE_HEADER, await namespaceHash(namespace))
         if (config.upstream) {
           const namespacePath =
-            typeof config.upstream.namespacePath === "function"
+            typeof config.upstream.namespacePath === 'function'
               ? config.upstream.namespacePath(namespace)
-              : config.upstream.namespacePath;
-          if (!namespacePath.startsWith("/")) {
-            return json(
-              { error: "upstream namespacePath must be an absolute path" },
-              500,
-            );
+              : config.upstream.namespacePath
+          if (!namespacePath.startsWith('/')) {
+            return json({ error: 'upstream namespacePath must be an absolute path' }, 500)
           }
-          headers.set(UPSTREAM_PATH_HEADER, namespacePath.replace(/\/$/, ""));
+          headers.set(UPSTREAM_PATH_HEADER, namespacePath.replace(/\/$/, ''))
         }
 
         const forwarded = forwardedBody
           ? jsonBodyRequest(request, headers, forwardedBody)
-          : new Request(request, { headers });
-        const id = env.SYNC_DO.idFromName(namespace);
-        return env.SYNC_DO.get(id).fetch(forwarded);
-      };
-      return withCors(await handle());
+          : new Request(request, { headers })
+        const id = env.SYNC_DO.idFromName(namespace)
+        return env.SYNC_DO.get(id).fetch(forwarded)
+      }
+      return withCors(await handle())
     },
-  };
+  }
 }
 
 export interface SyncDurableObjectConstructor<Env extends SyncHostEnv> {
-  new (ctx: DurableObjectState, env: Env): DurableObject<Env>;
+  new (ctx: DurableObjectState, env: Env): DurableObject<Env>
 }
 
 /** Create the namespace Durable Object class for one bundled consumer config. */
@@ -552,98 +511,95 @@ export function createSyncDurableObject<
   Env extends SyncHostEnv,
   S extends Schema = Schema,
 >(config: SyncHostConfig<Env, S>): SyncDurableObjectConstructor<Env> {
-  validateSyncHostConfig(config);
-  const compileQuery = createQueryCompiler(config.schema);
-  const defaultRetainChanges = String(config.retainChanges ?? 4_096);
-  const idleTeardownMs = config.idleTeardownMs ?? 5_000;
+  validateSyncHostConfig(config)
+  const compileQuery = createQueryCompiler(config.schema)
+  const defaultRetainChanges = String(config.retainChanges ?? 4_096)
+  const idleTeardownMs = config.idleTeardownMs ?? 5_000
   // A CF fan-out wakes every client into an HTTP pull. Give concurrent writer
   // requests a real batching window so a storm burst creates one pull wave.
-  const wakeCoalesceMs = config.wakeCoalesceMs ?? 25;
-  const upstreamIntervalMs = config.upstream?.intervalMs ?? 15_000;
-  const upstreamLimit = config.upstream?.changeLimit ?? 1_000;
-  const ingestBudgetRows = config.upstream?.ingestBudgetRows ?? 150_000;
-  const ingestBudgetWindowMs =
-    config.upstream?.ingestBudgetWindowMs ?? 5 * 60_000;
-  const ingestBackoffMs = config.upstream?.ingestBackoffMs ?? 1_000;
-  const ingestMaxBackoffMs = config.upstream?.ingestMaxBackoffMs ?? 60_000;
-  const delegateMaxAttempts = config.delegatedPushRetry?.maxAttempts ?? 3;
-  const delegateInitialBackoffMs =
-    config.delegatedPushRetry?.initialBackoffMs ?? 100;
-  const delegateMaxBackoffMs = config.delegatedPushRetry?.maxBackoffMs ?? 1_000;
+  const wakeCoalesceMs = config.wakeCoalesceMs ?? 25
+  const upstreamIntervalMs = config.upstream?.intervalMs ?? 15_000
+  const upstreamLimit = config.upstream?.changeLimit ?? 1_000
+  const ingestBudgetRows = config.upstream?.ingestBudgetRows ?? 150_000
+  const ingestBudgetWindowMs = config.upstream?.ingestBudgetWindowMs ?? 5 * 60_000
+  const ingestBackoffMs = config.upstream?.ingestBackoffMs ?? 1_000
+  const ingestMaxBackoffMs = config.upstream?.ingestMaxBackoffMs ?? 60_000
+  const delegateMaxAttempts = config.delegatedPushRetry?.maxAttempts ?? 3
+  const delegateInitialBackoffMs = config.delegatedPushRetry?.initialBackoffMs ?? 100
+  const delegateMaxBackoffMs = config.delegatedPushRetry?.maxBackoffMs ?? 1_000
   // 30s, not a snappier number: delegate wall time under write-lane contention
   // is queueing, not compute (measured ~5s wall at ~90ms cpu), and an abort
   // cancels the app invocation mid-transaction. 5s canceled real pushes on any
   // seed heavier than trivial and each retry re-queued more contention
   // (production example apps, 2026-08-03).
-  const delegateTimeoutMs = config.delegatedPushRetry?.timeoutMs ?? 30_000;
+  const delegateTimeoutMs = config.delegatedPushRetry?.timeoutMs ?? 30_000
 
   return class SyncDurableObject extends DurableObject<Env> {
-    readonly #engineDb: SqlStorageSyncDb;
-    readonly #directSql: SqlStorageDirect;
-    readonly #mutatorSql: SqlStorageMutatorTransaction;
-    readonly #executor: SyncExecutor<S> | null;
-    #executorBeforeCommitFault: FaultKind | null = null;
-    #bootID = crypto.randomUUID();
-    #initSkipped = false;
-    #lastRequestAt = 0;
-    #hibernations = 0;
-    #dropNextPushResponse = false;
-    #counters = freshCounters();
-    #sqlBilling = { rowsRead: 0, rowsWritten: 0 };
-    #pulling = new Set<string>();
-    #wakeOrigins = new Set<string>();
-    #wakeRecipients = new Set<WebSocket>();
-    #wakePromise: Promise<void> | null = null;
+    readonly #engineDb: SqlStorageSyncDb
+    readonly #directSql: SqlStorageDirect
+    readonly #mutatorSql: SqlStorageMutatorTransaction
+    readonly #executor: SyncExecutor<S> | null
+    #executorBeforeCommitFault: FaultKind | null = null
+    #bootID = crypto.randomUUID()
+    #initSkipped = false
+    #lastRequestAt = 0
+    #hibernations = 0
+    #dropNextPushResponse = false
+    #counters = freshCounters()
+    #sqlBilling = { rowsRead: 0, rowsWritten: 0 }
+    #pulling = new Set<string>()
+    #wakeOrigins = new Set<string>()
+    #wakeRecipients = new Set<WebSocket>()
+    #wakePromise: Promise<void> | null = null
     // Streaming fields. Null when the namespace configures no manifest, which
     // is every wake-only deployment: no hub is built and nothing below runs.
-    #realtime: RealtimeSocketHost | null = null;
-    #realtimeConnections = new Map<WebSocket, HostConnection>();
+    #realtime: RealtimeSocketHost | null = null
+    #realtimeConnections = new Map<WebSocket, HostConnection>()
     // Resolves once the sockets from a previous incarnation have been replayed
     // into this hub. Held as a promise rather than a flag so frames arriving
     // during the replay wait for it instead of racing past into an empty hub.
-    #realtimeReady: Promise<void> | null = null;
-    #ingestPromise: Promise<number> | null = null;
-    #recordingIngestBillable = false;
+    #realtimeReady: Promise<void> | null = null
+    #ingestPromise: Promise<number> | null = null
+    #recordingIngestBillable = false
     #ingestBreaker = new IngestCircuitBreaker({
       budgetRows: ingestBudgetRows,
       windowMs: ingestBudgetWindowMs,
       initialBackoffMs: ingestBackoffMs,
       maxBackoffMs: ingestMaxBackoffMs,
       now: () => Date.now(),
-    });
+    })
 
     constructor(ctx: DurableObjectState, env: Env) {
-      super(ctx, env);
+      super(ctx, env)
       const recordRowsWritten = (rows: number) => {
-        this.#sqlBilling.rowsWritten += rows;
-        if (this.#recordingIngestBillable)
-          this.#ingestBreaker.recordBillable(rows);
-      };
+        this.#sqlBilling.rowsWritten += rows
+        if (this.#recordingIngestBillable) this.#ingestBreaker.recordBillable(rows)
+      }
       const recordRowsRead = (rows: number) => {
-        this.#sqlBilling.rowsRead += rows;
-      };
+        this.#sqlBilling.rowsRead += rows
+      }
       this.#engineDb = new SqlStorageSyncDb(
         ctx.storage.sql,
         recordRowsWritten,
-        recordRowsRead,
-      );
+        recordRowsRead
+      )
       this.#directSql = new SqlStorageDirect(
         ctx.storage.sql,
         recordRowsWritten,
-        recordRowsRead,
-      );
+        recordRowsRead
+      )
       this.#mutatorSql = new SqlStorageMutatorTransaction(
         this.#directSql,
         (ast, format) => this.#wasm(() => compileQuery(ast, format)),
-        config.transactionQueryBudget,
-      );
+        config.transactionQueryBudget
+      )
       const database: ApplicationDatabase = {
-        dialect: "sqlite",
+        dialect: 'sqlite',
         transaction: async <Value>(
-          work: (tx: ApplicationTransaction) => Value | Promise<Value>,
+          work: (tx: ApplicationTransaction) => Value | Promise<Value>
         ): Promise<Value> =>
           this.ctx.storage.transaction(async () => {
-            let applicationWrite = false;
+            let applicationWrite = false
             const tx: ApplicationTransaction = {
               exec: async (sql, params, metadata) => {
                 if (
@@ -651,9 +607,9 @@ export function createSyncDurableObject<
                   (!/^\s*CREATE\s+(?:SCHEMA|TABLE)\b/i.test(sql) &&
                     !/\b_zsync_[A-Za-z0-9_]+\b/.test(sql))
                 ) {
-                  applicationWrite = true;
+                  applicationWrite = true
                 }
-                return this.#mutatorSql.exec(sql, params, metadata);
+                return this.#mutatorSql.exec(sql, params, metadata)
               },
               query: (sql, params) => {
                 // exact helper statements use sqlite returning so the executor
@@ -663,49 +619,49 @@ export function createSyncDurableObject<
                   /\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sql) &&
                   /\bRETURNING\b/i.test(sql)
                 ) {
-                  applicationWrite = true;
+                  applicationWrite = true
                 }
-                return this.#mutatorSql.query(sql, params);
+                return this.#mutatorSql.query(sql, params)
               },
               queryAst: (ast, format, queryName) =>
                 this.#mutatorSql.queryAst(ast, format, queryName),
-            };
-            const value = await work(tx);
-            if (applicationWrite && this.#executorBeforeCommitFault) {
-              const fault = this.#executorBeforeCommitFault;
-              this.#executorBeforeCommitFault = null;
-              throw this.#faultError(fault, "push_after_write_before_commit");
             }
-            return value;
+            const value = await work(tx)
+            if (applicationWrite && this.#executorBeforeCommitFault) {
+              const fault = this.#executorBeforeCommitFault
+              this.#executorBeforeCommitFault = null
+              throw this.#faultError(fault, 'push_after_write_before_commit')
+            }
+            return value
           }),
         query: (sql, params) => this.#mutatorSql.query(sql, params),
-      };
+      }
       this.#executor = config.mutators
         ? createSyncExecutor({
             database,
             effects: {
               runBackground: (promise) => this.ctx.waitUntil(promise),
               report: (error) => {
-                this.#counters.externalEffectFailures++;
+                this.#counters.externalEffectFailures++
                 console.error(
                   JSON.stringify({
-                    event: "sync_external_effect_error",
+                    event: 'sync_external_effect_error',
                     hostVersion: config.hostVersion,
                     error: errorMessage(error),
-                  }),
-                );
+                  })
+                )
               },
             },
             mutators: config.mutators,
             schema: config.schema,
           })
-        : null;
+        : null
       ctx.blockConcurrencyWhile(async () => {
         ctx.storage.transactionSync(() => {
           this.#directSql.exec(`CREATE TABLE IF NOT EXISTS _zsync_host_control (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
-          )`);
+          )`)
           // one durable fingerprint gates the whole schema pass. hibernation
           // reconstructs this object every few idle minutes, and re-running
           // consumer DDL plus both engine inits against an already-current
@@ -717,72 +673,68 @@ export function createSyncDurableObject<
             this.#wasm(() => engine_schema_revision()),
             config.schema,
             config.initialize.toString(),
-          ]);
-          this.#initSkipped =
-            this.#controlGet("initFingerprint") === initFingerprint;
+          ])
+          this.#initSkipped = this.#controlGet('initFingerprint') === initFingerprint
           if (!this.#initSkipped) {
-            config.initialize(this.#directSql);
+            config.initialize(this.#directSql)
             this.#directSql.exec(
-              "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')",
-            );
-            this.#wasm(() => engine_init_schema(this.#engineDb, config.schema));
-            this.#wasm(() => engine_init_query_schema(this.#engineDb));
-            this.#controlSet("initFingerprint", initFingerprint);
+              "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
+            )
+            this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
+            this.#wasm(() => engine_init_query_schema(this.#engineDb))
+            this.#controlSet('initFingerprint', initFingerprint)
           }
-          const ingestBreakerReason = this.#controlGet("ingestBreakerReason");
+          const ingestBreakerReason = this.#controlGet('ingestBreakerReason')
           if (
-            ingestBreakerReason === "ingestBudgetExceeded" ||
-            ingestBreakerReason === "ingestCursorStalled"
+            ingestBreakerReason === 'ingestBudgetExceeded' ||
+            ingestBreakerReason === 'ingestCursorStalled'
           ) {
             this.#ingestBreaker.restore(
               ingestBreakerReason,
-              Number(this.#controlGet("ingestBreakerRetryAt")),
-              Number(this.#controlGet("ingestBreakerTrips")),
-            );
+              Number(this.#controlGet('ingestBreakerRetryAt')),
+              Number(this.#controlGet('ingestBreakerTrips'))
+            )
           }
-        });
-      });
+        })
+      })
     }
 
     #armUpstreamAlarm(): void {
-      if (!config.upstream) return;
+      if (!config.upstream) return
       this.ctx.waitUntil(
         (async () => {
           if ((await this.ctx.storage.getAlarm()) === null) {
-            await this.ctx.storage.setAlarm(Date.now() + upstreamIntervalMs);
+            await this.ctx.storage.setAlarm(Date.now() + upstreamIntervalMs)
           }
-        })(),
-      );
+        })()
+      )
     }
 
     #wasm<T>(call: () => T): T {
-      this.#counters.wasmBoundaryCalls++;
-      return call();
+      this.#counters.wasmBoundaryCalls++
+      return call()
     }
 
     #simulateIdleTeardown(now: number): void {
-      if (
-        this.#lastRequestAt > 0 &&
-        now - this.#lastRequestAt >= idleTeardownMs
-      ) {
-        this.#bootID = crypto.randomUUID();
-        this.#hibernations++;
-        this.#counters = freshCounters();
-        this.#sqlBilling = { rowsRead: 0, rowsWritten: 0 };
-        this.#pulling.clear();
-        this.#wakeOrigins.clear();
-        this.#wakeRecipients.clear();
-        this.#wakePromise = null;
+      if (this.#lastRequestAt > 0 && now - this.#lastRequestAt >= idleTeardownMs) {
+        this.#bootID = crypto.randomUUID()
+        this.#hibernations++
+        this.#counters = freshCounters()
+        this.#sqlBilling = { rowsRead: 0, rowsWritten: 0 }
+        this.#pulling.clear()
+        this.#wakeOrigins.clear()
+        this.#wakeRecipients.clear()
+        this.#wakePromise = null
         // Real hibernation reconstructs the object, so the hub and every
         // connection handle are gone while the sockets stay open. Modelling
         // that here is what makes rehydration reachable from a test: leaving
         // the hub in place would make the simulation pass for a reason the
         // real runtime never gives it.
-        this.#realtime = null;
-        this.#realtimeConnections.clear();
-        this.#realtimeReady = null;
+        this.#realtime = null
+        this.#realtimeConnections.clear()
+        this.#realtimeReady = null
       }
-      this.#lastRequestAt = now;
+      this.#lastRequestAt = now
     }
 
     // the admin-set namespace knobs (writer, retention) live in
@@ -791,10 +743,10 @@ export function createSyncDurableObject<
     // config default mid-run changes namespace behavior under the client.
     #controlGet(key: string): string | null {
       const row = this.#directSql.query<{ value: string }>(
-        "SELECT value FROM _zsync_host_control WHERE key = ?",
-        [key],
-      )[0];
-      return row?.value ?? null;
+        'SELECT value FROM _zsync_host_control WHERE key = ?',
+        [key]
+      )[0]
+      return row?.value ?? null
     }
 
     #controlSet(key: string, value: string): void {
@@ -802,293 +754,281 @@ export function createSyncDurableObject<
       // every forwarded request, and an unguarded upsert billed one row
       // written per request for a value that almost never changes.
       this.#directSql.exec(
-        "INSERT INTO _zsync_host_control (key, value) VALUES (?, ?) " +
-          "ON CONFLICT(key) DO UPDATE SET value = excluded.value " +
-          "WHERE value <> excluded.value",
-        [key, value],
-      );
+        'INSERT INTO _zsync_host_control (key, value) VALUES (?, ?) ' +
+          'ON CONFLICT(key) DO UPDATE SET value = excluded.value ' +
+          'WHERE value <> excluded.value',
+        [key, value]
+      )
     }
 
     #controlDelete(...keys: string[]): void {
-      if (keys.length === 0) return;
+      if (keys.length === 0) return
       this.#directSql.exec(
-        `DELETE FROM _zsync_host_control WHERE key IN (${keys.map(() => "?").join(", ")})`,
-        keys,
-      );
+        `DELETE FROM _zsync_host_control WHERE key IN (${keys.map(() => '?').join(', ')})`,
+        keys
+      )
     }
 
     #persistIngestBreaker(): void {
-      const status = this.#ingestBreaker.status();
-      if (!status.reason || status.retryAt === null) return;
-      this.#controlSet("ingestBreakerReason", status.reason);
-      this.#controlSet("ingestBreakerRetryAt", String(status.retryAt));
-      this.#controlSet("ingestBreakerTrips", String(status.consecutiveTrips));
+      const status = this.#ingestBreaker.status()
+      if (!status.reason || status.retryAt === null) return
+      this.#controlSet('ingestBreakerReason', status.reason)
+      this.#controlSet('ingestBreakerRetryAt', String(status.retryAt))
+      this.#controlSet('ingestBreakerTrips', String(status.consecutiveTrips))
     }
 
     #recoverIngestBreaker(): void {
-      const wasTripped = this.#ingestBreaker.status().reason !== null;
-      this.#ingestBreaker.recovered();
+      const wasTripped = this.#ingestBreaker.status().reason !== null
+      this.#ingestBreaker.recovered()
       if (wasTripped) {
         this.#controlDelete(
-          "ingestBreakerReason",
-          "ingestBreakerRetryAt",
-          "ingestBreakerTrips",
-        );
+          'ingestBreakerReason',
+          'ingestBreakerRetryAt',
+          'ingestBreakerTrips'
+        )
       }
     }
 
     #writerEnabled(): boolean {
-      return this.#controlGet("writerEnabled") === "1";
+      return this.#controlGet('writerEnabled') === '1'
     }
 
     #retainChanges(): string {
-      return this.#controlGet("retainChanges") ?? defaultRetainChanges;
+      return this.#controlGet('retainChanges') ?? defaultRetainChanges
     }
 
     #takeFault(point: FaultPoint): FaultKind | null {
-      if (this.#controlGet("faultPoint") !== point) return null;
-      const kind = this.#controlGet("faultKind");
+      if (this.#controlGet('faultPoint') !== point) return null
+      const kind = this.#controlGet('faultKind')
       this.#directSql.exec(
-        "DELETE FROM _zsync_host_control WHERE key IN ('faultPoint', 'faultKind')",
-      );
-      return kind === "quota" ? "quota" : "error";
+        "DELETE FROM _zsync_host_control WHERE key IN ('faultPoint', 'faultKind')"
+      )
+      return kind === 'quota' ? 'quota' : 'error'
     }
 
-    #faultError(
-      kind: FaultKind,
-      point: FaultPoint,
-    ): Error & { status: number } {
+    #faultError(kind: FaultKind, point: FaultPoint): Error & { status: number } {
       return requestError(
         `injected ${kind} fault at ${point}`,
-        kind === "quota" ? 507 : 500,
-      );
+        kind === 'quota' ? 507 : 500
+      )
     }
 
     #engineState(): EngineState {
-      return this.#wasm(() => engine_state(this.#engineDb)) as EngineState;
+      return this.#wasm(() => engine_state(this.#engineDb)) as EngineState
     }
 
     #engineStateBestEffort(): EngineState | null {
       try {
-        return this.#engineState();
+        return this.#engineState()
       } catch {
-        return null;
+        return null
       }
     }
 
     #serviceBinding(name = config.upstream?.binding): {
-      fetch(input: string | Request, init?: RequestInit): Promise<Response>;
+      fetch(input: string | Request, init?: RequestInit): Promise<Response>
     } {
       const value = name
         ? (this.env as unknown as Record<string, unknown>)[name]
-        : undefined;
-      if (
-        !value ||
-        typeof (value as { fetch?: unknown }).fetch !== "function"
-      ) {
+        : undefined
+      if (!value || typeof (value as { fetch?: unknown }).fetch !== 'function') {
         throw requestError(
-          `missing upstream service binding: ${name ?? "(not configured)"}`,
-          500,
-        );
+          `missing upstream service binding: ${name ?? '(not configured)'}`,
+          500
+        )
       }
       return value as {
-        fetch(input: string | Request, init?: RequestInit): Promise<Response>;
-      };
+        fetch(input: string | Request, init?: RequestInit): Promise<Response>
+      }
     }
 
     async #upstreamWriteBudgetStatus(): Promise<Response> {
-      if (!config.upstream)
-        return json({ error: "upstream is not configured" }, 404);
-      const path = this.#controlGet("upstreamPath");
-      if (path === null)
-        return json({ error: "upstream path is not known yet" }, 409);
-      const endpoint = new URL(
-        `${path}/_orez/write-budget`,
-        "https://upstream.invalid",
-      );
+      if (!config.upstream) return json({ error: 'upstream is not configured' }, 404)
+      const path = this.#controlGet('upstreamPath')
+      if (path === null) return json({ error: 'upstream path is not known yet' }, 409)
+      const endpoint = new URL(`${path}/_orez/write-budget`, 'https://upstream.invalid')
       const response = await this.#serviceBinding().fetch(endpoint.toString(), {
         headers: { host: endpoint.host },
-      });
+      })
       if (!response.ok) {
         return json(
           {
-            error: "upstream write-budget status unavailable",
+            error: 'upstream write-budget status unavailable',
             upstreamStatus: response.status,
           },
-          502,
-        );
+          502
+        )
       }
-      return json(await response.json());
+      return json(await response.json())
     }
 
     #rememberUpstreamPath(request: Request): string | null {
-      if (!config.upstream) return null;
-      const path = request.headers.get(UPSTREAM_PATH_HEADER);
+      if (!config.upstream) return null
+      const path = request.headers.get(UPSTREAM_PATH_HEADER)
       if (path !== null) {
-        this.#controlSet("upstreamPath", path);
-        return path;
+        this.#controlSet('upstreamPath', path)
+        return path
       }
-      return this.#controlGet("upstreamPath");
+      return this.#controlGet('upstreamPath')
     }
 
     #tripIngest(
-      reason: "ingestBudgetExceeded" | "ingestCursorStalled",
-      fields: Record<string, unknown>,
+      reason: 'ingestBudgetExceeded' | 'ingestCursorStalled',
+      fields: Record<string, unknown>
     ): never {
       try {
-        return this.#ingestBreaker.trip(reason);
+        return this.#ingestBreaker.trip(reason)
       } catch (error) {
-        this.#persistIngestBreaker();
-        const status = this.#ingestBreaker.status();
+        this.#persistIngestBreaker()
+        const status = this.#ingestBreaker.status()
         console.error(
           JSON.stringify({
-            event: "sync_upstream_ingest_breaker_tripped",
+            event: 'sync_upstream_ingest_breaker_tripped',
             ...status,
             reason,
             ...fields,
-          }),
-        );
-        throw error;
+          })
+        )
+        throw error
       }
     }
 
     #recordIngestLogicalRows(rows: number): void {
-      this.#ingestBreaker.recordLogical(rows);
+      this.#ingestBreaker.recordLogical(rows)
     }
 
     #withIngestBilling<T>(fields: Record<string, unknown>, apply: () => T): T {
-      this.#recordingIngestBillable = true;
+      this.#recordingIngestBillable = true
       try {
-        return apply();
+        return apply()
       } catch (error) {
-        this.#recordingIngestBillable = false;
-        const status = this.#ingestBreaker.status();
+        this.#recordingIngestBillable = false
+        const status = this.#ingestBreaker.status()
         // a breaker thrown by the sql adapter crosses rust as an engine error,
         // so the durable breaker state is the authoritative classification.
         if (
           error instanceof IngestBreakerError ||
-          (status.tripped && status.reason === "ingestBudgetExceeded")
+          (status.tripped && status.reason === 'ingestBudgetExceeded')
         ) {
-          this.#persistIngestBreaker();
+          this.#persistIngestBreaker()
           console.error(
             JSON.stringify({
-              event: "sync_upstream_ingest_breaker_tripped",
+              event: 'sync_upstream_ingest_breaker_tripped',
               ...status,
-              reason: "ingestBudgetExceeded",
+              reason: 'ingestBudgetExceeded',
               ...fields,
-            }),
-          );
+            })
+          )
         }
-        throw error;
+        throw error
       } finally {
-        this.#recordingIngestBillable = false;
+        this.#recordingIngestBillable = false
       }
     }
 
     #snapshotProgress(): SnapshotProgress | null {
       return this.#wasm(() =>
-        engine_read_snapshot_progress(this.#engineDb),
-      ) as SnapshotProgress | null;
+        engine_read_snapshot_progress(this.#engineDb)
+      ) as SnapshotProgress | null
     }
 
     #resetSnapshotBillingWindow(): void {
       // every page is an independently committed write unit. metering it in a
       // fresh window keeps a rebuild larger than the breaker ceiling resumable
       // while preserving the ceiling for each transaction.
-      this.#ingestBreaker.reopen();
+      this.#ingestBreaker.reopen()
       this.#controlDelete(
-        "ingestBreakerReason",
-        "ingestBreakerRetryAt",
-        "ingestBreakerTrips",
-      );
+        'ingestBreakerReason',
+        'ingestBreakerRetryAt',
+        'ingestBreakerTrips'
+      )
     }
 
     #snapshotRetryLimit(
       error: unknown,
       limit: number,
-      fields: Record<string, unknown>,
+      fields: Record<string, unknown>
     ): number {
-      const status = statusOf(error);
-      if (!(error instanceof IngestBreakerError) && status < 500) throw error;
+      const status = statusOf(error)
+      if (!(error instanceof IngestBreakerError) && status < 500) throw error
       if (limit <= MIN_SNAPSHOT_PAGE_ROWS) {
         throw Object.assign(
           new Error(
-            `snapshot page failed at minimum limit ${MIN_SNAPSHOT_PAGE_ROWS}: ${errorMessage(error)}`,
+            `snapshot page failed at minimum limit ${MIN_SNAPSHOT_PAGE_ROWS}: ${errorMessage(error)}`
           ),
-          { status, cause: error },
-        );
+          { status, cause: error }
+        )
       }
-      const nextLimit = Math.max(MIN_SNAPSHOT_PAGE_ROWS, Math.floor(limit / 2));
+      const nextLimit = Math.max(MIN_SNAPSHOT_PAGE_ROWS, Math.floor(limit / 2))
       console.warn(
         JSON.stringify({
-          event: "sync_upstream_snapshot_page_retry",
+          event: 'sync_upstream_snapshot_page_retry',
           ...fields,
           limit,
           nextLimit,
           status,
           error: errorMessage(error),
-        }),
-      );
-      return nextLimit;
+        })
+      )
+      return nextLimit
     }
 
     async #fetchSnapshotPage(
       path: string,
       table: string,
       cursor: string | null,
-      limit: number,
+      limit: number
     ): Promise<SnapshotPage> {
-      const endpoint = new URL(`${path}/snapshot`, "https://upstream.invalid");
-      endpoint.searchParams.set("table", table);
-      endpoint.searchParams.set("limit", String(limit));
-      if (cursor !== null) endpoint.searchParams.set("cursor", cursor);
+      const endpoint = new URL(`${path}/snapshot`, 'https://upstream.invalid')
+      endpoint.searchParams.set('table', table)
+      endpoint.searchParams.set('limit', String(limit))
+      if (cursor !== null) endpoint.searchParams.set('cursor', cursor)
       const response = await this.#serviceBinding().fetch(endpoint.toString(), {
         headers: { host: endpoint.host },
-      });
+      })
       if (!response.ok) {
         throw requestError(
           `upstream snapshot page returned ${response.status}`,
-          response.status >= 500 ? 502 : response.status,
-        );
+          response.status >= 500 ? 502 : response.status
+        )
       }
-      const page = (await response.json()) as Partial<SnapshotPage>;
+      const page = (await response.json()) as Partial<SnapshotPage>
       if (
         !Number.isSafeInteger(page.watermark) ||
         Number(page.watermark) < 0 ||
         !Array.isArray(page.rows) ||
-        (page.nextCursor !== null && typeof page.nextCursor !== "string")
+        (page.nextCursor !== null && typeof page.nextCursor !== 'string')
       ) {
-        throw new Error("invalid upstream snapshot page response");
+        throw new Error('invalid upstream snapshot page response')
       }
-      return page as SnapshotPage;
+      return page as SnapshotPage
     }
 
     async #beginSnapshotGeneration(path: string): Promise<{
-      progress: SnapshotProgress;
-      page: SnapshotPage;
-      pageLimit: number;
+      progress: SnapshotProgress
+      page: SnapshotPage
+      pageLimit: number
     }> {
-      const table = Object.keys(config.schema.tables).sort()[0];
-      if (!table)
-        throw requestError("paged snapshots require a modeled table", 500);
-      let pageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS;
-      let page: SnapshotPage;
+      const table = Object.keys(config.schema.tables).sort()[0]
+      if (!table) throw requestError('paged snapshots require a modeled table', 500)
+      let pageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS
+      let page: SnapshotPage
       for (;;) {
         try {
-          page = await this.#fetchSnapshotPage(path, table, null, pageLimit);
-          break;
+          page = await this.#fetchSnapshotPage(path, table, null, pageLimit)
+          break
         } catch (error) {
           pageLimit = this.#snapshotRetryLimit(error, pageLimit, {
-            phase: "snapshot_page_fetch",
+            phase: 'snapshot_page_fetch',
             table,
             cursor: null,
-          });
+          })
         }
       }
-      this.#resetSnapshotBillingWindow();
+      this.#resetSnapshotBillingWindow()
       const progress = this.#withIngestBilling(
         {
-          phase: "snapshot_begin",
+          phase: 'snapshot_begin',
           table,
           startWatermark: page.watermark,
         },
@@ -1098,64 +1038,61 @@ export function createSyncDurableObject<
               engine_begin_snapshot_generation(
                 this.#engineDb,
                 config.schema,
-                String(page.watermark),
-              ),
-            ),
-          ),
-      ) as SnapshotProgress;
-      return { progress, page, pageLimit };
+                String(page.watermark)
+              )
+            )
+          )
+      ) as SnapshotProgress
+      return { progress, page, pageLimit }
     }
 
-    #ingest(
-      upstreamPath?: string | null,
-      forceSnapshot = false,
-    ): Promise<number> {
+    #ingest(upstreamPath?: string | null, forceSnapshot = false): Promise<number> {
       if (!config.upstream) {
         return forceSnapshot
-          ? Promise.reject(requestError("upstream is not configured"))
-          : Promise.resolve(0);
+          ? Promise.reject(requestError('upstream is not configured'))
+          : Promise.resolve(0)
       }
       if (this.#ingestPromise) {
         return forceSnapshot
           ? this.#ingestPromise.then(() => this.#ingest(upstreamPath, true))
-          : this.#ingestPromise;
+          : this.#ingestPromise
       }
-      const path = upstreamPath ?? this.#controlGet("upstreamPath");
+      const path = upstreamPath ?? this.#controlGet('upstreamPath')
       if (path === null) {
         return forceSnapshot
-          ? Promise.reject(requestError("upstream path is not available"))
-          : Promise.resolve(0);
+          ? Promise.reject(requestError('upstream path is not available'))
+          : Promise.resolve(0)
       }
       this.#ingestPromise = (async () => {
-        let progress = this.#snapshotProgress();
-        this.#ingestBreaker.assertReady();
-        const startingWatermark = this.#engineState().watermark;
-        let total = 0;
-        let pendingPage: SnapshotPage | null = null;
-        let snapshotPageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS;
-        let snapshotCompleted = false;
+        let progress = this.#snapshotProgress()
+        this.#ingestBreaker.assertReady()
+        const startingWatermark = this.#engineState().watermark
+        let total = 0
+        let pendingPage: SnapshotPage | null = null
+        let snapshotPageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS
+        let snapshotCompleted = false
         for (;;) {
-          if (progress?.state === "paging") {
-            const activeProgress = progress;
-            const table = activeProgress.table;
+          if (progress?.state === 'paging') {
+            const activeProgress = progress
+            const table = activeProgress.table
             if (table === null) {
               throw new Error(
-                `snapshot generation ${activeProgress.generation} is paging without a table`,
-              );
+                `snapshot generation ${activeProgress.generation} is paging without a table`
+              )
             }
-            let page: SnapshotPage | null = pendingPage;
+            let page: SnapshotPage | null = pendingPage
             try {
               page ??= await this.#fetchSnapshotPage(
                 path,
                 table,
                 activeProgress.cursor,
-                snapshotPageLimit,
-              );
-              const pageToApply = page;
-              this.#resetSnapshotBillingWindow();
+                snapshotPageLimit
+              )
+              const pageToApply = page
+              this.#resetSnapshotBillingWindow()
               const nextProgress = this.#withIngestBilling(
                 {
-                  phase: "snapshot_page_apply",
+                  phase: 'snapshot_page_apply',
                   generation: activeProgress.generation,
                   table,
                   cursor: activeProgress.cursor,
@@ -1171,72 +1108,54 @@ export function createSyncDurableObject<
                         activeProgress.generation,
                         table,
                         pageToApply.rows,
-                        pageToApply.nextCursor,
-                      ),
-                    ),
-                  ),
-              ) as SnapshotProgress;
-              total += pageToApply.rows.length;
-              this.#recordIngestLogicalRows(pageToApply.rows.length);
-              progress = nextProgress;
-              pendingPage = null;
+                        pageToApply.nextCursor
+                      )
+                    )
+                  )
+              ) as SnapshotProgress
+              total += pageToApply.rows.length
+              this.#recordIngestLogicalRows(pageToApply.rows.length)
+              progress = nextProgress
+              pendingPage = null
             } catch (error) {
-              snapshotPageLimit = this.#snapshotRetryLimit(
-                error,
-                snapshotPageLimit,
-                {
-                  phase:
-                    page === null
-                      ? "snapshot_page_fetch"
-                      : "snapshot_page_apply",
-                  generation: activeProgress.generation,
-                  table,
-                  cursor: activeProgress.cursor,
-                },
-              );
-              pendingPage = null;
+              snapshotPageLimit = this.#snapshotRetryLimit(error, snapshotPageLimit, {
+                phase: page === null ? 'snapshot_page_fetch' : 'snapshot_page_apply',
+                generation: activeProgress.generation,
+                table,
+                cursor: activeProgress.cursor,
+              })
+              pendingPage = null
             }
-            continue;
+            continue
           }
 
-          if (progress?.state === "catching_up") {
-            const activeProgress = progress;
-            const cursor = activeProgress.catchupWatermark;
-            const endpoint = new URL(
-              `${path}/changes`,
-              "https://upstream.invalid",
-            );
-            endpoint.searchParams.set("since", cursor);
-            endpoint.searchParams.set("limit", String(upstreamLimit));
-            const response = await this.#serviceBinding().fetch(
-              endpoint.toString(),
-              {
-                headers: { host: endpoint.host },
-              },
-            );
+          if (progress?.state === 'catching_up') {
+            const activeProgress = progress
+            const cursor = activeProgress.catchupWatermark
+            const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
+            endpoint.searchParams.set('since', cursor)
+            endpoint.searchParams.set('limit', String(upstreamLimit))
+            const response = await this.#serviceBinding().fetch(endpoint.toString(), {
+              headers: { host: endpoint.host },
+            })
             if (response.status === 410) {
-              const begun = await this.#beginSnapshotGeneration(path);
-              progress = begun.progress;
-              pendingPage = begun.page;
-              snapshotPageLimit = begun.pageLimit;
-              continue;
+              const begun = await this.#beginSnapshotGeneration(path)
+              progress = begun.progress
+              pendingPage = begun.page
+              snapshotPageLimit = begun.pageLimit
+              continue
             }
             if (!response.ok) {
-              throw new Error(
-                `upstream snapshot catch-up returned ${response.status}`,
-              );
+              throw new Error(`upstream snapshot catch-up returned ${response.status}`)
             }
-            const batch = (await response.json()) as UpstreamBatch;
-            if (
-              !Number.isSafeInteger(batch.watermark) ||
-              !Array.isArray(batch.changes)
-            ) {
-              throw new Error("invalid upstream changes response");
+            const batch = (await response.json()) as UpstreamBatch
+            if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
+              throw new Error('invalid upstream changes response')
             }
-            this.#resetSnapshotBillingWindow();
+            this.#resetSnapshotBillingWindow()
             const result = this.#withIngestBilling(
               {
-                phase: "snapshot_catchup",
+                phase: 'snapshot_catchup',
                 generation: activeProgress.generation,
                 cursor,
                 batchWatermark: batch.watermark,
@@ -1249,18 +1168,18 @@ export function createSyncDurableObject<
                       this.#engineDb,
                       config.schema,
                       activeProgress.generation,
-                      batch,
-                    ),
-                  ),
-                ),
-            ) as ApplyUpstreamResult;
-            total += result.applied;
-            this.#recordIngestLogicalRows(result.applied);
+                      batch
+                    )
+                  )
+                )
+            ) as ApplyUpstreamResult
+            total += result.applied
+            this.#recordIngestLogicalRows(result.applied)
             if (result.caughtUp) {
-              this.#resetSnapshotBillingWindow();
+              this.#resetSnapshotBillingWindow()
               this.#withIngestBilling(
                 {
-                  phase: "snapshot_finalize",
+                  phase: 'snapshot_finalize',
                   generation: activeProgress.generation,
                   watermark: result.watermark,
                 },
@@ -1271,73 +1190,64 @@ export function createSyncDurableObject<
                         this.#engineDb,
                         config.schema,
                         activeProgress.generation,
-                        String(result.watermark),
-                      ),
-                    ),
-                  ),
-              );
-              progress = null;
-              snapshotCompleted = true;
-              break;
+                        String(result.watermark)
+                      )
+                    )
+                  )
+              )
+              progress = null
+              snapshotCompleted = true
+              break
             }
             if (String(result.watermark) === cursor) {
-              this.#tripIngest("ingestCursorStalled", {
-                phase: "snapshot_catchup",
+              this.#tripIngest('ingestCursorStalled', {
+                phase: 'snapshot_catchup',
                 generation: activeProgress.generation,
                 cursor,
                 batchWatermark: batch.watermark,
                 changeRows: batch.changes.length,
                 applied: result.applied,
-              });
+              })
             }
             progress = {
               ...progress,
               catchupWatermark: String(result.watermark),
-            };
-            continue;
+            }
+            continue
           }
 
-          const cursor = this.#engineState().upstreamWatermark;
+          const cursor = this.#engineState().upstreamWatermark
           if (forceSnapshot) {
-            forceSnapshot = false;
-            const begun = await this.#beginSnapshotGeneration(path);
-            progress = begun.progress;
-            pendingPage = begun.page;
-            snapshotPageLimit = begun.pageLimit;
-            continue;
+            forceSnapshot = false
+            const begun = await this.#beginSnapshotGeneration(path)
+            progress = begun.progress
+            pendingPage = begun.page
+            snapshotPageLimit = begun.pageLimit
+            continue
           }
-          const endpoint = new URL(
-            `${path}/changes`,
-            "https://upstream.invalid",
-          );
-          endpoint.searchParams.set("watermark", cursor);
-          endpoint.searchParams.set("limit", String(upstreamLimit));
-          const response = await this.#serviceBinding().fetch(
-            endpoint.toString(),
-            {
-              headers: { host: endpoint.host },
-            },
-          );
+          const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
+          endpoint.searchParams.set('watermark', cursor)
+          endpoint.searchParams.set('limit', String(upstreamLimit))
+          const response = await this.#serviceBinding().fetch(endpoint.toString(), {
+            headers: { host: endpoint.host },
+          })
           if (response.status === 410) {
-            const begun = await this.#beginSnapshotGeneration(path);
-            progress = begun.progress;
-            pendingPage = begun.page;
-            snapshotPageLimit = begun.pageLimit;
-            continue;
+            const begun = await this.#beginSnapshotGeneration(path)
+            progress = begun.progress
+            pendingPage = begun.page
+            snapshotPageLimit = begun.pageLimit
+            continue
           }
           if (!response.ok) {
-            throw new Error(`upstream changes returned ${response.status}`);
+            throw new Error(`upstream changes returned ${response.status}`)
           }
-          const batch = (await response.json()) as UpstreamBatch;
-          if (
-            !Number.isSafeInteger(batch.watermark) ||
-            !Array.isArray(batch.changes)
-          ) {
-            throw new Error("invalid upstream changes response");
+          const batch = (await response.json()) as UpstreamBatch
+          if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
+            throw new Error('invalid upstream changes response')
           }
           const result = this.#withIngestBilling(
             {
-              phase: "changes",
+              phase: 'changes',
               cursor,
               batchWatermark: batch.watermark,
               changeRows: batch.changes.length,
@@ -1345,165 +1255,156 @@ export function createSyncDurableObject<
             () =>
               this.ctx.storage.transactionSync(() =>
                 this.#wasm(() =>
-                  engine_apply_upstream(this.#engineDb, config.schema, batch),
-                ),
-              ),
-          ) as ApplyUpstreamResult;
-          total += result.applied;
-          this.#recordIngestLogicalRows(result.applied);
-          const nextCursor = this.#engineState().upstreamWatermark;
-          if (
-            batch.changes.length > 0 &&
-            String(nextCursor) === String(cursor)
-          ) {
-            this.#tripIngest("ingestCursorStalled", {
-              phase: "changes",
+                  engine_apply_upstream(this.#engineDb, config.schema, batch)
+                )
+              )
+          ) as ApplyUpstreamResult
+          total += result.applied
+          this.#recordIngestLogicalRows(result.applied)
+          const nextCursor = this.#engineState().upstreamWatermark
+          if (batch.changes.length > 0 && String(nextCursor) === String(cursor)) {
+            this.#tripIngest('ingestCursorStalled', {
+              phase: 'changes',
               cursor,
               batchWatermark: batch.watermark,
               changeRows: batch.changes.length,
               applied: result.applied,
-            });
+            })
           }
-          if (result.caughtUp) break;
+          if (result.caughtUp) break
           // a page can legitimately apply zero rows while still advancing the
           // watermark: the engine consumes changes for tables this host does not
           // model (subset replica) without materializing them. only a page that
           // neither applied nor advanced is genuinely stalled.
           if (result.applied === 0 && String(nextCursor) === String(cursor)) {
-            this.#tripIngest("ingestCursorStalled", {
-              phase: "changes",
+            this.#tripIngest('ingestCursorStalled', {
+              phase: 'changes',
               cursor,
               batchWatermark: batch.watermark,
               changeRows: batch.changes.length,
               applied: result.applied,
-            });
+            })
           }
         }
-        this.#recoverIngestBreaker();
-        const endingWatermark = this.#engineState().watermark;
-        if (
-          snapshotCompleted ||
-          total > 0 ||
-          endingWatermark !== startingWatermark
-        ) {
-          await this.#enqueueWake("__upstream__");
+        this.#recoverIngestBreaker()
+        const endingWatermark = this.#engineState().watermark
+        if (snapshotCompleted || total > 0 || endingWatermark !== startingWatermark) {
+          await this.#enqueueWake('__upstream__')
         }
-        return total;
+        return total
       })().finally(() => {
-        this.#ingestPromise = null;
-      });
-      return this.#ingestPromise;
+        this.#ingestPromise = null
+      })
+      return this.#ingestPromise
     }
 
     #ingestAfterCurrent(upstreamPath: string | null): Promise<number> {
-      const current = this.#ingestPromise;
+      const current = this.#ingestPromise
       return current
         ? current.then(() => this.#ingest(upstreamPath))
-        : this.#ingest(upstreamPath);
+        : this.#ingest(upstreamPath)
     }
 
     async #fetchDelegatedPush(
       endpoint: URL,
       headers: Headers,
       body: ArrayBuffer,
-      provisioning = false,
+      provisioning = false
     ): Promise<Response> {
       const binding = this.#serviceBinding(
-        config.mutateBinding ?? config.upstream?.binding,
-      );
-      let lastError: unknown = null;
+        config.mutateBinding ?? config.upstream?.binding
+      )
+      let lastError: unknown = null
       for (let attempt = 1; attempt <= delegateMaxAttempts; attempt++) {
-        let response: Response | null = null;
+        let response: Response | null = null
         try {
           response = await binding.fetch(endpoint.toString(), {
-            method: "POST",
+            method: 'POST',
             headers,
             body,
             signal: AbortSignal.timeout(
-              provisioning
-                ? Math.max(delegateTimeoutMs, 25_000)
-                : delegateTimeoutMs,
+              provisioning ? Math.max(delegateTimeoutMs, 25_000) : delegateTimeoutMs
             ),
-          });
+          })
         } catch (error) {
-          lastError = error;
+          lastError = error
         }
         if (
           !shouldRetryDelegatedPush(
             response?.status ?? null,
             attempt,
-            delegateMaxAttempts,
+            delegateMaxAttempts
           )
         ) {
-          if (response) return response;
-          throw lastError;
+          if (response) return response
+          throw lastError
         }
-        await response?.body?.cancel();
+        await response?.body?.cancel()
         const delayMs = retryDelayMs(
           attempt,
           delegateInitialBackoffMs,
-          delegateMaxBackoffMs,
-        );
+          delegateMaxBackoffMs
+        )
         console.warn(
           JSON.stringify({
-            event: "sync_delegated_push_retry",
+            event: 'sync_delegated_push_retry',
             attempt,
             maxAttempts: delegateMaxAttempts,
             status: response?.status ?? null,
             delayMs,
             error: response ? null : errorMessage(lastError),
-          }),
-        );
-        await scheduler.wait(delayMs);
+          })
+        )
+        await scheduler.wait(delayMs)
       }
-      throw lastError ?? new Error("delegated push retry exhausted");
+      throw lastError ?? new Error('delegated push retry exhausted')
     }
 
     #log(fields: Record<string, unknown>): void {
       console.log(
         JSON.stringify({
-          event: "sync_request",
+          event: 'sync_request',
           hostVersion: config.hostVersion,
           engineVersion: engine_version(),
           ...fields,
-        }),
-      );
+        })
+      )
     }
 
     #enqueueWake(originClientID: string): Promise<void> {
-      this.#wakeOrigins.add(originClientID);
+      this.#wakeOrigins.add(originClientID)
       for (const socket of this.ctx.getWebSockets()) {
-        const attachment = socketAttachment(socket);
+        const attachment = socketAttachment(socket)
         if (
           !attachment ||
           attachment.clientID === originClientID ||
           this.#pulling.has(attachment.clientID)
         ) {
-          continue;
+          continue
         }
-        this.#wakeRecipients.add(socket);
+        this.#wakeRecipients.add(socket)
       }
-      return this.#scheduleWake();
+      return this.#scheduleWake()
     }
 
     #scheduleWake(): Promise<void> {
       if (!this.#wakePromise) {
-        const queuedAt = performance.now();
+        const queuedAt = performance.now()
         this.#wakePromise = (async () => {
-          await scheduler.wait(wakeCoalesceMs);
-          const fanoutStarted = performance.now();
-          const origins = this.#wakeOrigins;
-          this.#wakeOrigins = new Set();
-          const recipients = this.#wakeRecipients;
-          this.#wakeRecipients = new Set();
-          this.#counters.wakeBatches++;
-          let sent = 0;
-          const sockets = this.ctx.getWebSockets();
+          await scheduler.wait(wakeCoalesceMs)
+          const fanoutStarted = performance.now()
+          const origins = this.#wakeOrigins
+          this.#wakeOrigins = new Set()
+          const recipients = this.#wakeRecipients
+          this.#wakeRecipients = new Set()
+          this.#counters.wakeBatches++
+          let sent = 0
+          const sockets = this.ctx.getWebSockets()
           for (const socket of recipients) {
             try {
-              socket.send("wake");
-              sent++;
-              this.#counters.wakeFrames++;
+              socket.send('wake')
+              sent++
+              this.#counters.wakeFrames++
             } catch {
               // A closing hibernating socket disappears from getWebSockets;
               // a race here is advisory and carries no correctness weight.
@@ -1511,7 +1412,7 @@ export function createSyncDurableObject<
           }
           console.log(
             JSON.stringify({
-              event: "sync_wake",
+              event: 'sync_wake',
               hostVersion: config.hostVersion,
               socketCount: sockets.length,
               originCount: origins.size,
@@ -1519,41 +1420,40 @@ export function createSyncDurableObject<
               eligibleRecipients: recipients.size,
               coalesceMs: fanoutStarted - queuedAt,
               fanoutMs: performance.now() - fanoutStarted,
-            }),
-          );
+            })
+          )
         })().finally(() => {
-          this.#wakePromise = null;
-          if (this.#wakeOrigins.size > 0) void this.#scheduleWake();
-        });
+          this.#wakePromise = null
+          if (this.#wakeOrigins.size > 0) void this.#scheduleWake()
+        })
       }
-      return this.#wakePromise;
+      return this.#wakePromise
     }
 
     async #pull(
       request: Request,
       claims: NormalizedClaims,
-      namespace: string,
+      namespace: string
     ): Promise<Response> {
-      this.#counters.pulls++;
-      this.#engineDb.resetStats();
-      const started = performance.now();
-      let transactionMs = 0;
-      let body: Record<string, unknown> | undefined;
+      this.#counters.pulls++
+      this.#engineDb.resetStats()
+      const started = performance.now()
+      let transactionMs = 0
+      let body: Record<string, unknown> | undefined
       try {
-        body = await requestObject(request);
+        body = await requestObject(request)
         const transformVersion =
-          typeof config.queryTransformVersion === "function"
+          typeof config.queryTransformVersion === 'function'
             ? config.queryTransformVersion(claims)
-            : (config.queryTransformVersion ?? 0);
+            : (config.queryTransformVersion ?? 0)
         if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
-          throw new TypeError(
-            "queryTransformVersion must be a non-negative safe integer",
-          );
+          throw new TypeError('queryTransformVersion must be a non-negative safe integer')
         }
-        let response: Record<string, unknown>;
+        let response: Record<string, unknown>
         {
           const queries = body.queries as
-            { version?: unknown; patch?: unknown } | undefined;
+            | { version?: unknown; patch?: unknown }
+            | undefined
           if (queries && Array.isArray(queries.patch)) {
             // named queries resolve in-process against the app's ordinary
             // Zero registry, synchronously: patch application order is
@@ -1564,17 +1464,16 @@ export function createSyncDurableObject<
               config.queries,
               claims,
               transformVersion,
-              requestError,
-            );
-            body = { ...body, queries: { ...queries, patch } };
+              requestError
+            )
+            body = { ...body, queries: { ...queries, patch } }
           }
-          body = { ...body, _serverQueryTransformVersion: transformVersion };
-          const clientID =
-            typeof body.clientID === "string" ? body.clientID : "";
-          this.#pulling.add(clientID);
+          body = { ...body, _serverQueryTransformVersion: transformVersion }
+          const clientID = typeof body.clientID === 'string' ? body.clientID : ''
+          this.#pulling.add(clientID)
           try {
-            const txStarted = performance.now();
-            const duringFault = this.#takeFault("pull_during_tx");
+            const txStarted = performance.now()
+            const duringFault = this.#takeFault('pull_during_tx')
             response = this.ctx.storage.transactionSync(() => {
               const result = this.#wasm(() =>
                 engine_handle_query_pull(
@@ -1582,36 +1481,32 @@ export function createSyncDurableObject<
                   config.schema,
                   this.#retainChanges(),
                   body,
-                  claims.userID,
-                ),
-              ) as Record<string, unknown>;
-              if (duringFault)
-                throw this.#faultError(duringFault, "pull_during_tx");
-              return result;
-            });
-            transactionMs = performance.now() - txStarted;
+                  claims.userID
+                )
+              ) as Record<string, unknown>
+              if (duringFault) throw this.#faultError(duringFault, 'pull_during_tx')
+              return result
+            })
+            transactionMs = performance.now() - txStarted
           } finally {
-            this.#pulling.delete(clientID);
+            this.#pulling.delete(clientID)
           }
         }
-        const afterPullFault = this.#takeFault("pull_after_commit");
-        if (afterPullFault)
-          throw this.#faultError(afterPullFault, "pull_after_commit");
-        const patch = Array.isArray(response.rowsPatch)
-          ? response.rowsPatch
-          : [];
-        const queriesBody = body.queries as { patch?: unknown[] } | undefined;
+        const afterPullFault = this.#takeFault('pull_after_commit')
+        if (afterPullFault) throw this.#faultError(afterPullFault, 'pull_after_commit')
+        const patch = Array.isArray(response.rowsPatch) ? response.rowsPatch : []
+        const queriesBody = body.queries as { patch?: unknown[] } | undefined
         const queryPuts = Array.isArray(queriesBody?.patch)
           ? queriesBody.patch.filter(
-              (entry) => (entry as { op?: unknown } | null)?.op === "put",
+              (entry) => (entry as { op?: unknown } | null)?.op === 'put'
             ).length
-          : 0;
-        this.#counters.queryRecompilations += queryPuts;
-        const state = this.#engineStateBestEffort();
+          : 0
+        this.#counters.queryRecompilations += queryPuts
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
-          requestKind: "pull",
-          resultClass: response.unchanged === true ? "unchanged" : "success",
+          requestKind: 'pull',
+          resultClass: response.unchanged === true ? 'unchanged' : 'success',
           inputCookie: body.cookie ?? null,
           outputCookie: response.cookie ?? null,
           retainedFloor: state?.floor ?? null,
@@ -1619,25 +1514,25 @@ export function createSyncDurableObject<
           changeRowsScanned: null,
           changeRowsIncluded: null,
           queriesRecomputed: queryPuts,
-          rowPuts: patch.filter((entry) => entry?.op === "put").length,
-          rowDeletes: patch.filter((entry) => entry?.op === "del").length,
+          rowPuts: patch.filter((entry) => entry?.op === 'put').length,
+          rowDeletes: patch.filter((entry) => entry?.op === 'del').length,
           lmidAdvances: 0,
           transactionMs,
           totalMs: performance.now() - started,
           resetReason: null,
           wasmBoundaryCalls: this.#counters.wasmBoundaryCalls,
           sql: this.#engineDb.stats,
-        });
-        return json(response);
+        })
+        return json(response)
       } catch (error) {
-        const status = statusOf(error);
-        if (status === 409) this.#counters.resets++;
-        if (status === 500) this.#counters.invariantFailures++;
-        const state = this.#engineStateBestEffort();
+        const status = statusOf(error)
+        if (status === 409) this.#counters.resets++
+        if (status === 500) this.#counters.invariantFailures++
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
-          requestKind: "pull",
-          resultClass: status === 409 ? "reset" : "error",
+          requestKind: 'pull',
+          resultClass: status === 409 ? 'reset' : 'error',
           inputCookie: body?.cookie ?? null,
           outputCookie: null,
           retainedFloor: state?.floor ?? null,
@@ -1651,8 +1546,8 @@ export function createSyncDurableObject<
           transactionMs,
           totalMs: performance.now() - started,
           resetReason: status === 409 ? errorMessage(error) : null,
-        });
-        return json({ error: errorMessage(error) }, status);
+        })
+        return json({ error: errorMessage(error) }, status)
       }
     }
 
@@ -1660,23 +1555,23 @@ export function createSyncDurableObject<
       request: Request,
       claims: NormalizedClaims,
       namespace: string,
-      upstreamPath: string | null,
+      upstreamPath: string | null
     ): Promise<Response> {
-      this.#counters.pushes++;
-      this.#engineDb.resetStats();
-      const started = performance.now();
-      let transactionMs = 0;
-      let lmidAdvances = 0;
-      let resultClass = "success";
+      this.#counters.pushes++
+      this.#engineDb.resetStats()
+      const started = performance.now()
+      let transactionMs = 0
+      let lmidAdvances = 0
+      let resultClass = 'success'
       if (!this.#writerEnabled()) {
         // Workerd requires the request stream to be consumed before the DO
         // returns a response. Discard it without parsing or logging payloads.
-        await request.arrayBuffer();
-        const state = this.#engineStateBestEffort();
+        await request.arrayBuffer()
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
-          requestKind: "push",
-          resultClass: "writer_disabled",
+          requestKind: 'push',
+          resultClass: 'writer_disabled',
           inputCookie: null,
           outputCookie: null,
           retainedFloor: state?.floor ?? null,
@@ -1689,75 +1584,74 @@ export function createSyncDurableObject<
           lmidAdvances: 0,
           transactionMs: 0,
           totalMs: performance.now() - started,
-          resetReason: "writer disabled by operator",
+          resetReason: 'writer disabled by operator',
           wasmBoundaryCalls: this.#counters.wasmBoundaryCalls,
           sql: this.#engineDb.stats,
-        });
-        return json({ error: "writer disabled by operator" }, 503);
+        })
+        return json({ error: 'writer disabled by operator' }, 503)
       }
       if (config.mutateUrl) {
         try {
-          const bytes = await request.arrayBuffer();
+          const bytes = await request.arrayBuffer()
           const body = JSON.parse(new TextDecoder().decode(bytes)) as Record<
             string,
             unknown
-          >;
-          const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan;
-          if (plan.kind === "respond") return json(plan.response);
+          >
+          const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan
+          if (plan.kind === 'respond') return json(plan.response)
 
           const endpoint = new URL(
-            `${upstreamPath ?? ""}${config.mutateUrl}`,
-            config.mutateOrigin ?? "https://upstream.invalid",
-          );
-          const headers = new Headers(request.headers);
-          headers.delete(NAMESPACE_HEADER);
-          headers.delete(UPSTREAM_PATH_HEADER);
-          headers.set("host", endpoint.host);
+            `${upstreamPath ?? ''}${config.mutateUrl}`,
+            config.mutateOrigin ?? 'https://upstream.invalid'
+          )
+          const headers = new Headers(request.headers)
+          headers.delete(NAMESPACE_HEADER)
+          headers.delete(UPSTREAM_PATH_HEADER)
+          headers.set('host', endpoint.host)
           const upstreamResponse = await this.#fetchDelegatedPush(
             endpoint,
             headers,
             bytes,
-            this.#engineState().upstreamWatermark === "0",
-          );
+            this.#engineState().upstreamWatermark === '0'
+          )
           if (!upstreamResponse.ok) {
-            return new Response(upstreamResponse.body, upstreamResponse);
+            return new Response(upstreamResponse.body, upstreamResponse)
           }
-          const upstreamBody =
-            (await upstreamResponse.json()) as DelegatedPushBody;
-          const delegatedResponse = upstreamBody.pushResponse ?? upstreamBody;
+          const upstreamBody = (await upstreamResponse.json()) as DelegatedPushBody
+          const delegatedResponse = upstreamBody.pushResponse ?? upstreamBody
           if (isStructuredPushFailed(delegatedResponse)) {
             // PushFailed is a successful protocol response describing an
             // application-level failure. There are intentionally no mutation
             // acknowledgements to finalize in the host; preserve the body so
             // the Zero client can apply its retry/error policy.
-            return json({ pushResponse: delegatedResponse });
+            return json({ pushResponse: delegatedResponse })
           }
           const acknowledged =
-            typeof upstreamBody.pushResponse === "object" &&
+            typeof upstreamBody.pushResponse === 'object' &&
             upstreamBody.pushResponse !== null &&
-            "mutations" in upstreamBody.pushResponse
+            'mutations' in upstreamBody.pushResponse
               ? upstreamBody.pushResponse.mutations
-              : upstreamBody.mutations;
+              : upstreamBody.mutations
           if (!Array.isArray(acknowledged)) {
-            throw new Error("delegated push returned no mutation results");
+            throw new Error('delegated push returned no mutation results')
           }
           for (const mutation of plan.mutations) {
             const ack = acknowledged.some(
               (result) =>
                 result.id?.clientID === mutation.clientID &&
-                String(result.id?.id) === mutation.id,
-            );
+                String(result.id?.id) === mutation.id
+            )
             if (!ack) {
               throw new Error(
-                `delegated push did not acknowledge ${mutation.clientID}:${mutation.id}`,
-              );
+                `delegated push did not acknowledge ${mutation.clientID}:${mutation.id}`
+              )
             }
           }
           // the delegated app response is causally visible through DATA by
           // contract. start an ingest round after that response, even if an
           // older round is still in flight, then journal lmids. every capped
           // log prefix therefore preserves effects-before-ack.
-          await this.#ingestAfterCurrent(upstreamPath);
+          await this.#ingestAfterCurrent(upstreamPath)
           for (const mutation of plan.mutations) {
             this.ctx.storage.transactionSync(() => {
               const decision = this.#wasm(() =>
@@ -1766,98 +1660,86 @@ export function createSyncDurableObject<
                   plan.clientGroupID,
                   mutation.clientID,
                   mutation.id,
-                  claims.userID,
-                ),
-              ) as Preflight;
-              if (decision.kind === "applied") {
+                  claims.userID
+                )
+              ) as Preflight
+              if (decision.kind === 'applied') {
                 this.#wasm(() =>
                   engine_finalize(
                     this.#engineDb,
                     plan.clientGroupID,
                     mutation.clientID,
-                    mutation.id,
-                  ),
-                );
-                lmidAdvances++;
+                    mutation.id
+                  )
+                )
+                lmidAdvances++
               }
-            });
+            })
           }
           if (lmidAdvances > 0) {
             this.ctx.storage.transactionSync(() =>
-              this.#wasm(() =>
-                engine_prune(this.#engineDb, this.#retainChanges()),
-              ),
-            );
+              this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges()))
+            )
           }
-          return json({ pushResponse: delegatedResponse });
+          return json({ pushResponse: delegatedResponse })
         } catch (error) {
-          return errorResponse(error);
+          return errorResponse(error)
         }
       }
       try {
-        const body = await requestObject(request);
-        const beforeMutationFault = this.#takeFault("push_before_mutation");
+        const body = await requestObject(request)
+        const beforeMutationFault = this.#takeFault('push_before_mutation')
         if (beforeMutationFault)
-          throw this.#faultError(beforeMutationFault, "push_before_mutation");
-        if (!this.#executor)
-          throw new Error("local sync executor is not configured");
+          throw this.#faultError(beforeMutationFault, 'push_before_mutation')
+        if (!this.#executor) throw new Error('local sync executor is not configured')
         // Consume the fault outside the transaction it aborts so a rollback
         // cannot restore the one-shot control flag.
         this.#executorBeforeCommitFault = this.#takeFault(
-          "push_after_write_before_commit",
-        );
-        const txStarted = performance.now();
-        let result;
+          'push_after_write_before_commit'
+        )
+        const txStarted = performance.now()
+        let result
         try {
-          result = await this.#executor.push(body, claims);
+          result = await this.#executor.push(body, claims)
         } finally {
-          this.#executorBeforeCommitFault = null;
+          this.#executorBeforeCommitFault = null
         }
-        transactionMs += performance.now() - txStarted;
+        transactionMs += performance.now() - txStarted
 
         const mutationResults =
-          "mutations" in result.pushResponse
-            ? result.pushResponse.mutations
-            : [];
+          'mutations' in result.pushResponse ? result.pushResponse.mutations : []
         for (const mutation of mutationResults) {
           if (
-            "error" in mutation.result &&
-            mutation.result.error === "alreadyProcessed"
+            'error' in mutation.result &&
+            mutation.result.error === 'alreadyProcessed'
           ) {
-            continue;
+            continue
           }
-          lmidAdvances++;
-          if ("error" in mutation.result && mutation.result.error === "app") {
-            this.#counters.applicationErrors++;
-            resultClass = "application_error";
+          lmidAdvances++
+          if ('error' in mutation.result && mutation.result.error === 'app') {
+            this.#counters.applicationErrors++
+            resultClass = 'application_error'
           }
-          this.ctx.waitUntil(this.#enqueueWake(mutation.id.clientID));
+          this.ctx.waitUntil(this.#enqueueWake(mutation.id.clientID))
         }
 
         if (mutationResults.length > 0) {
-          const txStarted = performance.now();
+          const txStarted = performance.now()
           await this.ctx.storage.transaction(async () => {
-            this.#wasm(() =>
-              engine_prune(this.#engineDb, this.#retainChanges()),
-            );
-          });
-          transactionMs += performance.now() - txStarted;
-          this.#counters.retentionRuns++;
+            this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges()))
+          })
+          transactionMs += performance.now() - txStarted
+          this.#counters.retentionRuns++
         }
 
-        const afterCommitFault = this.#takeFault(
-          "push_after_commit_before_response",
-        );
+        const afterCommitFault = this.#takeFault('push_after_commit_before_response')
         if (afterCommitFault)
-          throw this.#faultError(
-            afterCommitFault,
-            "push_after_commit_before_response",
-          );
+          throw this.#faultError(afterCommitFault, 'push_after_commit_before_response')
 
-        const state = this.#engineStateBestEffort();
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
-          requestKind: "push",
+          requestKind: 'push',
           resultClass,
           inputCookie: null,
           outputCookie: null,
@@ -1874,20 +1756,20 @@ export function createSyncDurableObject<
           resetReason: null,
           wasmBoundaryCalls: this.#counters.wasmBoundaryCalls,
           sql: this.#engineDb.stats,
-        });
+        })
         if (this.#dropNextPushResponse) {
-          this.#dropNextPushResponse = false;
-          return json({ error: "intentionally dropped push response" }, 503);
+          this.#dropNextPushResponse = false
+          return json({ error: 'intentionally dropped push response' }, 503)
         }
-        return json(result);
+        return json(result)
       } catch (error) {
-        const status = statusOf(error);
-        if (status === 500) this.#counters.invariantFailures++;
-        const state = this.#engineStateBestEffort();
+        const status = statusOf(error)
+        if (status === 500) this.#counters.invariantFailures++
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
-          requestKind: "push",
-          resultClass: "error",
+          requestKind: 'push',
+          resultClass: 'error',
           inputCookie: null,
           outputCookie: null,
           retainedFloor: state?.floor ?? null,
@@ -1901,8 +1783,8 @@ export function createSyncDurableObject<
           transactionMs,
           totalMs: performance.now() - started,
           resetReason: null,
-        });
-        return errorResponse(error);
+        })
+        return errorResponse(error)
       }
     }
 
@@ -1910,9 +1792,9 @@ export function createSyncDurableObject<
     // namespace configures a manifest, so a wake-only deployment never pays for
     // one and every realtime path below is skipped.
     #realtimeHost(): RealtimeSocketHost | null {
-      const manifest = config.streamingManifest;
-      if (!manifest) return null;
-      if (this.#realtime) return this.#realtime;
+      const manifest = config.streamingManifest
+      if (!manifest) return null
+      if (this.#realtime) return this.#realtime
       this.#realtime = createSocketHost({
         manifest,
         // Answered from this object's own SQLite, which is the same durable
@@ -1927,22 +1809,22 @@ export function createSyncDurableObject<
               identity.clientGroupID,
               identity.userID,
               topic.table,
-              topic.key,
-            ),
-          ) as { ownsGroup: boolean; authorized: boolean };
-          if (result.authorized) return { status: "active" };
+              topic.key
+            )
+          ) as { ownsGroup: boolean; authorized: boolean }
+          if (result.authorized) return { status: 'active' }
           // the group is this user's, but the row is not in its membership
           // yet. That is the optimistic-row race, not a denial: the client
           // holds a row from its own unacked mutation, and retries after the
           // pull that records it.
-          if (result.ownsGroup) return { status: "pending" };
+          if (result.ownsGroup) return { status: 'pending' }
           return {
-            status: "denied",
-            reason: "row is not in this client group",
-          };
+            status: 'denied',
+            reason: 'row is not in this client group',
+          }
         },
-      });
-      return this.#realtime;
+      })
+      return this.#realtime
     }
 
     // Replay the sockets that outlived the previous incarnation. Every open
@@ -1950,71 +1832,71 @@ export function createSyncDurableObject<
     // must reach every subscriber of a topic, so restoring only the socket that
     // happened to send first would silently drop the rest.
     #realtimeRehydrate(host: RealtimeSocketHost): Promise<void> {
-      if (this.#realtimeReady) return this.#realtimeReady;
+      if (this.#realtimeReady) return this.#realtimeReady
       this.#realtimeReady = (async () => {
         const subscribers: {
-          socket: WebSocket;
-          identity: RealtimeIdentity;
-          connectionID: string;
-          topics: RealtimeTopic[];
-        }[] = [];
+          socket: WebSocket
+          identity: RealtimeIdentity
+          connectionID: string
+          topics: RealtimeTopic[]
+        }[] = []
         for (const socket of this.ctx.getWebSockets()) {
-          if (this.#realtimeConnections.has(socket)) continue;
-          const attachment = socketAttachment(socket);
-          if (!attachment) continue;
+          if (this.#realtimeConnections.has(socket)) continue
+          const attachment = socketAttachment(socket)
+          if (!attachment) continue
           if (attachment.producerID) {
             // Generations are ephemeral by design, so nothing is restored here
             // beyond the channel itself; the producer opens a new generation
             // and the durable row covers the gap either way.
             this.#realtimeConnections.set(
               socket,
-              host.acceptProducer(socket, attachment.producerID),
-            );
-            continue;
+              host.acceptProducer(socket, attachment.producerID)
+            )
+            continue
           }
-          if (!attachment.identity) continue;
+          if (!attachment.identity) continue
           subscribers.push({
             socket,
             identity: attachment.identity,
             connectionID: attachment.identity.clientID,
             topics: attachment.topics ?? [],
-          });
+          })
         }
-        const restored = await host.rehydrate(subscribers);
+        const restored = await host.rehydrate(subscribers)
         subscribers.forEach((entry, index) => {
-          this.#realtimeConnections.set(entry.socket, restored[index]);
-        });
-      })();
-      return this.#realtimeReady;
+          this.#realtimeConnections.set(entry.socket, restored[index])
+        })
+      })()
+      return this.#realtimeReady
     }
 
     // A socket's topics are the only realtime state that must survive an
     // eviction, so they are rewritten whenever they change rather than on a
     // timer: an eviction is not announced.
     #realtimePersist(socket: WebSocket, connection: HostConnection): void {
-      const attachment = socketAttachment(socket);
-      if (!attachment) return;
+      const attachment = socketAttachment(socket)
+      if (!attachment) return
       socket.serializeAttachment({
         ...attachment,
         topics: [...connection.topics()],
-      } satisfies SocketAttachment);
+      } satisfies SocketAttachment)
     }
 
     #wake(request: Request): Response {
-      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-        return json({ error: "websocket upgrade required" }, 426);
+      if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+        return json({ error: 'websocket upgrade required' }, 426)
       }
-      const params = new URL(request.url).searchParams;
-      const clientID = params.get("clientID");
-      if (!clientID) return json({ error: "clientID is required" }, 400);
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
+      const params = new URL(request.url).searchParams
+      const clientID = params.get('clientID')
+      if (!clientID) return json({ error: 'clientID is required' }, 400)
+      const pair = new WebSocketPair()
+      const [client, server] = Object.values(pair)
       // The userID is the worker's, taken from the authenticated request. The
       // group is the client's own claim, and stays a claim: every subscription
       // is checked against this userID before a row is read, so asserting
       // someone else's group buys nothing.
-      const encodedUserID = request.headers.get(IDENTITY_HEADER);
-      const clientGroupID = params.get("clientGroupID");
+      const encodedUserID = request.headers.get(IDENTITY_HEADER)
+      const clientGroupID = params.get('clientGroupID')
       const identity =
         encodedUserID && clientGroupID
           ? {
@@ -2022,19 +1904,19 @@ export function createSyncDurableObject<
               clientID,
               clientGroupID,
             }
-          : undefined;
+          : undefined
       server.serializeAttachment({
         clientID,
         identity,
-      } satisfies SocketAttachment);
-      this.ctx.acceptWebSocket(server, [`client:${clientID}`]);
+      } satisfies SocketAttachment)
+      this.ctx.acceptWebSocket(server, [`client:${clientID}`])
       if (identity) {
-        const host = this.#realtimeHost();
+        const host = this.#realtimeHost()
         if (host) {
           this.#realtimeConnections.set(
             server,
-            host.acceptSubscriber(server, identity, clientID),
-          );
+            host.acceptSubscriber(server, identity, clientID)
+          )
         }
       }
       // The alarm is only a safety net for an actively connected consumer.
@@ -2042,34 +1924,34 @@ export function createSyncDurableObject<
       // push ingests synchronously. Arming from construction made every
       // namespace poll upstream forever after its first request, even across
       // DO eviction, producing a permanent rows-written floor at zero traffic.
-      this.#armUpstreamAlarm();
-      const protocol = request.headers.get("sec-websocket-protocol");
+      this.#armUpstreamAlarm()
+      const protocol = request.headers.get('sec-websocket-protocol')
       return new Response(null, {
         status: 101,
-        headers: protocol ? { "Sec-WebSocket-Protocol": protocol } : undefined,
+        headers: protocol ? { 'Sec-WebSocket-Protocol': protocol } : undefined,
         webSocket: client,
-      } as ResponseInit & { webSocket: WebSocket });
+      } as ResponseInit & { webSocket: WebSocket })
     }
 
     #admin(
       route: string,
       request: Request,
-      upstreamPath: string | null,
+      upstreamPath: string | null
     ): Promise<Response> | Response {
-      if (route === "/admin/health") return json({ ok: true });
-      if (route === "/admin/sql-billing") return json({ ...this.#sqlBilling });
-      if (route === "/admin/upstream-write-budget" && request.method === "GET")
-        return this.#upstreamWriteBudgetStatus();
-      if (route === "/admin/status") {
+      if (route === '/admin/health') return json({ ok: true })
+      if (route === '/admin/sql-billing') return json({ ...this.#sqlBilling })
+      if (route === '/admin/upstream-write-budget' && request.method === 'GET')
+        return this.#upstreamWriteBudgetStatus()
+      if (route === '/admin/status') {
         const heap = (
           performance as Performance & {
             memory?: {
-              usedJSHeapSize: number;
-              totalJSHeapSize: number;
-              jsHeapSizeLimit: number;
-            };
+              usedJSHeapSize: number
+              totalJSHeapSize: number
+              jsHeapSizeLimit: number
+            }
           }
-        ).memory;
+        ).memory
         return this.ctx.storage.getAlarm().then((upstreamAlarmAt) =>
           json({
             bootID: this.#bootID,
@@ -2088,222 +1970,203 @@ export function createSyncDurableObject<
             sqlBillingSinceBoot: this.#sqlBilling,
             counters: this.#counters,
             ingestBreaker: this.#ingestBreaker.status(),
-          }),
-        );
+          })
+        )
       }
-      if (route === "/admin/sql") {
+      if (route === '/admin/sql') {
         return request.json().then((body) => {
           const { params, query } = body as {
-            params?: unknown;
-            query?: string;
-          };
-          if (typeof query !== "string")
-            return json({ error: "query is required" }, 400);
+            params?: unknown
+            query?: string
+          }
+          if (typeof query !== 'string') return json({ error: 'query is required' }, 400)
           try {
             return json({
               rows: this.#directSql.query(query, decodeSqlParams(params)),
-            });
+            })
           } catch (error) {
-            if (
-              error instanceof TypeError &&
-              error.message.startsWith("params")
-            ) {
-              return json({ error: `invalid params: ${error.message}` }, 400);
+            if (error instanceof TypeError && error.message.startsWith('params')) {
+              return json({ error: `invalid params: ${error.message}` }, 400)
             }
             if (
               error instanceof TypeError &&
-              error.message === "transaction SQL is host-owned and forbidden"
+              error.message === 'transaction SQL is host-owned and forbidden'
             ) {
-              return json({ error: error.message }, 400);
+              return json({ error: error.message }, 400)
             }
-            throw error;
+            throw error
           }
-        });
+        })
       }
-      if (route === "/admin/invalidate") {
+      if (route === '/admin/invalidate') {
         this.ctx.storage.transactionSync(() =>
-          this.#wasm(() => engine_invalidate(this.#engineDb)),
-        );
-        return json({ ok: true, engine: this.#engineState() });
+          this.#wasm(() => engine_invalidate(this.#engineDb))
+        )
+        return json({ ok: true, engine: this.#engineState() })
       }
-      if (route === "/admin/resnapshot") {
-        if (request.method !== "POST") {
-          return json({ error: "method not allowed" }, 405);
+      if (route === '/admin/resnapshot') {
+        if (request.method !== 'POST') {
+          return json({ error: 'method not allowed' }, 405)
         }
         return (async () => {
           try {
-            const beforeUpstreamWatermark =
-              this.#engineState().upstreamWatermark;
-            const applied = await this.#ingest(upstreamPath, true);
-            const engine = this.#engineState();
+            const beforeUpstreamWatermark = this.#engineState().upstreamWatermark
+            const applied = await this.#ingest(upstreamPath, true)
+            const engine = this.#engineState()
             return json({
               ok: true,
               applied,
               beforeUpstreamWatermark,
               afterUpstreamWatermark: engine.upstreamWatermark,
               engine,
-            });
+            })
           } catch (error) {
-            return errorResponse(error);
+            return errorResponse(error)
           }
-        })();
+        })()
       }
-      if (route === "/admin/drop-next-push-response") {
-        this.#dropNextPushResponse = true;
-        return json({ ok: true });
+      if (route === '/admin/drop-next-push-response') {
+        this.#dropNextPushResponse = true
+        return json({ ok: true })
       }
-      if (route === "/admin/restart") {
-        this.ctx.abort("admin requested durable object restart");
-        return json({ ok: true, bootID: this.#bootID });
+      if (route === '/admin/restart') {
+        this.ctx.abort('admin requested durable object restart')
+        return json({ ok: true, bootID: this.#bootID })
       }
-      if (route === "/admin/retention") {
+      if (route === '/admin/retention') {
         return request
           .json()
           .catch(() => ({}))
           .then((body) => {
-            const value = Number(
-              (body as { retainChanges?: unknown }).retainChanges,
-            );
+            const value = Number((body as { retainChanges?: unknown }).retainChanges)
             if (!Number.isSafeInteger(value) || value < 0)
-              return json({ error: "invalid retainChanges" }, 400);
-            this.#controlSet("retainChanges", String(value));
-            return json({ ok: true, retainChanges: value });
-          });
+              return json({ error: 'invalid retainChanges' }, 400)
+            this.#controlSet('retainChanges', String(value))
+            return json({ ok: true, retainChanges: value })
+          })
       }
-      if (route === "/admin/writer") {
-        if (request.method === "GET")
-          return json({ writerEnabled: this.#writerEnabled() });
+      if (route === '/admin/writer') {
+        if (request.method === 'GET')
+          return json({ writerEnabled: this.#writerEnabled() })
         return request
           .json()
           .catch(() => ({}))
           .then((body) => {
-            const enabled = (body as { enabled?: unknown }).enabled;
-            if (typeof enabled !== "boolean")
-              return json({ error: "enabled must be a boolean" }, 400);
-            this.#controlSet("writerEnabled", enabled ? "1" : "0");
-            return json({ ok: true, writerEnabled: enabled });
-          });
+            const enabled = (body as { enabled?: unknown }).enabled
+            if (typeof enabled !== 'boolean')
+              return json({ error: 'enabled must be a boolean' }, 400)
+            this.#controlSet('writerEnabled', enabled ? '1' : '0')
+            return json({ ok: true, writerEnabled: enabled })
+          })
       }
-      if (route === "/admin/ingest-breaker") {
-        if (request.method === "GET") return json(this.#ingestBreaker.status());
-        this.#ingestBreaker.reopen();
+      if (route === '/admin/ingest-breaker') {
+        if (request.method === 'GET') return json(this.#ingestBreaker.status())
+        this.#ingestBreaker.reopen()
         this.#controlDelete(
-          "ingestBreakerReason",
-          "ingestBreakerRetryAt",
-          "ingestBreakerTrips",
-        );
-        console.log(
-          JSON.stringify({ event: "sync_upstream_ingest_breaker_reopened" }),
-        );
-        return json({ ok: true, ...this.#ingestBreaker.status() });
+          'ingestBreakerReason',
+          'ingestBreakerRetryAt',
+          'ingestBreakerTrips'
+        )
+        console.log(JSON.stringify({ event: 'sync_upstream_ingest_breaker_reopened' }))
+        return json({ ok: true, ...this.#ingestBreaker.status() })
       }
-      if (route === "/admin/fault") {
+      if (route === '/admin/fault') {
         return request
           .json()
           .catch(() => ({}))
           .then((body) => {
             const value = body as {
-              clear?: unknown;
-              point?: unknown;
-              kind?: unknown;
-            };
+              clear?: unknown
+              point?: unknown
+              kind?: unknown
+            }
             if (value.clear === true) {
               this.#directSql.exec(
-                "DELETE FROM _zsync_host_control WHERE key IN ('faultPoint', 'faultKind')",
-              );
-              return json({ ok: true, armed: null });
+                "DELETE FROM _zsync_host_control WHERE key IN ('faultPoint', 'faultKind')"
+              )
+              return json({ ok: true, armed: null })
             }
             const points: FaultPoint[] = [
-              "push_before_mutation",
-              "push_after_write_before_commit",
-              "push_after_commit_before_response",
-              "pull_during_tx",
-              "pull_after_commit",
-            ];
+              'push_before_mutation',
+              'push_after_write_before_commit',
+              'push_after_commit_before_response',
+              'pull_during_tx',
+              'pull_after_commit',
+            ]
             if (!points.includes(value.point as FaultPoint))
-              return json({ error: "invalid fault point" }, 400);
-            if (value.kind !== "error" && value.kind !== "quota")
-              return json({ error: "invalid fault kind" }, 400);
-            this.#controlSet("faultPoint", value.point as string);
-            this.#controlSet("faultKind", value.kind);
+              return json({ error: 'invalid fault point' }, 400)
+            if (value.kind !== 'error' && value.kind !== 'quota')
+              return json({ error: 'invalid fault kind' }, 400)
+            this.#controlSet('faultPoint', value.point as string)
+            this.#controlSet('faultKind', value.kind)
             return json({
               ok: true,
               armed: { point: value.point, kind: value.kind },
-            });
-          });
+            })
+          })
       }
-      return json({ error: "not found" }, 404);
+      return json({ error: 'not found' }, 404)
     }
 
     async fetch(request: Request): Promise<Response> {
-      this.#simulateIdleTeardown(Date.now());
-      const route = routeAfterNamespace(new URL(request.url).pathname);
-      const namespace = request.headers.get(NAMESPACE_HEADER) ?? "unknown";
-      const upstreamPath = this.#rememberUpstreamPath(request);
-      if (route.startsWith("/admin/"))
-        return this.#admin(route, request, upstreamPath);
+      this.#simulateIdleTeardown(Date.now())
+      const route = routeAfterNamespace(new URL(request.url).pathname)
+      const namespace = request.headers.get(NAMESPACE_HEADER) ?? 'unknown'
+      const upstreamPath = this.#rememberUpstreamPath(request)
+      if (route.startsWith('/admin/')) return this.#admin(route, request, upstreamPath)
 
-      if (route === "/wake" && request.method === "GET")
-        return this.#wake(request);
-      if (route === "/realtime/produce" && request.method === "GET") {
-        return this.#realtimeProduce(request, this.env);
+      if (route === '/wake' && request.method === 'GET') return this.#wake(request)
+      if (route === '/realtime/produce' && request.method === 'GET') {
+        return this.#realtimeProduce(request, this.env)
       }
-      if (route === "/notify" && request.method === "POST") {
+      if (route === '/notify' && request.method === 'POST') {
         try {
-          const applied = await this.#ingest(upstreamPath);
-          return json({ ok: true, applied });
+          const applied = await this.#ingest(upstreamPath)
+          return json({ ok: true, applied })
         } catch (error) {
-          return errorResponse(error);
+          return errorResponse(error)
         }
       }
 
-      if (
-        (route === "/pull" || route === "/push") &&
-        request.method === "POST"
-      ) {
-        let forwarded;
+      if ((route === '/pull' || route === '/push') && request.method === 'POST') {
+        let forwarded
         try {
-          forwarded = await forwardedSyncRequest(request);
+          forwarded = await forwardedSyncRequest(request)
         } catch (error) {
-          return errorResponse(error);
+          return errorResponse(error)
         }
         // pull and push both establish the upstream schema and snapshot barrier.
         try {
-          await this.#ingest(upstreamPath);
+          await this.#ingest(upstreamPath)
         } catch (error) {
-          return errorResponse(error);
+          return errorResponse(error)
         }
-        if (route === "/pull") {
-          return this.#pull(forwarded.request, forwarded.claims, namespace);
+        if (route === '/pull') {
+          return this.#pull(forwarded.request, forwarded.claims, namespace)
         }
-        return this.#push(
-          forwarded.request,
-          forwarded.claims,
-          namespace,
-          upstreamPath,
-        );
+        return this.#push(forwarded.request, forwarded.claims, namespace, upstreamPath)
       }
-      return json({ error: "not found" }, 404);
+      return json({ error: 'not found' }, 404)
     }
 
     async alarm(): Promise<void> {
-      if (this.ctx.getWebSockets().length === 0) return;
+      if (this.ctx.getWebSockets().length === 0) return
       try {
-        await this.#ingest();
+        await this.#ingest()
       } catch (error) {
         console.error(
           JSON.stringify({
-            event: "sync_upstream_ingest_error",
+            event: 'sync_upstream_ingest_error',
             status: statusOf(error),
             error: errorMessage(error),
-          }),
-        );
+          })
+        )
       } finally {
         if (this.ctx.getWebSockets().length > 0) {
-          const retryAfterMs = this.#ingestBreaker.status().retryAfterMs;
+          const retryAfterMs = this.#ingestBreaker.status().retryAfterMs
           await this.ctx.storage.setAlarm(
-            Date.now() + Math.max(upstreamIntervalMs, retryAfterMs),
-          );
+            Date.now() + Math.max(upstreamIntervalMs, retryAfterMs)
+          )
         }
       }
     }
@@ -2312,98 +2175,84 @@ export function createSyncDurableObject<
     // so it needs its own authorization and gets no default: a namespace that
     // configures no authorizeProduce cannot be published to at all.
     async #realtimeProduce(request: Request, env: Env): Promise<Response> {
-      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-        return json({ error: "websocket upgrade required" }, 426);
+      if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+        return json({ error: 'websocket upgrade required' }, 426)
       }
-      const host = this.#realtimeHost();
-      if (!host) return json({ error: "namespace streams no fields" }, 404);
-      if (
-        !config.authorizeProduce ||
-        !(await config.authorizeProduce(request, env))
-      ) {
-        return json({ error: "forbidden" }, 403);
+      const host = this.#realtimeHost()
+      if (!host) return json({ error: 'namespace streams no fields' }, 404)
+      if (!config.authorizeProduce || !(await config.authorizeProduce(request, env))) {
+        return json({ error: 'forbidden' }, 403)
       }
       const producerID =
-        new URL(request.url).searchParams.get("producerID") ??
-        crypto.randomUUID();
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
+        new URL(request.url).searchParams.get('producerID') ?? crypto.randomUUID()
+      const pair = new WebSocketPair()
+      const [client, server] = Object.values(pair)
       server.serializeAttachment({
         clientID: producerID,
         producerID,
-      } satisfies SocketAttachment);
-      this.ctx.acceptWebSocket(server, [`producer:${producerID}`]);
-      this.#realtimeConnections.set(
-        server,
-        host.acceptProducer(server, producerID),
-      );
-      return new Response(null, { status: 101, webSocket: client });
+      } satisfies SocketAttachment)
+      this.ctx.acceptWebSocket(server, [`producer:${producerID}`])
+      this.#realtimeConnections.set(server, host.acceptProducer(server, producerID))
+      return new Response(null, { status: 101, webSocket: client })
     }
 
     async webSocketMessage(
       socket: WebSocket,
-      message: string | ArrayBuffer,
+      message: string | ArrayBuffer
     ): Promise<void> {
-      if (message === "ping") {
-        socket.send("pong");
-        return;
+      if (message === 'ping') {
+        socket.send('pong')
+        return
       }
-      const host = this.#realtimeHost();
-      if (!host || typeof message !== "string") return;
+      const host = this.#realtimeHost()
+      if (!host || typeof message !== 'string') return
       // A cold start left the hub empty while the socket stayed open, so the
       // subscriptions have to be replayed before this frame is applied.
-      await this.#realtimeRehydrate(host);
-      const connection = this.#realtimeConnections.get(socket);
+      await this.#realtimeRehydrate(host)
+      const connection = this.#realtimeConnections.get(socket)
       if (!connection) {
         // a wake-only socket (no clientGroupID on the upgrade) has no realtime
         // identity, so a frame here is a subscription that can never deliver.
         // Closing names the cause; ignoring it would look like streaming that
         // silently stopped.
-        socket.close(
-          1008,
-          "realtime frames require clientGroupID on the wake upgrade",
-        );
-        return;
+        socket.close(1008, 'realtime frames require clientGroupID on the wake upgrade')
+        return
       }
-      connection.handleMessage(message);
+      connection.handleMessage(message)
       // handleMessage moves the owned-topic set synchronously before any async
       // delivery work starts, so the set is final when it returns.
-      this.#realtimePersist(socket, connection);
+      this.#realtimePersist(socket, connection)
     }
 
     webSocketClose(
       socket: WebSocket,
       code: number,
       reason: string,
-      _wasClean: boolean,
+      _wasClean: boolean
     ): void {
       // The peer already closed, so echo the close to release the socket — but
       // WebSocket.close() rejects reserved/absent codes (1005 "no status", 1006
       // abnormal, 1015) with InvalidAccessError, and a real browser routinely
       // closes with 1001/1005. An uncaught throw here aborts the DO, so only
       // echo an application-permitted code and otherwise close cleanly.
-      const echoable = code === 1000 || (code >= 3000 && code <= 4999);
-      this.#realtimeDrop(socket);
-      socketCloseQuietly(
-        socket,
-        echoable ? code : 1000,
-        echoable ? reason : "",
-      );
+      const echoable = code === 1000 || (code >= 3000 && code <= 4999)
+      this.#realtimeDrop(socket)
+      socketCloseQuietly(socket, echoable ? code : 1000, echoable ? reason : '')
     }
 
     webSocketError(socket: WebSocket, _error: unknown): void {
-      this.#realtimeDrop(socket);
-      socketCloseQuietly(socket, 1011, "wake socket error");
+      this.#realtimeDrop(socket)
+      socketCloseQuietly(socket, 1011, 'wake socket error')
     }
 
     // Release whatever the socket held: a subscriber's topics, or a producer's
     // generations. Dropping a producer reveals the durable row to everyone
     // watching it, so a crashed producer cannot strand a stale overlay.
     #realtimeDrop(socket: WebSocket): void {
-      const connection = this.#realtimeConnections.get(socket);
-      if (!connection) return;
-      this.#realtimeConnections.delete(socket);
-      connection.close();
+      const connection = this.#realtimeConnections.get(socket)
+      if (!connection) return
+      this.#realtimeConnections.delete(socket)
+      connection.close()
     }
-  };
+  }
 }

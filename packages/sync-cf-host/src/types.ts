@@ -1,106 +1,106 @@
-import type { TransactionQueryBudget } from "./transaction-query.js";
-import type { AnyQueryRegistry, Schema } from "@rocicorp/zero";
+import type { TransactionQueryBudget } from './transaction-query.js'
+import type { AnyQueryRegistry, Schema } from '@rocicorp/zero'
 import type {
   ExecResult,
   MutatorRegistry,
   NormalizedClaims,
   SqlStatementMetadata,
-} from "orez-sync-executor";
-import type { StreamingManifest } from "orez-sync-executor/realtime";
+} from 'orez-sync-executor'
+import type { StreamingManifest } from 'orez-sync-executor/realtime'
 
 export interface SyncSql {
   exec(
     sql: string,
     params?: readonly unknown[],
-    metadata?: SqlStatementMetadata,
-  ): ExecResult;
+    metadata?: SqlStatementMetadata
+  ): ExecResult
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
-    params?: readonly unknown[],
-  ): Row[];
+    params?: readonly unknown[]
+  ): Row[]
 }
 
 export interface SyncHostEnv {
-  SYNC_DO: DurableObjectNamespace;
-  ADMIN_KEY?: string;
+  SYNC_DO: DurableObjectNamespace
+  ADMIN_KEY?: string
 }
 
 export type ServiceBinding = {
-  fetch(input: string | Request, init?: RequestInit): Promise<Response>;
-};
+  fetch(input: string | Request, init?: RequestInit): Promise<Response>
+}
 
 export type UpstreamConfig = {
   /** Env key for the service binding that owns the app write endpoint and feed. */
-  binding: string;
+  binding: string
   /** Path to this namespace on the bound service (for example `/data/<id>`). */
-  namespacePath: string | ((namespace: string) => string);
+  namespacePath: string | ((namespace: string) => string)
   /** Feed page size; the cursor loop continues until the reported head is reached. */
-  changeLimit?: number;
+  changeLimit?: number
   /** Active wake-socket alarm safety net. Defaults to 15 seconds. */
-  intervalMs?: number;
+  intervalMs?: number
   /** Billable SQLite rows written by ingest per rolling window. Defaults to 150,000. */
-  ingestBudgetRows?: number;
+  ingestBudgetRows?: number
   /** Rolling ingest budget window. Defaults to five minutes. */
-  ingestBudgetWindowMs?: number;
+  ingestBudgetWindowMs?: number
   /** Initial breaker cooldown. Defaults to one second. */
-  ingestBackoffMs?: number;
+  ingestBackoffMs?: number
   /** Maximum breaker cooldown. Defaults to one minute. */
-  ingestMaxBackoffMs?: number;
-};
+  ingestMaxBackoffMs?: number
+}
 
 export type DelegatedPushRetryConfig = {
   /** Total attempts including the first request. Defaults to 3. */
-  maxAttempts?: number;
+  maxAttempts?: number
   /** Initial exponential delay. Defaults to 100ms. */
-  initialBackoffMs?: number;
+  initialBackoffMs?: number
   /** Delay cap. Defaults to 1,000ms. */
-  maxBackoffMs?: number;
+  maxBackoffMs?: number
   /**
    * Per-attempt service-binding timeout. Defaults to 30,000ms. Delegate wall
    * time under write-lane contention is queueing rather than compute, and the
    * abort cancels the app invocation mid-transaction, so a short timeout
    * cancels real pushes on any nontrivial seed.
    */
-  timeoutMs?: number;
-};
+  timeoutMs?: number
+}
 
 export type SyncHostConfig<
   Env extends SyncHostEnv = SyncHostEnv,
   S extends Schema = Schema,
 > = {
-  hostVersion: string;
-  schema: S;
-  mutators?: MutatorRegistry<S>;
+  hostVersion: string
+  schema: S
+  mutators?: MutatorRegistry<S>
   /**
    * absolute app push path on the delegated mutation service. a successful
    * response must be causally visible through the configured upstream data
    * feed before the app returns, because the host ingests effects before it
    * records the mutation's lmid.
    */
-  mutateUrl?: string;
+  mutateUrl?: string
   /** Absolute origin used for delegated push requests through the service binding. */
-  mutateOrigin?: string;
+  mutateOrigin?: string
   /**
    * env binding for delegated pushes; defaults to upstream.binding. the bound
    * service and upstream feed must satisfy the mutateUrl causality contract.
    */
-  mutateBinding?: string;
-  delegatedPushRetry?: DelegatedPushRetryConfig;
+  mutateBinding?: string
+  delegatedPushRetry?: DelegatedPushRetryConfig
   /** Required for delegated push; forbidden with local mutators (no dual apply). */
-  upstream?: UpstreamConfig;
+  upstream?: UpstreamConfig
   /** Application DDL and optional seed, called before sync-core schema init. */
-  initialize(sql: SyncSql): void;
+  initialize(sql: SyncSql): void
   authenticate(
     request: Request,
-    env: Env,
-  ): NormalizedClaims | null | Promise<NormalizedClaims | null>;
+    env: Env
+  ): NormalizedClaims | null | Promise<NormalizedClaims | null>
   /** Authorize authenticated application access before selecting a namespace DO. */
   authorize(
     request: Request,
     claims: NormalizedClaims,
     namespace: string,
-    env: Env,
-  ): boolean | Promise<boolean>;
+    env: Env
+  ): boolean | Promise<boolean>
   /** Authorize the advisory wake socket before selecting a namespace DO.
    * The standard client carries its existing Zero auth token in a WebSocket
    * subprotocol. The host normalizes that to the ordinary Authorization header
@@ -114,12 +114,12 @@ export type SyncHostConfig<
    * never arrives. */
   authorizeWake(
     request: Request,
-    env: Env,
-  ): boolean | { userID: string } | Promise<boolean | { userID: string }>;
+    env: Env
+  ): boolean | { userID: string } | Promise<boolean | { userID: string }>
   /** Authorize upstream service notifications before selecting a namespace DO. */
-  authorizeNotify(request: Request, env: Env): boolean | Promise<boolean>;
+  authorizeNotify(request: Request, env: Env): boolean | Promise<boolean>
   /** Resolve the first path component or another consumer-defined namespace. */
-  namespace(request: Request): string | null;
+  namespace(request: Request): string | null
   /**
    * The app's ordinary Zero query registry (the `defineQueries` result the
    * client is built with). The host resolves every desired named query
@@ -127,7 +127,7 @@ export type SyncHostConfig<
    * the query definitions themselves, with the authenticated claims as the
    * query context. There is no app endpoint to call and nothing else to wire.
    */
-  queries: AnyQueryRegistry;
+  queries: AnyQueryRegistry
   /**
    * Streaming fields for this namespace: which columns may carry a live,
    * uncommitted value, and their publish mode and rate bounds.
@@ -139,7 +139,7 @@ export type SyncHostConfig<
    *
    * See docs/streaming-fields.md.
    */
-  streamingManifest?: StreamingManifest;
+  streamingManifest?: StreamingManifest
   /**
    * Authorize a producer socket, which may publish a value into any streaming
    * field for any row. That is a much stronger capability than the wake socket
@@ -148,15 +148,15 @@ export type SyncHostConfig<
    * refused. Producers are server-side callers (an AI generation worker, a job
    * runner), so a service binding or a shared secret is the usual check.
    */
-  authorizeProduce?: (request: Request, env: Env) => boolean | Promise<boolean>;
+  authorizeProduce?: (request: Request, env: Env) => boolean | Promise<boolean>
   /** Server-owned invalidation epoch for permission/schema transforms. */
-  queryTransformVersion?: number | ((claims: NormalizedClaims) => number);
-  retainChanges?: number;
-  idleTeardownMs?: number;
-  wakeCoalesceMs?: number;
+  queryTransformVersion?: number | ((claims: NormalizedClaims) => number)
+  retainChanges?: number
+  idleTeardownMs?: number
+  wakeCoalesceMs?: number
   /** per-query guard for recursive transaction query materialization. */
-  transactionQueryBudget?: Partial<TransactionQueryBudget>;
-  authorizeAdmin?: (request: Request, env: Env) => boolean | Promise<boolean>;
+  transactionQueryBudget?: Partial<TransactionQueryBudget>
+  authorizeAdmin?: (request: Request, env: Env) => boolean | Promise<boolean>
   /**
    * Browser origins (exact match, e.g. `https://ios-myapp.example.com`) allowed
    * to call this host cross-origin. The host answers their CORS preflights
@@ -166,5 +166,5 @@ export type SyncHostConfig<
    * Authorization header, so no cookie credentials are allowed or needed.
    * Absent means same-origin consumers only.
    */
-  allowedOrigins?: readonly string[];
-};
+  allowedOrigins?: readonly string[]
+}
