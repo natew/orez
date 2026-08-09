@@ -335,7 +335,6 @@ const APPLICATION_SQL_DISPOSE = Symbol('applicationSqlDispose')
 
 class ApplicationSqlSessionTarget extends RpcTarget {
   state: ApplicationSqlSessionState = 'created'
-  changed = false
   mutated = false
 
   constructor(
@@ -420,7 +419,7 @@ export class ZeroDO extends DurableObject {
   private applicationSqlWriter: ApplicationSqlSessionTarget | null = null
   private applicationSqlReaders = new Set<ApplicationSqlSessionTarget>()
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
-  protected applicationSqlDidCommit(_changed: boolean, _mutated: boolean): void {}
+  protected applicationSqlDidCommit(_published: boolean, _mutated: boolean): void {}
 
   private durableObjectIdentity(): { objectId: string; objectName: string | null } {
     return {
@@ -1844,7 +1843,6 @@ export class ZeroDO extends DurableObject {
         applicationSqlTrack(metadata),
         session.sessionID
       )
-      if (result.changes > 0) session.changed = true
       return { changes: result.changes }
     })
   }
@@ -1881,17 +1879,19 @@ export class ZeroDO extends DurableObject {
 
   async [APPLICATION_SQL_COMMIT](session: ApplicationSqlSessionTarget): Promise<void> {
     this.assertApplicationSqlSession(session)
+    let published = false
     try {
       if (session.mutated) {
-        await this.atomically(() => {
-          this.commitPendingTrackedChanges(session.sessionID)
+        published = await this.atomically(() => {
+          const committed = this.commitPendingTrackedChanges(session.sessionID)
           commitTxJournal(this.sql, session.sessionID)
+          return committed > 0
         })
       }
     } finally {
       this.releaseApplicationSqlTurn(session)
     }
-    this.applicationSqlDidCommit(session.changed, session.mutated)
+    this.applicationSqlDidCommit(published, session.mutated)
   }
 
   /**

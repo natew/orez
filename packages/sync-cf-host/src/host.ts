@@ -57,6 +57,8 @@ import type {
 
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
 const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
+const NOTIFY_IF_SUBSCRIBED_HEADER = 'x-orez-notify-if-subscribed'
+const WAKE_SUBSCRIBER_TAG = 'orez:wake-subscriber'
 // A websocket upgrade is a GET, so the authenticated identity cannot ride the
 // body the way /pull and /push carry their claims. It rides a private header
 // the worker always deletes from the incoming request before setting its own,
@@ -357,9 +359,22 @@ function socketCloseQuietly(socket: WebSocket, code: number, reason: string): vo
  */
 export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Schema>(
   config: SyncHostConfig<Env, S>
-): ExportedHandler<Env> {
+): ExportedHandler<Env> & {
+  notify(env: Env, namespace: string): Promise<Response>
+} {
   validateSyncHostConfig(config)
   const allowedOrigins = new Set(config.allowedOrigins ?? [])
+  const upstreamPath = (namespace: string): string | null => {
+    if (!config.upstream) return null
+    const path =
+      typeof config.upstream.namespacePath === 'function'
+        ? config.upstream.namespacePath(namespace)
+        : config.upstream.namespacePath
+    if (!path.startsWith('/')) {
+      throw new Error('upstream namespacePath must be an absolute path')
+    }
+    return path.replace(/\/$/, '')
+  }
   const corsHeaders = (origin: string): Record<string, string> => ({
     'access-control-allow-origin': origin,
     vary: 'origin',
@@ -462,6 +477,7 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         headers.delete(NAMESPACE_HEADER)
         headers.delete(UPSTREAM_PATH_HEADER)
         headers.delete(IDENTITY_HEADER)
+        headers.delete(NOTIFY_IF_SUBSCRIBED_HEADER)
         let forwardedBody: ForwardedSyncBody | null = null
         // /wake and /realtime/produce are both websocket upgrades and have no
         // body to put claims in. wake authentication is normalized from its
@@ -500,15 +516,11 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         // nothing gained by moving them here.
         if (wakeUserID) headers.set(IDENTITY_HEADER, encodeURIComponent(wakeUserID))
         headers.set(NAMESPACE_HEADER, await namespaceHash(namespace))
-        if (config.upstream) {
-          const namespacePath =
-            typeof config.upstream.namespacePath === 'function'
-              ? config.upstream.namespacePath(namespace)
-              : config.upstream.namespacePath
-          if (!namespacePath.startsWith('/')) {
-            return json({ error: 'upstream namespacePath must be an absolute path' }, 500)
-          }
-          headers.set(UPSTREAM_PATH_HEADER, namespacePath.replace(/\/$/, ''))
+        try {
+          const path = upstreamPath(namespace)
+          if (path !== null) headers.set(UPSTREAM_PATH_HEADER, path)
+        } catch (error) {
+          return errorResponse(error)
         }
 
         const forwarded = forwardedBody
@@ -518,6 +530,21 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         return env.SYNC_DO.get(id).fetch(forwarded)
       }
       return withCors(await handle())
+    },
+    async notify(env, namespace): Promise<Response> {
+      if (!namespace) throw new TypeError('sync notification namespace is required')
+      const path = upstreamPath(namespace)
+      if (path === null) throw new Error('sync notifications require an upstream feed')
+      const headers = new Headers({
+        [NAMESPACE_HEADER]: await namespaceHash(namespace),
+        [UPSTREAM_PATH_HEADER]: path,
+        [NOTIFY_IF_SUBSCRIBED_HEADER]: '1',
+      })
+      const request = new Request('https://orez-sync.internal/namespace/notify', {
+        method: 'POST',
+        headers,
+      })
+      return env.SYNC_DO.get(env.SYNC_DO.idFromName(namespace)).fetch(request)
     },
   }
 }
@@ -561,6 +588,7 @@ export function createSyncDurableObject<
     readonly #executor: SyncExecutor<S> | null
     #executorBeforeCommitFault: FaultKind | null = null
     #bootID = crypto.randomUUID()
+    #initialized = false
     #initSkipped = false
     #lastRequestAt = 0
     #hibernations = 0
@@ -678,47 +706,50 @@ export function createSyncDurableObject<
             schema: config.schema,
           })
         : null
-      ctx.blockConcurrencyWhile(async () => {
-        ctx.storage.transactionSync(() => {
-          this.#directSql.exec(`CREATE TABLE IF NOT EXISTS _zsync_host_control (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-          )`)
-          // one durable fingerprint gates the whole schema pass. hibernation
-          // reconstructs this object every few idle minutes, and re-running
-          // consumer DDL plus both engine inits against an already-current
-          // database costs ~1.5k billable reads per wake. everything the pass
-          // depends on is in the fingerprint, so a build that changes any DDL
-          // surface re-runs it exactly once per namespace.
-          const initFingerprint = JSON.stringify([
-            config.hostVersion,
-            this.#wasm(() => engine_schema_revision()),
-            config.schema,
-            config.initialize.toString(),
-          ])
-          this.#initSkipped = this.#controlGet('initFingerprint') === initFingerprint
-          if (!this.#initSkipped) {
-            config.initialize(this.#directSql)
-            this.#directSql.exec(
-              "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
-            )
-            this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
-            this.#wasm(() => engine_init_query_schema(this.#engineDb))
-            this.#controlSet('initFingerprint', initFingerprint)
-          }
-          const ingestBreakerReason = this.#controlGet('ingestBreakerReason')
-          if (
-            ingestBreakerReason === 'ingestBudgetExceeded' ||
-            ingestBreakerReason === 'ingestCursorStalled'
-          ) {
-            this.#ingestBreaker.restore(
-              ingestBreakerReason,
-              Number(this.#controlGet('ingestBreakerRetryAt')),
-              Number(this.#controlGet('ingestBreakerTrips'))
-            )
-          }
-        })
+    }
+
+    #initialize(): void {
+      if (this.#initialized) return
+      this.ctx.storage.transactionSync(() => {
+        this.#directSql.exec(`CREATE TABLE IF NOT EXISTS _zsync_host_control (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )`)
+        // one durable fingerprint gates the whole schema pass. hibernation
+        // reconstructs this object every few idle minutes, and re-running
+        // consumer DDL plus both engine inits against an already-current
+        // database costs ~1.5k billable reads per wake. everything the pass
+        // depends on is in the fingerprint, so a build that changes any DDL
+        // surface re-runs it exactly once per namespace.
+        const initFingerprint = JSON.stringify([
+          config.hostVersion,
+          this.#wasm(() => engine_schema_revision()),
+          config.schema,
+          config.initialize.toString(),
+        ])
+        this.#initSkipped = this.#controlGet('initFingerprint') === initFingerprint
+        if (!this.#initSkipped) {
+          config.initialize(this.#directSql)
+          this.#directSql.exec(
+            "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
+          )
+          this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
+          this.#wasm(() => engine_init_query_schema(this.#engineDb))
+          this.#controlSet('initFingerprint', initFingerprint)
+        }
+        const ingestBreakerReason = this.#controlGet('ingestBreakerReason')
+        if (
+          ingestBreakerReason === 'ingestBudgetExceeded' ||
+          ingestBreakerReason === 'ingestCursorStalled'
+        ) {
+          this.#ingestBreaker.restore(
+            ingestBreakerReason,
+            Number(this.#controlGet('ingestBreakerRetryAt')),
+            Number(this.#controlGet('ingestBreakerTrips'))
+          )
+        }
       })
+      this.#initialized = true
     }
 
     #armUpstreamAlarm(): void {
@@ -1402,7 +1433,7 @@ export function createSyncDurableObject<
     #enqueueWake(originClientID: string, tables: Iterable<string> = []): Promise<void> {
       this.#wakeOrigins.add(originClientID)
       for (const table of tables) this.#wakeTables.add(table)
-      for (const socket of this.ctx.getWebSockets()) {
+      for (const socket of this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)) {
         const attachment = socketAttachment(socket)
         if (
           !attachment ||
@@ -1430,7 +1461,7 @@ export function createSyncDurableObject<
           this.#wakeTables = new Set()
           this.#counters.wakeBatches++
           let sent = 0
-          const sockets = this.ctx.getWebSockets()
+          const sockets = this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)
           for (const socket of recipients) {
             try {
               socket.send('wake')
@@ -1946,7 +1977,7 @@ export function createSyncDurableObject<
         clientID,
         identity,
       } satisfies SocketAttachment)
-      this.ctx.acceptWebSocket(server, [`client:${clientID}`])
+      this.ctx.acceptWebSocket(server, [WAKE_SUBSCRIBER_TAG, `client:${clientID}`])
       if (identity) {
         const host = this.#realtimeHost()
         if (host) {
@@ -1996,7 +2027,7 @@ export function createSyncDurableObject<
             idleTeardownMs,
             hibernations: this.#hibernations,
             databaseSizeBytes: this.ctx.storage.sql.databaseSize,
-            connectedWakeSockets: this.ctx.getWebSockets().length,
+            connectedWakeSockets: this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG).length,
             upstreamAlarmAt,
             writerEnabled: this.#writerEnabled(),
             wasmMemoryBytes: engine_memory_bytes(),
@@ -2147,8 +2178,22 @@ export function createSyncDurableObject<
     }
 
     async fetch(request: Request): Promise<Response> {
-      this.#simulateIdleTeardown(Date.now())
       const route = routeAfterNamespace(new URL(request.url).pathname)
+      if (
+        route === '/notify' &&
+        request.method === 'POST' &&
+        request.headers.get(NOTIFY_IF_SUBSCRIBED_HEADER) === '1' &&
+        this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG).length === 0
+      ) {
+        return json({
+          ok: true,
+          applied: 0,
+          skipped: 'no-wake-subscribers',
+          rowsWritten: this.#sqlBilling.rowsWritten,
+        })
+      }
+      this.#initialize()
+      this.#simulateIdleTeardown(Date.now())
       const namespace = request.headers.get(NAMESPACE_HEADER) ?? 'unknown'
       const upstreamPath = this.#rememberUpstreamPath(request)
       if (route.startsWith('/admin/')) return this.#admin(route, request, upstreamPath)
@@ -2159,7 +2204,7 @@ export function createSyncDurableObject<
       }
       if (route === '/notify' && request.method === 'POST') {
         try {
-          const applied = await this.#ingest(upstreamPath)
+          const applied = await this.#ingestAfterCurrent(upstreamPath)
           return json({ ok: true, applied })
         } catch (error) {
           return errorResponse(error)
@@ -2188,7 +2233,8 @@ export function createSyncDurableObject<
     }
 
     async alarm(): Promise<void> {
-      if (this.ctx.getWebSockets().length === 0) return
+      if (this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG).length === 0) return
+      this.#initialize()
       try {
         await this.#ingest()
       } catch (error) {
@@ -2200,7 +2246,7 @@ export function createSyncDurableObject<
           })
         )
       } finally {
-        if (this.ctx.getWebSockets().length > 0) {
+        if (this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG).length > 0) {
           const retryAfterMs = this.#ingestBreaker.status().retryAfterMs
           await this.ctx.storage.setAlarm(
             Date.now() + Math.max(upstreamIntervalMs, retryAfterMs)
@@ -2242,6 +2288,7 @@ export function createSyncDurableObject<
         socket.send('pong')
         return
       }
+      this.#initialize()
       const host = this.#realtimeHost()
       if (!host || typeof message !== 'string') return
       // A cold start left the hub empty while the socket stayed open, so the

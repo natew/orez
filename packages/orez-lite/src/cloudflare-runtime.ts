@@ -31,6 +31,7 @@ export {
   resolveOrezDataRequest,
 } from './cf-do/lite-data-worker.js'
 export type {
+  OrezApplicationSqlCommitContext,
   OrezAppSchemaDescriptor,
   OrezBackupConfig,
   OrezDataWorkerEnv,

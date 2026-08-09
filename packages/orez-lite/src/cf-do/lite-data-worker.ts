@@ -106,6 +106,12 @@ export interface OrezRequestContext<Env extends OrezDataWorkerEnv> {
   ensureSchema(options?: { force?: boolean }): Promise<unknown>
 }
 
+export interface OrezApplicationSqlCommitContext<Env extends OrezDataWorkerEnv> {
+  env: Env
+  executionContext: OrezExecutionContext
+  instance: string
+}
+
 export interface OrezBackupConfig<Env extends OrezDataWorkerEnv> extends Partial<
   Pick<
     NamespaceBackupOptions<Env>,
@@ -158,6 +164,14 @@ export interface OrezDataWorkerOptions<
     rows?: number
     windowMs?: number
   }
+  /**
+   * Notify an application-owned consumer after a transaction durably commits
+   * published CDC rows. Invocation and failure handling run through the
+   * Durable Object execution context, outside the application write result.
+   */
+  applicationSqlDidCommit?(
+    context: OrezApplicationSqlCommitContext<Env>
+  ): MaybePromise<void>
   setup?(context: OrezRequestContext<Env>): MaybePromise<void>
   routes?(context: OrezRequestContext<Env>): MaybePromise<Response | null | undefined>
   onError?(error: unknown, context: OrezErrorContext<Env>): MaybePromise<void>
@@ -559,6 +573,9 @@ export function createOrezDataWorker<
   class ZeroSqlDO extends OrezZeroDO {
     private readonly orezStorage: any
     private readonly orezWorkerVersion: string
+    private readonly orezEnv: Env
+    private readonly orezExecutionContext: OrezExecutionContext
+    private readonly orezInstance: string
     private orezSchemaRunVersion: string | null = null
     private orezSchemaRun: Promise<unknown> | null = null
     private orezReadyVersion: string | null = null
@@ -584,6 +601,15 @@ export function createOrezDataWorker<
       )
       this.orezStorage = ctx.storage
       this.orezWorkerVersion = env.CF_VERSION?.id ?? ''
+      this.orezEnv = env
+      this.orezExecutionContext = ctx
+      const instance = ctx.id.name
+      if (options.applicationSqlDidCommit && typeof instance !== 'string') {
+        throw new Error(
+          'application SQL commit notifications require a named Durable Object'
+        )
+      }
+      this.orezInstance = instance ?? ''
       ctx.storage.sql.exec(
         `CREATE TABLE IF NOT EXISTS ${readyTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL)`
       )
@@ -595,8 +621,46 @@ export function createOrezDataWorker<
       )
     }
 
-    protected applicationSqlDidCommit(_changed: boolean, mutated: boolean): void {
+    protected applicationSqlDidCommit(published: boolean, mutated: boolean): void {
       if (mutated) this.orezBumpBackupMarker()
+      if (published && options.applicationSqlDidCommit) {
+        const notification = Promise.resolve()
+          .then(() =>
+            options.applicationSqlDidCommit!({
+              env: this.orezEnv,
+              executionContext: this.orezExecutionContext,
+              instance: this.orezInstance,
+            })
+          )
+          .catch((error) => {
+            try {
+              console.error(
+                JSON.stringify({
+                  event: 'application_sql_commit_notification_failed',
+                  instance: this.orezInstance,
+                  error: errorMessage(error),
+                })
+              )
+            } catch {
+              // Reporting is post-commit too and cannot change the write result.
+            }
+          })
+        try {
+          this.orezExecutionContext.waitUntil(notification)
+        } catch (error) {
+          try {
+            console.error(
+              JSON.stringify({
+                event: 'application_sql_commit_notification_schedule_failed',
+                instance: this.orezInstance,
+                error: errorMessage(error),
+              })
+            )
+          } catch {
+            // The durable application write is already committed.
+          }
+        }
+      }
     }
 
     async orezImportBatch(

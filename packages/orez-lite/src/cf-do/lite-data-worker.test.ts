@@ -276,6 +276,80 @@ describe('createOrezDataWorker', () => {
     ).toThrow(/tablePrefix/)
   })
 
+  it('schedules an application consumer only after a published commit', async () => {
+    const notified = vi.fn(() => undefined)
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      applicationSqlDidCommit: notified,
+    })
+    const pending: Promise<unknown>[] = []
+    const executionContext = {
+      waitUntil(promise: Promise<unknown>) {
+        pending.push(promise)
+      },
+    }
+    const env = { ZERO_SQL_DO: {} }
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.orezEnv = env
+    zero.orezExecutionContext = executionContext
+    zero.orezInstance = 'ns:proj-a'
+    zero.orezBumpBackupMarker = vi.fn()
+
+    zero.applicationSqlDidCommit(false, true)
+    expect(zero.orezBumpBackupMarker).toHaveBeenCalledOnce()
+    expect(notified).not.toHaveBeenCalled()
+
+    zero.applicationSqlDidCommit(true, true)
+    expect(notified).not.toHaveBeenCalled()
+    await Promise.all(pending)
+    expect(zero.orezBumpBackupMarker).toHaveBeenCalledTimes(2)
+    expect(notified).toHaveBeenCalledWith({
+      env,
+      executionContext,
+      instance: 'ns:proj-a',
+    })
+  })
+
+  it.each([
+    [
+      'synchronous',
+      () => {
+        throw new Error('synchronous notifier failure')
+      },
+    ],
+    [
+      'asynchronous',
+      async () => {
+        throw new Error('asynchronous notifier failure')
+      },
+    ],
+  ])('contains a %s post-commit notifier failure', async (_kind, notify) => {
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      applicationSqlDidCommit: notify,
+    })
+    const pending: Promise<unknown>[] = []
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.orezEnv = { ZERO_SQL_DO: {} }
+    zero.orezExecutionContext = {
+      waitUntil(promise: Promise<unknown>) {
+        pending.push(promise)
+      },
+    }
+    zero.orezInstance = 'ns:proj-failure'
+    zero.orezBumpBackupMarker = vi.fn()
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(() => zero.applicationSqlDidCommit(true, true)).not.toThrow()
+    await expect(Promise.all(pending)).resolves.toEqual([undefined])
+    expect(reported).toHaveBeenCalledWith(
+      expect.stringContaining('application_sql_commit_notification_failed')
+    )
+    reported.mockRestore()
+  })
+
   it('returns the concrete Cloudflare class and forwards standard feed routes', async () => {
     const status = vi.fn(async () => ({
       schemaVersion: 'schema-v7',

@@ -261,6 +261,95 @@ describe('ZeroDO transactional CDC integration', () => {
     expect(zero.readChangesSince(0)).toEqual([])
   })
 
+  it('reports a durable application commit only when it publishes CDC rows', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+    const registration = await zero.applicationSqlSession('commit-registration')
+    await registration.begin()
+    await registration.registerTables([{ table: 'item', publicTable: 'public.item' }])
+    await registration.commit()
+
+    const committed = vi.fn()
+    zero.applicationSqlDidCommit = committed
+    const session = await zero.applicationSqlSession('published-commit')
+    await session.begin()
+    await session.exec("INSERT INTO item VALUES ('one', 'published')", [], {
+      table: 'item',
+      publicTable: 'public.item',
+      kind: 'insert',
+    })
+    await session.commit()
+
+    expect(sql.exec('SELECT * FROM item').toArray()).toEqual([
+      { id: 'one', body: 'published' },
+    ])
+    expect(zero.readChangesSince(0)).toHaveLength(1)
+    expect(committed).toHaveBeenCalledOnce()
+    expect(committed).toHaveBeenCalledWith(true, true)
+  })
+
+  it('does not report private or no-op commits as published changes', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+    sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')
+    const registration = await zero.applicationSqlSession('non-published-registration')
+    await registration.begin()
+    await registration.registerTables([
+      { table: 'item', publicTable: 'public.item' },
+      { table: 'private_note', publicTable: 'private.private_note', publish: false },
+    ])
+    await registration.commit()
+
+    const committed = vi.fn()
+    zero.applicationSqlDidCommit = committed
+    const privateSession = await zero.applicationSqlSession('private-commit')
+    await privateSession.begin()
+    await privateSession.exec("INSERT INTO private_note VALUES ('one', 'private')")
+    await privateSession.commit()
+
+    const noOpSession = await zero.applicationSqlSession('no-op-commit')
+    await noOpSession.begin()
+    await noOpSession.exec("UPDATE item SET body = 'missing' WHERE id = 'missing'", [], {
+      table: 'item',
+      publicTable: 'public.item',
+      kind: 'update',
+    })
+    await noOpSession.commit()
+
+    expect(sql.exec('SELECT * FROM private_note').toArray()).toEqual([
+      { id: 'one', body: 'private' },
+    ])
+    expect(zero.readChangesSince(0)).toEqual([])
+    expect(committed.mock.calls).toEqual([
+      [false, true],
+      [false, true],
+    ])
+  })
+
+  it('does not report an application transaction that rolls back', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+    const registration = await zero.applicationSqlSession('rollback-registration')
+    await registration.begin()
+    await registration.registerTables([{ table: 'item', publicTable: 'public.item' }])
+    await registration.commit()
+
+    const committed = vi.fn()
+    zero.applicationSqlDidCommit = committed
+    const session = await zero.applicationSqlSession('published-rollback')
+    await session.begin()
+    await session.exec("INSERT INTO item VALUES ('one', 'rolled back')", [], {
+      table: 'item',
+      publicTable: 'public.item',
+      kind: 'insert',
+    })
+    await session.rollback()
+
+    expect(sql.exec('SELECT * FROM item').toArray()).toEqual([])
+    expect(zero.readChangesSince(0)).toEqual([])
+    expect(committed).not.toHaveBeenCalled()
+  })
+
   it('defers the application schema snapshot until the session changes schema', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')

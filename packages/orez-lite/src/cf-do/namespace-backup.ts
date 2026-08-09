@@ -542,15 +542,14 @@ export function createNamespaceBackupManager<Env>(
           .filter((table) => table !== name && dropNameSet.has(table))
       )
     }
-    await options.batch(
-      env,
-      namespace,
-      dependencyOrder(dropNames, dropDependencies)
-        .reverse()
-        .map((name) => ({
-          sql: `DROP TABLE IF EXISTS "${quoteIdentifier(name)}"`,
-        }))
-    )
+    const dropStatements = dependencyOrder(dropNames, dropDependencies)
+      .reverse()
+      .map((name) => ({
+        sql: `DROP TABLE IF EXISTS "${quoteIdentifier(name)}"`,
+      }))
+    for (let offset = 0; offset < dropStatements.length; offset += 400) {
+      await options.batch(env, namespace, dropStatements.slice(offset, offset + 400))
+    }
     const includedEntries = tableEntries.filter((entry) => !isExcluded(entry.name))
     for (let offset = 0; offset < includedEntries.length; offset += 400) {
       await options.batch(

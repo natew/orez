@@ -1,6 +1,7 @@
 name = "orez-rust-sync-ingest-harness"
 main = "../orez-lite/test-workers/ingest-harness-worker.ts"
 compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
 
 [[rules]]
 type = "CompiledWasm"
@@ -16,6 +17,10 @@ class_name = "SyncDurableObject"
 
 [[durable_objects.bindings]]
 name = "UPSTREAM_DO"
+class_name = "ZeroDO"
+
+[[durable_objects.bindings]]
+name = "ZERO_SQL_DO"
 class_name = "ZeroDO"
 
 [[services]]

@@ -55,6 +55,20 @@ try {
     patch: [{ op: 'put', hash: 'q-all-items', name: 'allItems', args: [] }],
   }
 
+  const waitForCommitNotification = async (notificationNamespace, attempts) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await fetch(
+        `${base}/application-commit-status/${notificationNamespace}`
+      )
+      const status = await response.json()
+      if (status.attempts === attempts) return status
+      await Bun.sleep(10)
+    }
+    throw new Error(
+      `application commit notification count did not reach ${attempts} for ${notificationNamespace}`
+    )
+  }
+
   // A root-mounted data feed is encoded as an empty internal path. Empty is a
   // configured root, while null means the worker has not supplied a feed path.
   const rootNamespace = `root-mount-${crypto.randomUUID()}`
@@ -83,6 +97,183 @@ try {
   })
   assert.equal(rootBudgetResponse.status, 200)
   assert.deepEqual(await rootBudgetResponse.json(), { enabled: true, rootMount: true })
+  const rootIdleNotify = await fetch(`${base}/internal-notify/${rootNamespace}`, {
+    method: 'POST',
+  })
+  assert.equal(rootIdleNotify.status, 200)
+  assert.equal((await rootIdleNotify.json()).skipped, 'no-wake-subscribers')
+
+  // The internal commit path must be a zero-write point lookup when no wake
+  // subscriber exists. This starts with a cold namespace: the returned meter
+  // includes every wrapped SQLite write since construction, so a constructor
+  // schema/control write makes this assertion fail.
+  const coldNotifyNamespace = `cold-notify-${crypto.randomUUID()}`
+  const coldNotify = await fetch(`${base}/internal-notify/${coldNotifyNamespace}`, {
+    method: 'POST',
+  })
+  assert.equal(coldNotify.status, 200)
+  assert.deepEqual(await coldNotify.json(), {
+    ok: true,
+    applied: 0,
+    skipped: 'no-wake-subscribers',
+    rowsWritten: 0,
+  })
+
+  // A public caller cannot select the private idle shortcut by smuggling its
+  // header through the authenticated /notify route.
+  const publicNotifyNamespace = `public-notify-${crypto.randomUUID()}`
+  const publicNotify = await fetch(`${base}/${publicNotifyNamespace}/notify`, {
+    method: 'POST',
+    headers: {
+      'x-admin-key': 'ingest-harness-admin',
+      'x-orez-notify-if-subscribed': '1',
+    },
+  })
+  assert.equal(publicNotify.status, 200)
+  assert.equal(Object.hasOwn(await publicNotify.json(), 'skipped'), false)
+  assert.equal(
+    (
+      await fetch(`${base}/upstream-change-requests/${publicNotifyNamespace}`).then(
+        (response) => response.json()
+      )
+    ).requests > 0,
+    true
+  )
+
+  // Producer channels share the Durable Object but are not wake consumers.
+  // They must neither make an internal notification ingest nor receive a wake.
+  const producerOnlyNamespace = `producer-only-${crypto.randomUUID()}`
+  const producer = new WebSocket(
+    `${base.replace('http://', 'ws://')}/${producerOnlyNamespace}/realtime/produce?adminKey=ingest-harness-admin&producerID=producer-only`
+  )
+  await new Promise((resolve, reject) => {
+    producer.addEventListener('open', resolve, { once: true })
+    producer.addEventListener('error', reject, { once: true })
+  })
+  await fetch(`${base}/upstream-change-requests/${producerOnlyNamespace}`, {
+    method: 'POST',
+  })
+  const producerNotify = await fetch(`${base}/internal-notify/${producerOnlyNamespace}`, {
+    method: 'POST',
+  })
+  assert.equal(producerNotify.status, 200)
+  assert.equal((await producerNotify.json()).skipped, 'no-wake-subscribers')
+  assert.deepEqual(
+    await fetch(`${base}/upstream-change-requests/${producerOnlyNamespace}`).then(
+      (response) => response.json()
+    ),
+    { requests: 0 }
+  )
+  producer.close()
+
+  // Private, no-op, and rolled-back application transactions do not publish
+  // CDC and therefore never select the internal sync notification.
+  for (const action of ['private', 'no-op', 'rollback']) {
+    const commitNamespace = `commit-${action}-${crypto.randomUUID()}`
+    const response = await fetch(
+      `${base}/application-commit/${commitNamespace}/${action}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: `${action}-row` }),
+      }
+    )
+    assert.equal(response.status, 200, `${action} application transaction response`)
+    await Bun.sleep(50)
+    assert.equal(
+      (
+        await fetch(`${base}/application-commit-status/${commitNamespace}`).then(
+          (result) => result.json()
+        )
+      ).attempts,
+      0,
+      `${action} application transaction notification count`
+    )
+  }
+
+  // A synchronous notifier throw happens after the SQLite commit. The app
+  // response still succeeds and a fresh read proves the row is durable.
+  const failureNamespace = `commit-failure-${crypto.randomUUID()}`
+  const failedNotifierCommit = await fetch(
+    `${base}/application-commit/${failureNamespace}/sync-failure`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'survives-notifier' }),
+    }
+  )
+  assert.equal(failedNotifierCommit.status, 200)
+  assert.deepEqual((await failedNotifierCommit.json()).rows, [
+    { id: 'survives-notifier' },
+  ])
+  await waitForCommitNotification(failureNamespace, 1)
+
+  // End-to-end commit -> internal notification -> one upstream ingest -> wake.
+  const activeNamespace = `commit-active-${crypto.randomUUID()}`
+  const activeOrigin = `${base}/${activeNamespace}`
+  const activePull = await fetch(`${activeOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'commit-reader',
+      clientGroupID: 'commit-group',
+      cookie: null,
+      desiredQueriesPatch: allItemsQueries,
+    }),
+  })
+  assert.equal(activePull.status, 200)
+  const activeCommitWake = new WebSocket(
+    `${activeOrigin.replace('http://', 'ws://')}/wake?clientID=commit-reader&wakeToken=ingest-harness-wake`
+  )
+  await new Promise((resolve, reject) => {
+    activeCommitWake.addEventListener('open', resolve, { once: true })
+    activeCommitWake.addEventListener('error', reject, { once: true })
+  })
+  await fetch(`${base}/upstream-change-requests/${activeNamespace}`, {
+    method: 'POST',
+  })
+  const activeWakeMessage = new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('application commit notification did not wake')),
+      1_000
+    )
+    activeCommitWake.addEventListener(
+      'message',
+      (event) => {
+        clearTimeout(timer)
+        resolve(String(event.data))
+      },
+      { once: true }
+    )
+  })
+  const committed = await fetch(`${base}/application-commit/${activeNamespace}/public`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: 'commit-notified' }),
+  })
+  assert.equal(committed.status, 200)
+  assert.deepEqual((await committed.json()).rows, [{ id: 'commit-notified' }])
+  assert.equal(await activeWakeMessage, 'wake')
+  await waitForCommitNotification(activeNamespace, 1)
+  assert.deepEqual(
+    await fetch(`${base}/upstream-change-requests/${activeNamespace}`).then((response) =>
+      response.json()
+    ),
+    { requests: 1 }
+  )
+  const activeRows = await fetch(`${activeOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'x-admin-key': 'ingest-harness-admin',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ query: "SELECT id FROM item WHERE id = 'commit-notified'" }),
+  }).then((response) => response.json())
+  assert.deepEqual(activeRows.rows, [{ id: 'commit-notified' }])
+  activeCommitWake.close()
 
   // An upstream namespace must not become a permanent polling timer after its
   // client leaves. Pulls ingest synchronously and therefore do not need an

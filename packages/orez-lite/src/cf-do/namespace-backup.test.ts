@@ -1,3 +1,5 @@
+// @ts-expect-error - CJS module
+import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -59,12 +61,27 @@ function writableBucket() {
           }
         : null
     },
-    async createMultipartUpload() {
+    async createMultipartUpload(key) {
+      const parts = new Map<number, Uint8Array>()
       return {
         async uploadPart(partNumber, value) {
-          return { partNumber, value }
+          parts.set(partNumber, value)
+          return { partNumber }
         },
-        async complete() {},
+        async complete() {
+          const ordered = [...parts.entries()]
+            .sort(([left], [right]) => left - right)
+            .map(([, value]) => value)
+          const bytes = new Uint8Array(
+            ordered.reduce((total, value) => total + value.byteLength, 0)
+          )
+          let offset = 0
+          for (const value of ordered) {
+            bytes.set(value, offset)
+            offset += value.byteLength
+          }
+          pointers.set(key, new TextDecoder().decode(bytes))
+        },
         async abort() {},
       }
     },
@@ -77,6 +94,41 @@ function writableBucket() {
     async delete() {},
   }
   return { bucket, pointers }
+}
+
+const BetterSqlite3 = BedrockSqlite.Database
+
+function realSqliteManager(
+  db: InstanceType<typeof BetterSqlite3>,
+  bucket: NamespaceBackupBucket,
+  batchSizes: number[] = []
+) {
+  return createNamespaceBackupManager({
+    format: 'test-v3',
+    markerTable: '_test_backup_meta',
+    excludedTables: ['_test_backup_meta'],
+    files: () => bucket,
+    query: async (_env, _namespace, sql, params) => {
+      const statement = db.prepare(sql)
+      if (statement.reader) return statement.all(...params)
+      statement.run(...params)
+      return []
+    },
+    batch: async (_env, _namespace, statements) => {
+      batchSizes.push(statements.length)
+      db.exec('BEGIN')
+      try {
+        for (const statement of statements) {
+          db.prepare(statement.sql).run(...(statement.params ?? []))
+        }
+        db.exec('COMMIT')
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+    },
+    listNamespaces: async () => ['singleton'],
+  })
 }
 
 describe('namespace backup export', () => {
@@ -177,6 +229,44 @@ describe('namespace backup export', () => {
         params: ['tenant-one', 'message-199', 1000],
       },
     ])
+  })
+
+  it('pages every composite WITHOUT ROWID key against real SQLite', async () => {
+    const db = new BetterSqlite3(':memory:')
+    const stored = writableBucket()
+    db.exec(
+      'CREATE TABLE message (tenant TEXT, id TEXT, body TEXT, PRIMARY KEY (tenant, id)) WITHOUT ROWID'
+    )
+    db.exec('CREATE TABLE _test_backup_meta (id INTEGER PRIMARY KEY, write_seq INTEGER)')
+    db.exec('INSERT INTO _test_backup_meta VALUES (1, 7)')
+    const expected = Array.from({ length: 1_201 }, (_, index) => ({
+      tenant: `tenant-${String(Math.floor(index / 300)).padStart(2, '0')}`,
+      id: `message-${String(index % 300).padStart(3, '0')}`,
+      body: `body-${index}`,
+    })).sort((left, right) =>
+      left.tenant === right.tenant
+        ? left.id.localeCompare(right.id)
+        : left.tenant.localeCompare(right.tenant)
+    )
+    const insert = db.prepare('INSERT INTO message VALUES (?, ?, ?)')
+    db.exec('BEGIN')
+    for (const row of expected) insert.run(row.tenant, row.id, row.body)
+    db.exec('COMMIT')
+
+    const summary = await realSqliteManager(db, stored.bucket).exportNamespace(
+      {},
+      'singleton'
+    )
+    const exported = (stored.pointers.get(summary.key) ?? '')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.kind === 'rows' && entry.table === 'message')
+      .flatMap((entry) => entry.rows)
+
+    expect(summary).toMatchObject({ marker: 7, rows: 1_201 })
+    expect(exported).toEqual(expected)
+    db.close()
   })
 })
 
@@ -341,6 +431,57 @@ describe('namespace backup restore', () => {
       'DROP TABLE IF EXISTS "messageReaction"',
       'DROP TABLE IF EXISTS "message"',
     ])
+  })
+
+  it('drops reverse-FK current tables in bounded batches against real SQLite', async () => {
+    const key = 'backups/singleton/real-older.ndjson'
+    const stored = bucketWith(
+      key,
+      dump([
+        {
+          kind: 'header',
+          format: 'test-v3',
+          ns: 'source',
+          orderedTables: true,
+        },
+        {
+          kind: 'table',
+          name: 'message',
+          sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)',
+          indexes: [],
+        },
+        { kind: 'rows', table: 'message', rows: [{ id: 'restored' }] },
+        { kind: 'footer', tables: 1, rows: 1 },
+      ])
+    )
+    const db = new BetterSqlite3(':memory:')
+    db.exec('PRAGMA foreign_keys = ON')
+    db.exec('CREATE TABLE message (id TEXT PRIMARY KEY)')
+    db.exec(
+      'CREATE TABLE messageReaction (id TEXT PRIMARY KEY, messageId TEXT NOT NULL REFERENCES message(id))'
+    )
+    db.exec("INSERT INTO message VALUES ('current')")
+    db.exec("INSERT INTO messageReaction VALUES ('reaction', 'current')")
+    for (let index = 0; index < 401; index++) {
+      db.exec(`CREATE TABLE "current_only_${String(index).padStart(3, '0')}" (id TEXT)`)
+    }
+    const batchSizes: number[] = []
+
+    const summary = await realSqliteManager(
+      db,
+      stored.bucket,
+      batchSizes
+    ).importNamespace({}, 'singleton', key)
+
+    expect(summary).toMatchObject({ rows: 1, counts: { message: 1 } })
+    expect(db.prepare('SELECT * FROM message').all()).toEqual([{ id: 'restored' }])
+    expect(
+      db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .all()
+    ).toEqual([{ name: 'message' }])
+    expect(Math.max(...batchSizes)).toBeLessThanOrEqual(400)
+    db.close()
   })
 
   it('accepts explicitly retained legacy formats', async () => {

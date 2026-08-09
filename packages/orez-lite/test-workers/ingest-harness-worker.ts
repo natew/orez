@@ -1,13 +1,16 @@
 import { createBuilder, defineQueries, defineQuery } from '@rocicorp/zero'
 import { WorkerEntrypoint } from 'cloudflare:workers'
+import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
 import {
   createSyncDurableObject,
   createSyncWorker,
 } from '../../sync-cf-host/src/index.js'
-import { ZeroDO } from '../src/cf-do/worker.js'
+import { createApplicationSqlClient } from '../src/cf-do/application-sql.js'
+import { createOrezDataWorker } from '../src/cf-do/lite-data-worker.js'
 
 import type { SyncHostConfig, SyncHostEnv } from '../../sync-cf-host/src/index.js'
+import type { OrezDataWorkerEnv } from '../src/cf-do/lite-data-worker.js'
 import type { Schema } from '@rocicorp/zero'
 
 const schema = {
@@ -33,11 +36,17 @@ const queries = defineQueries({
 })
 
 type Fetcher = { fetch(input: string | Request, init?: RequestInit): Promise<Response> }
-interface Env extends SyncHostEnv {
+interface Env extends SyncHostEnv, OrezDataWorkerEnv {
   DATA: Fetcher
   APP: Fetcher
   UPSTREAM_DO: DurableObjectNamespace
 }
+
+const streaming = defineStreamingFields(schema, {
+  item: {
+    label: { maxBytes: 10_000, maxUpdatesPerSecond: 60, maxBytesPerSecond: 60_000 },
+  },
+})
 
 const runawayNamespaces = new Set<string>()
 const numericTextNamespaces = new Set<string>()
@@ -52,6 +61,9 @@ const activeDelegatedPushes = new Set<string>()
 const completedDelegatedPushes = new Set<string>()
 const heldChangeResponses = new Set<string>()
 const activeHeldChangeResponses = new Set<string>()
+const upstreamChangeRequests = new Map<string, number>()
+const commitNotificationAttempts = new Map<string, number>()
+const commitNotificationFailures = new Map<string, 'sync' | 'async'>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 let delegatedPushFailedRemaining = 0
@@ -92,6 +104,8 @@ const config: SyncHostConfig<Env> = {
   },
   authorizeWake(request) {
     return new URL(request.url).searchParams.get('wakeToken') === 'ingest-harness-wake'
+      ? { userID: 'user-a' }
+      : false
   },
   authorizeNotify(request, env) {
     return Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
@@ -99,10 +113,42 @@ const config: SyncHostConfig<Env> = {
   namespace(request) {
     return new URL(request.url).pathname.split('/')[1] || null
   },
+  streamingManifest: streaming.manifest,
+  authorizeProduce(request) {
+    return new URL(request.url).searchParams.get('adminKey') === 'ingest-harness-admin'
+  },
 }
 
+const syncWorker = createSyncWorker(config)
+const dataWorker = createOrezDataWorker<Env>({
+  name: 'ingestharness',
+  schema: {
+    version: 'ingest-harness-v1',
+    schema,
+    publicTables: [{ table: 'item', publicTable: 'public.item' }],
+    migrate: async () => undefined,
+  },
+  applicationSqlDidCommit(context) {
+    commitNotificationAttempts.set(
+      context.instance,
+      (commitNotificationAttempts.get(context.instance) ?? 0) + 1
+    )
+    const failure = commitNotificationFailures.get(context.instance)
+    if (failure === 'sync') throw new Error('synthetic synchronous notifier failure')
+    if (failure === 'async') {
+      return Promise.reject(new Error('synthetic asynchronous notifier failure'))
+    }
+    return syncWorker.notify(context.env, context.instance).then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`sync notification returned ${response.status}`)
+      }
+      await response.body?.cancel()
+    })
+  },
+})
+
 export const SyncDurableObject = createSyncDurableObject(config)
-export { ZeroDO }
+export const ZeroDO = dataWorker.ZeroDO
 
 async function upstreamFetch(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
@@ -176,6 +222,12 @@ export class DataService extends WorkerEntrypoint<Env> {
       return Promise.resolve(Response.json({ enabled: true, rootMount: true }))
     }
     const namespace = pathname.split('/')[1] ?? ''
+    if (pathname.endsWith('/changes')) {
+      upstreamChangeRequests.set(
+        namespace,
+        (upstreamChangeRequests.get(namespace) ?? 0) + 1
+      )
+    }
     if (pathname.endsWith('/changes') && jsonValueNamespaces.has(namespace)) {
       const cursor = Number(new URL(request.url).searchParams.get('watermark') ?? 0)
       const values = [
@@ -381,10 +433,112 @@ export class AppService extends WorkerEntrypoint<Env> {
   }
 }
 
-const syncWorker = createSyncWorker(config)
+async function runApplicationCommitProbe(request: Request, env: Env): Promise<Response> {
+  const [, , namespace, action] = new URL(request.url).pathname.split('/')
+  if (!namespace || !action) {
+    return Response.json({ error: 'namespace and action are required' }, { status: 400 })
+  }
+  const body = (await request.json().catch(() => ({}))) as { id?: unknown }
+  const id = typeof body.id === 'string' ? body.id : `${action}-item`
+  const stub = env.UPSTREAM_DO.get(env.UPSTREAM_DO.idFromName(namespace))
+  const exec = async (sql: string) => {
+    const response = await stub.fetch('https://upstream.invalid/exec', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sql }),
+    })
+    if (!response.ok)
+      throw new Error(`application probe setup failed: ${await response.text()}`)
+  }
+  await exec(
+    'CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)'
+  )
+  const client = createApplicationSqlClient(env.UPSTREAM_DO, namespace)
+  commitNotificationAttempts.set(namespace, 0)
+  commitNotificationFailures.delete(namespace)
+  if (action === 'sync-failure') commitNotificationFailures.set(namespace, 'sync')
+  if (action === 'async-failure') commitNotificationFailures.set(namespace, 'async')
+
+  try {
+    if (action === 'public' || action === 'sync-failure' || action === 'async-failure') {
+      await client.exec(
+        'INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, ?, ?)',
+        [id, action, 1, 0, null],
+        { table: 'item', publicTable: 'item', kind: 'insert' }
+      )
+    } else if (action === 'private') {
+      await exec(
+        'CREATE TABLE IF NOT EXISTS private_note (id TEXT PRIMARY KEY, body TEXT)'
+      )
+      await client.registerTables([
+        { table: 'private_note', publicTable: 'private_note', publish: false },
+      ])
+      await client.exec('INSERT INTO private_note (id, body) VALUES (?, ?)', [id, action])
+    } else if (action === 'no-op') {
+      await client.exec("UPDATE item SET label = 'missing' WHERE id = 'missing'", [], {
+        table: 'item',
+        publicTable: 'item',
+        kind: 'update',
+      })
+    } else if (action === 'rollback') {
+      try {
+        await client.transaction(
+          () => {
+            throw new Error('application probe query compiler should not run')
+          },
+          async (tx) => {
+            await tx.exec(
+              'INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, ?, ?)',
+              [id, action, 1, 0, null],
+              { table: 'item', publicTable: 'item', kind: 'insert' }
+            )
+            throw new Error('intentional application probe rollback')
+          }
+        )
+      } catch (error) {
+        if (!String(error).includes('intentional application probe rollback')) throw error
+      }
+    } else {
+      return Response.json(
+        { error: 'unknown application commit action' },
+        { status: 404 }
+      )
+    }
+    const rows = await client.query<{ id: string }>('SELECT id FROM item WHERE id = ?', [
+      id,
+    ])
+    return Response.json({ ok: true, action, id, rows })
+  } catch (error) {
+    return Response.json({ ok: false, action, id, error: String(error) }, { status: 500 })
+  }
+}
+
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/internal-notify/')) {
+      const namespace = url.pathname.slice('/internal-notify/'.length)
+      return syncWorker.notify(env, namespace)
+    }
+    if (url.pathname.startsWith('/upstream-change-requests/')) {
+      const namespace = url.pathname.slice('/upstream-change-requests/'.length)
+      if (request.method === 'POST') upstreamChangeRequests.set(namespace, 0)
+      return Promise.resolve(
+        Response.json({ requests: upstreamChangeRequests.get(namespace) ?? 0 })
+      )
+    }
+    if (url.pathname.startsWith('/application-commit-status/')) {
+      const namespace = url.pathname.slice('/application-commit-status/'.length)
+      return Promise.resolve(
+        Response.json({
+          attempts: commitNotificationAttempts.get(namespace) ?? 0,
+          failure: commitNotificationFailures.get(namespace) ?? null,
+        })
+      )
+    }
+    if (url.pathname.startsWith('/application-commit/')) {
+      return runApplicationCommitProbe(request, env)
+    }
     if (url.pathname.startsWith('/delegated-ingest-control/')) {
       const namespace = url.pathname.slice('/delegated-ingest-control/'.length)
       if (request.method === 'GET') {
