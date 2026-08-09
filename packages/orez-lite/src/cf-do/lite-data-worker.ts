@@ -666,7 +666,7 @@ export function createOrezDataWorker<
           try {
             result = await options.schema.migrate({ client, instance })
           } finally {
-            // each migration statement commits through its own session, so a
+            // each migration file commits through its own session, so a
             // migrate() that throws partway has already moved the persisted
             // schema; the cached table shapes are stale on every exit
             this.invalidateSchemaCaches()

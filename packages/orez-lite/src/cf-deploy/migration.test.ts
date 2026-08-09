@@ -94,6 +94,84 @@ describe('buildMigrationModuleSource', () => {
     await expect(migrationModule.orezAppSchema.migrate()).resolves.toBeUndefined()
   })
 
+  it('commits migration files separately so later DDL can snapshot a table', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = { tables: {}, relationships: {} }
+    `)
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-backlog',
+        schemaImportSpecifier: schemaModuleUrl,
+        nativeSqlStatements: [
+          {
+            id: '0001_rows/migration.sql:0',
+            sql: 'UPDATE project SET name = name',
+          },
+          {
+            id: '0002_schema/migration.sql:0',
+            sql: 'ALTER TABLE project ADD iconSha text',
+          },
+        ],
+      })
+    )
+    const ledger = new Set<string>()
+    const statementTransactions: number[] = []
+    let transaction = 0
+    let rowWriteTransaction = -1
+    const tx = {
+      async query(sql: string) {
+        if (sql.startsWith('SELECT id FROM "__contrast_cf_migrations"')) {
+          return [...ledger].map((id) => ({ id }))
+        }
+        if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
+        if (sql.includes("SELECT name FROM sqlite_master WHERE type = 'table'")) return []
+        throw new Error(`unexpected query: ${sql}`)
+      },
+      async exec(sql: string, params: unknown[] = []) {
+        if (
+          sql.startsWith('CREATE TABLE IF NOT EXISTS "__contrast_cf_migrations"') ||
+          sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')
+        ) {
+          return
+        }
+        if (sql === 'UPDATE project SET name = name') {
+          rowWriteTransaction = transaction
+          statementTransactions.push(transaction)
+          return
+        }
+        if (sql === 'ALTER TABLE project ADD iconSha text') {
+          if (rowWriteTransaction === transaction) {
+            throw new Error(
+              'cannot snapshot project after row undo in the same transaction'
+            )
+          }
+          statementTransactions.push(transaction)
+          return
+        }
+        if (sql.startsWith('INSERT INTO "__contrast_cf_migrations"')) {
+          ledger.add(String(params[0]))
+          return
+        }
+        throw new Error(`unexpected exec: ${sql}`)
+      },
+      async registerTables() {},
+    }
+    const client = {
+      async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
+        transaction++
+        await run(tx)
+      },
+    }
+
+    await expect(migrationModule.orezAppSchema.migrate({ client })).resolves.toEqual({
+      tables: [],
+    })
+    expect(statementTransactions).toHaveLength(2)
+    expect(statementTransactions[0]).not.toBe(statementTransactions[1])
+    expect(ledger.size).toBe(2)
+  })
+
   it('accepts equivalent SQLite type affinities and still rejects incompatible types', async () => {
     const schemaModuleUrl = javascriptModuleUrl(`
       export const schema = { tables: {}, relationships: {} }

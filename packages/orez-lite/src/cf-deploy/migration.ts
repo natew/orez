@@ -571,14 +571,18 @@ async function reconcilePhantomLedger(tx, applied) {
   }
 }
 
-async function applyNativeSchema(tx, instance) {
+async function applyNativeSchema(tx, instance, {
+  prepare = true,
+  migrationFile = null,
+  finalize = true,
+} = {}) {
   await tx.exec(
     'CREATE TABLE IF NOT EXISTS ' + quoteIdentifier(migrationTable) +
       ' (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)',
   )
   const appliedRows = await tx.query('SELECT id FROM ' + quoteIdentifier(migrationTable))
   const applied = new Set(appliedRows.map((row) => row.id))
-  await reconcilePhantomLedger(tx, applied)
+  if (prepare) await reconcilePhantomLedger(tx, applied)
   // register BEFORE the statements, not only after them. a cdc trigger whose
   // _orez_cdc_tables row is missing is invisible to beginSchemaChange, which
   // skips unregistered tables, so it never suspends capture and the next
@@ -589,7 +593,7 @@ async function applyNativeSchema(tx, instance) {
   // still runs and still owns publication; this one only heals. on a fresh
   // namespace every table is absent, ensureTable returns false for each, and
   // this is a no-op beyond creating the cdc bookkeeping tables early.
-  await tx.registerTables(publicTables())
+  if (prepare) await tx.registerTables(publicTables())
   const appliedIds = [...applied]
   const appliedStatementIds = new Set()
   const supersededStatementIds = new Set()
@@ -609,6 +613,21 @@ async function applyNativeSchema(tx, instance) {
       supersededStatementIds.add(id)
     }
   }
+  const pendingMigrationFiles = []
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
+    if (!item.sql.split('\\n').some((line) => {
+      const trimmed = line.trim()
+      return trimmed.length > 0 && !trimmed.startsWith('--')
+    })) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    if (supersededStatementIds.has(baseId) || appliedStatementIds.has(baseId)) continue
+    const file = baseId.split(':')[0]
+    if (!pendingMigrationFiles.includes(file)) pendingMigrationFiles.push(file)
+  }
   // CREATE TABLE IF NOT EXISTS is a SILENT NO-OP against a table that already
   // exists in an older shape, so every column that only ever appears inside a
   // CREATE definition is unreachable on a namespace whose table predates it,
@@ -621,7 +640,7 @@ async function applyNativeSchema(tx, instance) {
   // failure compensation below, so at the start of every retry the CREATE is
   // unledgered and the pass skipped it. converging here is independent of
   // ledger state, which is the only thing that made it reachable at all.
-  for (const [index, statement] of nativeSqlStatements.entries()) {
+  for (const [index, statement] of prepare ? nativeSqlStatements.entries() : []) {
     const item = typeof statement === 'string' ? null : statement
     if (!item || !Array.isArray(item.declaredColumns)) continue
     if (typeof item.sql !== 'string') continue
@@ -684,6 +703,7 @@ async function applyNativeSchema(tx, instance) {
       })) continue
       const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
       if (supersededStatementIds.has(baseId)) continue
+      if (migrationFile !== null && baseId.split(':')[0] !== migrationFile) continue
       const id = baseId + ':' + hashMigrationSql(item.sql)
       // migration statement ids are immutable execution identities. the SQL hash
       // records which source version ran, but editing an old migration must never
@@ -751,6 +771,7 @@ async function applyNativeSchema(tx, instance) {
     }
     throw error
   }
+  if (!finalize) return pendingMigrationFiles
   await assertExpectedSchema(tx)
   await tx.exec(
     'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)',
@@ -830,7 +851,7 @@ export async function ${runCloudflareMigrations}({
     await client.registerTables(resolvedPublicTables)
     return { tables: resolvedPublicTables.map((table) => table.publicTable) }
   }
-  // the statement loop labels its own failures; acquiring the session and
+  // the migration-file loop labels its own failures; acquiring a session and
   // committing sit OUTSIDE every try/catch in applyNativeSchema, so a Durable
   // Object SQL error raised there arrives bare. the schema barrier hands that
   // string straight back as a 503 body, which is the entire diagnosis budget a
@@ -841,12 +862,41 @@ export async function ${runCloudflareMigrations}({
   // so what is left is only reachable through a message that says more.
   let phase = 'session-acquire'
   try {
+    let pendingMigrationFiles = []
     await client.transaction(() => {
       throw new Error('native schema migration does not use queryAst')
     }, async (tx) => {
-      phase = 'reconcile'
-      await applyNativeSchema(tx, instance)
-      phase = 'commit'
+      phase = 'prepare'
+      pendingMigrationFiles = await applyNativeSchema(tx, instance, {
+        prepare: true,
+        migrationFile: '',
+        finalize: false,
+      })
+      phase = 'prepare-commit'
+    })
+    for (const migrationFile of pendingMigrationFiles) {
+      await client.transaction(() => {
+        throw new Error('native schema migration does not use queryAst')
+      }, async (tx) => {
+        phase = 'migration ' + migrationFile
+        await applyNativeSchema(tx, instance, {
+          prepare: false,
+          migrationFile,
+          finalize: false,
+        })
+        phase = 'migration-commit ' + migrationFile
+      })
+    }
+    await client.transaction(() => {
+      throw new Error('native schema migration does not use queryAst')
+    }, async (tx) => {
+      phase = 'finalize'
+      await applyNativeSchema(tx, instance, {
+        prepare: false,
+        migrationFile: '',
+        finalize: true,
+      })
+      phase = 'finalize-commit'
     })
   } catch (error) {
     throw new Error(
