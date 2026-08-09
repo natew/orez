@@ -288,6 +288,61 @@ describe('namespace backup restore', () => {
     ).toBeDefined()
   })
 
+  it('drops current-only dependent tables before restoring an older dump', async () => {
+    const key = 'backups/singleton/older.ndjson'
+    const stored = bucketWith(
+      key,
+      dump([
+        {
+          kind: 'header',
+          format: 'test-v3',
+          ns: 'source',
+          orderedTables: true,
+        },
+        {
+          kind: 'table',
+          name: 'message',
+          sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)',
+          indexes: [],
+        },
+        { kind: 'rows', table: 'message', rows: [{ id: 'one' }] },
+        { kind: 'footer', tables: 1, rows: 1 },
+      ])
+    )
+    const batches: NamespaceBackupStatement[][] = []
+    const manager = createNamespaceBackupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query: async (_env, _namespace, sql) => {
+        if (sql.startsWith('SELECT name FROM sqlite_master')) {
+          return [{ name: 'message' }, { name: 'messageReaction' }]
+        }
+        if (sql === 'PRAGMA foreign_key_list("messageReaction")') {
+          return [{ table: 'message' }]
+        }
+        if (sql.startsWith('PRAGMA foreign_key_list')) return []
+        if (sql.startsWith('SELECT COUNT(*)')) return [{ n: 1 }]
+        return []
+      },
+      batch: async (_env, _namespace, statements) => {
+        batches.push([...statements])
+      },
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await manager.importNamespace({}, 'singleton', key)
+
+    const drops = batches
+      .flat()
+      .map((statement) => statement.sql)
+      .filter((sql) => sql.startsWith('DROP TABLE'))
+    expect(drops).toEqual([
+      'DROP TABLE IF EXISTS "messageReaction"',
+      'DROP TABLE IF EXISTS "message"',
+    ])
+  })
+
   it('accepts explicitly retained legacy formats', async () => {
     const key = 'backups/singleton/legacy.ndjson'
     const stored = bucketWith(

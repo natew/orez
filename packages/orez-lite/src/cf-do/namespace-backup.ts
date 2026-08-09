@@ -108,6 +108,25 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
+function dependencyOrder(
+  names: readonly string[],
+  dependencies: ReadonlyMap<string, readonly string[]>
+): string[] {
+  const ordered: string[] = []
+  const done = new Set<string>()
+  const visiting = new Set<string>()
+  const visit = (name: string) => {
+    if (done.has(name) || visiting.has(name)) return
+    visiting.add(name)
+    for (const dependency of dependencies.get(name) ?? []) visit(dependency)
+    visiting.delete(name)
+    done.add(name)
+    ordered.push(name)
+  }
+  for (const name of names) visit(name)
+  return ordered
+}
+
 async function* ndjsonLines(stream: ReadableStream<Uint8Array>) {
   const decoder = new TextDecoder()
   const reader = stream.getReader()
@@ -212,18 +231,10 @@ export function createNamespaceBackupManager<Env>(
           .filter((dependency) => dependency !== name && tableNames.has(dependency))
       )
     }
-    const orderedNames: string[] = []
-    const ordered = new Set<string>()
-    const visiting = new Set<string>()
-    const visit = (name: string) => {
-      if (ordered.has(name) || visiting.has(name)) return
-      visiting.add(name)
-      for (const dependency of dependencies.get(name) ?? []) visit(dependency)
-      visiting.delete(name)
-      ordered.add(name)
-      orderedNames.push(name)
-    }
-    for (const table of unorderedTables) visit(String(table.name))
+    const orderedNames = dependencyOrder(
+      unorderedTables.map((table) => String(table.name)),
+      dependencies
+    )
     const tableByName = new Map(
       unorderedTables.map((table) => [String(table.name), table])
     )
@@ -505,19 +516,41 @@ export function createNamespaceBackupManager<Env>(
       rowTotal += rows.length
     }
 
-    for (let offset = 0; offset < tableNames.length; offset += 400) {
-      await options.batch(
+    const liveTableRows = await options.query(
+      env,
+      namespace,
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY name",
+      []
+    )
+    const liveTableNames = liveTableRows
+      .map((row) => String(row.name ?? ''))
+      .filter((name) => name && !isExcluded(name))
+    const dropNames = [...new Set([...tableNames, ...liveTableNames])]
+    const dropNameSet = new Set(dropNames)
+    const dropDependencies = new Map<string, string[]>()
+    for (const name of liveTableNames) {
+      const foreignKeys = await options.query(
         env,
         namespace,
-        tableNames
-          .slice()
-          .reverse()
-          .slice(offset, offset + 400)
-          .map((name) => ({
-            sql: `DROP TABLE IF EXISTS "${quoteIdentifier(name)}"`,
-          }))
+        `PRAGMA foreign_key_list("${quoteIdentifier(name)}")`,
+        []
+      )
+      dropDependencies.set(
+        name,
+        foreignKeys
+          .map((foreignKey) => String(foreignKey.table))
+          .filter((table) => table !== name && dropNameSet.has(table))
       )
     }
+    await options.batch(
+      env,
+      namespace,
+      dependencyOrder(dropNames, dropDependencies)
+        .reverse()
+        .map((name) => ({
+          sql: `DROP TABLE IF EXISTS "${quoteIdentifier(name)}"`,
+        }))
+    )
     const includedEntries = tableEntries.filter((entry) => !isExcluded(entry.name))
     for (let offset = 0; offset < includedEntries.length; offset += 400) {
       await options.batch(
@@ -566,18 +599,7 @@ export function createNamespaceBackupManager<Env>(
             .filter((table) => table !== name && tableNames.includes(table))
         )
       }
-      const ordered: string[] = []
-      const done = new Set<string>()
-      const visiting = new Set<string>()
-      const visit = (name: string) => {
-        if (done.has(name) || visiting.has(name)) return
-        visiting.add(name)
-        for (const dependency of dependencies.get(name) ?? []) visit(dependency)
-        visiting.delete(name)
-        done.add(name)
-        ordered.push(name)
-      }
-      for (const name of tableNames) visit(name)
+      const ordered = dependencyOrder(tableNames, dependencies)
       for (const name of ordered) await insertRows(name, bufferedRows.get(name) ?? [])
     }
 
