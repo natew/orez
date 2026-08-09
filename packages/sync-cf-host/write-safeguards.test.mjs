@@ -4,7 +4,6 @@ import {
   IngestCircuitBreaker,
   retryDelayMs,
   shouldRetryDelegatedPush,
-  trackBillableCursorRows,
 } from './src/write-safeguards.ts'
 
 describe('IngestCircuitBreaker', () => {
@@ -72,36 +71,4 @@ test('delegated push retries are bounded and exponentially capped', () => {
   expect(shouldRetryDelegatedPush(503, 2, 3)).toBe(true)
   expect(shouldRetryDelegatedPush(503, 3, 3)).toBe(false)
   expect(shouldRetryDelegatedPush(400, 1, 3)).toBe(false)
-})
-
-test('billable cursor tracking captures rows that appear during raw iteration', () => {
-  const cursor = {
-    rowsRead: 0,
-    rowsWritten: 0,
-    raw() {
-      let done = false
-      return {
-        [Symbol.iterator]() {
-          return this
-        },
-        next: () => {
-          if (done) return { done: true }
-          done = true
-          this.rowsRead = 1
-          this.rowsWritten = 7
-          return { done: false, value: [1] }
-        },
-      }
-    },
-  }
-  const written = []
-  const read = []
-  const tracked = trackBillableCursorRows(
-    cursor,
-    (rows) => written.push(rows),
-    (rows) => read.push(rows)
-  )
-  expect(Array.from(tracked.raw())).toEqual([[1]])
-  expect(written).toEqual([7])
-  expect(read).toEqual([1])
 })

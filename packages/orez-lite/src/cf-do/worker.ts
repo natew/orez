@@ -5,6 +5,7 @@ import {
   type CompiledTransactionQueryPlan,
   type TransactionQueryBudget,
 } from 'orez-sync-cf-host/transaction-query'
+import { trackBillableCursorRows } from 'orez-sync-executor/sql-billing'
 
 import {
   classifySql,
@@ -12,7 +13,6 @@ import {
   isSqlRowMutation,
   RollingRowWriteBudget,
   stripPublicPrefix,
-  trackSqlCursorBillingRows,
   trackedChangeRow,
   WriteBudgetExceededError,
   type RowWriteBudgetTrip,
@@ -543,7 +543,7 @@ export class ZeroDO extends DurableObject {
       if (measurement && this.activeWriteMeasurements) {
         this.activeWriteMeasurements.push(measurement)
       }
-      return trackSqlCursorBillingRows(
+      return trackBillableCursorRows(
         cursor,
         (rows) => {
           this.sqlBillingSinceBoot.rowsWritten += rows

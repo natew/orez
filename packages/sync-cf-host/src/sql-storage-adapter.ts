@@ -1,7 +1,7 @@
+import { trackBillableCursorRows } from 'orez-sync-executor/sql-billing'
 import { encodeSqlValue } from 'orez-sync-executor/sqlite'
 
 import { executeTransactionQueryPlan } from './transaction-query.js'
-import { trackBillableCursorRows } from './write-safeguards.js'
 
 import type {
   CompiledTransactionQueryPlan,

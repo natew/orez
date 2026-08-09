@@ -4,7 +4,6 @@ import {
   isSqlMutation,
   isSqlRowMutation,
   RollingRowWriteBudget,
-  trackSqlCursorBillingRows,
   trackedChangeRow,
   WriteBudgetExceededError,
 } from './do-sql-tracking.js'
@@ -153,79 +152,5 @@ describe('isSqlMutation', () => {
     expect(isSqlRowMutation('WITH x AS (SELECT 1) DELETE FROM t')).toBe(true)
     expect(isSqlRowMutation('CREATE TABLE t (id INTEGER)')).toBe(false)
     expect(isSqlRowMutation('VACUUM')).toBe(false)
-  })
-})
-
-describe('trackSqlCursorBillingRows', () => {
-  it('records billing rows that appear only while a RETURNING cursor is drained', () => {
-    const rows = [{ id: 1 }, { id: 2 }, { id: 3 }]
-    let index = 0
-    const cursor = {
-      rowsWritten: 0,
-      next() {
-        if (index >= rows.length) return { done: true, value: undefined }
-        this.rowsWritten += 4 // base row + three index rows billed by CF
-        return { done: false, value: rows[index++] }
-      },
-      toArray() {
-        const out = []
-        for (;;) {
-          const item = this.next()
-          if (item.done) return out
-          out.push(item.value)
-        }
-      },
-    }
-    const deltas: number[] = []
-    const tracked = trackSqlCursorBillingRows(cursor, (delta) => deltas.push(delta))
-    expect(tracked.rowsWritten).toBe(0)
-    expect(tracked.toArray()).toEqual(rows)
-    expect(deltas).toEqual([12])
-  })
-
-  it('records immediate rows once and monotonic deltas from next/raw iteration', () => {
-    const cursor = {
-      rowsWritten: 2,
-      next() {
-        this.rowsWritten = 5
-        return { done: true, value: undefined }
-      },
-      raw() {
-        return {
-          next: () => {
-            this.rowsWritten = 9
-            return { done: true, value: undefined }
-          },
-        }
-      },
-    }
-    const deltas: number[] = []
-    const tracked = trackSqlCursorBillingRows(cursor, (delta) => deltas.push(delta))
-    tracked.next()
-    tracked.raw().next()
-    expect(deltas).toEqual([2, 3, 4])
-  })
-
-  it('records read and write deltas from the same consumed cursor', () => {
-    const cursor = {
-      rowsRead: 1,
-      rowsWritten: 0,
-      toArray() {
-        this.rowsRead = 7
-        this.rowsWritten = 3
-        return [{ id: 'row-1' }]
-      },
-    }
-    const written: number[] = []
-    const read: number[] = []
-    const tracked = trackSqlCursorBillingRows(
-      cursor,
-      (delta) => written.push(delta),
-      (delta) => read.push(delta)
-    )
-
-    expect(tracked.toArray()).toEqual([{ id: 'row-1' }])
-    expect(written).toEqual([3])
-    expect(read).toEqual([1, 6])
   })
 })

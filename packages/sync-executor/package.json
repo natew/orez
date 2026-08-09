@@ -24,6 +24,10 @@
     "./realtime": {
       "types": "./dist/realtime/index.d.ts",
       "import": "./dist/realtime/index.js"
+    },
+    "./sql-billing": {
+      "types": "./dist/sql-billing.d.ts",
+      "import": "./dist/sql-billing.js"
     }
   },
   "scripts": {
