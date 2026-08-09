@@ -225,6 +225,7 @@ export interface OrezDataWorkerResult<Env extends OrezDataWorkerEnv> {
 const STANDARD_DATA_PATHS = [
   '/_orez/backup/restore',
   '/_orez/backup/export',
+  '/_orez/status',
   '/_orez/write-budget/trip',
   '/_orez/write-budget/reopen',
   '/_orez/write-budget',
@@ -1035,6 +1036,7 @@ export function createOrezDataWorker<
           if (
             resolved.pathname === '/changes' ||
             resolved.pathname === '/snapshot' ||
+            resolved.pathname === '/_orez/status' ||
             resolved.pathname === '/_orez/write-budget' ||
             resolved.pathname === '/_orez/write-budget/trip' ||
             resolved.pathname === '/_orez/write-budget/reopen'

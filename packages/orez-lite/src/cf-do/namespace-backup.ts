@@ -29,6 +29,7 @@ export interface NamespaceBackupSummary {
   exportedAt: string
   tables: number
   rows: number
+  tableRows: Record<string, number>
   bytes: number
   parts: number
 }
@@ -270,6 +271,7 @@ export function createNamespaceBackupManager<Env>(
     }
 
     let rowTotal = 0
+    const tableRows: Record<string, number> = {}
     try {
       await writeLine({
         kind: 'header',
@@ -281,6 +283,7 @@ export function createNamespaceBackupManager<Env>(
       })
       for (const table of tables) {
         const name = String(table.name)
+        let tableRowTotal = 0
         await writeLine({
           kind: 'table',
           name,
@@ -304,10 +307,12 @@ export function createNamespaceBackupManager<Env>(
           for (const row of rows) delete row.__orez_backup_rowid
           const lineBytes = await writeLine({ kind: 'rows', table: name, rows })
           rowTotal += rows.length
+          tableRowTotal += rows.length
           const perRow = Math.max(1, Math.ceil(lineBytes / rows.length))
           limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
           if (rows.length < usedLimit) break
         }
+        tableRows[name] = tableRowTotal
       }
       await writeLine({ kind: 'footer', tables: tables.length, rows: rowTotal })
       await flushParts(true)
@@ -328,6 +333,7 @@ export function createNamespaceBackupManager<Env>(
       exportedAt,
       tables: tables.length,
       rows: rowTotal,
+      tableRows,
       bytes: totalBytes,
       parts: uploadedParts.length,
     }

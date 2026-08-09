@@ -45,6 +45,80 @@ function dump(lines: unknown[]): string {
   return `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`
 }
 
+function writableBucket() {
+  const pointers = new Map<string, string>()
+  const bucket: NamespaceBackupBucket = {
+    async get(key) {
+      const value = pointers.get(key)
+      return value
+        ? {
+            body: stream(value),
+            async json() {
+              return JSON.parse(value)
+            },
+          }
+        : null
+    },
+    async createMultipartUpload() {
+      return {
+        async uploadPart(partNumber, value) {
+          return { partNumber, value }
+        },
+        async complete() {},
+        async abort() {},
+      }
+    },
+    async put(key, value) {
+      pointers.set(key, value)
+    },
+    async list() {
+      return { objects: [] }
+    },
+    async delete() {},
+  }
+  return { bucket, pointers }
+}
+
+describe('namespace backup export', () => {
+  it('records per-table row counts in the durable summary without another scan', async () => {
+    const stored = writableBucket()
+    const manager = createNamespaceBackupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query: async (_env, _namespace, sql, params) => {
+        if (sql.includes('SELECT write_seq')) return [{ write_seq: 9 }]
+        if (sql.includes('sqlite_master')) {
+          return [
+            { name: 'empty', sql: 'CREATE TABLE empty (id TEXT)', type: 'table' },
+            { name: 'message', sql: 'CREATE TABLE message (id TEXT)', type: 'table' },
+          ]
+        }
+        if (sql.startsWith('PRAGMA foreign_key_list')) return []
+        if (sql.includes('FROM "empty"')) return []
+        if (sql.includes('FROM "message"')) {
+          return Number(params[0]) === 0 ? [{ __orez_backup_rowid: 1, id: 'one' }] : []
+        }
+        throw new Error(`unexpected export query: ${sql}`)
+      },
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    const summary = await manager.exportNamespace({}, 'singleton')
+
+    expect(summary).toMatchObject({
+      marker: 9,
+      tables: 2,
+      rows: 1,
+      tableRows: { empty: 0, message: 1 },
+    })
+    expect(
+      JSON.parse(stored.pointers.get('backups/singleton/latest.json') ?? '{}').tableRows
+    ).toEqual({ empty: 0, message: 1 })
+  })
+})
+
 describe('namespace backup restore', () => {
   it('validates the complete dump before mutating the namespace', async () => {
     const key = 'backups/singleton/truncated.ndjson'

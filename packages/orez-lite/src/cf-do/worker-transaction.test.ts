@@ -73,8 +73,43 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
     reload() {},
   }
   zero.watermarks = { invalidateCache() {} }
-  zero.writeBudget = { recordLogical() {} }
+  zero.writeBudget = {
+    recordLogical() {},
+    status: () => ({
+      state: 'open',
+      budget: 150_000,
+      windowMs: 300_000,
+      windowRows: 0,
+      billableRows: 0,
+      logicalRows: 0,
+      trippedAt: null,
+    }),
+  }
   zero.writeBudgetDisabled = true
+  zero.writeBudgetAdminToken = 'operator-token'
+  zero.writeBudgetTripStatement = undefined
+  zero.bootID = 'test-boot'
+  zero.bootedAt = Date.now()
+  zero.requestsSinceBoot = {
+    fetch: 0,
+    applicationSqlSessions: 0,
+    applicationSqlReadSessions: 0,
+    applicationSqlWriteSessions: 0,
+    sqlStatements: 0,
+  }
+  zero.sqlBillingSinceBoot = { rowsRead: 0, rowsWritten: 0 }
+  const writeGrantWaitSamples: number[] = []
+  zero.writeGrantWaitMs = {
+    record: (value: number) => writeGrantWaitSamples.push(value),
+    status: () => ({
+      observed: writeGrantWaitSamples.length,
+      sampled: writeGrantWaitSamples.length,
+      capacity: 4_096,
+      p50: writeGrantWaitSamples[0] ?? null,
+      p99: writeGrantWaitSamples.at(-1) ?? null,
+      max: writeGrantWaitSamples.length ? Math.max(...writeGrantWaitSamples) : null,
+    }),
+  }
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
@@ -82,8 +117,11 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   zero.applicationSqlReaders = new Set()
   zero.applicationSqlQueue = []
   zero.applicationSqlDidCommit = () => {}
-  zero.ctx = { storage: { transaction } }
-  return { storage, zero }
+  zero.ctx = {
+    id: { toString: () => 'test-object-id' },
+    storage: { sql: { databaseSize: 12_345 }, transaction },
+  }
+  return { storage, writeGrantWaitSamples, zero }
 }
 
 const unusedCompiler = () => {
@@ -315,6 +353,54 @@ describe('ZeroDO trusted application transaction', () => {
     expect(admitted).toEqual(['first', 'second', 'third'])
   })
 
+  it('reports per-object admission pressure only to an authenticated operator', async () => {
+    const { writeGrantWaitSamples, zero } = await createTestZero(
+      async (work) => await work()
+    )
+    const owner = await zero.applicationSqlSession('owner')
+    await owner.begin()
+    const next = await zero.applicationSqlSession('next')
+    const nextAdmission = next.begin()
+    await Promise.resolve()
+
+    const forbidden = await zero.fetch(new Request('http://zero-do/_orez/status'))
+    expect(forbidden.status).toBe(403)
+
+    zero.releaseApplicationSqlTurn(owner)
+    await nextAdmission
+    expect(writeGrantWaitSamples).toHaveLength(2)
+
+    const response = await zero.fetch(
+      new Request('http://zero-do/_orez/status', {
+        headers: {
+          'x-orez-admin-token': 'operator-token',
+          'x-orez-do-instance': 'ns:user-1',
+        },
+      })
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      bootID: 'test-boot',
+      ns: 'ns:user-1',
+      objectId: 'test-object-id',
+      databaseSizeBytes: 12_345,
+      requestsSinceBoot: {
+        fetch: 2,
+        applicationSqlSessions: 2,
+        applicationSqlWriteSessions: 2,
+      },
+      applicationSql: {
+        activeReaders: 0,
+        writerActive: true,
+        queuedReaders: 0,
+        queuedWriters: 0,
+        writeGrantWaitMs: { observed: 2, sampled: 2 },
+      },
+      writeBudget: { enabled: false, state: 'open' },
+    })
+    zero.releaseApplicationSqlTurn(next)
+  })
+
   it('admits latency-sensitive sessions before queued normal work', async () => {
     const { zero } = await createTestZero(async (work) => await work())
     const owner = await zero.applicationSqlSession('owner')
@@ -468,8 +554,7 @@ describe('ZeroDO trusted application transaction', () => {
   })
 
   it('does not expose private application SQL on the public fetch surface', async () => {
-    const { ZeroDO } = await import('./worker.js')
-    const zero = Object.create(ZeroDO.prototype) as ZeroDO
+    const { zero } = await createTestZero(async (work) => await work())
 
     const response = await zero.fetch(
       new Request('http://zero-do/_orez/application-sql', {

@@ -65,6 +65,14 @@ async function createWorkerCore() {
     windowMs: 300_000,
     now: () => 1,
   })
+  zero.requestsSinceBoot = {
+    fetch: 0,
+    applicationSqlSessions: 0,
+    applicationSqlReadSessions: 0,
+    applicationSqlWriteSessions: 0,
+    sqlStatements: 0,
+  }
+  zero.writeGrantWaitMs = { record() {} }
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false

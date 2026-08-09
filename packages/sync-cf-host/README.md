@@ -168,7 +168,12 @@ channel disconnects, it retries in the background while the safety poll
 continues to provide convergence.
 
 `/admin/status` reports a boot ID, hibernation simulation count, connected wake
-sockets, durable database size, engine watermark/floor, and aggregate counters.
+sockets, durable database size, engine watermark/floor, aggregate counters, and
+the most recent coalesced wake batch. That wake record includes the sorted
+upstream table names which caused the batch plus its socket, recipient, timing,
+and frame counts. Local-only pushes have no upstream table attribution and
+therefore report an empty table list. The same fields are emitted in the
+structured `sync_wake` log.
 After the configured idle gap (5 seconds in the harness deployment), the local
 deterministic model resets in-memory state and changes boot ID while retaining
 SQLite state and sockets. This models the harness idle-teardown pattern; it

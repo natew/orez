@@ -293,6 +293,7 @@ export function stripPublicPrefix(tableName: string): string {
 }
 
 type SqlCursorLike = {
+  rowsRead?: number
   rowsWritten?: number
   next?: (...args: unknown[]) => unknown
   one?: (...args: unknown[]) => unknown
@@ -302,26 +303,34 @@ type SqlCursorLike = {
 }
 
 /**
- * Account a mutation cursor's final billing rows as it is consumed.
+ * Account a cursor's final billing rows as it is consumed.
  *
- * Cloudflare's `rowsWritten` can increase during cursor iteration (notably for
- * `... RETURNING` statements). Sampling only when `sql.exec()` returns misses
- * those writes. This proxy records monotonic deltas after every consumption
- * method while preserving the cursor's native `this` binding.
+ * Cloudflare's `rowsRead` and `rowsWritten` can increase during cursor
+ * iteration (notably for `... RETURNING` statements). Sampling only when
+ * `sql.exec()` returns misses that work. This proxy records monotonic deltas
+ * after every consumption method while preserving the cursor's native `this`
+ * binding.
  */
-export function trackSqlCursorRowsWritten<Cursor extends SqlCursorLike>(
+export function trackSqlCursorBillingRows<Cursor extends SqlCursorLike>(
   cursor: Cursor,
-  record: (rows: number) => void
+  recordWritten: (rows: number) => void,
+  recordRead: (rows: number) => void = () => {}
 ): Cursor {
   if (!cursor || typeof cursor !== 'object') return cursor
-  let accountedRows = 0
+  let accountedWritten = 0
+  let accountedRead = 0
 
   const account = () => {
-    const current = Number(cursor.rowsWritten ?? 0)
-    if (!Number.isSafeInteger(current) || current <= accountedRows) return
-    const delta = current - accountedRows
-    accountedRows = current
-    record(delta)
+    const written = Number(cursor.rowsWritten ?? 0)
+    if (Number.isSafeInteger(written) && written > accountedWritten) {
+      recordWritten(written - accountedWritten)
+      accountedWritten = written
+    }
+    const read = Number(cursor.rowsRead ?? 0)
+    if (Number.isSafeInteger(read) && read > accountedRead) {
+      recordRead(read - accountedRead)
+      accountedRead = read
+    }
   }
 
   const wrapIterator = (iterator: object): object =>

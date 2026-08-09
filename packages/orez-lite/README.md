@@ -86,3 +86,21 @@ CLI:
 ```sh
 orez-lite dev -- node server.js
 ```
+
+## Cloudflare data-object status
+
+The Cloudflare data worker forwards `GET /<namespace>/_orez/status` to the
+namespace's data Durable Object. The request must present the configured
+`OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN` as `x-orez-admin-token` or a bearer token.
+The response identifies the namespace and object, reports database size,
+application SQL reader/writer queue depth, recent write-grant wait p50/p99/max,
+SQL rows read and written, and request/session counters.
+
+These measurements are bounded, in-memory values since the current object boot.
+They reset on eviction and do not add storage writes. The existing environment
+variable name is retained for deployed compatibility even though the token now
+protects the broader status route as well as write-budget controls.
+
+Cloudflare namespace backup summaries also include `tableRows`, the row count
+observed for every exported table during the existing streaming scan. Consumers
+can persist fleet profiles without issuing a second set of table reads.

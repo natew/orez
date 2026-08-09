@@ -100,6 +100,16 @@ type UpstreamBatch = {
     oldData: Record<string, unknown> | null
   }>
 }
+type WakeStatus = {
+  at: number
+  tables: string[]
+  socketCount: number
+  originCount: number
+  sent: number
+  eligibleRecipients: number
+  coalesceMs: number
+  fanoutMs: number
+}
 type ApplyUpstreamResult = {
   watermark: number | string
   applied: number
@@ -112,6 +122,16 @@ type SnapshotProgress = {
   cursor: string | null
   state: 'paging' | 'catching_up'
   catchupWatermark: string
+}
+
+function upstreamBatchTables(batch: UpstreamBatch): Set<string> {
+  const tables = new Set<string>()
+  for (const change of batch.changes) {
+    if (typeof change?.tableName === 'string' && change.tableName.length > 0) {
+      tables.add(change.tableName)
+    }
+  }
+  return tables
 }
 type SnapshotPage = {
   watermark: number
@@ -550,7 +570,9 @@ export function createSyncDurableObject<
     #pulling = new Set<string>()
     #wakeOrigins = new Set<string>()
     #wakeRecipients = new Set<WebSocket>()
+    #wakeTables = new Set<string>()
     #wakePromise: Promise<void> | null = null
+    #lastWake: WakeStatus | null = null
     // Streaming fields. Null when the namespace configures no manifest, which
     // is every wake-only deployment: no hub is built and nothing below runs.
     #realtime: RealtimeSocketHost | null = null
@@ -724,7 +746,9 @@ export function createSyncDurableObject<
         this.#pulling.clear()
         this.#wakeOrigins.clear()
         this.#wakeRecipients.clear()
+        this.#wakeTables.clear()
         this.#wakePromise = null
+        this.#lastWake = null
         // Real hibernation reconstructs the object, so the hub and every
         // connection handle are gone while the sockets stay open. Modelling
         // that here is what makes rehydration reachable from a test: leaving
@@ -1071,6 +1095,7 @@ export function createSyncDurableObject<
         let pendingPage: SnapshotPage | null = null
         let snapshotPageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS
         let snapshotCompleted = false
+        const changedTables = new Set<string>()
         for (;;) {
           if (progress?.state === 'paging') {
             const activeProgress = progress
@@ -1115,6 +1140,7 @@ export function createSyncDurableObject<
               ) as SnapshotProgress
               total += pageToApply.rows.length
               this.#recordIngestLogicalRows(pageToApply.rows.length)
+              changedTables.add(table)
               progress = nextProgress
               pendingPage = null
             } catch (error) {
@@ -1152,6 +1178,7 @@ export function createSyncDurableObject<
             if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
               throw new Error('invalid upstream changes response')
             }
+            for (const table of upstreamBatchTables(batch)) changedTables.add(table)
             this.#resetSnapshotBillingWindow()
             const result = this.#withIngestBilling(
               {
@@ -1245,6 +1272,7 @@ export function createSyncDurableObject<
           if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
             throw new Error('invalid upstream changes response')
           }
+          for (const table of upstreamBatchTables(batch)) changedTables.add(table)
           const result = this.#withIngestBilling(
             {
               phase: 'changes',
@@ -1289,7 +1317,7 @@ export function createSyncDurableObject<
         this.#recoverIngestBreaker()
         const endingWatermark = this.#engineState().watermark
         if (snapshotCompleted || total > 0 || endingWatermark !== startingWatermark) {
-          await this.#enqueueWake('__upstream__')
+          await this.#enqueueWake('__upstream__', changedTables)
         }
         return total
       })().finally(() => {
@@ -1371,8 +1399,9 @@ export function createSyncDurableObject<
       )
     }
 
-    #enqueueWake(originClientID: string): Promise<void> {
+    #enqueueWake(originClientID: string, tables: Iterable<string> = []): Promise<void> {
       this.#wakeOrigins.add(originClientID)
+      for (const table of tables) this.#wakeTables.add(table)
       for (const socket of this.ctx.getWebSockets()) {
         const attachment = socketAttachment(socket)
         if (
@@ -1397,6 +1426,8 @@ export function createSyncDurableObject<
           this.#wakeOrigins = new Set()
           const recipients = this.#wakeRecipients
           this.#wakeRecipients = new Set()
+          const tables = [...this.#wakeTables].sort()
+          this.#wakeTables = new Set()
           this.#counters.wakeBatches++
           let sent = 0
           const sockets = this.ctx.getWebSockets()
@@ -1410,16 +1441,22 @@ export function createSyncDurableObject<
               // a race here is advisory and carries no correctness weight.
             }
           }
+          const wakeStatus: WakeStatus = {
+            at: Date.now(),
+            tables,
+            socketCount: sockets.length,
+            originCount: origins.size,
+            sent,
+            eligibleRecipients: recipients.size,
+            coalesceMs: fanoutStarted - queuedAt,
+            fanoutMs: performance.now() - fanoutStarted,
+          }
+          this.#lastWake = wakeStatus
           console.log(
             JSON.stringify({
               event: 'sync_wake',
               hostVersion: config.hostVersion,
-              socketCount: sockets.length,
-              originCount: origins.size,
-              sent,
-              eligibleRecipients: recipients.size,
-              coalesceMs: fanoutStarted - queuedAt,
-              fanoutMs: performance.now() - fanoutStarted,
+              ...wakeStatus,
             })
           )
         })().finally(() => {
@@ -1970,6 +2007,7 @@ export function createSyncDurableObject<
             sqlBillingSinceBoot: this.#sqlBilling,
             counters: this.#counters,
             ingestBreaker: this.#ingestBreaker.status(),
+            lastWake: this.#lastWake,
           })
         )
       }

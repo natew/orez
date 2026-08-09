@@ -12,7 +12,7 @@ import {
   isSqlRowMutation,
   RollingRowWriteBudget,
   stripPublicPrefix,
-  trackSqlCursorRowsWritten,
+  trackSqlCursorBillingRows,
   trackedChangeRow,
   WriteBudgetExceededError,
   type RowWriteBudgetTrip,
@@ -195,10 +195,53 @@ const WRITE_BUDGET_TRIPPED_KEY = '_orez_write_budget_tripped_at'
 const SCHEMA_PROVISIONING_WAIT_MS = 20_000
 const SCHEMA_PROVISIONING_MAX_DELAY_MS = 500
 const APPLICATION_SQL_TURN_WAIT_MS = 30_000
+const WRITE_GRANT_WAIT_SAMPLE_CAPACITY = 4_096
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MAX_SNAPSHOT_PAGE_ROWS = 10_000
 const TRANSACTION_CONTROL_SQL =
   /^\s*(?:BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)(?=\s|;|$)/i
+
+class RecentLatencySamples {
+  private readonly samples: number[] = []
+  private next = 0
+  private observed = 0
+
+  constructor(private readonly capacity: number) {}
+
+  record(value: number): void {
+    if (!Number.isFinite(value) || value < 0) return
+    this.observed++
+    if (this.samples.length < this.capacity) {
+      this.samples.push(value)
+      return
+    }
+    this.samples[this.next] = value
+    this.next = (this.next + 1) % this.capacity
+  }
+
+  status(): {
+    observed: number
+    sampled: number
+    capacity: number
+    p50: number | null
+    p99: number | null
+    max: number | null
+  } {
+    const sorted = [...this.samples].sort((left, right) => left - right)
+    const percentile = (fraction: number): number | null => {
+      if (sorted.length === 0) return null
+      return sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)]!
+    }
+    return {
+      observed: this.observed,
+      sampled: sorted.length,
+      capacity: this.capacity,
+      p50: percentile(0.5),
+      p99: percentile(0.99),
+      max: sorted.at(-1) ?? null,
+    }
+  }
+}
 
 function positiveEnvInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value)
@@ -275,6 +318,7 @@ type ApplicationSqlSessionState = 'created' | 'waiting' | 'active' | 'closed'
 
 type ApplicationSqlWaiter = {
   session: ApplicationSqlSessionTarget
+  queuedAt: number
   admit: () => void
   reject: (error: unknown) => void
   timer: ReturnType<typeof setTimeout>
@@ -348,6 +392,19 @@ class ApplicationSqlSessionTarget extends RpcTarget {
 }
 
 export class ZeroDO extends DurableObject {
+  private readonly bootID = crypto.randomUUID()
+  private readonly bootedAt = Date.now()
+  private readonly requestsSinceBoot = {
+    fetch: 0,
+    applicationSqlSessions: 0,
+    applicationSqlReadSessions: 0,
+    applicationSqlWriteSessions: 0,
+    sqlStatements: 0,
+  }
+  private readonly sqlBillingSinceBoot = { rowsRead: 0, rowsWritten: 0 }
+  private readonly writeGrantWaitMs = new RecentLatencySamples(
+    WRITE_GRANT_WAIT_SAMPLE_CAPACITY
+  )
   private sql: any
   private watermarks: DurableWatermarkState
   private cdc: TransactionalCdc
@@ -476,19 +533,28 @@ export class ZeroDO extends DurableObject {
     }
     const rawExec = this.sql.exec.bind(this.sql)
     this.sql.exec = (statement: string, ...params: unknown[]) => {
+      this.requestsSinceBoot.sqlStatements++
       const mutation = isSqlMutation(statement)
       if (mutation && !this.writeBudgetDisabled) this.writeBudget.assertOpen()
       const cursor = rawExec(statement, ...params)
-      if (!mutation) return cursor
-      const measurement = {
-        sql: statement,
-        rowsWritten: 0,
+      const measurement: SqlWriteMeasurement | undefined = mutation
+        ? { sql: statement, rowsWritten: 0 }
+        : undefined
+      if (measurement && this.activeWriteMeasurements) {
+        this.activeWriteMeasurements.push(measurement)
       }
-      if (this.activeWriteMeasurements) this.activeWriteMeasurements.push(measurement)
-      return trackSqlCursorRowsWritten(cursor, (rows) => {
-        measurement.rowsWritten += rows
-        if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows, measurement)
-      })
+      return trackSqlCursorBillingRows(
+        cursor,
+        (rows) => {
+          this.sqlBillingSinceBoot.rowsWritten += rows
+          if (!measurement) return
+          measurement.rowsWritten += rows
+          if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows, measurement)
+        },
+        (rows) => {
+          this.sqlBillingSinceBoot.rowsRead += rows
+        }
+      )
     }
     this.cdc = new TransactionalCdc(this.sql)
     this.watermarks = new DurableWatermarkState(this.sql)
@@ -520,6 +586,7 @@ export class ZeroDO extends DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    this.requestsSinceBoot.fetch++
     const url = new URL(request.url)
     if (request.method === 'OPTIONS') {
       return new Response(null, {
@@ -538,6 +605,8 @@ export class ZeroDO extends DurableObject {
         ...this.writeBudget.status(),
         trippedStatement: this.writeBudgetTripStatement,
       })
+    if (url.pathname === '/_orez/status' && request.method === 'GET')
+      return this.handleStatus(request)
     if (url.pathname === '/_orez/write-budget/trip' && request.method === 'POST')
       return this.handleWriteBudgetTrip(request)
     if (url.pathname === '/_orez/write-budget/reopen' && request.method === 'POST')
@@ -571,8 +640,39 @@ export class ZeroDO extends DurableObject {
     return new Response('not found', { status: 404 })
   }
 
+  private handleStatus(request: Request): Response {
+    if (!this.hasAdminToken(request)) {
+      return Response.json({ error: 'forbidden' }, { status: 403 })
+    }
+    const queuedReadSessions = this.applicationSqlQueue.filter(
+      (waiter) => waiter.session.readOnly
+    ).length
+    return Response.json({
+      bootID: this.bootID,
+      bootedAt: this.bootedAt,
+      uptimeMs: Math.max(0, Date.now() - this.bootedAt),
+      ns: request.headers.get('x-orez-do-instance'),
+      objectId: this.ctx.id.toString(),
+      databaseSizeBytes: this.ctx.storage.sql.databaseSize,
+      requestsSinceBoot: { ...this.requestsSinceBoot },
+      sqlBillingSinceBoot: { ...this.sqlBillingSinceBoot },
+      applicationSql: {
+        activeReaders: this.applicationSqlReaders.size,
+        writerActive: this.applicationSqlWriter !== null,
+        queuedReaders: queuedReadSessions,
+        queuedWriters: this.applicationSqlQueue.length - queuedReadSessions,
+        writeGrantWaitMs: this.writeGrantWaitMs.status(),
+      },
+      writeBudget: {
+        enabled: !this.writeBudgetDisabled,
+        ...this.writeBudget.status(),
+        trippedStatement: this.writeBudgetTripStatement,
+      },
+    })
+  }
+
   private async handleWriteBudgetReopen(request: Request): Promise<Response> {
-    if (!this.hasWriteBudgetAdminToken(request))
+    if (!this.hasAdminToken(request))
       return Response.json({ error: 'forbidden' }, { status: 403 })
     await this.ctx.storage.delete(WRITE_BUDGET_TRIPPED_KEY)
     this.writeBudgetTripStatement = undefined
@@ -584,7 +684,7 @@ export class ZeroDO extends DurableObject {
   }
 
   private async handleWriteBudgetTrip(request: Request): Promise<Response> {
-    if (!this.hasWriteBudgetAdminToken(request))
+    if (!this.hasAdminToken(request))
       return Response.json({ error: 'forbidden' }, { status: 403 })
     const status = this.writeBudget.forceTrip()
     this.writeBudgetTripStatement = {
@@ -609,7 +709,7 @@ export class ZeroDO extends DurableObject {
     })
   }
 
-  private hasWriteBudgetAdminToken(request: Request): boolean {
+  private hasAdminToken(request: Request): boolean {
     const supplied =
       request.headers.get('x-orez-admin-token') ??
       request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
@@ -1410,7 +1510,10 @@ export class ZeroDO extends DurableObject {
       clearTimeout(waiter.timer)
       waiter.session.state = 'active'
       if (waiter.session.readOnly) this.applicationSqlReaders.add(waiter.session)
-      else this.applicationSqlWriter = waiter.session
+      else {
+        this.applicationSqlWriter = waiter.session
+        this.writeGrantWaitMs.record(performance.now() - waiter.queuedAt)
+      }
       waiter.admit()
     }
   }
@@ -1432,6 +1535,7 @@ export class ZeroDO extends DurableObject {
     const admission = new Promise<void>((resolve, reject) => {
       const waiter: ApplicationSqlWaiter = {
         session,
+        queuedAt: performance.now(),
         admit: resolve,
         reject,
         timer: setTimeout(() => {
@@ -1614,6 +1718,9 @@ export class ZeroDO extends DurableObject {
     if (priority !== 'normal' && priority !== 'latency-sensitive') {
       throw new TypeError('invalid application SQLite session priority')
     }
+    this.requestsSinceBoot.applicationSqlSessions++
+    if (options.readOnly === true) this.requestsSinceBoot.applicationSqlReadSessions++
+    else this.requestsSinceBoot.applicationSqlWriteSessions++
     return new ApplicationSqlSessionTarget(
       this,
       sessionID,

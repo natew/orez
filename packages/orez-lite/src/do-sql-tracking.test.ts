@@ -4,7 +4,7 @@ import {
   isSqlMutation,
   isSqlRowMutation,
   RollingRowWriteBudget,
-  trackSqlCursorRowsWritten,
+  trackSqlCursorBillingRows,
   trackedChangeRow,
   WriteBudgetExceededError,
 } from './do-sql-tracking.js'
@@ -156,7 +156,7 @@ describe('isSqlMutation', () => {
   })
 })
 
-describe('trackSqlCursorRowsWritten', () => {
+describe('trackSqlCursorBillingRows', () => {
   it('records billing rows that appear only while a RETURNING cursor is drained', () => {
     const rows = [{ id: 1 }, { id: 2 }, { id: 3 }]
     let index = 0
@@ -177,7 +177,7 @@ describe('trackSqlCursorRowsWritten', () => {
       },
     }
     const deltas: number[] = []
-    const tracked = trackSqlCursorRowsWritten(cursor, (delta) => deltas.push(delta))
+    const tracked = trackSqlCursorBillingRows(cursor, (delta) => deltas.push(delta))
     expect(tracked.rowsWritten).toBe(0)
     expect(tracked.toArray()).toEqual(rows)
     expect(deltas).toEqual([12])
@@ -200,9 +200,32 @@ describe('trackSqlCursorRowsWritten', () => {
       },
     }
     const deltas: number[] = []
-    const tracked = trackSqlCursorRowsWritten(cursor, (delta) => deltas.push(delta))
+    const tracked = trackSqlCursorBillingRows(cursor, (delta) => deltas.push(delta))
     tracked.next()
     tracked.raw().next()
     expect(deltas).toEqual([2, 3, 4])
+  })
+
+  it('records read and write deltas from the same consumed cursor', () => {
+    const cursor = {
+      rowsRead: 1,
+      rowsWritten: 0,
+      toArray() {
+        this.rowsRead = 7
+        this.rowsWritten = 3
+        return [{ id: 'row-1' }]
+      },
+    }
+    const written: number[] = []
+    const read: number[] = []
+    const tracked = trackSqlCursorBillingRows(
+      cursor,
+      (delta) => written.push(delta),
+      (delta) => read.push(delta)
+    )
+
+    expect(tracked.toArray()).toEqual([{ id: 'row-1' }])
+    expect(written).toEqual([3])
+    expect(read).toEqual([1, 6])
   })
 })

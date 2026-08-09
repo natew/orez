@@ -338,6 +338,21 @@ describe('createOrezDataWorker', () => {
     expect(env.ZERO_SQL_DO.idFromName).toHaveBeenCalledWith('ns:proj-a')
     expect(status).toHaveBeenCalledWith('schema-v7')
     expect(fetch.mock.calls[0]?.[0].headers.get('x-orez-do-instance')).toBe('ns:proj-a')
+
+    fetch.mockResolvedValueOnce(Response.json({ bootID: 'boot-1' }))
+    const statusResponse = await runtime.fetch(
+      new Request('https://data.test/proj-a/_orez/status', {
+        headers: { 'x-orez-admin-token': 'operator-token' },
+      }),
+      env,
+      { waitUntil: vi.fn() }
+    )
+    expect(await statusResponse.json()).toEqual({ bootID: 'boot-1' })
+    expect(status).toHaveBeenCalledTimes(1)
+    const statusRequest = fetch.mock.calls[1]?.[0]
+    expect(new URL(statusRequest.url).pathname).toBe('/_orez/status')
+    expect(statusRequest.headers.get('x-orez-admin-token')).toBe('operator-token')
+    expect(statusRequest.headers.get('x-orez-do-instance')).toBe('ns:proj-a')
   })
 
   it('serves the synthetic syncCursor snapshot page from the change-log head', async () => {

@@ -424,6 +424,10 @@ try {
     ),
     true
   )
+  const concurrentStatus = await fetch(`${concurrentOrigin}/admin/status`, {
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  }).then((response) => response.json())
+  assert.equal(concurrentStatus.lastWake.tables.includes('item'), true)
 
   const pushBody = {
     clientGroupID: 'group',
