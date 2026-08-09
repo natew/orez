@@ -283,6 +283,26 @@ export function createNamespaceBackupManager<Env>(
       })
       for (const table of tables) {
         const name = String(table.name)
+        const withoutRowid = /\bWITHOUT\s+ROWID\b/i.test(String(table.sql))
+        const primaryKeyColumns = withoutRowid
+          ? (
+              await options.query(
+                env,
+                namespace,
+                `PRAGMA table_info("${quoteIdentifier(name)}")`,
+                []
+              )
+            )
+              .filter((column) => Number(column.pk) > 0)
+              .sort((left, right) => Number(left.pk) - Number(right.pk))
+              .map((column) => String(column.name))
+          : []
+        if (withoutRowid && primaryKeyColumns.length === 0) {
+          throw new Error(`WITHOUT ROWID table ${name} has no primary key`)
+        }
+        const quotedPrimaryKey = primaryKeyColumns
+          .map((column) => `"${quoteIdentifier(column)}"`)
+          .join(', ')
         let tableRowTotal = 0
         await writeLine({
           kind: 'table',
@@ -292,19 +312,34 @@ export function createNamespaceBackupManager<Env>(
             .filter((index) => index.tbl_name === name)
             .map((index) => index.sql),
         })
-        let cursor = 0
+        let rowidCursor: unknown = 0
+        let primaryKeyCursor: unknown[] | null = null
         let limit = 200
         while (true) {
           const usedLimit = limit
-          const rows = await options.query(
-            env,
-            namespace,
-            `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
-            [cursor, usedLimit]
-          )
+          const rows: Record<string, unknown>[] = withoutRowid
+            ? await options.query(
+                env,
+                namespace,
+                primaryKeyCursor
+                  ? `SELECT * FROM "${quoteIdentifier(name)}" WHERE (${quotedPrimaryKey}) > (${primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
+                  : `SELECT * FROM "${quoteIdentifier(name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
+                primaryKeyCursor ? [...primaryKeyCursor, usedLimit] : [usedLimit]
+              )
+            : await options.query(
+                env,
+                namespace,
+                `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+                [rowidCursor, usedLimit]
+              )
           if (rows.length === 0) break
-          cursor = Number(rows.at(-1)?.__orez_backup_rowid)
-          for (const row of rows) delete row.__orez_backup_rowid
+          if (withoutRowid) {
+            const last = rows.at(-1)!
+            primaryKeyCursor = primaryKeyColumns.map((column) => last[column])
+          } else {
+            rowidCursor = rows.at(-1)?.__orez_backup_rowid
+            for (const row of rows) delete row.__orez_backup_rowid
+          }
           const lineBytes = await writeLine({ kind: 'rows', table: name, rows })
           rowTotal += rows.length
           tableRowTotal += rows.length

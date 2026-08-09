@@ -117,6 +117,67 @@ describe('namespace backup export', () => {
       JSON.parse(stored.pointers.get('backups/singleton/latest.json') ?? '{}').tableRows
     ).toEqual({ empty: 0, message: 1 })
   })
+
+  it('pages a WITHOUT ROWID table by its composite primary key', async () => {
+    const stored = writableBucket()
+    const rows = Array.from({ length: 201 }, (_, index) => ({
+      tenant: 'tenant-one',
+      id: `message-${String(index).padStart(3, '0')}`,
+      body: `body-${index}`,
+    }))
+    const pageQueries: Array<{ sql: string; params: readonly unknown[] }> = []
+    const manager = createNamespaceBackupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query: async (_env, _namespace, sql, params) => {
+        if (sql.includes('SELECT write_seq')) return [{ write_seq: 4 }]
+        if (sql.includes('sqlite_master')) {
+          return [
+            {
+              name: 'message',
+              sql: 'CREATE TABLE message (tenant TEXT, id TEXT, body TEXT, PRIMARY KEY (tenant, id)) WITHOUT ROWID',
+              type: 'table',
+            },
+          ]
+        }
+        if (sql.startsWith('PRAGMA foreign_key_list')) return []
+        if (sql.startsWith('PRAGMA table_info')) {
+          return [
+            { name: 'tenant', pk: 1 },
+            { name: 'id', pk: 2 },
+            { name: 'body', pk: 0 },
+          ]
+        }
+        if (sql.includes('FROM "message"')) {
+          pageQueries.push({ sql, params })
+          return params.length === 1 ? rows.slice(0, 200) : rows.slice(200)
+        }
+        throw new Error(`unexpected export query: ${sql}`)
+      },
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    const summary = await manager.exportNamespace({}, 'singleton')
+
+    expect(summary).toMatchObject({
+      marker: 4,
+      tables: 1,
+      rows: 201,
+      tableRows: { message: 201 },
+    })
+    expect(pageQueries).toEqual([
+      {
+        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ?',
+        params: [200],
+      },
+      {
+        sql: 'SELECT * FROM "message" WHERE ("tenant", "id") > (?, ?) ORDER BY "tenant", "id" LIMIT ?',
+        params: ['tenant-one', 'message-199', 1000],
+      },
+    ])
+  })
 })
 
 describe('namespace backup restore', () => {
