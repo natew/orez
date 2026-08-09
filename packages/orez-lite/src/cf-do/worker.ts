@@ -422,6 +422,13 @@ export class ZeroDO extends DurableObject {
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
   protected applicationSqlDidCommit(_changed: boolean, _mutated: boolean): void {}
 
+  private durableObjectIdentity(): { objectId: string; objectName: string | null } {
+    return {
+      objectId: this.ctx.id.toString(),
+      objectName: typeof this.ctx.id.name === 'string' ? this.ctx.id.name : null,
+    }
+  }
+
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
     const wasTripped = this.writeBudget.status().tripped
     try {
@@ -443,6 +450,7 @@ export class ZeroDO extends DurableObject {
         console.error(
           JSON.stringify({
             event: 'orez_do_write_budget_tripped',
+            ...this.durableObjectIdentity(),
             windowRows: status.windowRows,
             billableRows: status.billableRows,
             logicalRows: status.logicalRows,
@@ -491,6 +499,7 @@ export class ZeroDO extends DurableObject {
         console.error(
           JSON.stringify({
             event: 'orez_do_write_budget_persist_failed',
+            ...this.durableObjectIdentity(),
             message: error instanceof Error ? error.message : String(error),
           })
         )
@@ -678,7 +687,11 @@ export class ZeroDO extends DurableObject {
     this.writeBudgetTripStatement = undefined
     const status = this.writeBudget.reopen()
     console.log(
-      JSON.stringify({ event: 'orez_do_write_budget_reopened', reopenedAt: Date.now() })
+      JSON.stringify({
+        event: 'orez_do_write_budget_reopened',
+        ...this.durableObjectIdentity(),
+        reopenedAt: Date.now(),
+      })
     )
     return Response.json({ ok: true, enabled: !this.writeBudgetDisabled, ...status })
   }
@@ -698,6 +711,7 @@ export class ZeroDO extends DurableObject {
     console.error(
       JSON.stringify({
         event: 'orez_do_write_budget_force_tripped',
+        ...this.durableObjectIdentity(),
         trippedAt: Date.now(),
       })
     )

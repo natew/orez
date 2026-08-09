@@ -75,6 +75,10 @@ async function createWorkerCore() {
     }
   }
   zero.ctx = {
+    id: {
+      name: 'ns:proj-cost',
+      toString: () => 'project-cost-object-id',
+    },
     storage: {
       transaction: async <T>(work: () => T) => runTransaction(work),
       transactionSync: runTransaction,
@@ -371,6 +375,10 @@ describe('ZeroDO transactional CDC integration', () => {
     }
     new ZeroDO(
       {
+        id: {
+          name: 'ns:application-fk-interrupted',
+          toString: () => 'application-fk-interrupted-object-id',
+        },
         storage: {
           sql,
           get: async () => undefined,
@@ -423,6 +431,10 @@ describe('ZeroDO transactional CDC integration', () => {
     }
     const recreated = new ZeroDO(
       {
+        id: {
+          name: 'ns:application-restart',
+          toString: () => 'application-restart-object-id',
+        },
         storage: {
           sql,
           get: async (key: string) =>
@@ -1010,18 +1022,31 @@ describe('ZeroDO write budget stickiness', () => {
     const { RollingRowWriteBudget, WriteBudgetExceededError } =
       await import('../do-sql-tracking.js')
     const { puts, deferred } = trippableWorker(core)
+    const errors: string[] = []
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation((value) => {
+      errors.push(String(value))
+    })
     core.zero.writeBudget = new RollingRowWriteBudget({
       budgetRows: 3,
       windowMs: 300_000,
       now: () => 1_000,
     })
 
-    expect(() =>
-      core.zero.recordWriteBudgetRows(9, {
-        sql: "UPDATE message SET text = 'private-value' WHERE id = 42",
-        rowsWritten: 9,
-      })
-    ).toThrow(WriteBudgetExceededError)
+    try {
+      expect(() =>
+        core.zero.recordWriteBudgetRows(9, {
+          sql: "UPDATE message SET text = 'private-value' WHERE id = 42",
+          rowsWritten: 9,
+        })
+      ).toThrow(WriteBudgetExceededError)
+    } finally {
+      errorSpy.mockRestore()
+    }
+    expect(JSON.parse(errors[0]!)).toMatchObject({
+      event: 'orez_do_write_budget_tripped',
+      objectId: 'project-cost-object-id',
+      objectName: 'ns:proj-cost',
+    })
     // Nothing yet: a put issued here would be rolled back with the write.
     expect(puts).toEqual([])
     expect(deferred).toHaveLength(1)
