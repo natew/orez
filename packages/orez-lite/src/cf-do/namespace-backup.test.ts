@@ -101,7 +101,8 @@ const BetterSqlite3 = BedrockSqlite.Database
 function realSqliteManager(
   db: InstanceType<typeof BetterSqlite3>,
   bucket: NamespaceBackupBucket,
-  batchSizes: number[] = []
+  batchSizes: number[] = [],
+  metrics?: { queries: string[]; rowsRead: number }
 ) {
   return createNamespaceBackupManager({
     format: 'test-v3',
@@ -109,8 +110,13 @@ function realSqliteManager(
     excludedTables: ['_test_backup_meta'],
     files: () => bucket,
     query: async (_env, _namespace, sql, params) => {
+      metrics?.queries.push(sql)
       const statement = db.prepare(sql)
-      if (statement.reader) return statement.all(...params)
+      if (statement.reader) {
+        const rows = statement.all(...params)
+        if (metrics) metrics.rowsRead += rows.length
+        return rows
+      }
       statement.run(...params)
       return []
     },
@@ -146,7 +152,6 @@ describe('namespace backup export', () => {
             { name: 'message', sql: 'CREATE TABLE message (id TEXT)', type: 'table' },
           ]
         }
-        if (sql.startsWith('PRAGMA foreign_key_list')) return []
         if (sql.includes('FROM "empty"')) return []
         if (sql.includes('FROM "message"')) {
           return Number(params[0]) === 0 ? [{ __orez_backup_rowid: 1, id: 'one' }] : []
@@ -193,7 +198,6 @@ describe('namespace backup export', () => {
             },
           ]
         }
-        if (sql.startsWith('PRAGMA foreign_key_list')) return []
         if (sql.startsWith('PRAGMA table_info')) {
           return [
             { name: 'tenant', pk: 1 },
@@ -405,13 +409,19 @@ describe('namespace backup restore', () => {
       markerTable: '_test_backup_meta',
       files: () => stored.bucket,
       query: async (_env, _namespace, sql) => {
-        if (sql.startsWith('SELECT name FROM sqlite_master')) {
-          return [{ name: 'message' }, { name: 'messageReaction' }]
+        if (sql.startsWith('SELECT name, sql FROM sqlite_master')) {
+          return [
+            { name: 'message', sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)' },
+            {
+              name: 'messageReaction',
+              sql: `CREATE TABLE messageReaction (
+                id TEXT DEFAULT 'REFERENCES ignored',
+                messageId TEXT REFERENCES "Message"(id)
+                /* REFERENCES ignored_too */
+              )`,
+            },
+          ]
         }
-        if (sql === 'PRAGMA foreign_key_list("messageReaction")') {
-          return [{ table: 'message' }]
-        }
-        if (sql.startsWith('PRAGMA foreign_key_list')) return []
         if (sql.startsWith('SELECT COUNT(*)')) return [{ n: 1 }]
         return []
       },
@@ -462,16 +472,22 @@ describe('namespace backup restore', () => {
     )
     db.exec("INSERT INTO message VALUES ('current')")
     db.exec("INSERT INTO messageReaction VALUES ('reaction', 'current')")
-    for (let index = 0; index < 401; index++) {
+    for (let index = 0; index < 41; index++) {
       db.exec(`CREATE TABLE "current_only_${String(index).padStart(3, '0')}" (id TEXT)`)
     }
     const batchSizes: number[] = []
+    const metrics = { queries: [] as string[], rowsRead: 0 }
+    const totalChanges = () =>
+      Number(db.prepare('SELECT total_changes() AS value').get().value)
+    const changesBeforeRestore = totalChanges()
 
     const summary = await realSqliteManager(
       db,
       stored.bucket,
-      batchSizes
+      batchSizes,
+      metrics
     ).importNamespace({}, 'singleton', key)
+    const restoreChanges = totalChanges() - changesBeforeRestore
 
     expect(summary).toMatchObject({ rows: 1, counts: { message: 1 } })
     expect(db.prepare('SELECT * FROM message').all()).toEqual([{ id: 'restored' }])
@@ -480,7 +496,14 @@ describe('namespace backup restore', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         .all()
     ).toEqual([{ name: 'message' }])
-    expect(Math.max(...batchSizes)).toBeLessThanOrEqual(400)
+    expect(metrics.queries).toHaveLength(8)
+    expect(
+      metrics.queries.filter((sql) => sql.startsWith('PRAGMA foreign_key_list'))
+    ).toHaveLength(0)
+    expect(metrics.rowsRead).toBe(44)
+    expect(restoreChanges).toBe(1)
+    expect(batchSizes).toHaveLength(4)
+    expect(Math.max(...batchSizes)).toBeLessThanOrEqual(40)
     db.close()
   })
 

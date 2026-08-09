@@ -10,6 +10,7 @@ fallthrough = true
 
 [vars]
 ADMIN_KEY = "ingest-harness-admin"
+OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN = "ingest-harness-do-admin"
 
 [[durable_objects.bindings]]
 name = "SYNC_DO"

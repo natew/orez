@@ -341,10 +341,53 @@ function migrationStatementTargetTable(sql) {
 }
 
 function appliedHasStatement(applied, baseId) {
-  for (const id of applied) {
-    if (id === baseId || id.startsWith(baseId + ':')) return true
+  return applied.has(baseId)
+}
+
+function knownMigrationStatementIds() {
+  const ids = new Set()
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
+    ids.add(typeof item.id === 'string' && item.id ? item.id : 'statement-' + index)
   }
-  return false
+  return [...ids]
+}
+
+const migrationStatementIds = knownMigrationStatementIds()
+
+// The ledger grows with deployment history, while this worker can only act on
+// the statement ids compiled into THIS bundle. Probe those ids through the
+// ledger primary key in bounded packs instead of scanning every historical row
+// once for prepare, once per migration file, and once again for finalize.
+async function readAppliedMigrationStatements(tx) {
+  const applied = new Set()
+  for (let offset = 0; offset < migrationStatementIds.length; offset += 100) {
+    const ids = migrationStatementIds.slice(offset, offset + 100)
+    const params = []
+    for (const id of ids) params.push(id, id + ':', id + ';')
+    const rows = await tx.query(
+      'WITH expected(baseId, lowerId, upperId) AS (VALUES ' +
+        ids.map(() => '(?, ?, ?)').join(', ') +
+        ') SELECT expected.baseId FROM expected WHERE EXISTS (' +
+        'SELECT 1 FROM ' + quoteIdentifier(migrationTable) +
+        ' WHERE id = expected.baseId OR (id >= expected.lowerId AND id < expected.upperId)' +
+        ' LIMIT 1)',
+      params,
+    )
+    for (const row of rows) applied.add(row.baseId)
+  }
+  return applied
+}
+
+async function deleteAppliedMigrationStatement(tx, baseId) {
+  await tx.exec(
+    'DELETE FROM ' + quoteIdentifier(migrationTable) +
+      ' WHERE id = ? OR (id >= ? AND id < ?)',
+    [baseId, baseId + ':', baseId + ';'],
+  )
 }
 
 // A migration can create scratch/candidate/guard tables, use them, and drop
@@ -560,28 +603,26 @@ async function reconcilePhantomLedger(tx, applied) {
     await tx.exec('DROP TABLE IF EXISTS ' + quoteIdentifier('__new_' + table))
   }
   for (const baseId of resurrect) {
-    for (const id of [...applied]) {
-      if (id !== baseId && !id.startsWith(baseId + ':')) continue
-      await tx.exec(
-        'DELETE FROM ' + quoteIdentifier(migrationTable) + ' WHERE id = ?',
-        [id],
-      )
-      applied.delete(id)
-    }
+    await deleteAppliedMigrationStatement(tx, baseId)
+    applied.delete(baseId)
   }
 }
 
 async function applyNativeSchema(tx, instance, {
+  applied = null,
   prepare = true,
   migrationFile = null,
   finalize = true,
 } = {}) {
-  await tx.exec(
-    'CREATE TABLE IF NOT EXISTS ' + quoteIdentifier(migrationTable) +
-      ' (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)',
-  )
-  const appliedRows = await tx.query('SELECT id FROM ' + quoteIdentifier(migrationTable))
-  const applied = new Set(appliedRows.map((row) => row.id))
+  if (prepare) {
+    await tx.exec(
+      'CREATE TABLE IF NOT EXISTS ' + quoteIdentifier(migrationTable) +
+        ' (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)',
+    )
+    applied = await readAppliedMigrationStatements(tx)
+  } else if (!(applied instanceof Set)) {
+    throw new Error('migration ledger state is required after prepare')
+  }
   if (prepare) await reconcilePhantomLedger(tx, applied)
   // register BEFORE the statements, not only after them. a cdc trigger whose
   // _orez_cdc_tables row is missing is invisible to beginSchemaChange, which
@@ -594,8 +635,7 @@ async function applyNativeSchema(tx, instance, {
   // namespace every table is absent, ensureTable returns false for each, and
   // this is a no-op beyond creating the cdc bookkeeping tables early.
   if (prepare) await tx.registerTables(publicTables())
-  const appliedIds = [...applied]
-  const appliedStatementIds = new Set()
+  const appliedStatementIds = new Set(applied)
   const supersededStatementIds = new Set()
   for (const [index, statement] of nativeSqlStatements.entries()) {
     const item = typeof statement === 'string'
@@ -603,12 +643,6 @@ async function applyNativeSchema(tx, instance, {
       : statement
     if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
     const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
-    if (
-      applied.has(baseId) ||
-      appliedIds.some((appliedId) => appliedId.startsWith(baseId + ':'))
-    ) {
-      appliedStatementIds.add(baseId)
-    }
     for (const id of Array.isArray(item.supersedes) ? item.supersedes : []) {
       supersededStatementIds.add(id)
     }
@@ -628,6 +662,11 @@ async function applyNativeSchema(tx, instance, {
     const file = baseId.split(':')[0]
     if (!pendingMigrationFiles.includes(file)) pendingMigrationFiles.push(file)
   }
+  const selectedMigrationFile =
+    migrationFile === null && prepare ? (pendingMigrationFiles[0] ?? null) : migrationFile
+  const remainingMigrationFiles = pendingMigrationFiles.filter(
+    (file) => file !== selectedMigrationFile,
+  )
   // CREATE TABLE IF NOT EXISTS is a SILENT NO-OP against a table that already
   // exists in an older shape, so every column that only ever appears inside a
   // CREATE definition is unreachable on a namespace whose table predates it,
@@ -703,7 +742,9 @@ async function applyNativeSchema(tx, instance, {
       })) continue
       const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
       if (supersededStatementIds.has(baseId)) continue
-      if (migrationFile !== null && baseId.split(':')[0] !== migrationFile) continue
+      if (selectedMigrationFile === null || baseId.split(':')[0] !== selectedMigrationFile) {
+        continue
+      }
       const id = baseId + ':' + hashMigrationSql(item.sql)
       // migration statement ids are immutable execution identities. the SQL hash
       // records which source version ran, but editing an old migration must never
@@ -750,47 +791,51 @@ async function applyNativeSchema(tx, instance, {
           )
         }
       }
-      if (!applied.has(id)) {
+      if (!appliedStatementIds.has(baseId)) {
         await tx.exec(
           'INSERT INTO ' + quoteIdentifier(migrationTable) + ' (id, applied_at) VALUES (?, ?)',
           [id, Date.now()],
         )
-        applied.add(id)
+        applied.add(baseId)
         appliedStatementIds.add(baseId)
-        insertedThisRun.push(id)
+        insertedThisRun.push({ baseId, id })
+      }
+    }
+    if (finalize && remainingMigrationFiles.length === 0) {
+      await assertExpectedSchema(tx)
+      await tx.exec(
+        'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)',
+      )
+      try {
+        for (const statement of schemaMetadataStatements()) {
+          await tx.exec(statement.sql, statement.params)
+        }
+        await tx.registerTables(publicTables())
+      } catch (error) {
+        // publication runs against every registered table, so a table this schema
+        // no longer has still gets queried here. without the label the error is
+        // indistinguishable from a migration statement failing.
+        throw new Error(
+          'schema publication failed on instance ' + instance + ': ' +
+            (error && error.message ? error.message : String(error)),
+          { cause: error },
+        )
       }
     }
   } catch (error) {
-    for (const insertedId of insertedThisRun) {
+    for (const inserted of insertedThisRun) {
       try {
         await tx.exec(
           'DELETE FROM ' + quoteIdentifier(migrationTable) + ' WHERE id = ?',
-          [insertedId],
+          [inserted.id],
         )
       } catch {}
+      applied.delete(inserted.baseId)
+      appliedStatementIds.delete(inserted.baseId)
     }
     throw error
   }
-  if (!finalize) return pendingMigrationFiles
-  await assertExpectedSchema(tx)
-  await tx.exec(
-    'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)',
-  )
-  try {
-    for (const statement of schemaMetadataStatements()) {
-      await tx.exec(statement.sql, statement.params)
-    }
-    await tx.registerTables(publicTables())
-  } catch (error) {
-    // publication runs against every registered table, so a table this schema
-    // no longer has still gets queried here. without the label the error is
-    // indistinguishable from a migration statement failing.
-    throw new Error(
-      'schema publication failed on instance ' + instance + ': ' +
-        (error && error.message ? error.message : String(error)),
-      { cause: error },
-    )
-  }
+  return { applied, pendingMigrationFiles: remainingMigrationFiles }
 }
 
 // what the namespace actually looks like, for a failure message. the single
@@ -862,42 +907,37 @@ export async function ${runCloudflareMigrations}({
   // so what is left is only reachable through a message that says more.
   let phase = 'session-acquire'
   try {
-    let pendingMigrationFiles = []
+    let migrationState
     await client.transaction(() => {
       throw new Error('native schema migration does not use queryAst')
     }, async (tx) => {
       phase = 'prepare'
-      pendingMigrationFiles = await applyNativeSchema(tx, instance, {
+      migrationState = await applyNativeSchema(tx, instance, {
         prepare: true,
-        migrationFile: '',
-        finalize: false,
+        migrationFile: null,
+        finalize: true,
       })
-      phase = 'prepare-commit'
+      phase = migrationState.pendingMigrationFiles.length > 0
+        ? 'first-migration-commit'
+        : 'finalize-commit'
     })
-    for (const migrationFile of pendingMigrationFiles) {
+    const remainingMigrationFiles = migrationState.pendingMigrationFiles
+    for (const [index, migrationFile] of remainingMigrationFiles.entries()) {
       await client.transaction(() => {
         throw new Error('native schema migration does not use queryAst')
       }, async (tx) => {
         phase = 'migration ' + migrationFile
-        await applyNativeSchema(tx, instance, {
+        migrationState = await applyNativeSchema(tx, instance, {
+          applied: migrationState.applied,
           prepare: false,
           migrationFile,
-          finalize: false,
+          finalize: index === remainingMigrationFiles.length - 1,
         })
-        phase = 'migration-commit ' + migrationFile
+        phase = migrationState.pendingMigrationFiles.length === 0
+          ? 'finalize-commit'
+          : 'migration-commit ' + migrationFile
       })
     }
-    await client.transaction(() => {
-      throw new Error('native schema migration does not use queryAst')
-    }, async (tx) => {
-      phase = 'finalize'
-      await applyNativeSchema(tx, instance, {
-        prepare: false,
-        migrationFile: '',
-        finalize: true,
-      })
-      phase = 'finalize-commit'
-    })
   } catch (error) {
     throw new Error(
       'schema migration failed on instance ' + instance + ' during ' + phase + ': ' +

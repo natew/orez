@@ -23,6 +23,22 @@ async function importJavascriptModule(source: string): Promise<Record<string, an
   }
 }
 
+function migrationLedgerRows(
+  sql: string,
+  params: readonly unknown[],
+  ledger: ReadonlySet<string>
+): Array<{ baseId: string }> | null {
+  if (!sql.startsWith('WITH expected(baseId, lowerId, upperId)')) return null
+  const rows: Array<{ baseId: string }> = []
+  for (let index = 0; index < params.length; index += 3) {
+    const baseId = String(params[index])
+    if ([...ledger].some((id) => id === baseId || id.startsWith(`${baseId}:`))) {
+      rows.push({ baseId })
+    }
+  }
+  return rows
+}
+
 describe('buildMigrationModuleSource', () => {
   it('exports a native descriptor backed by the imported Zero schema', async () => {
     const schemaModuleUrl = javascriptModuleUrl(`
@@ -120,10 +136,9 @@ describe('buildMigrationModuleSource', () => {
     let transaction = 0
     let rowWriteTransaction = -1
     const tx = {
-      async query(sql: string) {
-        if (sql.startsWith('SELECT id FROM "__contrast_cf_migrations"')) {
-          return [...ledger].map((id) => ({ id }))
-        }
+      async query(sql: string, params: readonly unknown[] = []) {
+        const applied = migrationLedgerRows(sql, params, ledger)
+        if (applied) return applied
         if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
         if (sql.includes("SELECT name FROM sqlite_master WHERE type = 'table'")) return []
         throw new Error(`unexpected query: ${sql}`)
@@ -169,7 +184,98 @@ describe('buildMigrationModuleSource', () => {
     })
     expect(statementTransactions).toHaveLength(2)
     expect(statementTransactions[0]).not.toBe(statementTransactions[1])
+    expect(transaction).toBe(2)
     expect(ledger.size).toBe(2)
+  })
+
+  it('bounds ledger reads and application sessions to the pending migration files', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = { tables: {}, relationships: {} }
+    `)
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-cost',
+        schemaImportSpecifier: schemaModuleUrl,
+        nativeSqlStatements: [
+          {
+            id: '0001_retired/migration.sql:0',
+            sql: 'DROP TABLE IF EXISTS retired',
+          },
+          {
+            id: '0002_alpha/migration.sql:0',
+            sql: 'CREATE TABLE alpha (id TEXT PRIMARY KEY)',
+          },
+          {
+            id: '0003_beta/migration.sql:0',
+            sql: 'CREATE TABLE beta (id TEXT PRIMARY KEY)',
+          },
+        ],
+      })
+    )
+    const ledger = new Set<string>([
+      '0001_retired/migration.sql:0:previous-hash',
+      ...Array.from(
+        { length: 1_000 },
+        (_, index) => `historical-${String(index).padStart(4, '0')}:hash`
+      ),
+    ])
+    const tables = new Set<string>()
+    let ledgerQueries = 0
+    let ledgerRowsRead = 0
+    let sessions = 0
+    let postCommitCallbacks = 0
+    const tx = {
+      async query(sql: string, params: readonly unknown[] = []) {
+        const applied = migrationLedgerRows(sql, params, ledger)
+        if (applied) {
+          ledgerQueries++
+          ledgerRowsRead += applied.length
+          return applied
+        }
+        if (sql.includes("FROM sqlite_master WHERE type IN ('table', 'index')")) {
+          return [...tables].map((name) => ({ name, type: 'table' }))
+        }
+        if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
+        throw new Error(`unexpected query: ${sql}`)
+      },
+      async exec(sql: string, params: readonly unknown[] = []) {
+        if (
+          sql.startsWith('CREATE TABLE IF NOT EXISTS "__contrast_cf_migrations"') ||
+          sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables') ||
+          sql === 'DROP TABLE IF EXISTS retired'
+        ) {
+          return
+        }
+        const created = /^CREATE TABLE (alpha|beta)/.exec(sql)?.[1]
+        if (created) {
+          tables.add(created)
+          return
+        }
+        if (sql.startsWith('INSERT INTO "__contrast_cf_migrations"')) {
+          ledger.add(String(params[0]))
+          return
+        }
+        throw new Error(`unexpected exec: ${sql}`)
+      },
+      async registerTables() {},
+    }
+    const client = {
+      async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
+        sessions++
+        await run(tx)
+        postCommitCallbacks++
+      },
+    }
+
+    await migrationModule.orezAppSchema.migrate({ client })
+
+    expect(ledgerQueries).toBe(1)
+    expect(ledgerRowsRead).toBe(1)
+    expect(sessions).toBe(2)
+    expect(postCommitCallbacks).toBe(2)
+    expect(tables).toEqual(new Set(['alpha', 'beta']))
+    expect(ledger.size).toBe(1_003)
   })
 
   it('accepts equivalent SQLite type affinities and still rejects incompatible types', async () => {
@@ -200,7 +306,7 @@ describe('buildMigrationModuleSource', () => {
     const columnType = { current: 'varchar(255)' }
     const tx = {
       async query(sql: string) {
-        if (sql.startsWith('SELECT id FROM "__contrast_cf_migrations"')) return []
+        if (sql.startsWith('WITH expected(baseId, lowerId, upperId)')) return []
         if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) {
           return [
             {
@@ -265,10 +371,9 @@ describe('buildMigrationModuleSource', () => {
     const ledger = new Set<string>()
     const ledgerWrites: string[] = []
     const tx = {
-      async query(sql: string) {
-        if (sql.startsWith('SELECT id FROM "__contrast_cf_migrations"')) {
-          return [...ledger].map((id) => ({ id }))
-        }
+      async query(sql: string, params: readonly unknown[] = []) {
+        const applied = migrationLedgerRows(sql, params, ledger)
+        if (applied) return applied
         if (sql.includes("FROM sqlite_master WHERE type IN ('table', 'index')")) {
           return [{ name: 'customer', type: 'table' }]
         }
@@ -368,10 +473,9 @@ describe('buildMigrationModuleSource', () => {
     const ledger = new Set<string>()
     const writes: string[] = []
     const tx = {
-      async query(sql: string) {
-        if (sql.startsWith('SELECT id FROM "__contrast_cf_migrations"')) {
-          return [...ledger].map((id) => ({ id }))
-        }
+      async query(sql: string, params: readonly unknown[] = []) {
+        const applied = migrationLedgerRows(sql, params, ledger)
+        if (applied) return applied
         if (sql.includes("FROM sqlite_master WHERE type IN ('table', 'index')")) {
           return [...tables].map((name) => ({ name, type: 'table' }))
         }

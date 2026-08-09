@@ -380,6 +380,7 @@ describe('createOrezDataWorker', () => {
       orezImportBatch: vi.fn(),
     }
     const env = {
+      OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN: 'operator-token',
       ZERO_SQL_DO: {
         idFromName: vi.fn((name: string) => ({ toString: () => `id:${name}` })),
         get: vi.fn(() => stub),
@@ -427,6 +428,38 @@ describe('createOrezDataWorker', () => {
     expect(new URL(statusRequest.url).pathname).toBe('/_orez/status')
     expect(statusRequest.headers.get('x-orez-admin-token')).toBe('operator-token')
     expect(statusRequest.headers.get('x-orez-do-instance')).toBe('ns:proj-a')
+  })
+
+  it('rejects protected status before resolving or instantiating the durable object', async () => {
+    const idFromName = vi.fn()
+    const get = vi.fn()
+    const setup = vi.fn()
+    const routes = vi.fn()
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      setup,
+      routes,
+    })
+
+    const response = await runtime.fetch(
+      new Request('https://data.test/proj-cold/_orez/status'),
+      {
+        OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN: 'operator-token',
+        ZERO_SQL_DO: { idFromName, get },
+      },
+      { waitUntil: vi.fn() }
+    )
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual({
+      error: 'forbidden',
+      sqlBillingSinceBoot: { rowsWritten: 0 },
+    })
+    expect(setup).not.toHaveBeenCalled()
+    expect(routes).not.toHaveBeenCalled()
+    expect(idFromName).not.toHaveBeenCalled()
+    expect(get).not.toHaveBeenCalled()
   })
 
   it('serves the synthetic syncCursor snapshot page from the change-log head', async () => {

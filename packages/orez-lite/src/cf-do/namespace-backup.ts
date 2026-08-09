@@ -108,6 +108,103 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
+function referencedTables(createSql: unknown): string[] {
+  const sql = String(createSql ?? '')
+  const references: string[] = []
+  let awaitingTable = false
+  let index = 0
+  while (index < sql.length) {
+    const character = sql[index]!
+    if (/\s/.test(character) || ',();'.includes(character)) {
+      index++
+      continue
+    }
+    if (character === '-' && sql[index + 1] === '-') {
+      index += 2
+      while (index < sql.length && sql[index] !== '\n') index++
+      continue
+    }
+    if (character === '/' && sql[index + 1] === '*') {
+      const end = sql.indexOf('*/', index + 2)
+      index = end === -1 ? sql.length : end + 2
+      continue
+    }
+    if (character === "'") {
+      index++
+      while (index < sql.length) {
+        if (sql[index] !== "'") {
+          index++
+          continue
+        }
+        if (sql[index + 1] === "'") {
+          index += 2
+          continue
+        }
+        index++
+        break
+      }
+      continue
+    }
+    if (character === '"' || character === '`' || character === '[') {
+      const close = character === '[' ? ']' : character
+      let value = ''
+      index++
+      while (index < sql.length) {
+        if (sql[index] !== close) {
+          value += sql[index]
+          index++
+          continue
+        }
+        if (sql[index + 1] === close) {
+          value += close
+          index += 2
+          continue
+        }
+        index++
+        break
+      }
+      if (awaitingTable && value) {
+        references.push(value)
+        awaitingTable = false
+      }
+      continue
+    }
+    let end = index + 1
+    while (end < sql.length && !/[\s,();]/.test(sql[end]!)) end++
+    const token = sql.slice(index, end)
+    index = end
+    if (awaitingTable) {
+      references.push(token)
+      awaitingTable = false
+    } else if (token.toUpperCase() === 'REFERENCES') {
+      awaitingTable = true
+    }
+  }
+  return references
+}
+
+function tableDependencies(
+  createSql: unknown,
+  tableName: string,
+  namesBySqlIdentity: ReadonlyMap<string, string>
+): string[] {
+  const self = tableName.toLowerCase()
+  return [
+    ...new Set(
+      referencedTables(createSql)
+        .map((reference) => namesBySqlIdentity.get(reference.toLowerCase()))
+        .filter(
+          (dependency): dependency is string =>
+            dependency !== undefined && dependency.toLowerCase() !== self
+        )
+    ),
+  ]
+}
+
+function tableIdentities(names: readonly string[]): Map<string, string> {
+  return new Map(names.map((name) => [name.toLowerCase(), name]))
+}
+
 function dependencyOrder(
   names: readonly string[],
   dependencies: ReadonlyMap<string, readonly string[]>
@@ -214,23 +311,17 @@ export function createNamespaceBackupManager<Env>(
     const unorderedTables = master.filter(
       (row) => row.type === 'table' && !isExcluded(row.name)
     )
-    const tableNames = new Set(unorderedTables.map((row) => String(row.name)))
-    const dependencies = new Map<string, string[]>()
-    for (const table of unorderedTables) {
-      const name = String(table.name)
-      const foreignKeys = await options.query(
-        env,
-        namespace,
-        `PRAGMA foreign_key_list("${quoteIdentifier(name)}")`,
-        []
-      )
-      dependencies.set(
-        name,
-        foreignKeys
-          .map((foreignKey) => String(foreignKey.table))
-          .filter((dependency) => dependency !== name && tableNames.has(dependency))
-      )
-    }
+    const tableNames = unorderedTables.map((row) => String(row.name))
+    const tableNamesBySqlIdentity = tableIdentities(tableNames)
+    // sqlite_master already carries every CREATE statement in this bounded
+    // schema read. Derive FK edges from those statements instead of asking
+    // pragma_foreign_key_list to re-walk the complete schema once per table.
+    const dependencies = new Map(
+      unorderedTables.map((table) => [
+        String(table.name),
+        tableDependencies(table.sql, String(table.name), tableNamesBySqlIdentity),
+      ])
+    )
     const orderedNames = dependencyOrder(
       unorderedTables.map((table) => String(table.name)),
       dependencies
@@ -519,36 +610,38 @@ export function createNamespaceBackupManager<Env>(
     const liveTableRows = await options.query(
       env,
       namespace,
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY name",
+      "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY name",
       []
     )
     const liveTableNames = liveTableRows
       .map((row) => String(row.name ?? ''))
       .filter((name) => name && !isExcluded(name))
     const dropNames = [...new Set([...tableNames, ...liveTableNames])]
-    const dropNameSet = new Set(dropNames)
-    const dropDependencies = new Map<string, string[]>()
-    for (const name of liveTableNames) {
-      const foreignKeys = await options.query(
-        env,
-        namespace,
-        `PRAGMA foreign_key_list("${quoteIdentifier(name)}")`,
-        []
-      )
-      dropDependencies.set(
-        name,
-        foreignKeys
-          .map((foreignKey) => String(foreignKey.table))
-          .filter((table) => table !== name && dropNameSet.has(table))
-      )
-    }
+    const dropNamesBySqlIdentity = tableIdentities(dropNames)
+    const dropDependencies = new Map(
+      liveTableRows
+        .map((row) => ({ name: String(row.name ?? ''), sql: row.sql }))
+        .filter((row) => row.name && !isExcluded(row.name))
+        .map((row) => [
+          row.name,
+          tableDependencies(row.sql, row.name, dropNamesBySqlIdentity),
+        ])
+    )
     const dropStatements = dependencyOrder(dropNames, dropDependencies)
       .reverse()
       .map((name) => ({
         sql: `DROP TABLE IF EXISTS "${quoteIdentifier(name)}"`,
       }))
-    for (let offset = 0; offset < dropStatements.length; offset += 400) {
-      await options.batch(env, namespace, dropStatements.slice(offset, offset + 400))
+    // workerd's DROP TABLE schema work grows with the number of live tables.
+    // Keep each destructive storage transaction small even though ordinary
+    // row inserts can safely use the larger 400-statement import batches.
+    const destructiveBatchSize = 40
+    for (let offset = 0; offset < dropStatements.length; offset += destructiveBatchSize) {
+      await options.batch(
+        env,
+        namespace,
+        dropStatements.slice(offset, offset + destructiveBatchSize)
+      )
     }
     const includedEntries = tableEntries.filter((entry) => !isExcluded(entry.name))
     for (let offset = 0; offset < includedEntries.length; offset += 400) {
@@ -583,21 +676,13 @@ export function createNamespaceBackupManager<Env>(
     }
 
     if (validatedHeader.orderedTables !== true) {
-      const dependencies = new Map<string, string[]>()
-      for (const name of tableNames) {
-        const foreignKeys = await options.query(
-          env,
-          namespace,
-          `PRAGMA foreign_key_list("${quoteIdentifier(name)}")`,
-          []
-        )
-        dependencies.set(
-          name,
-          foreignKeys
-            .map((foreignKey) => String(foreignKey.table))
-            .filter((table) => table !== name && tableNames.includes(table))
-        )
-      }
+      const tableNamesBySqlIdentity = tableIdentities(tableNames)
+      const dependencies = new Map(
+        includedEntries.map((entry) => [
+          entry.name,
+          tableDependencies(entry.sql, entry.name, tableNamesBySqlIdentity),
+        ])
+      )
       const ordered = dependencyOrder(tableNames, dependencies)
       for (const name of ordered) await insertRows(name, bufferedRows.get(name) ?? [])
     }

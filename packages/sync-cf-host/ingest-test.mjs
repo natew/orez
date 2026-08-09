@@ -55,6 +55,114 @@ try {
     patch: [{ op: 'put', hash: 'q-all-items', name: 'allItems', args: [] }],
   }
 
+  // The worker owns status authorization. A rejected cold probe returns before
+  // idFromName/get, while the authorized control proves the real DO meter sees
+  // constructor writes once object creation is allowed.
+  const coldStatusNamespace = `proj-cold-status-${crypto.randomUUID()}`
+  const rejectedColdStatus = await fetch(
+    `${base}/data-worker/${coldStatusNamespace}/_orez/status`
+  )
+  assert.equal(rejectedColdStatus.status, 403)
+  assert.deepEqual(await rejectedColdStatus.json(), {
+    error: 'forbidden',
+    sqlBillingSinceBoot: { rowsWritten: 0 },
+  })
+  const authorizedColdStatus = await fetch(
+    `${base}/data-worker/${coldStatusNamespace}/_orez/status`,
+    { headers: { 'x-orez-admin-token': 'ingest-harness-do-admin' } }
+  )
+  assert.equal(authorizedColdStatus.status, 200)
+  assert.ok(
+    (await authorizedColdStatus.json()).sqlBillingSinceBoot.rowsWritten > 0,
+    'authorized cold status proves the physical write meter is live'
+  )
+
+  // Restore a dump over a live reverse-FK graph plus 41 current-only tables.
+  // The real DO status meter captures the packed discovery/session cost, while
+  // total_changes includes trigger-written rows and the notifier counter pins
+  // post-commit behavior.
+  const restoreNamespace = `proj-restore-cost-${crypto.randomUUID()}`
+  const restoreFixtureResponse = await fetch(
+    `${base}/restore-fixture/${restoreNamespace}`,
+    { method: 'POST' }
+  )
+  assert.equal(restoreFixtureResponse.status, 200)
+  const restoreFixture = await restoreFixtureResponse.json()
+  const restoreTotalBefore = await fetch(
+    `${base}/application-total-changes/${restoreNamespace}`
+  ).then((response) => response.json())
+  const restoreStatusBefore = await fetch(
+    `${base}/data-worker/${restoreNamespace}/_orez/status`,
+    { headers: { 'x-orez-admin-token': 'ingest-harness-do-admin' } }
+  ).then((response) => response.json())
+  await fetch(`${base}/application-commit-status/ns:${restoreNamespace}`, {
+    method: 'POST',
+  })
+  const restoreResponse = await fetch(
+    `${base}/data-worker/${restoreNamespace}/_orez/backup/restore?confirm=${restoreNamespace}`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-admin-key': 'ingest-harness-admin',
+      },
+      body: JSON.stringify({ key: restoreFixture.key }),
+    }
+  )
+  assert.equal(restoreResponse.status, 200)
+  assert.deepEqual(await restoreResponse.json(), {
+    ok: true,
+    ns: `ns:${restoreNamespace}`,
+    key: restoreFixture.key,
+    sourceNs: 'source',
+    tables: 1,
+    rows: 1,
+    counts: { item: 1 },
+  })
+  const restoreTotalAfter = await fetch(
+    `${base}/application-total-changes/${restoreNamespace}`
+  ).then((response) => response.json())
+  const restoreStatusAfter = await fetch(
+    `${base}/data-worker/${restoreNamespace}/_orez/status`,
+    { headers: { 'x-orez-admin-token': 'ingest-harness-do-admin' } }
+  ).then((response) => response.json())
+  const restoreNotificationStatus = await fetch(
+    `${base}/application-commit-status/ns:${restoreNamespace}`
+  ).then((response) => response.json())
+  const restoreCost = {
+    totalChanges: restoreTotalAfter.value - restoreTotalBefore.value,
+    rowsRead:
+      restoreStatusAfter.sqlBillingSinceBoot.rowsRead -
+      restoreStatusBefore.sqlBillingSinceBoot.rowsRead,
+    rowsWritten:
+      restoreStatusAfter.sqlBillingSinceBoot.rowsWritten -
+      restoreStatusBefore.sqlBillingSinceBoot.rowsWritten,
+    sessions:
+      restoreStatusAfter.requestsSinceBoot.applicationSqlSessions -
+      restoreStatusBefore.requestsSinceBoot.applicationSqlSessions,
+    statements:
+      restoreStatusAfter.requestsSinceBoot.sqlStatements -
+      restoreStatusBefore.requestsSinceBoot.sqlStatements,
+    callbacks: restoreNotificationStatus.attempts,
+  }
+  assert.deepEqual(restoreCost, {
+    totalChanges: 19,
+    rowsRead: 2_653,
+    rowsWritten: 29,
+    sessions: 9,
+    statements: 158,
+    callbacks: 0,
+  })
+  assert.deepEqual(
+    await fetch(`${base}/restore-observation/${restoreNamespace}`).then((response) =>
+      response.json()
+    ),
+    {
+      tables: [{ name: 'item' }],
+      rows: [{ id: 'restored', label: 'after restore' }],
+    }
+  )
+
   const waitForCommitNotification = async (notificationNamespace, attempts) => {
     for (let attempt = 0; attempt < 100; attempt++) {
       const response = await fetch(

@@ -64,6 +64,7 @@ const activeHeldChangeResponses = new Set<string>()
 const upstreamChangeRequests = new Map<string, number>()
 const commitNotificationAttempts = new Map<string, number>()
 const commitNotificationFailures = new Map<string, 'sync' | 'async'>()
+const restoreObjects = new Map<string, string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 let delegatedPushFailedRemaining = 0
@@ -120,6 +121,41 @@ const config: SyncHostConfig<Env> = {
 }
 
 const syncWorker = createSyncWorker(config)
+
+const restoreBucket = {
+  async get(key: string) {
+    const value = restoreObjects.get(key)
+    if (value === undefined) return null
+    return {
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(value))
+          controller.close()
+        },
+      }),
+      async json() {
+        return JSON.parse(value)
+      },
+    }
+  },
+  async createMultipartUpload() {
+    throw new Error('restore harness does not export backups')
+  },
+  async put(key: string, value: string) {
+    restoreObjects.set(key, value)
+  },
+  async list({ prefix }: { prefix: string }) {
+    return {
+      objects: [...restoreObjects.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .map((key) => ({ key })),
+    }
+  },
+  async delete(keys: readonly string[]) {
+    for (const key of keys) restoreObjects.delete(key)
+  },
+}
+
 const dataWorker = createOrezDataWorker<Env>({
   name: 'ingestharness',
   schema: {
@@ -127,6 +163,16 @@ const dataWorker = createOrezDataWorker<Env>({
     schema,
     publicTables: [{ table: 'item', publicTable: 'public.item' }],
     migrate: async () => undefined,
+  },
+  backup: {
+    format: 'ingest-harness-backup-v1',
+    bucket: () => restoreBucket,
+    inventory: async () => [],
+    authorize(request, env) {
+      return (
+        Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
+      )
+    },
   },
   applicationSqlDidCommit(context) {
     commitNotificationAttempts.set(
@@ -516,6 +562,10 @@ async function runApplicationCommitProbe(request: Request, env: Env): Promise<Re
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/data-worker/')) {
+      url.pathname = url.pathname.slice('/data-worker'.length)
+      return dataWorker.fetch(new Request(url, request), env, ctx)
+    }
     if (url.pathname.startsWith('/internal-notify/')) {
       const namespace = url.pathname.slice('/internal-notify/'.length)
       return syncWorker.notify(env, namespace)
@@ -529,6 +579,7 @@ export default {
     }
     if (url.pathname.startsWith('/application-commit-status/')) {
       const namespace = url.pathname.slice('/application-commit-status/'.length)
+      if (request.method === 'POST') commitNotificationAttempts.set(namespace, 0)
       return Promise.resolve(
         Response.json({
           attempts: commitNotificationAttempts.get(namespace) ?? 0,
@@ -538,6 +589,79 @@ export default {
     }
     if (url.pathname.startsWith('/application-commit/')) {
       return runApplicationCommitProbe(request, env)
+    }
+    if (url.pathname.startsWith('/application-total-changes/')) {
+      const namespace = url.pathname.slice('/application-total-changes/'.length)
+      return dataWorker
+        .applicationSqlClient(env, namespace)
+        .query<{ value: number }>('SELECT total_changes() AS value')
+        .then((rows) => Response.json({ value: Number(rows[0]?.value ?? 0) }))
+    }
+    if (url.pathname.startsWith('/restore-observation/')) {
+      const namespace = url.pathname.slice('/restore-observation/'.length)
+      const client = dataWorker.applicationSqlClient(env, namespace)
+      return Promise.all([
+        client.query<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND (name IN ('item', 'itemReaction') OR name LIKE 'current_only_%') ORDER BY name"
+        ),
+        client.query<{ id: string; label: string }>(
+          'SELECT id, label FROM item ORDER BY id'
+        ),
+      ]).then(([tables, rows]) => Response.json({ tables, rows }))
+    }
+    if (url.pathname.startsWith('/restore-fixture/')) {
+      const namespace = url.pathname.slice('/restore-fixture/'.length)
+      const instance = namespace.startsWith('ns:') ? namespace : `ns:${namespace}`
+      const client = dataWorker.applicationSqlClient(env, instance)
+      return client
+        .transaction(
+          () => {
+            throw new Error('restore fixture does not compile query ASTs')
+          },
+          async (tx) => {
+            await tx.exec('CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT)')
+            await tx.exec(
+              'CREATE TABLE itemReaction (id TEXT PRIMARY KEY, itemId TEXT NOT NULL REFERENCES item(id))'
+            )
+            await tx.exec("INSERT INTO item VALUES ('current', 'before restore')")
+            await tx.exec("INSERT INTO itemReaction VALUES ('reaction', 'current')")
+            for (let index = 0; index < 41; index++) {
+              await tx.exec(
+                `CREATE TABLE "current_only_${String(index).padStart(3, '0')}" (id TEXT)`
+              )
+            }
+          }
+        )
+        .then(() => {
+          commitNotificationAttempts.set(instance, 0)
+          const key = `restore-fixtures/${instance}.ndjson`
+          restoreObjects.set(
+            key,
+            [
+              {
+                kind: 'header',
+                format: 'ingest-harness-backup-v1',
+                ns: 'source',
+                orderedTables: true,
+              },
+              {
+                kind: 'table',
+                name: 'item',
+                sql: 'CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT)',
+                indexes: [],
+              },
+              {
+                kind: 'rows',
+                table: 'item',
+                rows: [{ id: 'restored', label: 'after restore' }],
+              },
+              { kind: 'footer', tables: 1, rows: 1 },
+            ]
+              .map((entry) => JSON.stringify(entry))
+              .join('\n') + '\n'
+          )
+          return Response.json({ instance, key })
+        })
     }
     if (url.pathname.startsWith('/delegated-ingest-control/')) {
       const namespace = url.pathname.slice('/delegated-ingest-control/'.length)

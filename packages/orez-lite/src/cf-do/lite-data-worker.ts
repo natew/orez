@@ -1029,6 +1029,16 @@ export function createOrezDataWorker<
     }
   }
 
+  const hasAdminToken = (request: Request, env: Env): boolean => {
+    const supplied =
+      request.headers.get('x-orez-admin-token') ??
+      request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+    return Boolean(
+      env.OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN &&
+      supplied === env.OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN
+    )
+  }
+
   const worker = {
     async fetch(
       request: Request,
@@ -1041,6 +1051,16 @@ export function createOrezDataWorker<
           installRuntimeGlobals(env)
           const resolved = resolveOrezDataRequest(request, namespaceOptions)
           if (!resolved) return new Response('invalid namespace', { status: 400 })
+          // The DO constructor creates durable control tables. Reject the
+          // protected status probe at the worker boundary so an unauthenticated
+          // request cannot name or instantiate a cold object just to receive a
+          // 403 from inside it.
+          if (resolved.pathname === '/_orez/status' && !hasAdminToken(request, env)) {
+            return Response.json(
+              { error: 'forbidden', sqlBillingSinceBoot: { rowsWritten: 0 } },
+              { status: 403 }
+            )
+          }
           const routedHeaders = new Headers(request.headers)
           routedHeaders.set(
             namespaceOptions.nsHeader!,
