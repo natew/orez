@@ -520,6 +520,7 @@ if (!packOnly && !dryRun && !trustedPublishing) {
 // check: format, lint, types, tests
 if (!packOnly) {
   console.info('\nchecking...')
+  run('make -B dist/package.json', { cwd: sqliteWasmDir })
   run('bun run format')
   run('bun run format:check')
   run('bun run lint')
