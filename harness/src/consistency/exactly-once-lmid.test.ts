@@ -438,6 +438,21 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     })
   })
 
+  test('accepts a pull LMID terminal after the mutation server outcome', () => {
+    const fixture = history()
+    const pullTerminalIndex = fixture.events.findIndex(
+      (event) => event.exactlyOnce?.type === 'pull' && event.phase === 'ok'
+    )
+    const [pullTerminal] = fixture.events.splice(pullTerminalIndex, 1)
+    const mutationTerminalIndex = fixture.events.findIndex(
+      (event) => event.exactlyOnce?.type === 'mutation' && event.phase !== 'invoke'
+    )
+    fixture.events.splice(mutationTerminalIndex + 1, 0, pullTerminal!)
+    reindex(fixture.events, fixture.schedule)
+
+    expect(checkExactlyOnceLmid(fixture.events, fixture.schedule).status).toBe('pass')
+  })
+
   test('accepts retry-only, both recovery branches, and pending pull quiescence', () => {
     const retryOnly = history()
     addStockRetry(retryOnly)

@@ -9,7 +9,7 @@ import type { ConsistencyCheck } from './artifacts.js'
 
 export const EXACTLY_ONCE_LMID_PROFILE = {
   name: 'exactly-once-lost-push-recovery-plus-server-replay',
-  version: 3,
+  version: 4,
 } as const
 
 export type ExactlyOnceLmidResult = Pick<
@@ -393,29 +393,37 @@ export function checkExactlyOnceLmid(
   ) {
     violations.push('exactly-once evidence is not in the required history order')
   }
-  const recoveryTerminals = [
-    ...pulls
-      .filter(
-        (pair) =>
-          pair.terminal?.exactlyOnce.observed?.outcome === 'pull-lmid-observed' &&
-          pair.terminal.exactlyOnce.observed.lastMutationId === '1'
-      )
-      .map((pair) => pair.terminal?.index),
-    ...stockPushes.slice(1).map((pair) => pair.terminal?.index),
-  ]
+  const pullRecoveryTerminals = pulls
+    .filter(
+      (pair) =>
+        pair.terminal?.exactlyOnce.observed?.outcome === 'pull-lmid-observed' &&
+        pair.terminal.exactlyOnce.observed.lastMutationId === '1'
+    )
+    .map((pair) => pair.terminal?.index)
+  const stockRetryTerminals = stockPushes.slice(1).map((pair) => pair.terminal?.index)
   const lossIndex = first?.terminal?.index
   const mutationTerminalIndex = mutation?.terminal?.index
   if (
     lossIndex === undefined ||
     mutationTerminalIndex === undefined ||
-    recoveryTerminals.some((index) => index === undefined) ||
-    recoveryTerminals.some(
+    stockRetryTerminals.some((index) => index === undefined) ||
+    stockRetryTerminals.some(
       (index) => index! <= lossIndex! || index! >= mutationTerminalIndex!
     )
   )
     violations.push(
-      'stock recovery terminals must follow loss and precede mutation terminal'
+      'stock retry terminals must follow loss and precede mutation terminal'
     )
+  const quiesceTerminalIndex = quiesce?.terminal?.index
+  if (
+    lossIndex === undefined ||
+    quiesceTerminalIndex === undefined ||
+    pullRecoveryTerminals.some((index) => index === undefined) ||
+    pullRecoveryTerminals.some(
+      (index) => index! <= lossIndex! || index! >= quiesceTerminalIndex!
+    )
+  )
+    violations.push('pull LMID terminals must follow loss and precede client quiescence')
   if (
     stockPushes
       .slice(1)
