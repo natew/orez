@@ -364,8 +364,9 @@ const migrationStatementIds = knownMigrationStatementIds()
 // once for prepare, once per migration file, and once again for finalize.
 async function readAppliedMigrationStatements(tx) {
   const applied = new Set()
-  for (let offset = 0; offset < migrationStatementIds.length; offset += 100) {
-    const ids = migrationStatementIds.slice(offset, offset + 100)
+  const statementIdsPerQuery = 32
+  for (let offset = 0; offset < migrationStatementIds.length; offset += statementIdsPerQuery) {
+    const ids = migrationStatementIds.slice(offset, offset + statementIdsPerQuery)
     const params = []
     for (const id of ids) params.push(id, id + ':', id + ';')
     const rows = await tx.query(

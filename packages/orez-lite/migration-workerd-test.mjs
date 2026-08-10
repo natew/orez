@@ -21,6 +21,10 @@ writeFileSync(
     schemaVersion: 'migration-cost-v1',
     schemaImportSpecifier: './schema.js',
     nativeSqlStatements: [
+      ...Array.from({ length: 588 - 3 }, (_, index) => ({
+        id: `0000_history/migration.sql:${index}`,
+        sql: '-- historical statement retained for migration identity',
+      })),
       {
         id: '0001_retired/migration.sql:0',
         sql: 'DROP TABLE IF EXISTS retired',
@@ -204,15 +208,14 @@ try {
     ledger: 1_003,
     callbacks: 0,
   })
-  // The previous orchestration opened prepare + one session per pending file
-  // + finalize (four here) and scanned all 1,001 historical ledger rows in
-  // each. The two-session and physical-read controls therefore fail on that
-  // prototype while retaining one transaction boundary per pending file.
+  // the 588 current ids take 19 primary-key probe statements. unmatched
+  // historical rows do not add reads; the previous scan read all 1,001 rows
+  // once per session while opening prepare + one session per file + finalize.
   assert.deepEqual(cost, {
-    rowsRead: 394,
+    rowsRead: 979,
     rowsWritten: 69,
     sessions: 2,
-    statements: 75,
+    statements: 93,
     callbacks: 0,
   })
 } finally {
