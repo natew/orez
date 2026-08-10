@@ -13,13 +13,26 @@ import { getQueryName } from './queryRegistry'
 import type { ZeroRunner } from './zeroRunner'
 import type { AnyQueryRegistry } from '@rocicorp/zero'
 
+export type ZeroClientRuntime = {
+  zero: unknown | null
+  readyWaiters: Set<(zero: unknown) => void>
+  runner: ZeroRunner | null
+}
+
 export type ZeroClientInstance = {
   name: string
   customQueries: AnyQueryRegistry
+  runtime: ZeroClientRuntime
   // set when the instance's provider mounts (client); stays null on the
   // server, where the ambient transaction runner serves every instance
   runner: ZeroRunner | null
 }
+
+const getRuntimesByName = () =>
+  globalValue<Map<string, ZeroClientRuntime>>(
+    'on-zero:instance-runtimes-by-name',
+    () => new Map()
+  )
 
 const getInstancesByNamespace = () =>
   globalValue<Map<string, ZeroClientInstance>>(
@@ -71,7 +84,26 @@ export function registerClientInstance({
     }
   }
 
-  const instance: ZeroClientInstance = { name, customQueries, runner: null }
+  // the provider and its project module do not necessarily refresh together.
+  // keep their live zero behind the stable instance name so a new module facade
+  // resolves the provider that is already mounted.
+  const runtimesByName = getRuntimesByName()
+  let runtime = runtimesByName.get(name)
+  if (!runtime) {
+    runtime = { zero: null, readyWaiters: new Set(), runner: null }
+    runtimesByName.set(name, runtime)
+  }
+  const instance: ZeroClientInstance = {
+    name,
+    customQueries,
+    runtime,
+    get runner() {
+      return runtime.runner
+    },
+    set runner(next) {
+      runtime.runner = next
+    },
+  }
 
   for (const namespace of namespaces) {
     const existing = instancesByNamespace.get(namespace)

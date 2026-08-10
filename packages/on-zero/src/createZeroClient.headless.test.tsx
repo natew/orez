@@ -45,3 +45,30 @@ test('connectHeadless publishes the instance with no react tree', async () => {
 
   await connection.close()
 })
+
+test('a hot-recreated client resolves the mounted same-name instance', async () => {
+  const first = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: { headlessHotTest: { byId } },
+    instanceName: 'headless-hot-test',
+  })
+  const connection = first.connectHeadless({
+    userID: 'user-headless-hot',
+    kvStore: 'mem',
+    storageKey: 'headless-hot-test',
+  })
+
+  const refreshed = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: { headlessHotTest: { byId } },
+    instanceName: 'headless-hot-test',
+  })
+
+  expect(refreshed.zero.clientID).toBe(connection.zero.clientID)
+  expect(await refreshed.waitForZero()).toBe(connection.zero)
+
+  await connection.close()
+  expect(() => refreshed.zero.clientID).toThrow(/not initialized/)
+})

@@ -288,6 +288,10 @@ export function createZeroClientInternal<
       Object.keys(queries).map((name) => `${namespace}.${name}`)
     ),
   })
+  const zeroRuntime = instance.runtime as typeof instance.runtime & {
+    zero: ZeroInstance | null
+    readyWaiters: Set<(instance: ZeroInstance) => void>
+  }
 
   // register for global run() helper
   setCustomQueries(customQueries)
@@ -383,30 +387,27 @@ export function createZeroClientInternal<
     return createdInstance
   }
 
-  let latestZeroInstance: ZeroInstance | null = null
-  const zeroReadyWaiters = new Set<(instance: ZeroInstance) => void>()
-
   // publish the active instance through the stable facade and query runner.
   // the provider calls this during render (before descendant effects do
   // imperative work) and connectHeadless calls it directly — the `zero` proxy,
   // run(), and waitForZero() resolve identically either way.
   function publishZeroInstance(zeroInstance: ZeroInstance): boolean {
-    if (zeroInstance === latestZeroInstance) return false
-    latestZeroInstance = zeroInstance
+    if (zeroInstance === zeroRuntime.zero) return false
+    zeroRuntime.zero = zeroInstance
     mutationLifecycle.activate()
     const runner: ZeroRunner = (query, options) => zeroInstance.run(query as any, options)
     // the instance-keyed runner is what run() dispatches owned namespaces to;
     // the global runner stays as the ambient fallback (inline zql)
     instance.runner = runner
     setRunner(runner)
-    const waiters = [...zeroReadyWaiters]
-    zeroReadyWaiters.clear()
+    const waiters = [...zeroRuntime.readyWaiters]
+    zeroRuntime.readyWaiters.clear()
     for (const onReady of waiters) onReady(zeroInstance)
     return true
   }
 
   function waitForZero({ signal }: WaitForZeroOptions = {}): Promise<ZeroInstance> {
-    if (latestZeroInstance) return Promise.resolve(latestZeroInstance)
+    if (zeroRuntime.zero) return Promise.resolve(zeroRuntime.zero)
     if (signal?.aborted) {
       return Promise.reject(
         signal.reason ?? new Error('Waiting for the Zero instance was aborted')
@@ -419,10 +420,10 @@ export function createZeroClientInternal<
         resolve(instance)
       }
       const onAbort = () => {
-        zeroReadyWaiters.delete(onReady)
+        zeroRuntime.readyWaiters.delete(onReady)
         reject(signal?.reason ?? new Error('Waiting for the Zero instance was aborted'))
       }
-      zeroReadyWaiters.add(onReady)
+      zeroRuntime.readyWaiters.add(onReady)
       signal?.addEventListener('abort', onAbort, { once: true })
     })
   }
@@ -435,12 +436,12 @@ export function createZeroClientInternal<
   // with still-no instance throws the same error, so real misuse stays loud.
   function lazyMutatePath(path: string[]): any {
     const resolve = () => {
-      if (latestZeroInstance === null) {
+      if (zeroRuntime.zero === null) {
         throw new Error(
           `Zero instance not initialized. Ensure ZeroProvider is mounted before accessing 'zero'.`
         )
       }
-      let target: any = (latestZeroInstance as any).mutate
+      let target: any = zeroRuntime.zero.mutate
       for (const key of path) target = target[key]
       return target
     }
@@ -459,17 +460,17 @@ export function createZeroClientInternal<
   // Ideally rocicorp/zero would support .setAuth() natively, but for now we swap instances.
   const zero: ZeroInstance = new Proxy({} as never, {
     get(_, key) {
-      if (latestZeroInstance === null) {
+      if (zeroRuntime.zero === null) {
         if (key === 'mutate') return lazyMutatePath([])
         throw new Error(
           `Zero instance not initialized. Ensure ZeroProvider is mounted before accessing 'zero'.`
         )
       }
       if (key === 'delete') {
-        const instanceToDelete = latestZeroInstance
+        const instanceToDelete = zeroRuntime.zero
         return () => deleteZeroInstance(instanceToDelete)
       }
-      return getZeroProxyValue(latestZeroInstance, key)
+      return getZeroProxyValue(zeroRuntime.zero, key)
     },
   })
 
@@ -497,6 +498,7 @@ export function createZeroClientInternal<
       )
     },
   })
+  if (zeroRuntime.zero) mutationLifecycle.activate()
 
   const zeroInstanceVersion = createDirectUseQuery
     ? createEmitter<number>(`zero-instance-version${emitterScope}`, 0)
@@ -513,7 +515,7 @@ export function createZeroClientInternal<
     ? createDirectUseQuery({
         DisabledContext,
         customQueries,
-        getZero: () => latestZeroInstance,
+        getZero: () => zeroRuntime.zero,
         zeroVersion: zeroInstanceVersion!,
       })
     : createUnavailableDirectUseQuery<Schema>()
@@ -611,8 +613,8 @@ export function createZeroClientInternal<
   let remintAttempts = 0
 
   function unpublishZeroInstance(instanceToInvalidate: ZeroInstance): boolean {
-    if (latestZeroInstance !== instanceToInvalidate) return false
-    latestZeroInstance = null
+    if (zeroRuntime.zero !== instanceToInvalidate) return false
+    zeroRuntime.zero = null
     instance.runner = null
     setRunner(null)
     return true
@@ -668,8 +670,8 @@ export function createZeroClientInternal<
     remintAttempts += 1
 
     const { dropLocalState = true } = opts
-    if (dropLocalState && latestZeroInstance) {
-      await deleteZeroInstance(latestZeroInstance).catch(() => {})
+    if (dropLocalState && zeroRuntime.zero) {
+      await deleteZeroInstance(zeroRuntime.zero).catch(() => {})
     }
     // re-check: the provider may have unmounted during the async delete.
     const bump = remintControl.bump
@@ -916,9 +918,9 @@ export function createZeroClientInternal<
     // descendant passive effects run. the outgoing instance remains cached
     // until the commit-safe rotation effect below closes or reuses it.
     useLayoutEffect(() => {
-      if (latestZeroInstance && (disable || cachedZero?.key !== instanceKey)) {
+      if (zeroRuntime.zero && (disable || cachedZero?.key !== instanceKey)) {
         mutationLifecycle.fence()
-        unpublishZeroInstance(latestZeroInstance)
+        unpublishZeroInstance(zeroRuntime.zero)
       }
     }, [disable, instanceKey])
 
