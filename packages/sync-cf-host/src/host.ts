@@ -245,6 +245,14 @@ function errorBody(error: unknown): Record<string, unknown> {
       retryAfterMs: error.retryAfterMs,
     }
   }
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'retryAfterMs' in error &&
+    typeof error.retryAfterMs === 'number'
+  ) {
+    return { error: errorMessage(error), retryAfterMs: error.retryAfterMs }
+  }
   return { error: errorMessage(error) }
 }
 
@@ -489,7 +497,19 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           route !== '/notify' &&
           route !== '/realtime/produce'
         ) {
-          const claims = await config.authenticate(request, env)
+          // an authenticate throw is an availability answer, not an identity
+          // verdict: the identity callback was reachable but told us to come
+          // back (e.g. a just-created namespace whose row is still committing).
+          // letting it propagate used to kill the whole request as an unhandled
+          // exception, which reached clients as an opaque 500 with no
+          // retry-after. map it through errorResponse so a status/retryAfterMs
+          // the callback attached survives to the wire.
+          let claims: Awaited<ReturnType<typeof config.authenticate>>
+          try {
+            claims = await config.authenticate(request, env)
+          } catch (error) {
+            return errorResponse(error)
+          }
           if (
             !claims ||
             typeof claims.userID !== 'string' ||
