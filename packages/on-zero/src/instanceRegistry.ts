@@ -28,23 +28,29 @@ export type ZeroClientInstance = {
   runner: ZeroRunner | null
 }
 
-const getRuntimesByName = () =>
-  globalValue<Map<string, ZeroClientRuntime>>(
+// keep these as declarations. code-split consumers can place this registry in
+// a chunk cycle and call releaseClientInstances during module evaluation, when
+// a const initializer in this module has not run yet.
+function getRuntimesByName() {
+  return globalValue<Map<string, ZeroClientRuntime>>(
     'on-zero:instance-runtimes-by-name',
     () => new Map()
   )
+}
 
-const getInstancesByNamespace = () =>
-  globalValue<Map<string, ZeroClientInstance>>(
+function getInstancesByNamespace() {
+  return globalValue<Map<string, ZeroClientInstance>>(
     'on-zero:instances-by-namespace',
     () => new Map()
   )
+}
 
-const getInstancesByQueryName = () =>
-  globalValue<Map<string, ZeroClientInstance>>(
+function getInstancesByQueryName() {
+  return globalValue<Map<string, ZeroClientInstance>>(
     'on-zero:instances-by-query-name',
     () => new Map()
   )
+}
 
 export function releaseClientInstances(names: readonly string[]): void {
   const releasing = new Set(names)
