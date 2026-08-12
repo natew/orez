@@ -81,14 +81,20 @@ export function startS3Local(config: S3LocalConfig): Promise<Server> {
       switch (req.method) {
         case 'GET': {
           // S3 ListObjectsV2: GET /?list-type=2&prefix=...&max-keys=...
+          // pages like real S3: lexicographic key order, and when more keys
+          // remain past max-keys the response carries IsTruncated plus a
+          // NextContinuationToken (the last returned key, matched against
+          // continuation-token as an exclusive start). without this, every
+          // >1000-key listing silently truncated and callers that diff a
+          // listing (backfills, delete-missing sweeps) dropped real files.
           if (url.searchParams.get('list-type') === '2') {
             const prefix = url.searchParams.get('prefix') || ''
             const maxKeys = parseInt(url.searchParams.get('max-keys') || '1000')
+            const after = url.searchParams.get('continuation-token') || ''
             const baseDir = join(storageDir, prefix)
-            const keys: string[] = []
+            const allKeys: string[] = []
 
             function walkList(dir: string) {
-              if (keys.length >= maxKeys) return
               let entries
               try {
                 entries = readdirSync(dir, { withFileTypes: true })
@@ -96,22 +102,31 @@ export function startS3Local(config: S3LocalConfig): Promise<Server> {
                 return
               }
               for (const entry of entries) {
-                if (keys.length >= maxKeys) break
                 const full = join(dir, entry.name)
                 if (entry.isDirectory()) {
                   walkList(full)
                 } else {
                   const rel = full.slice(storageDir.length + 1)
-                  keys.push(rel)
+                  allKeys.push(rel)
                 }
               }
             }
             walkList(baseDir)
+            allKeys.sort()
 
-            const keysXml = keys
+            const start = after
+              ? allKeys.findIndex((key) => key > after)
+              : 0
+            const window = start < 0 ? [] : allKeys.slice(start, start + maxKeys)
+            const truncated =
+              start >= 0 && start + window.length < allKeys.length
+            const keysXml = window
               .map((k) => `<Contents><Key>${k}</Key></Contents>`)
               .join('')
-            const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><KeyCount>${keys.length}</KeyCount>${keysXml}</ListBucketResult>`
+            const tokenXml = truncated
+              ? `<IsTruncated>true</IsTruncated><NextContinuationToken>${window[window.length - 1]}</NextContinuationToken>`
+              : '<IsTruncated>false</IsTruncated>'
+            const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><KeyCount>${window.length}</KeyCount>${tokenXml}${keysXml}</ListBucketResult>`
             res.writeHead(200, { ...headers, 'Content-Type': 'application/xml' })
             res.end(xml)
             return
