@@ -114,12 +114,9 @@ export function startS3Local(config: S3LocalConfig): Promise<Server> {
             walkList(baseDir)
             allKeys.sort()
 
-            const start = after
-              ? allKeys.findIndex((key) => key > after)
-              : 0
+            const start = after ? allKeys.findIndex((key) => key > after) : 0
             const window = start < 0 ? [] : allKeys.slice(start, start + maxKeys)
-            const truncated =
-              start >= 0 && start + window.length < allKeys.length
+            const truncated = start >= 0 && start + window.length < allKeys.length
             const keysXml = window
               .map((k) => `<Contents><Key>${k}</Key></Contents>`)
               .join('')
