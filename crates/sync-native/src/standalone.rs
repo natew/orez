@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::header::{
-    CONNECTION, CONTENT_LENGTH, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER,
-    TRANSFER_ENCODING, UPGRADE,
+    ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE,
+    TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Url};
@@ -532,7 +532,13 @@ fn callback_wake(client: Client, url: Url, admin_token: HeaderValue) -> Authoriz
 }
 
 fn callback_headers(source: &HeaderMap, admin_token: &HeaderValue) -> HeaderMap {
-    static OMIT: [HeaderName; 9] = [
+    // ACCEPT_ENCODING must not be forwarded: this host is the HTTP client for
+    // the callback, and forwarding a browser's `gzip, deflate, br` makes the
+    // callback server compress its JSON while reqwest — which disables its own
+    // auto-decompression when a request sets accept-encoding explicitly —
+    // hands the compressed bytes to the JSON decoder. every browser-originated
+    // pull then fails with "auth callback returned invalid JSON".
+    static OMIT: [HeaderName; 10] = [
         HOST,
         CONNECTION,
         CONTENT_LENGTH,
@@ -542,6 +548,7 @@ fn callback_headers(source: &HeaderMap, admin_token: &HeaderValue) -> HeaderMap 
         TRAILER,
         PROXY_AUTHENTICATE,
         PROXY_AUTHORIZATION,
+        ACCEPT_ENCODING,
     ];
     let connection_headers = source
         .get_all(CONNECTION)
