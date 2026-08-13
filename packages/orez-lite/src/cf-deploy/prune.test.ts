@@ -12,15 +12,14 @@ afterEach(() => {
   for (const dir of workerDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-it('refuses to prune a signature match statically imported by a retained module', () => {
+it('refuses to prune a signature match statically imported by a worker root module', () => {
   const workerDir = mkdtempSync(join(tmpdir(), 'orez-prune-static-import-'))
   workerDirs.push(workerDir)
   const assetsDir = join(workerDir, 'assets')
   mkdirSync(assetsDir)
-  writeFileSync(join(workerDir, 'index.js'), 'import "./assets/middleware.js"\n')
   writeFileSync(
-    join(assetsDir, 'middleware.js'),
-    'import { catalog } from "./env.js"\nexport default catalog\n'
+    join(workerDir, 'index.js'),
+    'import { catalog } from "./assets/env.js"\n'
   )
   writeFileSync(
     join(assetsDir, 'env.js'),
@@ -32,7 +31,7 @@ it('refuses to prune a signature match statically imported by a retained module'
       browserOnlyChunkSignature: /browser-only-signature/,
       serverNodeOnlyChunkSignatures: [],
     })
-  ).toThrow(/env\.js.*statically imported by.*middleware\.js/)
+  ).toThrow(/env\.js.*statically imported by index\.js/)
   expect(existsSync(join(assetsDir, 'env.js'))).toBe(true)
 })
 

@@ -123,7 +123,9 @@ export function pruneWorkerChunksBySignature(
 
   // signatures classify whole chunks from content. bundlers may co-locate an
   // otherwise shared module with a matching string, so never let that heuristic
-  // sever a static import from code that will remain attached to the worker.
+  // sever a static import from a root worker module. asset-to-asset imports are
+  // deliberately outside this check: callers prune dormant dynamic route graphs
+  // whose wrapper chunks can still statically reference the removed implementation.
   // validate the full deletion set before removing any file so a rejected prune
   // leaves the build artifact intact for diagnosis.
   const candidateByFile = new Map(
@@ -133,9 +135,6 @@ export function pruneWorkerChunksBySignature(
     ...readdirSync(workerDir)
       .filter((name) => name.endsWith('.js') || name.endsWith('.mjs'))
       .map((name) => join(workerDir, name)),
-    ...readdirSync(assetsDir)
-      .filter((name) => name.endsWith('.js') || name.endsWith('.mjs'))
-      .map((name) => join(assetsDir, name)),
   ]
   for (const importer of importerFiles) {
     if (candidateByFile.has(importer)) continue
