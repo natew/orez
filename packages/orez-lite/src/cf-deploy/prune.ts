@@ -7,7 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from 'fs'
-import { dirname, join } from 'path'
+import { dirname, join, relative } from 'path'
 
 // remove asset chunks not reachable (static OR dynamic) from the worker entry.
 export function pruneUnreachableWorkerModules(
@@ -89,8 +89,11 @@ export function pruneWorkerChunksBySignature(
 } {
   const assetsDir = join(workerDir, 'assets')
   if (!existsSync(assetsDir)) return { removed: 0, bytes: 0 }
-  let removed = 0
-  let bytes = 0
+  const candidates: Array<{
+    file: string
+    bytes: number
+    reason: string
+  }> = []
   for (const name of readdirSync(assetsDir)) {
     if (!name.endsWith('.js') && !name.endsWith('.mjs')) continue
     const file = join(assetsDir, name)
@@ -102,16 +105,64 @@ export function pruneWorkerChunksBySignature(
     } catch {
       continue
     }
-    if (
-      !signatures.browserOnlyChunkSignature.test(head) &&
-      !signatures.serverNodeOnlyChunkSignatures.some((sig) => head.includes(sig))
-    ) {
+    signatures.browserOnlyChunkSignature.lastIndex = 0
+    const browserOnly = signatures.browserOnlyChunkSignature.test(head)
+    signatures.browserOnlyChunkSignature.lastIndex = 0
+    const serverNodeOnly = signatures.serverNodeOnlyChunkSignatures.find((sig) =>
+      head.includes(sig)
+    )
+    if (!browserOnly && !serverNodeOnly) continue
+    candidates.push({
+      file,
+      bytes: Buffer.byteLength(head),
+      reason: browserOnly
+        ? `browser-only signature ${signatures.browserOnlyChunkSignature}`
+        : `server-only signature ${JSON.stringify(serverNodeOnly)}`,
+    })
+  }
+
+  // signatures classify whole chunks from content. bundlers may co-locate an
+  // otherwise shared module with a matching string, so never let that heuristic
+  // sever a static import from code that will remain attached to the worker.
+  // validate the full deletion set before removing any file so a rejected prune
+  // leaves the build artifact intact for diagnosis.
+  const candidateByFile = new Map(
+    candidates.map((candidate) => [candidate.file, candidate])
+  )
+  const importerFiles = [
+    ...readdirSync(workerDir)
+      .filter((name) => name.endsWith('.js') || name.endsWith('.mjs'))
+      .map((name) => join(workerDir, name)),
+    ...readdirSync(assetsDir)
+      .filter((name) => name.endsWith('.js') || name.endsWith('.mjs'))
+      .map((name) => join(assetsDir, name)),
+  ]
+  for (const importer of importerFiles) {
+    if (candidateByFile.has(importer)) continue
+    let source: string
+    try {
+      source = readFileSync(importer, 'utf-8')
+    } catch {
       continue
     }
-    bytes += Buffer.byteLength(head)
-    rmSync(file, { force: true })
-    removed++
+    const staticRefRe =
+      /\b(?:import\s+(?:[^;]*?\s+from\s+)?|export\s+[^;]*?\s+from\s+)["'](\.\.?\/[^"']+\.(?:js|mjs|wasm))["']/g
+    let match: RegExpExecArray | null
+    while ((match = staticRefRe.exec(source))) {
+      const candidate = candidateByFile.get(join(dirname(importer), match[1]))
+      if (!candidate) continue
+      throw new Error(
+        `refusing to prune ${relative(workerDir, candidate.file)} (${candidate.reason}): statically imported by ${relative(workerDir, importer)}`
+      )
+    }
   }
+
+  let bytes = 0
+  for (const candidate of candidates) {
+    bytes += candidate.bytes
+    rmSync(candidate.file, { force: true })
+  }
+  const removed = candidates.length
   // removing the browser-only chunks orphans every chunk that was reachable
   // ONLY through them (e.g. the ~466 shiki/textmate-grammar/wasm chunks
   // pulled in solely by the codemirror+lsp editor surface — 2.6 MiB gz).
