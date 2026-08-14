@@ -34,9 +34,8 @@ import type { ModelMutations, SchemaColumn } from './generate-helpers'
 // minimal ast info about a namespace mutation module (e.g. `post/mutations.ts`)
 export type LiteMutationExport = {
   // the first arg to `mutations('NAME', ...)` — string literal from the source.
-  // not currently emitted anywhere in the output; the model file basename is
-  // used for the top-level key in syncedMutations instead. kept for parity with
-  // what callers naturally extract, and to leave room for future use.
+  // this targets membership at the named table while the model file basename
+  // remains the top-level key in syncedMutations.
   modelName: string
   // handlers = keys of the last object literal arg to `mutations(...)`
   handlers: Array<{
@@ -464,6 +463,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   // parse each model file and build ModelMutations records for the emitter
   const allModelMutations: ModelMutations[] = []
   const modelNamesWithSchema: string[] = []
+  const modelTables = new Map<string, string>()
 
   for (const namespace of modelNamespaces) {
     const filePath = namespace.modelPath
@@ -473,6 +473,10 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
 
     // a model file has at most one mutate export, but the lite ast is an array
     const mutationExport = parsed.mutations[0] ?? null
+    modelTables.set(
+      modelName,
+      mutationExport?.modelName || mutationExport?.schema?.tableName || modelName
+    )
 
     // extract schema info if present
     const columns: Record<string, SchemaColumn> = {}
@@ -612,9 +616,17 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     }
   }
 
-  const owners = new Map(
-    modelNamespaces.map((namespace) => [namespace.name, namespace.instance])
-  )
+  const owners = new Map<string, string>()
+  for (const namespace of modelNamespaces) {
+    const table = modelTables.get(namespace.name)!
+    const owner = owners.get(table)
+    if (owner && owner !== namespace.instance) {
+      throw new Error(
+        `[on-zero] table '${table}' is claimed by instances '${owner}' and '${namespace.instance}'`
+      )
+    }
+    owners.set(table, namespace.instance)
+  }
   const relatedOwners = new Map<string, string>()
   const directTables = new Map<string, string[]>()
   const syncTables = new Map<string, string[]>()
@@ -622,7 +634,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     const direct = new Set(
       instance.namespaces
         .filter((namespace) => namespace.modelPath !== null)
-        .map((namespace) => namespace.name)
+        .map((namespace) => modelTables.get(namespace.name)!)
     )
     const synced = new Set(direct)
     for (const namespace of instance.namespaces) {

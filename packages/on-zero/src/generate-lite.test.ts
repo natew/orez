@@ -166,6 +166,22 @@ describe('generateLite', () => {
     expect(context.instances?.default?.supportTables).toEqual(['audit', 'settings'])
   })
 
+  test('derives mutation membership from the targeted table', () => {
+    const path = `${DIR}/mint/mutations.ts`
+    const result = generateLite({
+      files: { [path]: '// namespace' },
+      dir: DIR,
+      parse: makeParse({
+        [path]: {
+          mutations: [{ modelName: 'expense', handlers: [], schema: null }],
+          queries: [],
+        },
+      }),
+    })
+
+    expect(result.instances[0]?.syncTables).toEqual(['expense'])
+  })
+
   test('includes a fileless support table in every lite instance that uses it', () => {
     const files = {
       [`${DIR}/on-zero.config.ts`]: `export default defineConfig({ instances: { control: { dir: './planes/control', supportTables: ['manual'] }, project: { scope: 'projectId' } } })`,

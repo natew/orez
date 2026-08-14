@@ -8,6 +8,7 @@ export type DataNamespace = {
   instance: string
   queryPath: string | null
   modelPath: string | null
+  table: string | null
   sourcePaths: string[]
 }
 
@@ -327,6 +328,59 @@ function namespaceExportKinds(
   return { model: false, query }
 }
 
+function mutationTable(
+  ts: typeof import('typescript'),
+  path: string,
+  namespace: string
+): string {
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true
+  )
+  let schemaTable: string | null = null
+
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue
+    if (
+      !statement.modifiers?.some(
+        (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+      )
+    ) {
+      continue
+    }
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue
+      if (
+        declaration.name.text === 'mutate' &&
+        ts.isCallExpression(declaration.initializer)
+      ) {
+        const firstArgument = declaration.initializer.arguments[0]
+        if (firstArgument && ts.isStringLiteralLike(firstArgument)) {
+          return firstArgument.text
+        }
+      }
+      if (declaration.name.text !== 'schema') continue
+      const visit = (node: ts.Node) => {
+        if (
+          ts.isCallExpression(node) &&
+          node.expression.getText(source) === 'table' &&
+          node.arguments[0] &&
+          ts.isStringLiteralLike(node.arguments[0])
+        ) {
+          schemaTable = node.arguments[0].text
+          return
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(declaration.initializer)
+    }
+  }
+
+  return schemaTable ?? namespace
+}
+
 function discoverNamespaces(
   ts: typeof import('typescript'),
   baseDir: string,
@@ -350,6 +404,7 @@ function discoverNamespaces(
         // a query-only file is not a model, matching the folder layout where a
         // missing mutations.ts leaves modelPath null
         modelPath: kinds.model ? path : null,
+        table: kinds.model ? mutationTable(ts, path, name) : null,
         sourcePaths: [path],
       })
       continue
@@ -379,6 +434,7 @@ function discoverNamespaces(
       instance: instance.name,
       queryPath: hasQueries ? queryPath : null,
       modelPath: hasMutations ? modelPath : null,
+      table: hasMutations ? mutationTable(ts, modelPath, entry.name) : null,
       sourcePaths: [hasQueries && queryPath, hasMutations && modelPath].filter(
         (path): path is string => Boolean(path)
       ),
@@ -803,11 +859,17 @@ export function discoverDataLayout(
     }
     namespaceOwners.set(namespace.name, namespace.instance)
   }
-  const tableOwners = new Map(
-    namespaces
-      .filter((namespace) => namespace.modelPath !== null)
-      .map((namespace) => [namespace.name, namespace.instance])
-  )
+  const tableOwners = new Map<string, string>()
+  for (const namespace of namespaces) {
+    if (namespace.table === null) continue
+    const owner = tableOwners.get(namespace.table)
+    if (owner && owner !== namespace.instance) {
+      throw new Error(
+        `[on-zero] table '${namespace.table}' is claimed by instances '${owner}' and '${namespace.instance}'`
+      )
+    }
+    tableOwners.set(namespace.table, namespace.instance)
+  }
 
   const metadata = metadataPaths(baseDir)
   const relations = relationTargets(ts, metadata)
@@ -816,8 +878,8 @@ export function discoverDataLayout(
   for (const instance of instances) {
     const tables = new Set(
       instance.namespaces
-        .filter((namespace) => namespace.modelPath !== null)
-        .map((namespace) => namespace.name)
+        .map((namespace) => namespace.table)
+        .filter((table): table is string => table !== null)
     )
     const syncTables = new Set(tables)
     for (const namespace of instance.namespaces) {

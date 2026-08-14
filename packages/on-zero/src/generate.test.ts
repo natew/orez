@@ -200,6 +200,25 @@ export async function writeAudit(tx: Transaction) {
     })
   })
 
+  test('derives mutation membership from the targeted table', async () => {
+    writeFileSync(
+      join(dataDir(), 'mint/mutations.ts'),
+      `export const mutate = mutations('expense', permissions, { save: async () => {} })`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toEqual({
+      instances: {
+        default: {
+          tables: ['expense'],
+          syncTables: ['expense'],
+          supportTables: [],
+          scope: null,
+        },
+      },
+      allTables: ['expense'],
+    })
+  })
+
   test('includes a fileless support table in every instance that uses it', async () => {
     writeFileSync(
       join(dataDir(), 'control/account.ts'),
