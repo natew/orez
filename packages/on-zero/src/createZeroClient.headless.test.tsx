@@ -4,6 +4,7 @@ import { createSchema, string, table } from '@rocicorp/zero'
 import { expect, test } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'
+import { onMutationError, type MutationError } from './helpers/useMutation'
 
 import type { Query } from '@rocicorp/zero'
 
@@ -71,4 +72,61 @@ test('a hot-recreated client resolves the mounted same-name instance', async () 
 
   await connection.close()
   expect(() => refreshed.zero.clientID).toThrow(/not initialized/)
+})
+
+test('direct facade mutations surface client failures without explicit observation', async () => {
+  const client = createZeroClient({
+    schema,
+    models: {
+      user: {
+        mutate: {
+          insert: async () => {
+            throw new Error('optimistic mutation failed')
+          },
+        },
+      },
+    } as never,
+    groupedQueries: { headlessObservedMutationTest: { byId } },
+    instanceName: 'headless-observed-mutation-test',
+  })
+  const connection = client.connectHeadless({
+    userID: 'user-headless-observed-mutation',
+    kvStore: 'mem',
+    storageKey: 'headless-observed-mutation-test',
+  })
+  const errors: MutationError[] = []
+  const dispose = onMutationError((error) => errors.push(error))
+
+  const mutate = Reflect.get(client.zero, 'mutate')
+  const user = Reflect.get(mutate, 'user')
+  const insert = Reflect.get(user, 'insert')
+  const result = Reflect.apply(insert, null, [{ id: 'u1', name: 'Ada' }])
+  if (result === null || typeof result !== 'object') {
+    throw new Error('mutation did not return client/server promises')
+  }
+  await Promise.all([Reflect.get(result, 'client'), Reflect.get(result, 'server')])
+  await Promise.resolve()
+
+  expect(errors).toHaveLength(1)
+  expect(errors[0]).toMatchObject({
+    kind: 'app',
+    message: 'optimistic mutation failed',
+  })
+
+  errors.length = 0
+  const missing = Reflect.get(user, 'createdAfterClientConstruction')
+  expect(() => Reflect.apply(missing, null, [{}])).toThrow(
+    "mutation 'user.createdAfterClientConstruction' is not registered"
+  )
+  expect(errors).toEqual([
+    {
+      scope: 'client',
+      kind: 'zero',
+      message:
+        "[on-zero] mutation 'user.createdAfterClientConstruction' is not registered on the active Zero client.",
+    },
+  ])
+
+  dispose()
+  await connection.close()
 })

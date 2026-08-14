@@ -34,6 +34,19 @@ export type MutationState = {
 // surface in dev so a swallowed error is impossible.
 const mutationErrorListeners = new Set<(error: MutationError) => void>()
 
+type MutationObservation = {
+  done: Promise<void>
+  errors: MutationError[]
+  listeners: Set<(error: MutationError) => void>
+  settled: boolean
+}
+
+// createZeroClient observes every facade mutation automatically. useMutation
+// observes that same result again to populate local state, so observation must
+// be shared per result: one global report, with every local listener attached
+// to the same client/server phase work.
+const mutationObservations = new WeakMap<object, MutationObservation>()
+
 export function onMutationError(cb: (error: MutationError) => void): () => void {
   mutationErrorListeners.add(cb)
   return () => {
@@ -77,6 +90,10 @@ function rejectionToError(scope: 'client' | 'server', e: unknown): MutationError
   }
 }
 
+export function reportMutationInvocationError(error: unknown): void {
+  emitMutationError(rejectionToError('client', error))
+}
+
 /**
  * Wire a mutation result's optimistic-client and authoritative-server phases to
  * normalized errors, without awaiting either. Every error reaches the global
@@ -92,10 +109,28 @@ export function observeMutation(
   result: MutatorResultLike,
   onError?: (error: MutationError) => void
 ): Promise<void> {
+  const existing = mutationObservations.get(result)
+  if (existing) {
+    if (onError) {
+      for (const error of existing.errors) onError(error)
+      if (!existing.settled) existing.listeners.add(onError)
+    }
+    return existing.done
+  }
+
+  const observation: MutationObservation = {
+    done: Promise.resolve(),
+    errors: [],
+    listeners: new Set(onError ? [onError] : []),
+    settled: false,
+  }
+  mutationObservations.set(result, observation)
+
   let reportedGlobal = false
   const report = (err: MutationError | null) => {
     if (!err) return
-    onError?.(err)
+    observation.errors.push(err)
+    for (const listener of observation.listeners) listener(err)
     // first error per call reaches the global catch
     if (!reportedGlobal) {
       reportedGlobal = true
@@ -108,7 +143,11 @@ export function observeMutation(
   const server = result.server
     .then((d) => report(toMutationError('server', d)))
     .catch((e) => report(rejectionToError('server', e)))
-  return Promise.all([client, server]).then(() => undefined)
+  observation.done = Promise.all([client, server]).then(() => {
+    observation.settled = true
+    observation.listeners.clear()
+  })
+  return observation.done
 }
 
 /**

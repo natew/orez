@@ -45,6 +45,7 @@ import {
   type ZeroLogPattern,
   type ZeroRecoveryDeps,
 } from './helpers/recoverZeroClient'
+import { observeMutation, reportMutationInvocationError } from './helpers/useMutation'
 import { registerClientInstance } from './instanceRegistry'
 import { getAllMutationsPermissions, getMutationsPermissions } from './modelRegistry'
 import { registerQuery } from './queryRegistry'
@@ -442,7 +443,16 @@ export function createZeroClientInternal<
         )
       }
       let target: any = zeroRuntime.zero.mutate
-      for (const key of path) target = target[key]
+      for (const key of path) {
+        if (target == null) break
+        target = target[key]
+      }
+      if (typeof target !== 'function') {
+        const label = path.length > 0 ? path.join('.') : '<callable mutation>'
+        throw new Error(
+          `[on-zero] mutation '${label}' is not registered on the active Zero client.`
+        )
+      }
       return target
     }
     return new Proxy(function lazyMutator() {} as any, {
@@ -451,7 +461,14 @@ export function createZeroClientInternal<
         return lazyMutatePath([...path, key])
       },
       apply(_, __, args) {
-        return resolve()(...args)
+        try {
+          const result = resolve()(...args)
+          void observeMutation(result)
+          return result
+        } catch (error) {
+          reportMutationInvocationError(error)
+          throw error
+        }
       },
     })
   }
@@ -460,8 +477,11 @@ export function createZeroClientInternal<
   // Ideally rocicorp/zero would support .setAuth() natively, but for now we swap instances.
   const zero: ZeroInstance = new Proxy({} as never, {
     get(_, key) {
+      // Always resolve mutation paths at call time. Besides surviving auth
+      // rotations, this is the one boundary that can observe raw
+      // fire-and-forget calls before callers discard Zero's result promises.
+      if (key === 'mutate') return lazyMutatePath([])
       if (zeroRuntime.zero === null) {
-        if (key === 'mutate') return lazyMutatePath([])
         throw new Error(
           `Zero instance not initialized. Ensure ZeroProvider is mounted before accessing 'zero'.`
         )

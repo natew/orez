@@ -95,6 +95,21 @@ describe('observeMutation', () => {
     await expect(observeMutation(result)).resolves.toBeUndefined()
   })
 
+  test('observing the same result twice emits globally once', async () => {
+    const { result, client, server } = fakeResult()
+    const global: MutationError[] = []
+    const dispose = onMutationError((e) => global.push(e))
+
+    const first = observeMutation(result)
+    const second = observeMutation(result)
+    client.resolve(SUCCESS)
+    server.resolve(appError('denied'))
+    await Promise.all([first, second])
+
+    expect(global).toHaveLength(1)
+    dispose()
+  })
+
   test('with no listener registered it falls back to console.error in dev', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { result, client, server } = fakeResult()
