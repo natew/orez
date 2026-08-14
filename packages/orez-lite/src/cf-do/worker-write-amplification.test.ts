@@ -343,9 +343,9 @@ describe('billable write amplification on a synced namespace', () => {
     commitTxJournal(residual.sql, 'tx-control')
     residual.stop()
     expect(controlSnapshots).toContain('_zsync_changes')
-    expect(
-      residual.written.reduce((sum, write) => sum + write.rows, 0)
-    ).toBeGreaterThan(4_000)
+    expect(residual.written.reduce((sum, write) => sum + write.rows, 0)).toBeGreaterThan(
+      4_000
+    )
   })
 
   it('boot cleanup drops the zero-http journal residue exactly once', async () => {
@@ -378,7 +378,9 @@ describe('billable write amplification on a synced namespace', () => {
     ).toBe(highBefore)
     expect(
       core.sql
-        .exec("SELECT 1 AS ok FROM _orez_cdc_tables WHERE physical_table = '_zsync_changes'")
+        .exec(
+          "SELECT 1 AS ok FROM _orez_cdc_tables WHERE physical_table = '_zsync_changes'"
+        )
         .toArray()
     ).toEqual([])
 
