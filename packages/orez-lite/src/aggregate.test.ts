@@ -3,14 +3,15 @@ import { createSchema, number, string, table } from '@rocicorp/zero'
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it } from 'vitest'
 
-import { TransactionalCdc } from './cf-do/cdc.js'
 import {
   count,
-  defineRollups,
-  rollupMigrationStatements,
+  defineAggregates,
+  aggregateMigrationStatements,
+  mergeAggregateDefinitions,
   sum,
-  withOptimisticRollups,
-} from './rollup.js'
+  withOptimisticAggregates,
+} from './aggregate.js'
+import { TransactionalCdc } from './cf-do/cdc.js'
 
 import type { DurableSqlStorage } from './cf-do/watermark.js'
 
@@ -52,7 +53,7 @@ const schema = createSchema({
   tables: [expense, categorySpend, post, comment],
 })
 
-const rollups = defineRollups(schema, {
+const aggregates = defineAggregates(schema, {
   categorySpend: {
     source: 'expense',
     target: 'categorySpend',
@@ -61,7 +62,7 @@ const rollups = defineRollups(schema, {
       accountId: 'accountId',
       categoryId: 'categoryId',
     },
-    aggregates: {
+    columns: {
       expenseCount: count(),
       spent: sum('amount'),
     },
@@ -73,7 +74,7 @@ const rollups = defineRollups(schema, {
     groupBy: {
       postId: 'id',
     },
-    aggregates: {
+    columns: {
       commentCount: count(),
     },
   },
@@ -123,8 +124,8 @@ function changes(db: InstanceType<typeof BedrockSqlite.Database>, sql: string) {
   return after - before
 }
 
-describe('Orez Lite rollups', () => {
-  it('backfills and maintains materialized and existing-row aggregates', () => {
+describe('Orez Lite aggregates', () => {
+  it('backfills and maintains materialized and existing-row columns', () => {
     const db = createDatabase()
     db.exec(`
       INSERT INTO expense VALUES
@@ -136,7 +137,7 @@ describe('Orez Lite rollups', () => {
       INSERT INTO comment VALUES ('c1', 'p1'), ('c2', 'p1');
     `)
 
-    for (const statement of rollupMigrationStatements(rollups)) {
+    for (const statement of aggregateMigrationStatements(aggregates)) {
       db.exec(statement)
     }
 
@@ -335,7 +336,7 @@ describe('Orez Lite rollups', () => {
         return tables[tableName]?.find((row) => matches(row, where))
       },
     }
-    const tx = withOptimisticRollups(transaction, rollups)
+    const tx = withOptimisticAggregates(transaction, aggregates)
 
     await tx.mutate.expense.insert({
       id: 'e4',
@@ -406,10 +407,12 @@ describe('Orez Lite rollups', () => {
     ])
 
     const serverTransaction = { ...transaction, location: 'server' }
-    expect(withOptimisticRollups(serverTransaction, rollups)).toBe(serverTransaction)
+    expect(withOptimisticAggregates(serverTransaction, aggregates)).toBe(
+      serverTransaction
+    )
   })
 
-  it('publishes an authoritative source write and generated rollup change together', () => {
+  it('publishes an authoritative source write and generated aggregate change together', () => {
     const db = createDatabase()
     const sql: DurableSqlStorage = {
       exec(sqlText, ...params) {
@@ -439,7 +442,7 @@ describe('Orez Lite rollups', () => {
         tableName: 'public.categorySpend',
       },
     ])
-    for (const statement of rollupMigrationStatements(rollups)) {
+    for (const statement of aggregateMigrationStatements(aggregates)) {
       sql.exec(statement)
     }
     cdc.drain()
@@ -471,5 +474,14 @@ describe('Orez Lite rollups', () => {
         }),
       ])
     )
+  })
+
+  it('refuses one aggregate name declared by two namespaces', () => {
+    const post = { postExpenseCount: { source: 'expense', target: 'category' } }
+    const order = { postExpenseCount: { source: 'expense', target: 'account' } }
+    expect(() =>
+      // @ts-expect-error - shape is irrelevant; the collision is checked first
+      mergeAggregateDefinitions(post, order)
+    ).toThrow(/postExpenseCount is declared in more than one namespace/)
   })
 })

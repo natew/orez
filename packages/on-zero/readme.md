@@ -343,7 +343,7 @@ generates all files needed to connect your mutations and queries:
 - `schema.ts` - zero schema derived from drizzle via drizzle-zero (tables +
   relationships)
 - `models.ts` - aggregates all mutation files into a single import
-- `rollups.ts` - aggregates every namespace's optimistic rollups
+- `aggregates.ts` - compiles every namespace's aggregate declarations into one set
 - `types.ts` - typescript types derived from the schema
 - `syncedQueries.ts` - generates synced query definitions with valibot
   validators
@@ -490,14 +490,14 @@ the supported setup uses vanilla Zero and `zero-cache`:
 import { createZeroClient } from 'on-zero'
 import { schema } from '~/data/generated/schema'
 import { models } from '~/data/generated/models'
-import { rollups } from '~/data/generated/rollups'
+import { aggregates } from '~/data/generated/aggregates'
 import * as groupedQueries from '~/data/generated/groupedQueries'
 
 export const { ProvideZero, useQuery, zero, usePermission } = createZeroClient({
   schema,
   models,
   groupedQueries,
-  rollups,
+  aggregates,
 })
 ```
 

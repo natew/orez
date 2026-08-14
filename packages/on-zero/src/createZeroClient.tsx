@@ -56,7 +56,6 @@ import { getRawWhere, setEvaluatingPermission } from './where'
 import { setRunner, type ZeroRunner } from './zeroRunner'
 import { zql } from './zql'
 
-import type { RollupRegistry } from './helpers/createMutators'
 import type {
   AuthData,
   GenericModels,
@@ -73,6 +72,7 @@ import type {
   ZeroOptions,
   Schema as ZeroSchema,
 } from '@rocicorp/zero'
+import type { AggregateSet } from 'orez-lite/aggregate'
 
 type PreloadOptions = { ttl?: 'always' | 'never' | number | undefined }
 
@@ -102,7 +102,7 @@ export type CreateZeroClientOptions<
   schema: Schema
   models: Models
   groupedQueries: GroupedQueries
-  rollups?: RollupRegistry
+  aggregates?: AggregateSet<Schema>
   permissionStrategy?: PermissionStrategy
   // repeated server acknowledgement timeouts reconnect with the existing local
   // state. one timeout remains a normal slow-server failure.
@@ -162,7 +162,7 @@ export function createZeroClientInternal<
   schema,
   models,
   groupedQueries,
-  rollups,
+  aggregates,
   permissionStrategy = 'optimistic',
   instanceName = 'default',
   serverAckTimeoutRecoveryThreshold = 2,
@@ -310,7 +310,7 @@ export function createZeroClientInternal<
       environment: 'client',
       authData: null,
       bindCan: permissionsHelpers.bindCan,
-      rollups,
+      aggregates,
     })
     return clientMutators
   }

@@ -15,11 +15,11 @@
 // contexts without pulling in ~10mb of typescript.
 
 import {
+  generateAggregatesFile,
   generateGroupedQueriesFile,
   generateInstancesFile,
   generateModelsFile,
   generateReadmeFile,
-  generateRollupsFile,
   generateSyncedMutationsFile,
   generateSyncedQueriesFile,
   generateTablesFile,
@@ -218,7 +218,7 @@ type LiteNamespace = {
   instance: string
   queryPath: string | null
   modelPath: string | null
-  rollupPath: string | null
+  aggregatePath: string | null
 }
 
 type LiteInstance = {
@@ -382,7 +382,7 @@ function discoverLiteLayout(
         instance: instance.name,
         queryPath: path,
         modelPath: path,
-        rollupPath: null,
+        aggregatePath: null,
       })
     }
 
@@ -398,8 +398,8 @@ function discoverLiteLayout(
       if (folder === `${baseDir}/generated` || instanceDirs.has(folder)) continue
       const queries = `${folder}/queries.ts`
       const mutations = `${folder}/mutations.ts`
-      const rollups = `${folder}/rollups.ts`
-      if (!(queries in files) && !(mutations in files) && !(rollups in files)) {
+      const aggregates = `${folder}/aggregates.ts`
+      if (!(queries in files) && !(mutations in files) && !(aggregates in files)) {
         const oldName = baseName(folder)
         if (
           ['models', 'mutations', 'queries'].includes(oldName) &&
@@ -417,7 +417,7 @@ function discoverLiteLayout(
         instance: instance.name,
         queryPath: queries in files ? queries : null,
         modelPath: mutations in files ? mutations : null,
-        rollupPath: rollups in files ? rollups : null,
+        aggregatePath: aggregates in files ? aggregates : null,
       })
     }
   }
@@ -747,18 +747,6 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
       importPath: `../${relativePath(baseDir, namespace.modelPath).replace(/\.ts$/, '')}`,
     }))
   )
-  out['rollups.ts'] = generateRollupsFile(
-    namespaces
-      .filter(
-        (namespace): namespace is LiteNamespace & { rollupPath: string } =>
-          namespace.rollupPath !== null
-      )
-      .map((namespace) => ({
-        name: namespace.name,
-        importPath: `../${relativePath(baseDir, namespace.rollupPath).replace(/\.ts$/, '')}`,
-      }))
-  )
-
   if (modelNamesWithSchema.length > 0) {
     out['types.ts'] = generateTypesFile(modelNamesWithSchema)
     out['tables.ts'] = generateTablesFile(
@@ -793,6 +781,19 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
 
   if (allModelMutations.length > 0) {
     out['syncedMutations.ts'] = generateSyncedMutationsFile(allModelMutations)
+  }
+
+  const aggregateNamespaces = namespaces.filter(
+    (namespace): namespace is LiteNamespace & { aggregatePath: string } =>
+      namespace.aggregatePath !== null
+  )
+  if (aggregateNamespaces.length > 0) {
+    out['aggregates.ts'] = generateAggregatesFile(
+      aggregateNamespaces.map((namespace) => ({
+        name: namespace.name,
+        importPath: `../${relativePath(baseDir, namespace.aggregatePath).replace(/\.ts$/, '')}`,
+      }))
+    )
   }
 
   // count mutations the same way `generate()` does: 3 per crud model plus

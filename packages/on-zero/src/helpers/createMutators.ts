@@ -1,4 +1,4 @@
-import { withOptimisticRollups } from 'orez-lite/rollup'
+import { withOptimisticAggregates } from 'orez-lite/aggregate'
 
 import { getAuthData } from '../state'
 import { mapObject } from './mapObject'
@@ -13,7 +13,7 @@ import type {
   MutatorContext,
   Transaction,
 } from '../types'
-import type { RollupSet } from 'orez-lite/rollup'
+import type { AggregateSet } from 'orez-lite/aggregate'
 
 export type ValidateMutationFn = (args: {
   authData: AuthData | null
@@ -23,8 +23,6 @@ export type ValidateMutationFn = (args: {
 }) => void | Promise<void>
 
 export type { ValidateMutationFn as CreateMutatorsValidateFn }
-
-export type RollupRegistry = Readonly<Record<string, RollupSet>>
 
 export function createMutators<Models extends GenericModels>({
   environment,
@@ -37,7 +35,7 @@ export function createMutators<Models extends GenericModels>({
   validateMutation,
   mutationValidators,
   resolveAuthData,
-  rollups,
+  aggregates,
 }: {
   environment: 'server' | 'client'
   authData: AuthData | null
@@ -50,7 +48,7 @@ export function createMutators<Models extends GenericModels>({
   /** valibot schemas keyed by model.mutationName, auto-validates args before running */
   mutationValidators?: Record<string, Record<string, any>>
   resolveAuthData?: () => AuthData | null
-  rollups?: RollupRegistry
+  aggregates?: AggregateSet
 }): GetZeroMutators<Models> {
   const serverActions = createServerActions?.()
 
@@ -61,12 +59,10 @@ export function createMutators<Models extends GenericModels>({
 
   function withContext<Args extends any[]>(fn: (...args: Args) => Promise<void>) {
     return async (tx: Transaction, ...args: Args): Promise<void> => {
-      let transaction = tx
-      if (environment === 'client' && rollups) {
-        for (const rollup of Object.values(rollups)) {
-          transaction = withOptimisticRollups(transaction, rollup)
-        }
-      }
+      const transaction =
+        environment === 'client' && aggregates
+          ? withOptimisticAggregates(tx, aggregates)
+          : tx
       // on client, read authData dynamically to avoid stale closure during auth
       // transitions (ZeroProvider recreates Zero instance in useEffect, but
       // mutations can run before that)

@@ -8,7 +8,7 @@ export type DataNamespace = {
   instance: string
   queryPath: string | null
   modelPath: string | null
-  rollupPath: string | null
+  aggregatePath: string | null
   table: string | null
   sourcePaths: string[]
 }
@@ -405,7 +405,7 @@ function discoverNamespaces(
         // a query-only file is not a model, matching the folder layout where a
         // missing mutations.ts leaves modelPath null
         modelPath: kinds.model ? path : null,
-        rollupPath: null,
+        aggregatePath: null,
         table: kinds.model ? mutationTable(ts, path, name) : null,
         sourcePaths: [path],
       })
@@ -417,11 +417,11 @@ function discoverNamespaces(
 
     const queryPath = resolve(folder, 'queries.ts')
     const modelPath = resolve(folder, 'mutations.ts')
-    const rollupPath = resolve(folder, 'rollups.ts')
+    const aggregatePath = resolve(folder, 'aggregates.ts')
     const hasQueries = existsSync(queryPath)
     const hasMutations = existsSync(modelPath)
-    const hasRollups = existsSync(rollupPath)
-    if (!hasQueries && !hasMutations && !hasRollups) {
+    const hasAggregates = existsSync(aggregatePath)
+    if (!hasQueries && !hasMutations && !hasAggregates) {
       if (
         ['models', 'mutations', 'queries'].includes(entry.name) &&
         readdirSync(folder).some(isSourceFile)
@@ -438,12 +438,12 @@ function discoverNamespaces(
       instance: instance.name,
       queryPath: hasQueries ? queryPath : null,
       modelPath: hasMutations ? modelPath : null,
-      rollupPath: hasRollups ? rollupPath : null,
+      aggregatePath: hasAggregates ? aggregatePath : null,
       table: hasMutations ? mutationTable(ts, modelPath, entry.name) : null,
       sourcePaths: [
         hasQueries && queryPath,
         hasMutations && modelPath,
-        hasRollups && rollupPath,
+        hasAggregates && aggregatePath,
       ].filter((path): path is string => Boolean(path)),
     })
   }

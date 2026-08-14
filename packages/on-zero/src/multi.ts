@@ -7,9 +7,9 @@ import {
 } from './createZeroClient'
 import { releaseClientInstances } from './instanceRegistry'
 
-import type { RollupRegistry } from './helpers/createMutators'
 import type { GenericModels } from './types'
 import type { Schema as ZeroSchema } from '@rocicorp/zero'
+import type { AggregateSet } from 'orez-lite/aggregate'
 
 export * from './combineZeroClients'
 
@@ -33,7 +33,7 @@ export type ZeroInstanceManifestEntry<
   schema: Schema
   queries: CreateZeroClientOptions<Schema, Models>['groupedQueries']
   models: Models
-  rollups?: RollupRegistry
+  aggregates?: AggregateSet<Schema>
   tables: readonly string[]
   syncTables: readonly string[]
   supportTables: readonly string[]
@@ -78,7 +78,7 @@ export function createZeroClients<
       models: instance.models,
       groupedQueries: instance.queries,
       instanceName: name,
-      rollups: instance.rollups,
+      aggregates: instance.aggregates,
     }
     clients[name] =
       name === innerName

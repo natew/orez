@@ -4,11 +4,11 @@ import { basename, dirname, resolve } from 'node:path'
 
 import {
   formatObjectKey,
+  generateAggregatesFile,
   generateGroupedQueriesFile,
   generateInstancesFile,
   generateModelsFile,
   generateReadmeFile,
-  generateRollupsFile,
   generateSyncedMutationsFile,
   generateSyncedQueriesFile,
   generateTablesFile,
@@ -1029,24 +1029,10 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     name: namespace.name,
     importPath: namespaceImportPath(baseDir, namespace.modelPath),
   }))
-  const rollupModules = layout.namespaces
-    .filter(
-      (namespace): namespace is typeof namespace & { rollupPath: string } =>
-        namespace.rollupPath !== null
-    )
-    .map((namespace) => ({
-      name: namespace.name,
-      importPath: namespaceImportPath(baseDir, namespace.rollupPath),
-    }))
-
   const writeResults = [
     writeFileIfChanged(
       resolve(generatedDir, 'models.ts'),
       generateModelsFile(modelModules)
-    ),
-    writeFileIfChanged(
-      resolve(generatedDir, 'rollups.ts'),
-      generateRollupsFile(rollupModules)
     ),
     // only generate types.ts and tables.ts when model files define schemas.
     // when using drizzle-zero CLI for schema generation, these files are
@@ -1209,6 +1195,23 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     )
   )
   if (instancesChanged) filesChanged++
+
+  const aggregateNamespaces = layout.namespaces.filter(
+    (namespace): namespace is typeof namespace & { aggregatePath: string } =>
+      namespace.aggregatePath !== null
+  )
+  if (aggregateNamespaces.length > 0) {
+    const aggregatesChanged = writeFileIfChanged(
+      resolve(generatedDir, 'aggregates.ts'),
+      generateAggregatesFile(
+        aggregateNamespaces.map((namespace) => ({
+          name: namespace.name,
+          importPath: namespaceImportPath(baseDir, namespace.aggregatePath),
+        }))
+      )
+    )
+    if (aggregatesChanged) filesChanged++
+  }
 
   // generate mutation validators from model files
   const allModelMutations: ModelMutations[] = []

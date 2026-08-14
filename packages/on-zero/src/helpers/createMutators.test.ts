@@ -1,5 +1,5 @@
 import { createBuilder, createSchema, number, string, table } from '@rocicorp/zero'
-import { count, defineRollups } from 'orez-lite/rollup'
+import { count, defineAggregates } from 'orez-lite/aggregate'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { setSchema } from '../state'
@@ -53,7 +53,7 @@ describe('createMutators timeout guard', () => {
   })
 })
 
-test('createMutators installs optimistic rollups on client transactions', async () => {
+test('createMutators installs optimistic aggregates on client transactions', async () => {
   const comment = table('comment')
     .columns({ id: string(), postId: string() })
     .primaryKey('id')
@@ -62,13 +62,13 @@ test('createMutators installs optimistic rollups on client transactions', async 
     .primaryKey('id')
   const schema = createSchema({ tables: [comment, post] })
   setSchema(schema, createBuilder(schema))
-  const rollups = defineRollups(schema, {
+  const aggregates = defineAggregates(schema, {
     postCommentCount: {
       source: 'comment',
       target: 'post',
       mode: 'existing',
       groupBy: { postId: 'id' },
-      aggregates: { commentCount: count() },
+      columns: { commentCount: count() },
     },
   })
   const rows: Record<string, Array<Record<string, unknown>>> = {
@@ -122,7 +122,7 @@ test('createMutators installs optimistic rollups on client transactions', async 
     environment: 'client',
     authData: null,
     bindCan: () => async () => {},
-    rollups: { post: rollups },
+    aggregates,
     models: {
       comment: {
         mutate: {

@@ -29,7 +29,7 @@ incremental sync.
   to clients before it is written, for generated text and other values a reader
   should watch arrive. Runs beside Zero: no cookie advances and no row is
   written, so a dropped frame costs latency and never correctness.
-- **[Rollups](../rollups.md)**: maintaining count and sum columns with generated
+- **[Aggregates](../aggregates.md)**: maintaining count and sum columns with generated
   SQLite triggers and matching optimistic client projection.
 - **[Testing](./testing.md)**: an honest account of what is tested, how, and
   what is not.
