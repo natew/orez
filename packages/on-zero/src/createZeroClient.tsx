@@ -363,6 +363,7 @@ export function createZeroClientInternal<
         ...(benignLogPatterns ?? []),
       ],
       onRecovery: () => mutationLifecycle.fence(),
+      recoverInPlace: () => remint({ dropLocalState: false }),
     }
     const recovery = makeZeroRecovery(recoveryDeps)
     const createdInstance = new ZeroClient<Schema, ZeroMutators>({

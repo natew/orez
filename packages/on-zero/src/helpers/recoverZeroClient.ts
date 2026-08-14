@@ -80,8 +80,11 @@ export type ZeroRecoveryDeps = {
   // internal lifecycle fence. recovery invalidates queued and in-flight work
   // before the consumer can defer the reload.
   onRecovery?: (reasonKey: ZeroRecoveryReasonKey) => void
+  // non-DOM hosts cannot reload a page. reconstruct the mounted client in
+  // place after the same delete/beforeReload work completes.
+  recoverInPlace?: () => Promise<boolean>
   // injectable for tests; defaults to a real page reload.
-  reload?: () => void
+  reload?: () => void | boolean
 }
 
 // one reload per page-load. the local-state deletes that must precede it are
@@ -94,6 +97,7 @@ let reloadScheduled = false
 let reloadInProgress = false
 let reloadLatchTimer: ReturnType<typeof setTimeout> | undefined
 const pendingDeletes: Array<() => Promise<unknown>> = []
+const pendingInPlaceRecoveries: Array<() => Promise<boolean>> = []
 
 // within-a-page-load per-reason guard: real loop protection everywhere,
 // including Hermes (no storage needed). a reload wipes it, which is why the
@@ -192,15 +196,39 @@ function performReload(deps: ZeroRecoveryDeps): Promise<void> {
   // (`getBrowserGlobal('location')?.reload()`, zero.js): read location off the
   // global and optional-chain through it. a non-DOM host with a `window` shim
   // but no real `location` (the sootsim tenant render-worker hides `location`
-  // for isolation) then drops its stale IDB and no-ops the reload — letting the
-  // host remount — instead of throwing "reading 'reload'" on undefined.
-  const doReload = deps.reload ?? (() => globalThis.location?.reload?.())
+  // for isolation) reconstructs the client in place after the same cleanup.
+  const doReload =
+    deps.reload ??
+    (() => {
+      const reload = globalThis.location?.reload
+      if (!reload) return false
+      reload.call(globalThis.location)
+      return true
+    })
+  let inPlaceRecoveries: Array<() => Promise<boolean>> = []
   return Promise.resolve()
-    .then(() => Promise.allSettled(pendingDeletes.splice(0).map((run) => run())))
+    .then(() => {
+      inPlaceRecoveries = pendingInPlaceRecoveries.splice(0)
+      return Promise.allSettled(pendingDeletes.splice(0).map((run) => run()))
+    })
     .then(() => deps.beforeReload?.())
     .catch(() => {})
-    .then(() => {
-      doReload()
+    .then(async () => {
+      const reloadStarted = doReload()
+      if (reloadStarted !== false) return
+      try {
+        const results = await Promise.all(inPlaceRecoveries.map((recover) => recover()))
+        if (inPlaceRecoveries.length > 0 && results.some((recovered) => !recovered)) {
+          console.error('[on-zero] recovery could not reload or reconstruct the client')
+        }
+      } catch (error) {
+        console.error('[on-zero] in-place recovery failed', error)
+      } finally {
+        // a page reload tears down this module, but an in-place recovery keeps
+        // it alive. reopen the latch so a later, distinct failure can recover.
+        reloadInProgress = false
+        reloadScheduled = false
+      }
     })
 }
 
@@ -218,6 +246,7 @@ function recover(
   if (dropLocalState) {
     pendingDeletes.push(() => Promise.resolve().then(deps.deleteLocalState))
   }
+  if (deps.recoverInPlace) pendingInPlaceRecoveries.push(deps.recoverInPlace)
   // only ONE reload per page-load; a later trigger just contributes its delete.
   if (reloadScheduled) return
   if (!recoveryGuardOpen(reasonKey, deps.guardStorage)) {
@@ -461,7 +490,7 @@ export function isRecoverableZeroStalePokeMessage(message: string): boolean {
   )
 }
 
-// test-only: the reload latch + pending deletes + in-memory guard are in-memory
+// test-only: the reload latch + pending work + in-memory guard are in-memory
 // (a real page reload clears them); tests simulate that reset between successive
 // "page loads". the injectable/sessionStorage guard is NOT cleared here — like a
 // real reload, it survives, which is what catches an immediate re-fire.
@@ -473,6 +502,7 @@ export function resetRecoveryStateForTests() {
     reloadLatchTimer = undefined
   }
   pendingDeletes.length = 0
+  pendingInPlaceRecoveries.length = 0
   lastStoreClosedAtMs = 0
   inMemoryGuard.clear()
 }

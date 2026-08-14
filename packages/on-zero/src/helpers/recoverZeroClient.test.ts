@@ -90,6 +90,34 @@ describe('zero recovery', () => {
     expect(a.reload.mock.calls.length + b.reload.mock.calls.length).toBe(1)
   })
 
+  test('combined native client remints every instance when page reload is unavailable', async () => {
+    const a = setup()
+    const b = setup()
+    a.deps.reload = undefined
+    b.deps.reload = undefined
+    const recoverA = vi.fn(() => Promise.resolve(true))
+    const recoverB = vi.fn(() => Promise.resolve(true))
+    a.deps.recoverInPlace = recoverA
+    b.deps.recoverInPlace = recoverB
+    const originalLocation = globalThis.location
+    Object.defineProperty(globalThis, 'location', {
+      configurable: true,
+      value: undefined,
+    })
+    try {
+      makeZeroRecovery(a.deps).onClientStateNotFound()
+      makeZeroRecovery(b.deps).onClientStateNotFound()
+      await flush()
+    } finally {
+      Object.defineProperty(globalThis, 'location', {
+        configurable: true,
+        value: originalLocation,
+      })
+    }
+    expect(recoverA).toHaveBeenCalledTimes(1)
+    expect(recoverB).toHaveBeenCalledTimes(1)
+  })
+
   test('a second trigger in the same page-load adds no extra reload or fatal', async () => {
     const { deps, reload, events } = setup()
     const recovery = makeZeroRecovery(deps)
@@ -240,10 +268,9 @@ describe('zero recovery', () => {
 
   // a host with a `window` shim but no real `location` — the sootsim tenant
   // render-worker, which hides `location` for isolation. the DEFAULT reload
-  // path (no injected `deps.reload`) must still drop stale IDB and not throw
-  // "reading 'reload'" on undefined; it no-ops the reload and lets the host
-  // remount. previously crashed as an unhandled rejection.
-  test('default reload path is a safe no-op when location is absent', async () => {
+  // path (no injected `deps.reload`) must still drop stale IDB and reconstruct
+  // the client in place rather than leaving the worker on the rejected client.
+  test('default reload path remints in place when location is absent', async () => {
     const events: ZeroEvent[] = []
     const zeroEvents = createEmitter<ZeroEvent | null>(
       `test-recover-${emitterSeq++}`,
@@ -253,8 +280,9 @@ describe('zero recovery', () => {
       if (event) events.push(event)
     })
     const deleteLocalState = vi.fn(() => Promise.resolve())
+    const recoverInPlace = vi.fn(() => Promise.resolve(true))
     // no `reload` dep — exercises the default `globalThis.location?.reload?.()`.
-    const deps: ZeroRecoveryDeps = { deleteLocalState, zeroEvents }
+    const deps: ZeroRecoveryDeps = { deleteLocalState, zeroEvents, recoverInPlace }
     const originalLocation = globalThis.location
     // simulate the worker: window exists (jsdom) but location is absent.
     Object.defineProperty(globalThis, 'location', {
@@ -271,6 +299,7 @@ describe('zero recovery', () => {
       })
     }
     expect(deleteLocalState).toHaveBeenCalledTimes(1)
+    expect(recoverInPlace).toHaveBeenCalledTimes(1)
     expect(events).toContainEqual({
       type: 'recovering',
       reasonKey: 'client-state-not-found',
