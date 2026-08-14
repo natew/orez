@@ -15,6 +15,7 @@
 // contexts without pulling in ~10mb of typescript.
 
 import {
+  generateAggregatesFile,
   generateGroupedQueriesFile,
   generateInstancesFile,
   generateModelsFile,
@@ -218,6 +219,7 @@ type LiteNamespace = {
   instance: string
   queryPath: string | null
   modelPath: string | null
+  aggregatePath: string | null
 }
 
 type LiteInstance = {
@@ -381,6 +383,7 @@ function discoverLiteLayout(
         instance: instance.name,
         queryPath: path,
         modelPath: path,
+        aggregatePath: null,
       })
     }
 
@@ -396,7 +399,8 @@ function discoverLiteLayout(
       if (folder === `${baseDir}/generated` || instanceDirs.has(folder)) continue
       const queries = `${folder}/queries.ts`
       const mutations = `${folder}/mutations.ts`
-      if (!(queries in files) && !(mutations in files)) {
+      const aggregates = `${folder}/aggregates.ts`
+      if (!(queries in files) && !(mutations in files) && !(aggregates in files)) {
         const oldName = baseName(folder)
         if (
           ['models', 'mutations', 'queries'].includes(oldName) &&
@@ -414,6 +418,7 @@ function discoverLiteLayout(
         instance: instance.name,
         queryPath: queries in files ? queries : null,
         modelPath: mutations in files ? mutations : null,
+        aggregatePath: aggregates in files ? aggregates : null,
       })
     }
   }
@@ -765,6 +770,19 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
 
   if (allModelMutations.length > 0) {
     out['syncedMutations.ts'] = generateSyncedMutationsFile(allModelMutations)
+  }
+
+  const aggregateNamespaces = namespaces.filter(
+    (namespace): namespace is LiteNamespace & { aggregatePath: string } =>
+      namespace.aggregatePath !== null
+  )
+  if (aggregateNamespaces.length > 0) {
+    out['aggregates.ts'] = generateAggregatesFile(
+      aggregateNamespaces.map((namespace) => ({
+        name: namespace.name,
+        importPath: `../${relativePath(baseDir, namespace.aggregatePath).replace(/\.ts$/, '')}`,
+      }))
+    )
   }
 
   // count mutations the same way `generate()` does: 3 per crud model plus

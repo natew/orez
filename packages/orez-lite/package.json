@@ -38,10 +38,10 @@
       "import": "./dist/client/encrypted-column-conformance.js",
       "default": "./dist/client/encrypted-column-conformance.js"
     },
-    "./rollup": {
-      "types": "./dist/rollup.d.ts",
-      "import": "./dist/rollup.js",
-      "default": "./dist/rollup.js"
+    "./aggregate": {
+      "types": "./dist/aggregate.d.ts",
+      "import": "./dist/aggregate.js",
+      "default": "./dist/aggregate.js"
     },
     "./browser": {
       "types": "./dist/browser/index.d.ts",

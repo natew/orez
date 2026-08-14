@@ -3,8 +3,8 @@ import { createSchema, number, string, table } from '@rocicorp/zero'
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
+import { count, defineAggregates, aggregateMigrationStatements } from '../aggregate.js'
 import { RollingRowWriteBudget } from '../do-sql-tracking.js'
-import { count, defineRollups, rollupMigrationStatements } from '../rollup.js'
 import { TransactionalCdc } from './cdc.js'
 import { beginTxJournal, commitTxJournal, TX_MANIFEST_DDL } from './tx-journal.js'
 import { DurableWatermarkState } from './watermark.js'
@@ -229,7 +229,7 @@ async function controlNamespace() {
 }
 
 describe('billable write amplification on a synced namespace', () => {
-  it('keeps generated rollup triggers on the bounded captured-row path', async () => {
+  it('keeps generated aggregate triggers on the bounded captured-row path', async () => {
     const ns = await controlNamespace()
     ns.sql.exec('CREATE TABLE rollupSource (id TEXT PRIMARY KEY, groupId TEXT NOT NULL)')
     ns.sql.exec(
@@ -242,13 +242,13 @@ describe('billable write amplification on a synced namespace', () => {
       .columns({ groupId: string(), itemCount: number() })
       .primaryKey('groupId')
     const schema = createSchema({ tables: [source, target] })
-    const rollups = defineRollups(schema, {
+    const aggregates = defineAggregates(schema, {
       itemCount: {
         source: 'rollupSource',
         target: 'rollupTarget',
         mode: 'materialized',
         groupBy: { groupId: 'groupId' },
-        aggregates: { itemCount: count() },
+        columns: { itemCount: count() },
       },
     })
     ns.zero.cdc.syncTables([
@@ -264,13 +264,13 @@ describe('billable write amplification on a synced namespace', () => {
         tableName: 'rollupTarget',
       },
     ])
-    for (const statement of rollupMigrationStatements(rollups)) {
+    for (const statement of aggregateMigrationStatements(aggregates)) {
       ns.sql.exec(statement)
     }
     ns.zero.cdc.drain()
 
     const write = ns.syncedWrite(
-      'tx-rollup',
+      'tx-aggregate',
       "INSERT INTO rollupSource VALUES ('r1', 'g1')",
       {
         physicalTableName: 'rollupSource',

@@ -118,6 +118,46 @@ describe('generateLite', () => {
     expect(result.instances[0]?.syncTables).toEqual([])
   })
 
+  test('compiles every namespace aggregates.ts into one generated set', () => {
+    const files = {
+      [`${DIR}/post/queries.ts`]: '// queries',
+      [`${DIR}/post/aggregates.ts`]: '// declarations only',
+      [`${DIR}/order/aggregates.ts`]: '// declarations only',
+    }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/post/queries.ts`]: { mutations: [], queries: [] },
+      }),
+    })
+
+    const generated = result.files['aggregates.ts']
+    expect(generated).toBeDefined()
+    // a folder holding only aggregates.ts is still a namespace, and the
+    // aggregate module is never parsed — it is imported, not read.
+    expect(generated).toContain(
+      `import { aggregates as orderAggregates } from '../order/aggregates'`
+    )
+    expect(generated).toContain(
+      `import { aggregates as postAggregates } from '../post/aggregates'`
+    )
+    expect(generated).toContain(
+      'mergeAggregateDefinitions(orderAggregates, postAggregates)'
+    )
+  })
+
+  test('omits the generated aggregate set when no namespace declares one', () => {
+    const files = { [`${DIR}/post/queries.ts`]: '// queries' }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({ [`${DIR}/post/queries.ts`]: { mutations: [], queries: [] } }),
+    })
+
+    expect(result.files['aggregates.ts']).toBeUndefined()
+  })
+
   test('derives fileless support tables through parsed mutation helpers', () => {
     const files = {
       [`${DIR}/post.ts`]: '// namespace',

@@ -4,6 +4,7 @@ import { basename, dirname, resolve } from 'node:path'
 
 import {
   formatObjectKey,
+  generateAggregatesFile,
   generateGroupedQueriesFile,
   generateInstancesFile,
   generateModelsFile,
@@ -1195,6 +1196,23 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     )
   )
   if (instancesChanged) filesChanged++
+
+  const aggregateNamespaces = layout.namespaces.filter(
+    (namespace): namespace is typeof namespace & { aggregatePath: string } =>
+      namespace.aggregatePath !== null
+  )
+  if (aggregateNamespaces.length > 0) {
+    const aggregatesChanged = writeFileIfChanged(
+      resolve(generatedDir, 'aggregates.ts'),
+      generateAggregatesFile(
+        aggregateNamespaces.map((namespace) => ({
+          name: namespace.name,
+          importPath: namespaceImportPath(baseDir, namespace.aggregatePath),
+        }))
+      )
+    )
+    if (aggregatesChanged) filesChanged++
+  }
 
   // generate mutation validators from model files
   const allModelMutations: ModelMutations[] = []

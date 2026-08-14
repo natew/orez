@@ -8,6 +8,7 @@ export type DataNamespace = {
   instance: string
   queryPath: string | null
   modelPath: string | null
+  aggregatePath: string | null
   sourcePaths: string[]
 }
 
@@ -350,6 +351,7 @@ function discoverNamespaces(
         // a query-only file is not a model, matching the folder layout where a
         // missing mutations.ts leaves modelPath null
         modelPath: kinds.model ? path : null,
+        aggregatePath: null,
         sourcePaths: [path],
       })
       continue
@@ -360,9 +362,11 @@ function discoverNamespaces(
 
     const queryPath = resolve(folder, 'queries.ts')
     const modelPath = resolve(folder, 'mutations.ts')
+    const aggregatePath = resolve(folder, 'aggregates.ts')
     const hasQueries = existsSync(queryPath)
     const hasMutations = existsSync(modelPath)
-    if (!hasQueries && !hasMutations) {
+    const hasAggregates = existsSync(aggregatePath)
+    if (!hasQueries && !hasMutations && !hasAggregates) {
       if (
         ['models', 'mutations', 'queries'].includes(entry.name) &&
         readdirSync(folder).some(isSourceFile)
@@ -379,9 +383,12 @@ function discoverNamespaces(
       instance: instance.name,
       queryPath: hasQueries ? queryPath : null,
       modelPath: hasMutations ? modelPath : null,
-      sourcePaths: [hasQueries && queryPath, hasMutations && modelPath].filter(
-        (path): path is string => Boolean(path)
-      ),
+      aggregatePath: hasAggregates ? aggregatePath : null,
+      sourcePaths: [
+        hasQueries && queryPath,
+        hasMutations && modelPath,
+        hasAggregates && aggregatePath,
+      ].filter((path): path is string => Boolean(path)),
     })
   }
   return namespaces
