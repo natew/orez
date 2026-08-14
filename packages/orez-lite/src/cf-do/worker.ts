@@ -83,6 +83,7 @@ interface Env {
   OREZ_DO_WRITE_BUDGET_WINDOW_MS?: string
   OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN?: string
   OREZ_DO_WRITE_BUDGET_DISABLED?: string
+  OREZ_SQL_TELEMETRY_SAMPLE_RATE?: string
 }
 interface SchemaTable {
   primaryKey: string[]
@@ -146,6 +147,13 @@ interface SqlWriteMeasurement {
   sql: string
   rowsWritten: number
 }
+interface SqlTelemetrySample {
+  startedAt: number
+  admittedAt: number | null
+  rowsReturned: number
+  rowsChanged: number
+  statements: number
+}
 type PersistedWriteBudgetTrip = RowWriteBudgetTrip & {
   statement?: SqlWriteMeasurement
 }
@@ -196,6 +204,7 @@ const SCHEMA_PROVISIONING_WAIT_MS = 20_000
 const SCHEMA_PROVISIONING_MAX_DELAY_MS = 500
 const APPLICATION_SQL_TURN_WAIT_MS = 30_000
 const WRITE_GRANT_WAIT_SAMPLE_CAPACITY = 4_096
+const DEFAULT_SQL_TELEMETRY_SAMPLE_RATE = 0.01
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MAX_SNAPSHOT_PAGE_ROWS = 10_000
 const TRANSACTION_CONTROL_SQL =
@@ -246,6 +255,12 @@ class RecentLatencySamples {
 function positiveEnvInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function probabilityEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : fallback
 }
 
 function quoteIdent(name: string): string {
@@ -336,12 +351,14 @@ const APPLICATION_SQL_DISPOSE = Symbol('applicationSqlDispose')
 class ApplicationSqlSessionTarget extends RpcTarget {
   state: ApplicationSqlSessionState = 'created'
   mutated = false
+  telemetryFinished = false
 
   constructor(
     readonly owner: ZeroDO,
     readonly sessionID: string,
     readonly readOnly: boolean,
-    readonly priority: ApplicationSqlSessionPriority
+    readonly priority: ApplicationSqlSessionPriority,
+    readonly telemetry: SqlTelemetrySample | null
   ) {
     super()
   }
@@ -401,6 +418,7 @@ export class ZeroDO extends DurableObject {
     sqlStatements: 0,
   }
   private readonly sqlBillingSinceBoot = { rowsRead: 0, rowsWritten: 0 }
+  private readonly sqlTelemetrySampleRate: number
   private readonly writeGrantWaitMs = new RecentLatencySamples(
     WRITE_GRANT_WAIT_SAMPLE_CAPACITY
   )
@@ -426,6 +444,84 @@ export class ZeroDO extends DurableObject {
       objectId: this.ctx.id.toString(),
       objectName: typeof this.ctx.id.name === 'string' ? this.ctx.id.name : null,
     }
+  }
+
+  private startSqlTelemetrySample(): SqlTelemetrySample | null {
+    if (
+      this.sqlTelemetrySampleRate <= 0 ||
+      (this.sqlTelemetrySampleRate < 1 && Math.random() >= this.sqlTelemetrySampleRate)
+    ) {
+      return null
+    }
+    return {
+      startedAt: performance.now(),
+      admittedAt: null,
+      rowsReturned: 0,
+      rowsChanged: 0,
+      statements: 0,
+    }
+  }
+
+  private recordSqlTelemetry(
+    sample: SqlTelemetrySample,
+    result: { rows: readonly unknown[]; changes: number }
+  ): void {
+    sample.rowsReturned += result.rows.length
+    sample.rowsChanged += result.changes
+  }
+
+  private emitSqlTelemetry(
+    event: 'orez_sql_query_sample' | 'orez_sql_transaction_sample',
+    name: string,
+    outcome: 'committed' | 'error' | 'rolled_back' | 'success',
+    sample: SqlTelemetrySample | null,
+    error?: unknown
+  ): void {
+    if (!sample) return
+    try {
+      console.log(
+        JSON.stringify({
+          event,
+          name: name.slice(0, 200),
+          outcome,
+          durationMs: Math.round((performance.now() - sample.startedAt) * 1_000) / 1_000,
+          ...(sample.admittedAt === null
+            ? null
+            : {
+                queueMs:
+                  Math.round((sample.admittedAt - sample.startedAt) * 1_000) / 1_000,
+              }),
+          rowsReturned: sample.rowsReturned,
+          rowsChanged: sample.rowsChanged,
+          statements: sample.statements,
+          sampleRate: this.sqlTelemetrySampleRate,
+          ...(error
+            ? {
+                errorName: (error instanceof Error ? error.name : typeof error).slice(
+                  0,
+                  100
+                ),
+              }
+            : null),
+        })
+      )
+    } catch {}
+  }
+
+  private finishApplicationSqlTelemetry(
+    session: ApplicationSqlSessionTarget,
+    outcome: 'committed' | 'error' | 'rolled_back',
+    error?: unknown
+  ): void {
+    if (session.telemetryFinished) return
+    session.telemetryFinished = true
+    this.emitSqlTelemetry(
+      'orez_sql_transaction_sample',
+      session.readOnly ? 'application_sql_read' : 'application_sql_write',
+      outcome,
+      session.telemetry,
+      error
+    )
   }
 
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
@@ -520,6 +616,10 @@ export class ZeroDO extends DurableObject {
       env.OREZ_DO_WRITE_BUDGET_DISABLED ?? ''
     )
     this.writeBudgetAdminToken = env.OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN
+    this.sqlTelemetrySampleRate = probabilityEnv(
+      env.OREZ_SQL_TELEMETRY_SAMPLE_RATE,
+      DEFAULT_SQL_TELEMETRY_SAMPLE_RATE
+    )
     this.writeBudget = new RollingRowWriteBudget({
       budgetRows: positiveEnvInteger(
         env.OREZ_DO_WRITE_BUDGET_ROWS,
@@ -1602,6 +1702,9 @@ export class ZeroDO extends DurableObject {
       this.applicationSqlQueue.shift()
       clearTimeout(waiter.timer)
       waiter.session.state = 'active'
+      if (waiter.session.telemetry) {
+        waiter.session.telemetry.admittedAt = performance.now()
+      }
       if (waiter.session.readOnly) this.applicationSqlReaders.add(waiter.session)
       else {
         this.applicationSqlWriter = waiter.session
@@ -1818,7 +1921,8 @@ export class ZeroDO extends DurableObject {
       this,
       sessionID,
       options.readOnly === true,
-      priority
+      priority,
+      this.startSqlTelemetrySample()
     )
   }
 
@@ -1902,7 +2006,13 @@ export class ZeroDO extends DurableObject {
       if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
         session.mutated = true
       }
-      return this.executeSQL(sql, [...params], undefined, session.sessionID).rows as Row[]
+      return this.executeSQL(
+        sql,
+        [...params],
+        undefined,
+        session.sessionID,
+        session.telemetry
+      ).rows as Row[]
     })
   }
 
@@ -1921,7 +2031,8 @@ export class ZeroDO extends DurableObject {
         sql,
         [...params],
         applicationSqlTrack(metadata),
-        session.sessionID
+        session.sessionID,
+        session.telemetry
       )
       return { changes: result.changes }
     })
@@ -1934,16 +2045,32 @@ export class ZeroDO extends DurableObject {
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<Result> {
     this.assertApplicationSqlSession(session)
-    return this.atomically(() =>
-      executeTransactionQueryPlan<Result>(
-        plan,
-        (sql, params) => {
-          this.assertApplicationSqlStatement(session, sql)
-          return this.executeSQL(sql, params, undefined, session.sessionID).rows
-        },
-        { queryName, budget: queryBudget }
+    const sample = this.startSqlTelemetrySample()
+    const name = queryName?.trim() || `${plan.rootTable}:${plan.planHash}`
+    try {
+      const result = await this.atomically(() =>
+        executeTransactionQueryPlan<Result>(
+          plan,
+          (sql, params) => {
+            this.assertApplicationSqlStatement(session, sql)
+            return this.executeSQL(
+              sql,
+              params,
+              undefined,
+              session.sessionID,
+              session.telemetry,
+              sample
+            ).rows
+          },
+          { queryName, budget: queryBudget }
+        )
       )
-    )
+      this.emitSqlTelemetry('orez_sql_query_sample', name, 'success', sample)
+      return result
+    } catch (error) {
+      this.emitSqlTelemetry('orez_sql_query_sample', name, 'error', sample, error)
+      throw error
+    }
   }
 
   async [APPLICATION_SQL_REGISTER_TABLES](
@@ -1968,10 +2095,19 @@ export class ZeroDO extends DurableObject {
           return committed > 0
         })
       }
+    } catch (error) {
+      this.finishApplicationSqlTelemetry(session, 'error', error)
+      throw error
     } finally {
       this.releaseApplicationSqlTurn(session)
     }
-    this.applicationSqlDidCommit(published, session.mutated)
+    try {
+      this.applicationSqlDidCommit(published, session.mutated)
+      this.finishApplicationSqlTelemetry(session, 'committed')
+    } catch (error) {
+      this.finishApplicationSqlTelemetry(session, 'error', error)
+      throw error
+    }
   }
 
   /**
@@ -1999,11 +2135,23 @@ export class ZeroDO extends DurableObject {
   }
 
   async [APPLICATION_SQL_ROLLBACK](session: ApplicationSqlSessionTarget): Promise<void> {
-    this.closeApplicationSqlSession(session)
+    try {
+      this.closeApplicationSqlSession(session)
+      this.finishApplicationSqlTelemetry(session, 'rolled_back')
+    } catch (error) {
+      this.finishApplicationSqlTelemetry(session, 'error', error)
+      throw error
+    }
   }
 
   [APPLICATION_SQL_DISPOSE](session: ApplicationSqlSessionTarget): void {
-    this.closeApplicationSqlSession(session)
+    try {
+      this.closeApplicationSqlSession(session)
+      this.finishApplicationSqlTelemetry(session, 'rolled_back')
+    } catch (error) {
+      this.finishApplicationSqlTelemetry(session, 'error', error)
+      throw error
+    }
   }
 
   private atomicallySync<T>(work: () => T): T {
@@ -2101,7 +2249,9 @@ export class ZeroDO extends DurableObject {
     sql: string,
     params: unknown[] = [],
     track?: SqlTrack,
-    transactionID?: string
+    transactionID?: string,
+    transactionTelemetry: SqlTelemetrySample | null = null,
+    queryTelemetry: SqlTelemetrySample | null = null
   ): {
     rows: Record<string, unknown>[]
     columns: string[]
@@ -2109,6 +2259,10 @@ export class ZeroDO extends DurableObject {
     affectedRows?: number
     capturedChanges?: number
   } {
+    if (transactionTelemetry) transactionTelemetry.statements++
+    if (queryTelemetry && queryTelemetry !== transactionTelemetry) {
+      queryTelemetry.statements++
+    }
     let capturesTrackedTable = false
     if (track?.physicalTableName) {
       capturesTrackedTable = this.cdc.ensureTable({
@@ -2227,17 +2381,22 @@ export class ZeroDO extends DurableObject {
     }
 
     const publishedCaptured = captured.filter((change) => change.publish !== false).length
-    if (!track) return { rows, columns, changes, capturedChanges: publishedCaptured }
-
-    return {
-      rows: track.returnRows ? rows : [],
-      columns: track.returnRows ? columns : [],
-      changes,
-      affectedRows: rows.length,
-      capturedChanges:
-        publishedCaptured ||
-        (capturesTrackedTable || track.publish === false ? 0 : rows.length),
+    const result = !track
+      ? { rows, columns, changes, capturedChanges: publishedCaptured }
+      : {
+          rows: track.returnRows ? rows : [],
+          columns: track.returnRows ? columns : [],
+          changes,
+          affectedRows: rows.length,
+          capturedChanges:
+            publishedCaptured ||
+            (capturesTrackedTable || track.publish === false ? 0 : rows.length),
+        }
+    if (transactionTelemetry) this.recordSqlTelemetry(transactionTelemetry, result)
+    if (queryTelemetry && queryTelemetry !== transactionTelemetry) {
+      this.recordSqlTelemetry(queryTelemetry, result)
     }
+    return result
   }
 
   private cursorRows(cursor: any, columns?: string[]): Record<string, unknown>[] {

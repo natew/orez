@@ -76,6 +76,7 @@ export interface OrezDataWorkerEnv {
   OREZ_DO_WRITE_BUDGET_WINDOW_MS?: string
   OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN?: string
   OREZ_DO_WRITE_BUDGET_DISABLED?: string
+  OREZ_SQL_TELEMETRY_SAMPLE_RATE?: string
   [binding: string]: unknown
 }
 

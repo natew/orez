@@ -139,10 +139,11 @@ Delegated deployments also declare service bindings named by
 ordinary Cloudflare `[[services]]` bindings; the host reads them by name off
 `env`.
 
-## Data-worker environment variables (write safeguards)
+## Data-worker environment variables
 
-These configure the write budget on the data worker (`packages/orez-lite/src/cf-do/worker.ts`),
-not the sync host. They are the source-side defense against a runaway writer.
+These configure the data worker (`packages/orez-lite/src/cf-do/worker.ts`), not
+the sync host. The write-budget values are the source-side defense against a
+runaway writer.
 
 | Variable                           | Default | Meaning                                                                                                                       |
 | ---------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -150,10 +151,19 @@ not the sync host. They are the source-side defense against a runaway writer.
 | `OREZ_DO_WRITE_BUDGET_WINDOW_MS`   | 300000  | Rolling window (five minutes).                                                                                                |
 | `OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN` | none    | Token that authorizes a manual reopen via `POST /_orez/write-budget/reopen`.                                                  |
 | `OREZ_DO_WRITE_BUDGET_DISABLED`    | unset   | Setting `1` or `true` is the only opt-out. It logs a loud `orez_do_write_budget_disabled` error at object construction.       |
+| `OREZ_SQL_TELEMETRY_SAMPLE_RATE`   | 0.01    | Fraction from 0 to 1 of named queries and application SQL transactions emitted as structured worker logs.                     |
 
-Invalid or non-positive values fall back to the defaults. The budget is measured
-in Cloudflare billable rows (index and tracking rows included), not application
-rows. See the trade-offs page.
+Invalid budget values fall back to their defaults. The telemetry rate accepts a
+fraction from 0 through 1, with 0 disabling SQL telemetry; invalid rates fall
+back to 0.01. The budget is measured in Cloudflare billable rows (index and
+tracking rows included), not application rows. See the trade-offs page.
+
+Sampled SQL events are named `orez_sql_query_sample` and
+`orez_sql_transaction_sample`. They report duration, outcome, queue time for
+transactions, statements, rows returned, and rows changed. They never include
+SQL text, parameters, namespace names, or row values. Sampling happens once at
+the start of each query or transaction. Unsampled work pays one random-number
+comparison and no clock reads, row counters, object allocation, or log write.
 
 ## Admin surface
 

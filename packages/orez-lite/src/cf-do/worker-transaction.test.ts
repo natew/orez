@@ -98,6 +98,7 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
     sqlStatements: 0,
   }
   zero.sqlBillingSinceBoot = { rowsRead: 0, rowsWritten: 0 }
+  zero.sqlTelemetrySampleRate = 0
   const writeGrantWaitSamples: number[] = []
   zero.writeGrantWaitMs = {
     record: (value: number) => writeGrantWaitSamples.push(value),
@@ -167,6 +168,67 @@ function relatedPlan() {
 }
 
 describe('ZeroDO trusted application transaction', () => {
+  it('samples named query and transaction timing without logging SQL values', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    zero.sqlTelemetrySampleRate = 1
+    const events: Array<Record<string, unknown>> = []
+    const log = vi.spyOn(console, 'log').mockImplementation((message) => {
+      events.push(JSON.parse(String(message)))
+    })
+    try {
+      const session = await zero.applicationSqlSession('sampled')
+      await session.begin()
+      await expect(session.queryPlan(flatPlan(), 'item.byId')).resolves.toEqual([
+        { id: 'row-1', enabled: true },
+      ])
+      await session.commit()
+
+      const failed = await zero.applicationSqlSession('sampled-failure')
+      await failed.begin()
+      await expect(
+        failed.queryPlan(relatedPlan(), 'item.tooMany', { maxSelects: 1 })
+      ).rejects.toThrow('transaction_query_budget_exceeded')
+      await failed.rollback()
+    } finally {
+      log.mockRestore()
+    }
+
+    expect(events).toHaveLength(4)
+    expect(events[0]).toMatchObject({
+      event: 'orez_sql_query_sample',
+      name: 'item.byId',
+      outcome: 'success',
+      rowsReturned: 1,
+      rowsChanged: 0,
+      statements: 1,
+      sampleRate: 1,
+    })
+    expect(events[1]).toMatchObject({
+      event: 'orez_sql_transaction_sample',
+      name: 'application_sql_write',
+      outcome: 'committed',
+      rowsReturned: 1,
+      rowsChanged: 0,
+      statements: 1,
+      sampleRate: 1,
+    })
+    expect(events[2]).toMatchObject({
+      event: 'orez_sql_query_sample',
+      name: 'item.tooMany',
+      outcome: 'error',
+      errorName: 'TransactionQueryBudgetError',
+    })
+    expect(events[3]).toMatchObject({
+      event: 'orez_sql_transaction_sample',
+      outcome: 'rolled_back',
+    })
+    expect(events[0]?.durationMs).toEqual(expect.any(Number))
+    expect(events[1]?.durationMs).toEqual(expect.any(Number))
+    expect(events.every((event) => !Object.hasOwn(event, 'sql'))).toBe(true)
+    expect(events.every((event) => !Object.hasOwn(event, 'params'))).toBe(true)
+    expect(events.every((event) => !Object.hasOwn(event, 'namespace'))).toBe(true)
+  })
+
   it('binds the private application client to one Durable Object namespace', async () => {
     const { createApplicationSqlClient } = await import('./application-sql.js')
     const calls: unknown[] = []
