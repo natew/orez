@@ -8,6 +8,7 @@ import {
   generateInstancesFile,
   generateModelsFile,
   generateReadmeFile,
+  generateRollupsFile,
   generateSyncedMutationsFile,
   generateSyncedQueriesFile,
   generateTablesFile,
@@ -22,7 +23,7 @@ import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate
 import type { DataLayout } from './generate-layout'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
-const GENERATOR_CACHE_VERSION = '5'
+const GENERATOR_CACHE_VERSION = '6'
 
 const isGeneratorSourceFile = (name: string) =>
   name.endsWith('.ts') &&
@@ -1028,11 +1029,24 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     name: namespace.name,
     importPath: namespaceImportPath(baseDir, namespace.modelPath),
   }))
+  const rollupModules = layout.namespaces
+    .filter(
+      (namespace): namespace is typeof namespace & { rollupPath: string } =>
+        namespace.rollupPath !== null
+    )
+    .map((namespace) => ({
+      name: namespace.name,
+      importPath: namespaceImportPath(baseDir, namespace.rollupPath),
+    }))
 
   const writeResults = [
     writeFileIfChanged(
       resolve(generatedDir, 'models.ts'),
       generateModelsFile(modelModules)
+    ),
+    writeFileIfChanged(
+      resolve(generatedDir, 'rollups.ts'),
+      generateRollupsFile(rollupModules)
     ),
     // only generate types.ts and tables.ts when model files define schemas.
     // when using drizzle-zero CLI for schema generation, these files are

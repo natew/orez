@@ -19,6 +19,7 @@ import {
   generateInstancesFile,
   generateModelsFile,
   generateReadmeFile,
+  generateRollupsFile,
   generateSyncedMutationsFile,
   generateSyncedQueriesFile,
   generateTablesFile,
@@ -217,6 +218,7 @@ type LiteNamespace = {
   instance: string
   queryPath: string | null
   modelPath: string | null
+  rollupPath: string | null
 }
 
 type LiteInstance = {
@@ -380,6 +382,7 @@ function discoverLiteLayout(
         instance: instance.name,
         queryPath: path,
         modelPath: path,
+        rollupPath: null,
       })
     }
 
@@ -395,7 +398,8 @@ function discoverLiteLayout(
       if (folder === `${baseDir}/generated` || instanceDirs.has(folder)) continue
       const queries = `${folder}/queries.ts`
       const mutations = `${folder}/mutations.ts`
-      if (!(queries in files) && !(mutations in files)) {
+      const rollups = `${folder}/rollups.ts`
+      if (!(queries in files) && !(mutations in files) && !(rollups in files)) {
         const oldName = baseName(folder)
         if (
           ['models', 'mutations', 'queries'].includes(oldName) &&
@@ -413,6 +417,7 @@ function discoverLiteLayout(
         instance: instance.name,
         queryPath: queries in files ? queries : null,
         modelPath: mutations in files ? mutations : null,
+        rollupPath: rollups in files ? rollups : null,
       })
     }
   }
@@ -741,6 +746,17 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
       name: namespace.name,
       importPath: `../${relativePath(baseDir, namespace.modelPath).replace(/\.ts$/, '')}`,
     }))
+  )
+  out['rollups.ts'] = generateRollupsFile(
+    namespaces
+      .filter(
+        (namespace): namespace is LiteNamespace & { rollupPath: string } =>
+          namespace.rollupPath !== null
+      )
+      .map((namespace) => ({
+        name: namespace.name,
+        importPath: `../${relativePath(baseDir, namespace.rollupPath).replace(/\.ts$/, '')}`,
+      }))
   )
 
   if (modelNamesWithSchema.length > 0) {
