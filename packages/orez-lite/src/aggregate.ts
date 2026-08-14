@@ -148,14 +148,32 @@ function ensureOwnColumn(
   return columns[columnName]
 }
 
+// what a namespace's aggregates.ts exports. annotate the declaration with
+// `satisfies AggregateDefinitions<typeof schema>` so a bad table, column, or
+// mode is reported in the file that declares it rather than in generated output.
+export type AggregateDefinitions<S extends Schema> = Readonly<
+  Record<string, AggregateDefinition<S>>
+>
+
+type UnionToIntersection<U> = (U extends unknown ? (arg: U) => void : never) extends (
+  arg: infer I
+) => void
+  ? I
+  : never
+
 // combine per-namespace definition records into the single record
 // defineAggregates compiles. spreading them would let a name declared in two
 // namespaces silently win by source order, and the loser's triggers would never
 // install — the same invisible zero-total failure a missed definition causes.
-export function mergeAggregateDefinitions<S extends Schema>(
-  ...records: ReadonlyArray<Readonly<Record<string, AggregateDefinition<S>>>>
-): Readonly<Record<string, AggregateDefinition<S>>> {
-  const merged: Record<string, AggregateDefinition<S>> = {}
+//
+// the parameter stays unconstrained so each namespace's literal types survive
+// into defineAggregates, which is where they get checked against the schema.
+// constraining to AggregateDefinitions here has nothing to infer S from, so it
+// widens every source and target back to string and the schema check is lost.
+export function mergeAggregateDefinitions<
+  const Records extends ReadonlyArray<Readonly<Record<string, object>>>,
+>(...records: Records): UnionToIntersection<Records[number]> {
+  const merged: Record<string, object> = {}
   for (const record of records) {
     for (const [name, definition] of Object.entries(record)) {
       if (name in merged) {
@@ -164,7 +182,7 @@ export function mergeAggregateDefinitions<S extends Schema>(
       merged[name] = definition
     }
   }
-  return merged
+  return merged as UnionToIntersection<Records[number]>
 }
 
 export function defineAggregates<

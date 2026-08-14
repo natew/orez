@@ -63,7 +63,8 @@ A project declares aggregates in `data/<namespace>/aggregates.ts`, exporting the
 definitions themselves rather than a compiled set:
 
 ```ts
-import { count } from 'orez-lite/aggregate'
+import { count, type AggregateDefinitions } from 'orez-lite/aggregate'
+import { schema } from '../generated/schema'
 
 export const aggregates = {
   postCommentCount: {
@@ -73,8 +74,12 @@ export const aggregates = {
     groupBy: { postId: 'id' },
     columns: { commentCount: count() },
   },
-}
+} satisfies AggregateDefinitions<typeof schema>
 ```
+
+The `satisfies` annotation is what reports an unknown table, a non-numeric
+column, or a bad mode in the file that declares it. Without it the mistake
+surfaces in generated output instead.
 
 `on-zero generate` collects every namespace that has one and emits
 `data/generated/aggregates.ts`, which calls `defineAggregates` once over the
