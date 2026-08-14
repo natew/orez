@@ -1652,41 +1652,4 @@ describe('table snapshots never capture earlier writes from the same transaction
     expect(sql.exec('SELECT id FROM noteTag').toArray()).toEqual([{ id: 't1' }])
     expect(noteIds(sql)).toEqual(['pre'])
   })
-
-  it('copies nothing for a synced write whose only side effect is the zsync journal', async () => {
-    const { sql, zero } = await createWorkerCore()
-    sql.exec('CREATE TABLE note (id TEXT PRIMARY KEY, body TEXT)')
-    sql.exec(
-      'CREATE TABLE _zsync_changes (watermark INTEGER PRIMARY KEY AUTOINCREMENT, ' +
-        '"tableName" TEXT NOT NULL, "op" TEXT NOT NULL, "pk" TEXT)'
-    )
-    for (let index = 0; index < 200; index++) {
-      sql.exec(
-        `INSERT INTO _zsync_changes ("tableName", "op", "pk") VALUES ('note', 'row', '{}')`
-      )
-    }
-    // the `_zsync_tr_*` trigger shape installed on every synced table.
-    sql.exec(
-      'CREATE TRIGGER "_zsync_tr_note_i" AFTER INSERT ON "note" BEGIN ' +
-        `INSERT INTO _zsync_changes ("tableName", "op", "pk") VALUES ('note', 'row', '{}'); END`
-    )
-
-    zero.executeSQL(
-      "INSERT INTO note VALUES ('new', 'written') RETURNING *",
-      [],
-      noteTrack('INSERT'),
-      'tx-zsync'
-    )
-
-    // Before this fix the journal AND the written table were both copied, which
-    // is what tripped three production apps' 300k-row write budgets.
-    expect(undoTableCount(sql)).toBe(0)
-
-    zero.rollbackPendingTrackedChanges('tx-zsync')
-    zero.deletePendingTrackedChanges('tx-zsync')
-    rollbackTxJournal(sql, 'tx-zsync')
-
-    expect(noteIds(sql)).toEqual([])
-    expect(sql.exec('SELECT COUNT(*) AS n FROM _zsync_changes').one()).toEqual({ n: 200 })
-  })
 })

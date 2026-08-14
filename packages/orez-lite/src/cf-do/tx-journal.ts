@@ -70,18 +70,19 @@ const CDC_REGISTRATION_TABLE = '_orez_cdc_tables'
 export const PENDING_CHANGES_TABLE = '_zero_pending_changes'
 
 /**
- * the `_zsync_changes` journal. its AFTER triggers write it on every synced
- * application write, so it is the one side-effect target orez both owns and
- * knows the fixed identity of. that lets the DO register it for rollback-only
- * capture instead of copying it.
+ * the retired zero-http engine's change journal. its `_zsync_tr_*` AFTER
+ * triggers wrote it on every synced application write until the engine was
+ * deleted on 2026-07-29; the DO now drops the triggers and the table at boot
+ * (`dropZeroHttpJournalResidue` in worker.ts), and this constant names what
+ * that cleanup removes.
  */
 export const ZSYNC_CHANGES_TABLE = '_zsync_changes'
 
 /**
  * the packed mutation ledger. the sync executor toggles its captureMode column
  * mid-transaction through plain sql with no statement metadata, so no tracked
- * write ever registers it for capture, and its identity is fixed and orez-owned
- * like `_zsync_changes` above. the worker registers it rollback-only before any
+ * write ever registers it for capture, and its identity is fixed and
+ * orez-owned. the worker registers it rollback-only before any
  * statement that writes it: an application session abandoned mid-transaction (a
  * delegated push canceled by the sync host's per-attempt timeout) must restore
  * captureMode, or every later push fails preparePackedLedger with "packed
@@ -821,11 +822,12 @@ function hasRowUndoImages(sql: DurableSqlStorage, txID: string, table: string): 
  * a rollback nothing performs.
  *
  * this filter is also what keeps a snapshot from ever being taken late.
- * installing the `_zsync_tr_*` triggers used to make every synced write
- * reach `_zsync_changes` and so copy both the journal AND the written table on
- * every transaction: 2,854 rows per write on one measured namespace, against a
- * 300,000-row budget, which froze three production apps. those tables are
- * row-undoable, so none of that copying was buying anything.
+ * before the boot cleanup removed them, the retired zero-http engine's
+ * `_zsync_tr_*` triggers made every synced write reach `_zsync_changes` and so
+ * copy both the journal AND the written table on every transaction: 2,854 rows
+ * per write on one measured namespace, against a 300,000-row budget, which
+ * froze three production apps. those tables are row-undoable, so none of that
+ * copying was buying anything.
  */
 export function snapshotSideEffectWriteTables(
   sql: DurableSqlStorage,

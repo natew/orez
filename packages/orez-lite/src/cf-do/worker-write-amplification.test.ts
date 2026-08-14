@@ -187,6 +187,10 @@ function buildControlShape(sql: { exec: (s: string, ...p: unknown[]) => any }) {
 async function controlNamespace() {
   const core = await createWorkerCore()
   buildControlShape(core.sql)
+  // the DO constructor runs this against every production namespace, so the
+  // steady state every other test measures is the post-cleanup shape. the
+  // pre-cleanup amplification keeps its own control test below.
+  core.zero.dropZeroHttpJournalResidue()
   core.zero.cdc.syncTables([
     { physicalTableName: 'user', tableName: 'user' },
     { physicalTableName: 'project', tableName: 'project' },
@@ -309,24 +313,90 @@ describe('billable write amplification on a synced namespace', () => {
     expect(update.billed).toBeLessThan(40)
     expect(insert.billed).toBeLessThan(40)
 
-    // CONTROL. Without the journal's rollback-only registration `coversRowUndo`
-    // answers false, which is the namespace before ce07fd8. If this arm does not
-    // blow up, the bounds above are not testing anything.
-    ns.sql.exec("DELETE FROM _orez_cdc_tables WHERE physical_table = '_zsync_changes'")
-    ns.zero.cdc.reload()
-    const realEnsure = ns.zero.cdc.ensureTable.bind(ns.zero.cdc)
-    ns.zero.cdc.ensureTable = (registration: any, refresh?: boolean) =>
-      registration?.physicalTableName === '_zsync_changes'
-        ? false
-        : realEnsure(registration, refresh)
-
-    const unregistered = ns.syncedWrite(
-      'tx-control',
+    // CONTROL. On a namespace still carrying the zero-http residue the boot
+    // cleanup removes, the journal triggers make `_zsync_changes` an uncovered
+    // side-effect target and every synced write pays a journal-sized copy. If
+    // this arm does not blow up, the bounds above are not testing anything.
+    const residual = await createWorkerCore()
+    buildControlShape(residual.sql)
+    residual.zero.cdc.syncTables([
+      { physicalTableName: 'user', tableName: 'user' },
+      { physicalTableName: 'project', tableName: 'project' },
+      { physicalTableName: 'file', tableName: 'file' },
+    ])
+    residual.zero.cdc.drain()
+    residual.sql.exec(TX_MANIFEST_DDL)
+    residual.start()
+    beginTxJournal(residual.sql, 'tx-control', 'application')
+    residual.zero.executeSQL(
       "UPDATE file SET body = 'control' WHERE id = 'f1'",
-      ns.fileUpdate
+      [],
+      ns.fileUpdate,
+      'tx-control'
     )
-    expect(unregistered.snapshots).toEqual(['_zsync_changes'])
-    expect(unregistered.billed).toBeGreaterThan(4_000)
+    const controlSnapshots = residual.sql
+      .exec("SELECT original FROM _orez_tx_manifest WHERE tx_id = 'tx-control'")
+      .toArray()
+      .map((row: any) => String(row.original))
+      .sort()
+    residual.zero.commitPendingTrackedChanges('tx-control')
+    commitTxJournal(residual.sql, 'tx-control')
+    residual.stop()
+    expect(controlSnapshots).toContain('_zsync_changes')
+    expect(
+      residual.written.reduce((sum, write) => sum + write.rows, 0)
+    ).toBeGreaterThan(4_000)
+  })
+
+  it('boot cleanup drops the zero-http journal residue exactly once', async () => {
+    const core = await createWorkerCore()
+    buildControlShape(core.sql)
+    // production namespaces also carry the journal's old rollback-capture
+    // registration row; the cleanup must remove it with the table.
+    core.zero.cdc.ensureTable({
+      physicalTableName: '_zsync_changes',
+      tableName: '_zsync_changes',
+      publish: false,
+    })
+    const highBefore = Number(
+      core.sql.exec('SELECT MAX(watermark) AS high FROM _zsync_changes').one().high
+    )
+    expect(highBefore).toBeGreaterThanOrEqual(4_096)
+
+    core.zero.dropZeroHttpJournalResidue()
+
+    const objects = core.sql
+      .exec("SELECT name, type FROM sqlite_master WHERE name LIKE '%zsync%'")
+      .toArray()
+      .map((row: any) => `${row.type}:${row.name}`)
+      .sort()
+    // the journal, its marker table, and every trigger writing it are gone;
+    // the live client table and the preserved watermark remain.
+    expect(objects).toEqual(['table:_zsync_clients', 'table:_zsync_watermark'])
+    expect(
+      Number(core.sql.exec('SELECT high FROM _zsync_watermark WHERE lock = 1').one().high)
+    ).toBe(highBefore)
+    expect(
+      core.sql
+        .exec("SELECT 1 AS ok FROM _orez_cdc_tables WHERE physical_table = '_zsync_changes'")
+        .toArray()
+    ).toEqual([])
+
+    // a second boot finds nothing and writes nothing.
+    core.start()
+    core.zero.dropZeroHttpJournalResidue()
+    core.stop()
+    expect(core.written).toEqual([])
+
+    // a cleaned namespace with an already-higher durable watermark keeps it.
+    core.sql.exec('UPDATE _zsync_watermark SET high = high + 50 WHERE lock = 1')
+    core.sql.exec(
+      'CREATE TABLE _zsync_changes (watermark INTEGER PRIMARY KEY AUTOINCREMENT, "tableName" TEXT, "op" TEXT, "pk" TEXT)'
+    )
+    core.zero.dropZeroHttpJournalResidue()
+    expect(
+      Number(core.sql.exec('SELECT high FROM _zsync_watermark WHERE lock = 1').one().high)
+    ).toBe(highBefore + 50)
   })
 
   it('copies every uncovered table when a trigger names a target it cannot resolve', async () => {
@@ -347,10 +417,12 @@ describe('billable write amplification on a synced namespace', () => {
     )
 
     // Every table the CDC does not already cover, and nothing it does.
+    // `_zsync_watermark` is the one-row table the boot cleanup preserved the
+    // retired journal's high watermark into.
     expect(write.snapshots).toEqual([
       '__soot_cf_migrations',
       '_zsync_clients',
-      '_zsync_meta',
+      '_zsync_watermark',
       'projectMember',
       'sootsimRun',
     ])

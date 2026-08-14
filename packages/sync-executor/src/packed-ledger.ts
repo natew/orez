@@ -160,10 +160,20 @@ export async function initializePackedLedger(
     )
     if (counter(existing[0]?.count ?? 0, 'segment count') > 0) return
 
-    const legacy = await tx.query<{ watermark: number | bigint | string }>(
-      'SELECT COALESCE(MAX("watermark"), 0) AS "watermark" FROM "_zsync_changes"'
+    // seed above every watermark the retired `_zsync_changes` journal ever
+    // assigned, so cookies issued against it cannot regress. the DO drops that
+    // journal at boot after copying its high watermark into `_zsync_watermark`
+    // below, so on most namespaces only the durable watermark read remains.
+    const legacyTable = await tx.query<{ name: string }>(
+      `SELECT name FROM sqlite_schema WHERE type = 'table' AND name = '_zsync_changes'`
     )
-    let head = counter(legacy[0]?.watermark ?? 0, 'legacy watermark')
+    let head = 0
+    if (legacyTable.length > 0) {
+      const legacy = await tx.query<{ watermark: number | bigint | string }>(
+        'SELECT COALESCE(MAX("watermark"), 0) AS "watermark" FROM "_zsync_changes"'
+      )
+      head = counter(legacy[0]?.watermark ?? 0, 'legacy watermark')
+    }
     const watermarkTable = await tx.query<{ name: string }>(
       `SELECT name FROM sqlite_schema WHERE type = 'table' AND name = '_zsync_watermark'`
     )

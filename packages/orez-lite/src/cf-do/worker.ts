@@ -580,6 +580,10 @@ export class ZeroDO extends DurableObject {
         return transactionIDs
       })
       if (recovered.length) this.invalidateSchemaCaches()
+      // after recovery, which may still restore journal rows or re-create the
+      // residual triggers from a pre-cleanup schema snapshot, and before the
+      // trip restore, so the one-time drops run against a fresh write budget.
+      this.dropZeroHttpJournalResidue()
       if (!this.writeBudgetDisabled) {
         const persisted = await ctx.storage.get<number | PersistedWriteBudgetTrip>(
           WRITE_BUDGET_TRIPPED_KEY
@@ -591,6 +595,82 @@ export class ZeroDO extends DurableObject {
         }
       }
     })
+  }
+
+  /**
+   * Drop what the retired zero-http full-projection engine left in this
+   * database. That engine's mount installed `_zsync_tr_<table>_{i,u,d}` AFTER
+   * triggers on every synced table, appending a change envelope to
+   * `_zsync_changes` per write plus a `_zsync_meta` marker row per UPDATE. The
+   * engine was deleted on 2026-07-29, its drop logic with it, and nothing has
+   * read either table since the packed ledger replaced that pull path. The
+   * triggers stayed installed, though, so every synced write on a namespace
+   * mounted before the deletion still paid one or two billable journal rows
+   * forever (86,082 rows and ~2,600/day measured on the largest production
+   * namespace).
+   *
+   * Order matters for crash safety, and every step is idempotent:
+   *
+   * 1. preserve the journal's high watermark in `_zsync_watermark`, which
+   *    `initializePackedLedger` already consults, so a namespace whose packed
+   *    ledger has not initialized yet still seeds above every cookie it ever
+   *    issued after the journal is gone;
+   * 2. drop every trigger whose body references `_zsync_changes`; `_zsync_*`
+   *    is orez's reserved namespace, so no application trigger can
+   *    legitimately write it;
+   * 3. drop both tables and the journal's rollback-capture registration.
+   *
+   * Steady state costs one sqlite_master read per boot.
+   */
+  private dropZeroHttpJournalResidue(): void {
+    const residue = this.sql
+      .exec(
+        'SELECT name, type FROM sqlite_master ' +
+          "WHERE (type = 'trigger' AND sql LIKE '%\\_zsync\\_changes%' ESCAPE '\\') " +
+          `OR (type = 'table' AND name IN ('${ZSYNC_CHANGES_TABLE}', '_zsync_meta'))`
+      )
+      .toArray()
+      .map((row) => ({ name: String(row.name), type: String(row.type) }))
+    if (residue.length === 0) return
+    if (residue.some((row) => row.type === 'table' && row.name === ZSYNC_CHANGES_TABLE)) {
+      const high = Number(
+        this.sql
+          .exec(
+            `SELECT COALESCE(MAX(watermark), 0) AS high FROM ${quoteIdent(ZSYNC_CHANGES_TABLE)}`
+          )
+          .toArray()[0]?.high ?? 0
+      )
+      if (high > 0) {
+        this.sql.exec(
+          'CREATE TABLE IF NOT EXISTS _zsync_watermark (' +
+            'lock INTEGER PRIMARY KEY CHECK (lock = 1), high INTEGER NOT NULL)'
+        )
+        this.sql.exec(
+          'INSERT INTO _zsync_watermark (lock, high) VALUES (1, ?) ' +
+            'ON CONFLICT (lock) DO UPDATE SET high = MAX(high, excluded.high)',
+          high
+        )
+      }
+    }
+    for (const row of residue) {
+      if (row.type === 'trigger') {
+        this.sql.exec(`DROP TRIGGER IF EXISTS ${quoteIdent(row.name)}`)
+      }
+    }
+    this.sql.exec(`DROP TABLE IF EXISTS ${quoteIdent(ZSYNC_CHANGES_TABLE)}`)
+    this.sql.exec('DROP TABLE IF EXISTS _zsync_meta')
+    const cdcRegistry = this.sql
+      .exec(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_orez_cdc_tables' LIMIT 1"
+      )
+      .toArray()
+    if (cdcRegistry.length > 0) {
+      this.sql.exec(
+        'DELETE FROM _orez_cdc_tables WHERE physical_table = ?',
+        ZSYNC_CHANGES_TABLE
+      )
+      this.cdc.reload()
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -2069,16 +2149,6 @@ export class ZeroDO extends DurableObject {
     if (track && trackedTransactionID) {
       const physicalTableName =
         track.physicalTableName || stripPublicPrefix(track.tableName)
-      // the `_zsync_changes` journal is the one side-effect target orez owns,
-      // so this path may register it directly: its identity is fixed and it
-      // never publishes. registering it before the DML that fires the trigger,
-      // in the same storage transaction, keeps the ordering safe. otherwise
-      // `coversRowUndo` says no and the journal is snapshotted as before.
-      this.cdc.ensureTable({
-        physicalTableName: ZSYNC_CHANGES_TABLE,
-        tableName: ZSYNC_CHANGES_TABLE,
-        publish: false,
-      })
       for (const table of snapshotSideEffectWriteTables(
         this.sql,
         trackedTransactionID,
