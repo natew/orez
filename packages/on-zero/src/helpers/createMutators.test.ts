@@ -122,7 +122,7 @@ test('createMutators installs optimistic rollups on client transactions', async 
     environment: 'client',
     authData: null,
     bindCan: () => async () => {},
-    rollups,
+    rollups: { post: rollups },
     models: {
       comment: {
         mutate: {

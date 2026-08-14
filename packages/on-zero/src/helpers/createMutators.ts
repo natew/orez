@@ -24,6 +24,8 @@ export type ValidateMutationFn = (args: {
 
 export type { ValidateMutationFn as CreateMutatorsValidateFn }
 
+export type RollupRegistry = Readonly<Record<string, RollupSet>>
+
 export function createMutators<Models extends GenericModels>({
   environment,
   authData,
@@ -48,7 +50,7 @@ export function createMutators<Models extends GenericModels>({
   /** valibot schemas keyed by model.mutationName, auto-validates args before running */
   mutationValidators?: Record<string, Record<string, any>>
   resolveAuthData?: () => AuthData | null
-  rollups?: RollupSet
+  rollups?: RollupRegistry
 }): GetZeroMutators<Models> {
   const serverActions = createServerActions?.()
 
@@ -59,8 +61,12 @@ export function createMutators<Models extends GenericModels>({
 
   function withContext<Args extends any[]>(fn: (...args: Args) => Promise<void>) {
     return async (tx: Transaction, ...args: Args): Promise<void> => {
-      const transaction =
-        environment === 'client' && rollups ? withOptimisticRollups(tx, rollups) : tx
+      let transaction = tx
+      if (environment === 'client' && rollups) {
+        for (const rollup of Object.values(rollups)) {
+          transaction = withOptimisticRollups(transaction, rollup)
+        }
+      }
       // on client, read authData dynamically to avoid stale closure during auth
       // transitions (ZeroProvider recreates Zero instance in useEffect, but
       // mutations can run before that)

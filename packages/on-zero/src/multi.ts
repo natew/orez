@@ -7,9 +7,9 @@ import {
 } from './createZeroClient'
 import { releaseClientInstances } from './instanceRegistry'
 
+import type { RollupRegistry } from './helpers/createMutators'
 import type { GenericModels } from './types'
 import type { Schema as ZeroSchema } from '@rocicorp/zero'
-import type { RollupSet } from 'orez-lite/rollup'
 
 export * from './combineZeroClients'
 
@@ -33,7 +33,7 @@ export type ZeroInstanceManifestEntry<
   schema: Schema
   queries: CreateZeroClientOptions<Schema, Models>['groupedQueries']
   models: Models
-  rollups?: RollupSet<Schema>
+  rollups?: RollupRegistry
   tables: readonly string[]
   syncTables: readonly string[]
   supportTables: readonly string[]

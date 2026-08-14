@@ -55,6 +55,7 @@ import { getRawWhere, setEvaluatingPermission } from './where'
 import { setRunner, type ZeroRunner } from './zeroRunner'
 import { zql } from './zql'
 
+import type { RollupRegistry } from './helpers/createMutators'
 import type {
   AuthData,
   GenericModels,
@@ -71,7 +72,6 @@ import type {
   ZeroOptions,
   Schema as ZeroSchema,
 } from '@rocicorp/zero'
-import type { RollupSet } from 'orez-lite/rollup'
 
 type PreloadOptions = { ttl?: 'always' | 'never' | number | undefined }
 
@@ -101,7 +101,7 @@ export type CreateZeroClientOptions<
   schema: Schema
   models: Models
   groupedQueries: GroupedQueries
-  rollups?: RollupSet<Schema>
+  rollups?: RollupRegistry
   permissionStrategy?: PermissionStrategy
   // repeated server acknowledgement timeouts reconnect with the existing local
   // state. one timeout remains a normal slow-server failure.
