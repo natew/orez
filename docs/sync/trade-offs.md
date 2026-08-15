@@ -89,7 +89,11 @@ so a failure in one does not disable the others.
 3. **Delegated push bounds** (`packages/sync-cf-host/src/host.ts`). Delegated
    pushes retry only transport failures, 429, and 5xx, at most
    `delegatedPushRetry.maxAttempts` times (default 3), so a failing app endpoint
-   cannot become an internal hot loop.
+   cannot become an internal hot loop. An attempt that used its whole
+   `timeoutMs` is terminal: retrying a hang repeats its full cost and pushes the
+   host's answer past the deadline the waiting client is holding. See
+   `docs/sync/configuration.md` for how to size `timeoutMs` against that
+   deadline.
 
 The budgets deliberately keep the hot-path counter in the worker layer and
 persist only the sticky trip state. Metering every write into a table would add
