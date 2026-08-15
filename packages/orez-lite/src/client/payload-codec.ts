@@ -36,12 +36,14 @@ export type PullResponse =
       readonly rowsPatch: readonly JSONValue[]
       readonly unchanged?: false
       readonly gotQueries?: ServerGotQueries
+      readonly deletedClientIDs?: readonly string[]
     }
   | {
       readonly [key: string]: JSONValue | undefined
       readonly cookie: number | null
       readonly unchanged: true
       readonly gotQueries?: ServerGotQueries
+      readonly deletedClientIDs?: readonly string[]
     }
 
 export interface PayloadCodec {

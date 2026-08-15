@@ -294,6 +294,40 @@ pub(crate) fn all_lmids(
     Ok(out)
 }
 
+pub(crate) fn delete_clients(
+    db: &mut dyn SyncDb,
+    client_group_id: &str,
+    client_ids: &BTreeSet<String>,
+) -> Result<(), EngineError> {
+    if client_ids.is_empty() {
+        return Ok(());
+    }
+    let mut segment = active(db)?;
+    let mut changed = false;
+    let remove_group = if let Some(group) = segment.payload.lmids.get_mut(client_group_id) {
+        for client_id in client_ids {
+            changed |= group.remove(client_id).is_some();
+        }
+        group.is_empty()
+    } else {
+        false
+    };
+    if !changed {
+        return Ok(());
+    }
+    if remove_group {
+        segment.payload.lmids.remove(client_group_id);
+    }
+    db.exec(
+        "UPDATE _zsync_log_segments SET payload = ? WHERE startVersion = ?",
+        &[
+            text(encoded_payload(&segment.payload)?),
+            SqlValue::Integer(segment.start),
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn finalize(
     db: &mut dyn SyncDb,
     identity: Option<(&str, &str, i64)>,

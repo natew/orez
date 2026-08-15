@@ -11,7 +11,8 @@ mod common;
 
 use common::Host;
 use serde_json::json;
-use sync_core::{SqlValue, SyncDb};
+use sync_core::query::handle_query_pull;
+use sync_core::{SqlValue, SyncDb, Transactor};
 
 fn writes<T>(h: &mut Host, work: impl FnOnce(&mut Host) -> T) -> (i64, T) {
     let before = h.db.conn.total_changes() as i64;
@@ -45,6 +46,52 @@ fn a_caught_up_pull_writes_nothing_however_often_it_retries() {
             "a caught-up pull must write nothing (retry {attempt} wrote {rows} rows)"
         );
     }
+}
+
+#[test]
+fn deleting_a_client_with_shared_queries_writes_only_its_client_state() {
+    let mut h = Host::new(true);
+    h.init();
+    for i in 0..200 {
+        h.exec(&format!(
+            "INSERT INTO item_record VALUES ('i{i}','label{i}',{i}.0,0,NULL)"
+        ));
+    }
+
+    let keeper = h.pull_as("keeper", "g1", json!(null), "u1").unwrap();
+    let current = keeper["cookie"].clone();
+    h.pull_as("retired", "g1", current.clone(), "u1").unwrap();
+    let body = json!({
+        "clientID": "keeper",
+        "clientGroupID": "g1",
+        "cookie": current,
+        "deletedClientIDs": ["retired"],
+    });
+
+    let (written, response) = writes(&mut h, |h| {
+        let tables = h.tables.clone();
+        let retain = h.retain;
+        h.db.transaction(|db| handle_query_pull(db, &tables, retain, &body, "u1"))
+            .unwrap()
+    });
+    assert_eq!(
+        written, 3,
+        "deletion should remove one client, desire, and ack row"
+    );
+    assert_eq!(response["deletedClientIDs"], json!(["retired"]));
+    assert!(response["rowsPatch"].as_array().unwrap().is_empty());
+
+    let (retry_writes, retry) = writes(&mut h, |h| {
+        let tables = h.tables.clone();
+        let retain = h.retain;
+        h.db.transaction(|db| handle_query_pull(db, &tables, retain, &body, "u1"))
+            .unwrap()
+    });
+    assert_eq!(
+        retry_writes, 0,
+        "replaying a confirmed deletion must be read-only"
+    );
+    assert_eq!(retry["deletedClientIDs"], json!(["retired"]));
 }
 
 #[test]

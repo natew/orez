@@ -130,6 +130,105 @@ fn has_clear(resp: &Value) -> bool {
 }
 
 #[test]
+fn deleting_a_client_removes_its_queries_membership_and_lmid() {
+    let mut h = QHost::new();
+    let keeper = h.pull(
+        "keeper",
+        json!(null),
+        Some(json!({
+            "version": 1,
+            "patch": [{ "op": "put", "hash": "open", "ast": open_query() }],
+        })),
+    );
+
+    let push = json!({
+        "clientGroupID": "g1",
+        "mutations": [{
+            "type": "custom",
+            "id": 1,
+            "clientID": "retired",
+            "name": "issue.noop",
+            "args": [{}],
+            "timestamp": 0,
+        }],
+        "pushVersion": 1,
+    });
+    let push_response = json!({
+        "pushResponse": { "mutations": [{
+            "id": { "clientID": "retired", "id": 1 },
+            "result": {},
+        }] }
+    });
+    h.db.transaction(|db| settle_delegated_push(db, &push, &push_response, "u1"))
+        .unwrap();
+
+    let closed_query = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "=",
+        "left": { "type": "column", "name": "closed" },
+        "right": { "type": "literal", "value": true }
+    } });
+    let retired = h.pull(
+        "retired",
+        keeper["cookie"].clone(),
+        Some(json!({
+            "version": 1,
+            "patch": [{ "op": "put", "hash": "closed", "ast": closed_query }],
+        })),
+    );
+    assert_eq!(put_ids(&retired), vec!["i2"]);
+    assert_eq!(retired["lastMutationIDChanges"]["retired"], json!(1));
+
+    let body = json!({
+        "clientID": "keeper",
+        "clientGroupID": "g1",
+        "cookie": retired["cookie"],
+        "deletedClientIDs": ["retired"],
+    });
+    let tables = h.tables.clone();
+    let response =
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+            .unwrap();
+
+    assert_eq!(response["deletedClientIDs"], json!(["retired"]));
+    assert_eq!(del_ids(&response), vec!["i2"]);
+    assert!(response["lastMutationIDChanges"].get("retired").is_none());
+    for table in [
+        "_zsync_clients",
+        "_zsync_desires",
+        "_zsync_query_ack",
+        "_zsync_query_transform_client",
+    ] {
+        let rows =
+            h.db.query(
+                &format!("SELECT 1 FROM {table} WHERE clientGroupID = ? AND clientID = ?"),
+                &[
+                    SqlValue::Text("g1".into()),
+                    SqlValue::Text("retired".into()),
+                ],
+            )
+            .unwrap();
+        assert!(rows.is_empty(), "{table} retained the deleted client");
+    }
+}
+
+#[test]
+fn a_client_cannot_delete_itself() {
+    let mut h = QHost::new();
+    let body = json!({
+        "clientID": "c1",
+        "clientGroupID": "g1",
+        "cookie": null,
+        "deletedClientIDs": ["c1"],
+    });
+    let tables = h.tables.clone();
+    let error =
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+            .unwrap_err();
+
+    assert_eq!(error.status, 400);
+}
+
+#[test]
 fn desire_pull_then_data_change_flows_as_membership_delta() {
     let mut h = QHost::new();
     // first pull desires q_open (put with the transformed AST) at version 1

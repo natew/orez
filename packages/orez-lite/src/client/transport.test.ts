@@ -137,6 +137,49 @@ describe('Orez HTTP transport', () => {
     expect(requests[0].body.clientGroupID).toEqual(expect.any(String))
   })
 
+  test('forwards expired Zero clients through pull and confirms their deletion', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      return jsonResponse({
+        cookie: request.body.cookie,
+        unchanged: true,
+        ...(request.body.deletedClientIDs
+          ? { deletedClientIDs: request.body.deletedClientIDs }
+          : {}),
+      })
+    })
+    const transport = installHttpPullTransport({ origin: ORIGIN, fetch })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages({
+      deletedClientIDs: ['retired-from-init'],
+    })
+
+    await eventually(() =>
+      expect(requests[0]?.body.deletedClientIDs).toEqual(['retired-from-init'])
+    )
+    await eventually(() =>
+      expect(messages).toContainEqual([
+        'deleteClients',
+        { clientIDs: ['retired-from-init'] },
+      ])
+    )
+
+    socket.send(
+      JSON.stringify(['deleteClients', { clientIDs: ['retired-from-live-frame'] }])
+    )
+    await eventually(() =>
+      expect(requests.at(-1)?.body.deletedClientIDs).toEqual(['retired-from-live-frame'])
+    )
+    await eventually(() =>
+      expect(messages).toContainEqual([
+        'deleteClients',
+        { clientIDs: ['retired-from-live-frame'] },
+      ])
+    )
+  })
+
   test('decrypts a stock Zero pull whose primary key has a physical name', async () => {
     const payloadCodec = createTransportEncryptionCodec()
     const encoded = await payloadCodec.encodePush({
@@ -1854,6 +1897,7 @@ function openRawSocket() {
 
 function openRawSocketWithMessages(opts?: {
   authToken?: string
+  deletedClientIDs?: string[]
   desiredQueriesPatch?: unknown[]
   wsid?: string
   attemptStartedAt?: number
@@ -1873,7 +1917,15 @@ function openRawSocketWithMessages(opts?: {
   const socket = new WebSocket(
     url,
     encodeSecProtocol(
-      ['initConnection', { desiredQueriesPatch: opts?.desiredQueriesPatch ?? [] }],
+      [
+        'initConnection',
+        {
+          desiredQueriesPatch: opts?.desiredQueriesPatch ?? [],
+          ...(opts?.deletedClientIDs
+            ? { deleted: { clientIDs: opts.deletedClientIDs } }
+            : {}),
+        },
+      ],
       opts?.authToken ?? 'token-u1'
     )
   )

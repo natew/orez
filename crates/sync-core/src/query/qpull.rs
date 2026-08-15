@@ -20,10 +20,12 @@ use crate::store;
 use crate::wire;
 
 use super::membership::{
-    advance_query_ack, canonical_pk_text, clear_desires, client_query_version, desired_hashes,
-    prepare_transform_version, recompute_group_with_rehydrate, register_query, remove_desire,
-    set_desire, validate_active_queries,
+    advance_query_ack, canonical_pk_text, clear_desires, client_query_version, delete_clients,
+    desired_hashes, prepare_transform_version, recompute_group_with_rehydrate, register_query,
+    remove_desire, set_desire, validate_active_queries,
 };
+
+const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
 
 // apply the desiredQueriesPatch and return queries newly desired by this client.
 // an existing group can already have
@@ -166,8 +168,39 @@ pub fn handle_query_pull(
         (Some(c), Some(g), Ok(cookie)) if cookie_present => (c, g, cookie),
         _ => return Err(EngineError::bad_request("invalid pull body")),
     };
+    let deleted_client_ids = match body.get("deletedClientIDs") {
+        None => BTreeSet::new(),
+        Some(Value::Array(ids)) if ids.len() <= MAX_DELETED_CLIENTS_PER_PULL => {
+            let mut parsed = BTreeSet::new();
+            for id in ids {
+                let Some(id) = id.as_str().filter(|id| !id.is_empty()) else {
+                    return Err(EngineError::bad_request(
+                        "deletedClientIDs must contain non-empty strings",
+                    ));
+                };
+                if id == client_id {
+                    return Err(EngineError::bad_request(
+                        "deletedClientIDs cannot contain the requesting client",
+                    ));
+                }
+                parsed.insert(id.to_string());
+            }
+            parsed
+        }
+        Some(Value::Array(_)) => {
+            return Err(EngineError::bad_request(format!(
+                "deletedClientIDs cannot contain more than {MAX_DELETED_CLIENTS_PER_PULL} entries"
+            )));
+        }
+        Some(_) => {
+            return Err(EngineError::bad_request(
+                "deletedClientIDs must be an array",
+            ));
+        }
+    };
 
     store::claim_client(db, group, client_id, user_id)?;
+    delete_clients(db, group, &deleted_client_ids)?;
 
     let transform_client_reset = match body.get("_serverQueryTransformVersion") {
         None => false,
@@ -231,7 +264,11 @@ pub fn handle_query_pull(
     let full_response = cookie.is_none() || below_floor || transform_client_reset;
 
     // fast path: caught up and no desired-query change -> unchanged
-    if !full_response && cookie == Some(current) && applied_queries.is_none() {
+    if !full_response
+        && cookie == Some(current)
+        && applied_queries.is_none()
+        && deleted_client_ids.is_empty()
+    {
         validate_active_queries(db, tables, group)?;
         return Ok(json!({ "cookie": wire::counter_to_json(current)?, "unchanged": true }));
     }
@@ -278,10 +315,14 @@ pub fn handle_query_pull(
         lmid_map.insert(client.clone(), wire::counter_to_json(*lmid)?);
     }
 
-    Ok(json!({
+    let mut response = json!({
         "cookie": wire::counter_to_json(current)?,
         "lastMutationIDChanges": Value::Object(lmid_map),
         "rowsPatch": rows_patch,
         "gotQueries": { "version": wire::counter_to_json(ack_version)?, "patch": got_patch },
-    }))
+    });
+    if !deleted_client_ids.is_empty() {
+        response["deletedClientIDs"] = json!(deleted_client_ids);
+    }
+    Ok(response)
 }

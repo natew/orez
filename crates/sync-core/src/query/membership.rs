@@ -384,6 +384,36 @@ pub fn clear_desires(db: &mut dyn SyncDb, group: &str, client: &str) -> Result<(
     Ok(())
 }
 
+pub(crate) fn delete_clients(
+    db: &mut dyn SyncDb,
+    group: &str,
+    client_ids: &BTreeSet<String>,
+) -> Result<(), EngineError> {
+    if client_ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = std::iter::repeat_n("?", client_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut params = Vec::with_capacity(client_ids.len() + 1);
+    params.push(text(group));
+    params.extend(client_ids.iter().map(text));
+    for table in [
+        "_zsync_desires",
+        "_zsync_query_ack",
+        "_zsync_query_transform_client",
+    ] {
+        db.exec(
+            &format!(
+                "DELETE FROM {table}
+                 WHERE clientGroupID = ? AND clientID IN ({placeholders})"
+            ),
+            &params,
+        )?;
+    }
+    crate::store::delete_clients(db, group, client_ids)
+}
+
 // the hashes a client currently desires (for the gotQueries acknowledgement)
 pub(crate) fn desired_hashes(
     db: &mut dyn SyncDb,

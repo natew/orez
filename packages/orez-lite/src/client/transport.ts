@@ -97,6 +97,7 @@ const COOKIE_WIDTH = 20
 // cap the number of mutations so one response cannot monopolize the HTTP
 // transport indefinitely under a sustained producer.
 const MAX_PUSH_BATCH_MUTATIONS = 64
+const MAX_DELETED_CLIENTS_PER_PULL = 64
 // @rocicorp/zero 1.6 starts this deadline before its async createSocket work.
 // the connect URL's `ts` is captured at the same attempt boundary.
 const ZERO_CONNECT_TIMEOUT_MS = 10_000
@@ -538,6 +539,7 @@ class ZeroHttpSocket {
   private queryVersion = 0
   private sentQueryVersion: number | undefined
   private sentQueryPatchLen = 0
+  private readonly pendingDeletedClientIDs = new Set<string>()
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
   private nextPullTimer: ReturnType<typeof setTimeout> | undefined
@@ -599,6 +601,7 @@ class ZeroHttpSocket {
     const decoded = decodeSecProtocol(protocols)
     this.authToken = decoded.authToken
     this.queueDesiredQueries(decoded.initConnectionMessage?.[1])
+    this.queueDeletedClients(decoded.initConnectionMessage?.[1]?.deleted)
 
     this.state.sockets.add(this)
     // open on the next task so Zero can attach its listeners. open() checks the
@@ -633,6 +636,7 @@ class ZeroHttpSocket {
       case 'changeDesiredQueries':
         this.flushGeneration++
         this.queueDesiredQueries(message[1])
+        this.queueDeletedClients(message[1]?.deleted)
         this.requestPullAfterCurrent()
         return
       case 'updateAuth':
@@ -657,6 +661,9 @@ class ZeroHttpSocket {
         return
       }
       case 'deleteClients':
+        this.flushGeneration++
+        if (this.queueDeletedClients(message[1])) this.requestPullAfterCurrent()
+        return
       case 'ackMutationResponses':
         return
       default:
@@ -677,8 +684,18 @@ class ZeroHttpSocket {
       clearTimeout(this.nextPullTimer)
       this.nextPullTimer = undefined
     }
-    this.pullInFlight = this.fetchPull(this.clientGroupID, this.cookie, true)
+    const deletedClientIDs = [...this.pendingDeletedClientIDs].slice(
+      0,
+      MAX_DELETED_CLIENTS_PER_PULL
+    )
+    this.pullInFlight = this.fetchPull(
+      this.clientGroupID,
+      this.cookie,
+      true,
+      deletedClientIDs
+    )
       .then((response) => {
+        this.applyServerDeletedClients(response, deletedClientIDs)
         this.applyServerGotQueries(response)
         if (response.unchanged) {
           this.emitGotQueriesPatch(response.cookie)
@@ -864,6 +881,22 @@ class ZeroHttpSocket {
     this.queryVersion++
   }
 
+  private queueDeletedClients(body: unknown) {
+    const clientIDs = (body as { clientIDs?: unknown } | null)?.clientIDs
+    if (!Array.isArray(clientIDs)) return false
+    let added = false
+    for (const clientID of clientIDs) {
+      if (typeof clientID !== 'string' || clientID.length === 0) continue
+      if (clientID === this.clientID) {
+        throw new Error('Orez HTTP transport cannot delete its active client')
+      }
+      const size = this.pendingDeletedClientIDs.size
+      this.pendingDeletedClientIDs.add(clientID)
+      added ||= this.pendingDeletedClientIDs.size !== size
+    }
+    return added
+  }
+
   private async push({ body, frameCount, mutationCount }: PushBatch) {
     const encodedBody = await this.state.payloadCodec.encodePush(body as PushRequest)
     const response = (await this.postJSON('/push', encodedBody)) as {
@@ -998,6 +1031,29 @@ class ZeroHttpSocket {
     }
   }
 
+  private applyServerDeletedClients(
+    response: PullResponse,
+    sentClientIDs: readonly string[]
+  ) {
+    const acknowledged = response.deletedClientIDs
+    if (acknowledged === undefined) return
+    if (!Array.isArray(acknowledged)) {
+      throw new Error('Orez HTTP pull returned invalid deletedClientIDs')
+    }
+    const sent = new Set(sentClientIDs)
+    const confirmed: string[] = []
+    for (const clientID of acknowledged) {
+      if (typeof clientID !== 'string' || !sent.has(clientID)) {
+        throw new Error('Orez HTTP pull acknowledged an unsent deleted client')
+      }
+      if (this.pendingDeletedClientIDs.delete(clientID)) confirmed.push(clientID)
+    }
+    if (confirmed.length > 0) {
+      this.emitMessage(['deleteClients', { clientIDs: confirmed }])
+    }
+    if (this.pendingDeletedClientIDs.size > 0) this.pullAfterCurrent = true
+  }
+
   private async answerMutationRecoveryPull(body: {
     clientGroupID: string
     cookie: string | null
@@ -1018,7 +1074,8 @@ class ZeroHttpSocket {
   private async fetchPull(
     clientGroupID: string,
     cookie: string | null,
-    includeQueries: boolean
+    includeQueries: boolean,
+    deletedClientIDs: readonly string[] = []
   ) {
     const body: Record<string, unknown> = {
       clientID: this.clientID,
@@ -1034,6 +1091,9 @@ class ZeroHttpSocket {
       body.queries = { version: this.queryVersion, patch: [...this.desiredQueryPatch] }
     } else {
       this.sentQueryVersion = undefined
+    }
+    if (includeQueries && deletedClientIDs.length > 0) {
+      body.deletedClientIDs = deletedClientIDs
     }
     const response = (await this.postJSON('/pull', body)) as PullResponse
     return this.state.payloadCodec.decodePull(response)
