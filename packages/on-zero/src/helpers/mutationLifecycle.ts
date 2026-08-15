@@ -300,7 +300,11 @@ export function createMutationLifecycle(options: {
   }
 
   // a client replaced between the call and the await can never settle that
-  // call, so its waiter fails fast instead of running out the timeout
+  // call, so its waiter fails fast instead of running out the timeout.
+  // ONLY VALID FOR A MUTATION THIS LIFECYCLE ISSUED (or an untagged one) —
+  // instances count generations independently, so a foreign generation would
+  // match or miss by coincidence. both callers run below their foreignOwner
+  // check, which is what keeps that true.
   function issuedGeneration(mutation: MutationLike): number {
     return mutationOrigin(mutation)?.generation ?? generation
   }
