@@ -74,15 +74,34 @@ in `packages/sync-cf-host/src/host.ts`, on the delegated push. A pull runs to
 completion however long its query recompilation and row scan take, and the only
 thing bounding it is the client's own deadline.
 
-Measured in the incident above, 201 sampled durable-object pulls on the affected
-namespace: p50 4,364ms, p90 6,794ms, p99 43,058ms, max 54,044ms. Twelve pulls
-over 20s, four over 40s. The max is 90% of the client deadline.
+How close pulls actually get to that deadline is much less alarming than a
+first look at Workers Logs suggests, and the correction matters because the
+scary version of these numbers circulated first.
 
-Those long pulls were not independent. Each of the four over 40s started while a
-60s delegated push was in flight in the same object and finished within a few
-seconds of it, so the pushes were the pull latency. Fixing the push budget pulls
-these down as a side effect. It does not bound them, and it does not stop a pull
-that is slow on its own from tripping the identical teardown.
+A Durable Object request produces TWO invocation records under one requestId:
+the stateless edge worker, and the durable object. **Only the edge record is the
+request's latency.** The durable-object record spans the object's activity
+window, so while the object is busy with a concurrent push or an ingest round,
+its `wallTimeMs` absorbs that work and over-reports every request that overlaps
+it. In 201 paired pulls from the incident the edge worker finished a median of
+3.7 SECONDS before "its own" durable-object record, which an awaiting caller
+cannot do.
+
+Same 201 pulls, both records:
+
+| record                           | p50     | p90     | p99      | max      |
+| -------------------------------- | ------- | ------- | -------- | -------- |
+| edge worker (request latency)    | 659ms   | 1,446ms | 2,944ms  | 3,368ms  |
+| durable object (object lifetime) | 4,364ms | 6,794ms | 43,058ms | 54,044ms |
+
+The four pulls that looked like 43-54s answered in 523-792ms at the edge. They
+were concurrent with the 60s delegated pushes, which is exactly why their object
+records are long.
+
+So the real headroom is 3.4s against a 60s deadline, not 54s. A slow pull can
+still trip the identical teardown and the host still has no pull bound, but this
+is a structural gap rather than a live one, and it should not be prioritized as
+though pulls were seconds from the cliff.
 
 ## The trap
 
