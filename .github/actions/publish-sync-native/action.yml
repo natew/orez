@@ -27,7 +27,28 @@ runs:
     - name: Verify the published launcher
       shell: bash
       run: |
+        # the registry serves a new version's metadata a moment after publish,
+        # and npm skips an optional dependency it cannot resolve without saying
+        # anything, so installing immediately reports the launcher's "binary
+        # package is missing" message for a package that published correctly.
+        # 0.1.4 failed on all nine targets that way, 0.3s after publish.
+        package_name="$(node -p "require('./.release/platform/package.json').name")"
+        visible=''
+        attempt=0
+        while [ "$attempt" -lt 60 ]; do
+          if [ "$(npm view "$package_name@${{ inputs.version }}" version 2>/dev/null)" = '${{ inputs.version }}' ]; then
+            visible=1
+            break
+          fi
+          attempt=$((attempt + 1))
+          sleep 5
+        done
+        if [ -z "$visible" ]; then
+          echo "$package_name@${{ inputs.version }} published but the registry has not served it in five minutes" >&2
+          exit 1
+        fi
         npm install \
+          --prefer-online \
           --prefix .release/smoke \
           --ignore-scripts \
           'orez-sync-native@${{ inputs.version }}'
