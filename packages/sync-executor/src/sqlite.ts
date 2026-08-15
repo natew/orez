@@ -12,5 +12,5 @@ export function createSQLiteApplicationDatabase(options: {
     params?: readonly unknown[]
   ): Promise<readonly Row[]>
 }): ApplicationDatabase {
-  return { dialect: 'sqlite', ...options }
+  return options
 }

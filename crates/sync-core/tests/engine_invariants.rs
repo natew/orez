@@ -41,10 +41,6 @@ fn watermark_survives_full_prune_and_reopen() {
         assert!(before > 0);
         db.transaction(|db| prune(db, 0)).unwrap();
         assert_eq!(
-            db.query("SELECT 1 FROM _zsync_changes", &[]).unwrap().len(),
-            0
-        );
-        assert_eq!(
             db.query(
                 "SELECT 1 FROM _zsync_log_segments WHERE endVersion = ?",
                 &[sync_core::SqlValue::Integer(before)],
@@ -69,4 +65,52 @@ fn watermark_survives_full_prune_and_reopen() {
         after, before,
         "watermark regressed after pruning and reopen"
     );
+}
+
+#[test]
+fn init_retires_legacy_change_journal_without_regressing_its_watermark() {
+    let mut db = TestDb {
+        conn: Connection::open_in_memory().unwrap(),
+    };
+    db.exec(
+        "CREATE TABLE item_record (
+            item_id TEXT PRIMARY KEY,
+            item_label TEXT NOT NULL,
+            sort_rank REAL NOT NULL,
+            is_done INTEGER NOT NULL,
+            metadata_json TEXT
+        )",
+        &[],
+    )
+    .unwrap();
+    init_schema(&mut db, &item_tables()).unwrap();
+    db.exec(
+        "CREATE TABLE _zsync_changes (
+            watermark INTEGER PRIMARY KEY AUTOINCREMENT,
+            tableName TEXT NOT NULL,
+            op TEXT NOT NULL,
+            pk TEXT
+        )",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO _zsync_changes (watermark, tableName, op, pk)
+         VALUES (7, 'item', 'row', '{\"id\":\"legacy\"}')",
+        &[],
+    )
+    .unwrap();
+
+    init_schema(&mut db, &item_tables()).unwrap();
+
+    assert!(
+        db.query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_zsync_changes'",
+            &[],
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(db.transaction(watermark).unwrap(), 7);
+    assert_eq!(sync_core::pull::floor(&mut db).unwrap(), 7);
 }

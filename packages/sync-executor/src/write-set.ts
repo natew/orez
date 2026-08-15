@@ -128,18 +128,11 @@ function validateMetadata(
 
 export async function beginWriteSetCapture(
   schema: ZeroSchemaConfig,
-  applicationTx: ApplicationTransaction,
-  dialect: 'sqlite' | 'postgresql'
+  applicationTx: ApplicationTransaction
 ): Promise<{
   readonly transaction: ApplicationTransaction
   commit(identity?: PackedLedgerIdentity): Promise<void>
 }> {
-  if (dialect !== 'sqlite') {
-    return {
-      transaction: applicationTx,
-      commit: async () => {},
-    }
-  }
   const captureStart = await preparePackedLedger(applicationTx)
 
   let active = true

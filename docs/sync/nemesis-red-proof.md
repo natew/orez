@@ -92,15 +92,12 @@ cd harness
 bun src/state-machine.ts --against rust-local --nemesis --seed 101 --steps 24 --shrink-runs 50
 ```
 
-The mutant removed the floor update while leaving change deletion intact:
+The mutant removed the floor update while leaving packed-segment pruning intact:
 
 ```diff
 diff --git a/crates/sync-core/src/store.rs b/crates/sync-core/src/store.rs
 @@
-         db.exec(
-             "DELETE FROM _zsync_changes WHERE watermark <= ?",
-             &[counter(cutoff)],
-         )?;
+        ledger::prune(db, cutoff)?;
 -        db.exec(
 -            "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
 -            &[counter(cutoff)],

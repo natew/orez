@@ -146,7 +146,6 @@ async function rotatePackedLedger(
 export async function initializePackedLedger(
   database: ApplicationDatabase
 ): Promise<void> {
-  if (database.dialect !== 'sqlite') return
   await database.transaction(async (tx) => {
     await tx.exec(`CREATE TABLE IF NOT EXISTS "_zsync_log_segments" (
       "startVersion" INTEGER PRIMARY KEY,

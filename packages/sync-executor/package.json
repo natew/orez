@@ -13,10 +13,6 @@
       "types": "./dist/core.d.ts",
       "import": "./dist/core.js"
     },
-    "./postgres": {
-      "types": "./dist/postgres.d.ts",
-      "import": "./dist/postgres.js"
-    },
     "./sqlite": {
       "types": "./dist/sqlite.d.ts",
       "import": "./dist/sqlite.js"

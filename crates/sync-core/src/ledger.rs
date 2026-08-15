@@ -153,6 +153,28 @@ fn rotate_if_full(
 }
 
 pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
+    let legacy_table = !db
+        .query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_zsync_changes'",
+            &[],
+        )?
+        .is_empty();
+    let legacy_head = if legacy_table {
+        let rows = db.query(
+            "SELECT CAST(COALESCE(MAX(watermark), 0) AS TEXT) AS watermark
+             FROM _zsync_changes",
+            &[],
+        )?;
+        match rows.first().and_then(|row| row.get("watermark")) {
+            Some(SqlValue::Text(value)) => value.parse::<i64>().map_err(|_| {
+                DbError("legacy watermark is invalid while creating packed ledger".into())
+            })?,
+            Some(SqlValue::Integer(value)) => *value,
+            _ => 0,
+        }
+    } else {
+        0
+    };
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_log_segments (
             startVersion INTEGER PRIMARY KEY,
@@ -163,74 +185,72 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
          ) WITHOUT ROWID",
         &[],
     )?;
-    if !db
+    let has_segment = !db
         .query("SELECT 1 FROM _zsync_log_segments LIMIT 1", &[])?
-        .is_empty()
-    {
-        return Ok(());
-    }
-
-    let legacy_head = db.query(
-        "SELECT CAST(COALESCE(MAX(watermark), 0) AS TEXT) AS watermark
-         FROM _zsync_changes",
-        &[],
-    )?;
-    let legacy_head = match legacy_head.first().and_then(|row| row.get("watermark")) {
-        Some(SqlValue::Text(value)) => value.parse::<i64>().map_err(|_| {
-            DbError("legacy watermark is invalid while creating packed ledger".into())
-        })?,
-        Some(SqlValue::Integer(value)) => *value,
-        _ => 0,
-    };
-    let durable_head = db.query(
-        "SELECT CAST(high AS TEXT) AS watermark FROM _zsync_watermark WHERE lock = 1",
-        &[],
-    )?;
-    let durable_head = match durable_head.first().and_then(|row| row.get("watermark")) {
-        Some(SqlValue::Text(value)) => value.parse::<i64>().map_err(|_| {
-            DbError("durable watermark is invalid while creating packed ledger".into())
-        })?,
-        Some(SqlValue::Integer(value)) => *value,
-        _ => 0,
-    };
-    let head = legacy_head.max(durable_head);
-    let mut lmids: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for row in db.query(
-        "SELECT clientGroupID, clientID, CAST(lastMutationID AS TEXT) AS lmid
+        .is_empty();
+    if !has_segment {
+        let durable_head = db.query(
+            "SELECT CAST(high AS TEXT) AS watermark FROM _zsync_watermark WHERE lock = 1",
+            &[],
+        )?;
+        let durable_head = match durable_head.first().and_then(|row| row.get("watermark")) {
+            Some(SqlValue::Text(value)) => value.parse::<i64>().map_err(|_| {
+                DbError("durable watermark is invalid while creating packed ledger".into())
+            })?,
+            Some(SqlValue::Integer(value)) => *value,
+            _ => 0,
+        };
+        let head = legacy_head.max(durable_head);
+        let mut lmids: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        for row in db.query(
+            "SELECT clientGroupID, clientID, CAST(lastMutationID AS TEXT) AS lmid
          FROM _zsync_clients",
-        &[],
-    )? {
-        let (Some(SqlValue::Text(group)), Some(SqlValue::Text(client))) =
-            (row.get("clientGroupID"), row.get("clientID"))
-        else {
-            return Err(DbError("legacy client identity is invalid".into()));
-        };
-        let lmid = match row.get("lmid") {
-            Some(SqlValue::Text(value)) => value.clone(),
-            Some(SqlValue::Integer(value)) => value.to_string(),
-            _ => return Err(DbError("legacy client lmid is invalid".into())),
-        };
-        lmids
-            .entry(group.clone())
-            .or_default()
-            .insert(client.clone(), lmid);
-    }
-    let payload = serde_json::to_string(&LedgerPayload {
-        format: LEDGER_FORMAT,
-        lmids,
-        transactions: Vec::new(),
-    })
-    .map_err(|error| DbError(error.to_string()))?;
-    db.exec(
-        "INSERT INTO _zsync_log_segments
+            &[],
+        )? {
+            let (Some(SqlValue::Text(group)), Some(SqlValue::Text(client))) =
+                (row.get("clientGroupID"), row.get("clientID"))
+            else {
+                return Err(DbError("legacy client identity is invalid".into()));
+            };
+            let lmid = match row.get("lmid") {
+                Some(SqlValue::Text(value)) => value.clone(),
+                Some(SqlValue::Integer(value)) => value.to_string(),
+                _ => return Err(DbError("legacy client lmid is invalid".into())),
+            };
+            lmids
+                .entry(group.clone())
+                .or_default()
+                .insert(client.clone(), lmid);
+        }
+        let payload = serde_json::to_string(&LedgerPayload {
+            format: LEDGER_FORMAT,
+            lmids,
+            transactions: Vec::new(),
+        })
+        .map_err(|error| DbError(error.to_string()))?;
+        db.exec(
+            "INSERT INTO _zsync_log_segments
            (startVersion, endVersion, payload, pending, captureMode)
          VALUES (?, ?, ?, '[]', 0)",
-        &[
-            SqlValue::Integer(head + 1),
-            SqlValue::Integer(head),
-            text(payload),
-        ],
-    )
+            &[
+                SqlValue::Integer(head + 1),
+                SqlValue::Integer(head),
+                text(payload),
+            ],
+        )?;
+    }
+    if legacy_table {
+        db.exec(
+            "UPDATE _zsync_watermark SET high = MAX(high, ?) WHERE lock = 1",
+            &[SqlValue::Integer(legacy_head)],
+        )?;
+        db.exec(
+            "UPDATE _zsync_meta SET floor = MAX(floor, ?) WHERE lock = 1",
+            &[SqlValue::Integer(legacy_head)],
+        )?;
+        db.exec("DROP TABLE _zsync_changes", &[])?;
+    }
+    Ok(())
 }
 
 pub(crate) fn watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
@@ -399,11 +419,7 @@ pub(crate) struct ScannedLedger {
     pub changes: BTreeSet<(String, String)>,
 }
 
-pub(crate) fn scan_since(
-    db: &mut dyn SyncDb,
-    cookie: i64,
-    covered_through: i64,
-) -> Result<ScannedLedger, EngineError> {
+pub(crate) fn scan_since(db: &mut dyn SyncDb, cookie: i64) -> Result<ScannedLedger, EngineError> {
     let rows = db.query(
         "SELECT CAST(startVersion AS TEXT) AS startVersion,
                 CAST(endVersion AS TEXT) AS endVersion, payload
@@ -430,7 +446,7 @@ pub(crate) fn scan_since(
                     "packed ledger segment chain has a gap",
                 ));
             }
-        } else if start > covered_through.saturating_add(1) {
+        } else if start > cookie.saturating_add(1) {
             return Err(EngineError::internal(
                 "packed ledger segment chain has a leading gap",
             ));

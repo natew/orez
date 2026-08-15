@@ -289,7 +289,6 @@ class BrowserSyncHostImpl<
       config.transactionQueryBudget
     )
     const database: ApplicationDatabase = {
-      dialect: 'sqlite',
       transaction: async <Value>(
         work: (tx: ApplicationTransaction) => Value | Promise<Value>
       ): Promise<Value> => {
@@ -762,11 +761,7 @@ class BrowserSyncHostImpl<
     this.#assertAccepting()
     return await this.#runQueued('exec', async () => {
       const result = await this.#writeTransaction('direct', async () => {
-        const writeSet = await beginWriteSetCapture(
-          this.config.schema,
-          this.#mutatorSql,
-          'sqlite'
-        )
+        const writeSet = await beginWriteSetCapture(this.config.schema, this.#mutatorSql)
         const value = await writeSet.transaction.exec(sql, params, metadata)
         await writeSet.commit()
         return value

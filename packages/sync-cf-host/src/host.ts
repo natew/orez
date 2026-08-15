@@ -664,7 +664,6 @@ export function createSyncDurableObject<
         config.transactionQueryBudget
       )
       const database: ApplicationDatabase = {
-        dialect: 'sqlite',
         transaction: async <Value>(
           work: (tx: ApplicationTransaction) => Value | Promise<Value>
         ): Promise<Value> =>

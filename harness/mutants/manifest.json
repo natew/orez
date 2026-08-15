@@ -50,17 +50,10 @@
       "expectedLanes": ["cargo-sync-core", "state-machine", "exactly-once"]
     },
     {
-      "id": "M4-lmid-no-change-row",
-      "property": "mutator",
-      "file": "crates/sync-core/src/store.rs",
-      "description": "advance_lmid updates the counter but appends no lmid change row: acks never ride diffs (invariants 3, 4)",
-      "expectedLanes": ["cargo-sync-core"]
-    },
-    {
       "id": "L1-prune-no-floor",
       "property": "loss",
       "file": "crates/sync-core/src/store.rs",
-      "description": "retention deletes change rows without raising the floor: stale cookies diff across a silent gap",
+      "description": "retention prunes packed segments without raising the floor: stale cookies diff across a silent gap",
       "expectedLanes": ["cargo-sync-core", "state-machine", "eviction"]
     },
     {

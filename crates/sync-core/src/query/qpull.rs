@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
 
-use crate::db::{SqlValue, SyncDb};
+use crate::db::SyncDb;
 use crate::error::EngineError;
 use crate::ledger;
 use crate::schema::Tables;
@@ -107,44 +107,8 @@ fn scan_changed(
     tables: &Tables,
     cookie: i64,
 ) -> Result<BTreeSet<(String, String)>, EngineError> {
-    let rows = db.query(
-        "SELECT CAST(watermark AS TEXT) AS watermark, tableName, op, pk
-         FROM _zsync_changes WHERE watermark > ? ORDER BY watermark",
-        &[store::counter(cookie)],
-    )?;
     let mut out = BTreeSet::new();
-    let mut legacy_end = cookie;
-    for row in &rows {
-        let watermark = match row.get("watermark") {
-            Some(SqlValue::Text(value)) => value
-                .parse::<i64>()
-                .ok()
-                .filter(|value| *value >= 0)
-                .ok_or_else(|| EngineError::internal("legacy change version is invalid"))?,
-            Some(SqlValue::Integer(value)) if *value >= 0 => *value,
-            _ => return Err(EngineError::internal("legacy change version is invalid")),
-        };
-        if watermark != legacy_end.saturating_add(1) {
-            return Err(EngineError::internal("legacy change log has a gap"));
-        }
-        legacy_end = watermark;
-        if row.get("op") != Some(&SqlValue::Text("row".to_string())) {
-            continue;
-        }
-        let table = match row.get("tableName") {
-            Some(SqlValue::Text(s)) => s.clone(),
-            _ => continue,
-        };
-        let pk = match row.get("pk") {
-            Some(SqlValue::Text(s)) => match canonical_pk_text(tables, &table, s) {
-                Some(pk) => pk,
-                None => continue,
-            },
-            _ => continue,
-        };
-        out.insert((table, pk));
-    }
-    for (table, pk) in ledger::scan_since(db, cookie, legacy_end)?.changes {
+    for (table, pk) in ledger::scan_since(db, cookie)?.changes {
         let Some(pk) = canonical_pk_text(tables, &table, &pk) else {
             continue;
         };

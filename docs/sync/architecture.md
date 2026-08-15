@@ -179,13 +179,13 @@ the delegation page.
 
 ## The change log
 
-The cookie is the high watermark of a per-namespace change log
-(`_zsync_changes` in the engine, `_zero_changes` in the data worker). SQLite
-triggers installed per table append to the log on every write path, whether the
-write came from a mutator, from admin SQL, or from upstream ingest. The log
-stores which primary keys were touched, never row values. Retention is
-size-bounded: once the log passes `retainChanges` rows, the oldest entries are
-pruned and the floor rises. A client whose cookie has fallen below the floor
+The cookie is the high watermark of the per-namespace packed ledger
+(`_zsync_log_segments`; the data worker has its separate `_zero_changes` CDC
+queue). SQLite triggers installed per table append touched primary keys to the
+active segment on every write path, whether the write came from a mutator, from
+admin SQL, or from upstream ingest. The ledger stores keys, cookies, and
+last-mutation-id checkpoints, never row values. Retention prunes completed
+segments and raises the floor. A client whose cookie has fallen below the floor
 gets a snapshot on its next pull.
 
 This is the whole recovery model. Fresh clients, below-floor cookies, and epoch

@@ -34,29 +34,16 @@ fn read_i64(db: &mut dyn SyncDb, sql: &str, params: &[SqlValue]) -> Result<i64, 
     }
 }
 
-// the change log's high watermark = max(durable high-water, MAX(log)). durable
-// so it never regresses even if the log is emptied (invariant 7). bumps the
-// stored high-water when the log has advanced past it.
+// the packed ledger's high watermark, bounded below by the durable high-water
+// imported from retired journals during schema initialization.
 pub(crate) fn watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
-    let max_log = read_i64(
-        db,
-        "SELECT CAST(COALESCE(MAX(watermark), 0) AS TEXT) FROM _zsync_changes",
-        &[],
-    )?;
     let high = read_i64(
         db,
         "SELECT CAST(high AS TEXT) FROM _zsync_watermark WHERE lock = 1",
         &[],
     )?;
     let segment = ledger::watermark(db)?;
-    let wm = max_log.max(high).max(segment);
-    if wm > high && wm != segment {
-        db.exec(
-            "UPDATE _zsync_watermark SET high = ? WHERE lock = 1",
-            &[counter(wm)],
-        )?;
-    }
-    Ok(wm)
+    Ok(high.max(segment))
 }
 
 pub(crate) fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
@@ -67,15 +54,11 @@ pub(crate) fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
     )
 }
 
-// size-bounded retention: prune change rows at or below (watermark - retain),
-// raising the floor. never prunes the top row, so MAX(log) stays monotonic.
+// size-bounded retention: prune packed segments at or below the retained
+// cutoff, then raise the floor.
 pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), EngineError> {
     let cutoff = watermark(db)? - retain_changes;
     if cutoff > floor(db)? {
-        db.exec(
-            "DELETE FROM _zsync_changes WHERE watermark <= ?",
-            &[counter(cutoff)],
-        )?;
         ledger::prune(db, cutoff)?;
         db.exec(
             "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",

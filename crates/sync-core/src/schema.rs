@@ -1,6 +1,5 @@
 // the durable `_zsync_*` schema and application-table triggers that feed the
-// packed ledger. the normalized change table remains readable during migration
-// but new sqlite writes use packed segments.
+// packed ledger.
 //
 // invariants encoded here:
 // - the ledger stores which primary keys were touched, never row values:
@@ -17,6 +16,9 @@ use std::collections::BTreeSet;
 use crate::db::{DbError, SqlValue, SyncDb};
 use crate::error::EngineError;
 use crate::value::ZeroColumnType;
+
+// bump whenever init_schema changes a durable DDL or migration surface.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct TableSpec {
@@ -671,15 +673,6 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
     db.exec(
         "INSERT INTO _zsync_watermark (lock, high) VALUES (1, 0)
          ON CONFLICT (lock) DO NOTHING",
-        &[],
-    )?;
-    db.exec(
-        "CREATE TABLE IF NOT EXISTS _zsync_changes (
-            watermark INTEGER PRIMARY KEY AUTOINCREMENT,
-            tableName TEXT NOT NULL,
-            op TEXT NOT NULL CHECK (op IN ('row', 'lmid', 'marker')),
-            pk TEXT
-        )",
         &[],
     )?;
     crate::ledger::init(db)?;

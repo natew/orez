@@ -273,9 +273,8 @@ pub fn invalidate(conn: &Connection) -> Result<(), EngineError> {
     result
 }
 
-// harness full-prune hook: bump the durable high-water, then prune the entire
-// change log (retain 0), raising the floor to the head so _zsync_changes is
-// emptied. the durable high-water must keep the served cookie monotonic across
+// harness full-prune hook: prune the packed ledger to its head and raise the
+// floor. the durable high-water must keep the served cookie monotonic across
 // a reopen of the same sqlite file (invariant 7 / mutant O1). the state machine
 // arms this before a server restart to exercise O1 end to end at the system
 // level, which no other lane does (it empties the log AND reopens the store).
@@ -296,7 +295,6 @@ pub fn prune_to_head(conn: &Connection) -> Result<(), EngineError> {
 pub fn reset_cursor(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(
         "BEGIN;
-         DELETE FROM _zsync_changes;
          DELETE FROM _zsync_log_segments;
          INSERT INTO _zsync_log_segments
            (startVersion, endVersion, payload, pending, captureMode)
