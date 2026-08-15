@@ -95,6 +95,39 @@ describe('mutation lifecycle', () => {
     expect(next).toHaveBeenCalledOnce()
   })
 
+  test('drains server acknowledgements for client-settled background writes', async () => {
+    const { lifecycle } = setup()
+    const server = deferred<unknown>()
+    await lifecycle.enqueueBackgroundMutation('final stamp', () => ({
+      client: Promise.resolve({}),
+      server: server.promise,
+    }))
+
+    let drained = false
+    const draining = lifecycle.drainBackgroundMutations().then(() => {
+      drained = true
+    })
+    await Promise.resolve()
+    expect(drained).toBe(false)
+
+    server.resolve({})
+    await draining
+    expect(drained).toBe(true)
+  })
+
+  test('drain reports a server rejection that settled before it started', async () => {
+    const { lifecycle } = setup()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const rejected = new Error('authorization expired')
+    await lifecycle.enqueueBackgroundMutation('final stamp', () => ({
+      client: Promise.resolve({}),
+      server: Promise.reject(rejected),
+    }))
+    await Promise.resolve()
+
+    await expect(lifecycle.drainBackgroundMutations()).rejects.toBe(rejected)
+  })
+
   test('recovery or close quietly drops in-flight and queued background work', async () => {
     const { lifecycle } = setup()
     const client = deferred<unknown>()

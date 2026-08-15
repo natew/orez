@@ -1351,6 +1351,7 @@ export function createZeroClientInternal<
     remint,
     // combineZeroClients dispatches acknowledgement through this
     mutationLifecycle,
+    drainBackgroundMutations: mutationLifecycle.drainBackgroundMutations,
     enqueueBackgroundMutation: mutationLifecycle.enqueueBackgroundMutation,
     awaitMutationClient: mutationLifecycle.awaitMutationClient,
     awaitMutationServer: mutationLifecycle.awaitMutationServer,

@@ -81,6 +81,7 @@ function describeMutationError(error: unknown): string {
 export type MutationLifecycle = {
   activate: () => void
   fence: () => void
+  drainBackgroundMutations: () => Promise<void>
   enqueueBackgroundMutation: (
     label: string,
     create: () => unknown,
@@ -156,7 +157,14 @@ type BackgroundMutationQueue = {
   tail: Promise<void>
   lastErrorMessage: string | null
   coalesceSequence: Map<string, number>
+  serverSettlements: Set<Promise<void>>
+  serverErrors: unknown[]
 }
+
+type BackgroundMutationQueueControls = Pick<
+  MutationLifecycle,
+  'drainBackgroundMutations' | 'enqueueBackgroundMutation'
+>
 
 // one serial queue, however many instances it spans. each item pins the
 // generation of every live instance when it is queued, then acknowledges
@@ -166,14 +174,20 @@ function createBackgroundMutationQueue(instances: {
   // settles work no instance claimed: a create() that returns a plain promise,
   // or a mutation issued by a client outside this set
   fallback: () => MutationLifecycle
-}): MutationLifecycle['enqueueBackgroundMutation'] {
+}): BackgroundMutationQueueControls {
   const queue: BackgroundMutationQueue = {
     tail: Promise.resolve(),
     lastErrorMessage: null,
     coalesceSequence: new Map(),
+    serverSettlements: new Set(),
+    serverErrors: [],
   }
 
-  return function enqueueBackgroundMutation(label, create, mutationOptions = {}) {
+  function enqueueBackgroundMutation(
+    label: string,
+    create: () => unknown,
+    mutationOptions: BackgroundMutationOptions = {}
+  ) {
     const { coalesceKey = '', settle = 'client', timeoutMs = 120_000 } = mutationOptions
     const pinned = new Map<MutationLifecycle, number>()
     for (const lifecycle of instances.all()) {
@@ -201,9 +215,24 @@ function createBackgroundMutationQueue(instances: {
         // the helpers route to the issuing instance themselves; entering
         // through the fallback only decides where an UNTAGGED mutation settles
         const settleOn = instances.fallback()
+        const serverSettlement = mutation.server
+          ? settleOn.awaitMutationServer(mutation, label, timeoutMs)
+          : null
         if (settle === 'server' && mutation.server) {
-          await settleOn.awaitMutationServer(mutation, label, timeoutMs)
+          await serverSettlement
         } else {
+          if (serverSettlement) {
+            const trackedServerSettlement = serverSettlement.then(
+              () => {},
+              (error: unknown) => {
+                queue.serverErrors.push(error)
+              }
+            )
+            queue.serverSettlements.add(trackedServerSettlement)
+            void trackedServerSettlement.then(() => {
+              queue.serverSettlements.delete(trackedServerSettlement)
+            })
+          }
           await settleOn.awaitMutationClient(mutation, label, timeoutMs)
         }
       }
@@ -226,6 +255,22 @@ function createBackgroundMutationQueue(instances: {
     queue.tail = result.catch(() => {})
     return result
   }
+
+  async function drainBackgroundMutations() {
+    for (;;) {
+      const tail = queue.tail
+      await tail
+      const pending = [...queue.serverSettlements]
+      await Promise.all(pending)
+      if (queue.serverErrors.length > 0) {
+        const [error] = queue.serverErrors.splice(0)
+        throw error
+      }
+      if (tail === queue.tail && queue.serverSettlements.size === 0) return
+    }
+  }
+
+  return { drainBackgroundMutations, enqueueBackgroundMutation }
 }
 
 type GenerationWaiter = {
@@ -447,13 +492,14 @@ export function createMutationLifecycle(options: {
     }
   }
 
+  const backgroundQueue = createBackgroundMutationQueue({
+    all: () => [lifecycle],
+    fallback: () => lifecycle,
+  })
   const lifecycle: MutationLifecycle = {
     activate,
     fence,
-    enqueueBackgroundMutation: createBackgroundMutationQueue({
-      all: () => [lifecycle],
-      fallback: () => lifecycle,
-    }),
+    ...backgroundQueue,
     awaitMutationClient,
     awaitMutationServer,
     assertWritable,
@@ -466,7 +512,10 @@ export function createMutationLifecycle(options: {
 
 export type CombinedMutationLifecycle = Pick<
   MutationLifecycle,
-  'awaitMutationClient' | 'awaitMutationServer' | 'enqueueBackgroundMutation'
+  | 'awaitMutationClient'
+  | 'awaitMutationServer'
+  | 'drainBackgroundMutations'
+  | 'enqueueBackgroundMutation'
 >
 
 // the mutation half of combineZeroClients: acknowledgement goes to the instance
@@ -477,6 +526,10 @@ export function combineMutationLifecycles(
   lifecycles: readonly [MutationLifecycle, ...MutationLifecycle[]]
 ): CombinedMutationLifecycle {
   const primary = lifecycles[0]
+  const backgroundQueue = createBackgroundMutationQueue({
+    all: () => lifecycles,
+    fallback: () => primary,
+  })
 
   return {
     // every lifecycle already hands a mutation to the instance that issued it,
@@ -486,9 +539,6 @@ export function combineMutationLifecycles(
     // serial tail and one coalescing map spanning every instance.
     awaitMutationClient: primary.awaitMutationClient,
     awaitMutationServer: primary.awaitMutationServer,
-    enqueueBackgroundMutation: createBackgroundMutationQueue({
-      all: () => lifecycles,
-      fallback: () => primary,
-    }),
+    ...backgroundQueue,
   }
 }

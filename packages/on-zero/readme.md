@@ -577,6 +577,7 @@ export const {
   zeroEvents,
   awaitMutationClient,
   awaitMutationServer,
+  drainBackgroundMutations,
   enqueueBackgroundMutation,
 } = clients.combined
 ;<ProvideControlZero cacheURL={controlUrl} userID={user.id}>
@@ -802,6 +803,7 @@ void client.enqueueBackgroundMutation(
   () => client.zero.mutate.note.update(note),
   { coalesceKey: `note:${note.id}` }
 )
+await client.drainBackgroundMutations()
 ```
 
 the queue settles the client commit by default; use `settle: 'server'` only when
@@ -812,7 +814,12 @@ fence queued and in-flight work internally. direct settlement rejects with
 quietly. `MutationTimeoutError`, `MutationResultError`, and
 `mutationErrorMessage()` expose typed failure details.
 
-`combineZeroClients` exposes the same three helpers across every instance: one
+`drainBackgroundMutations()` waits for the serial queue and the server
+acknowledgements of client-settled writes that are still in flight. call it
+after stopping the producers and before releasing an authorization claim or
+disposing the client that those writes need.
+
+`combineZeroClients` exposes the same helpers across every instance: one
 serial queue with one coalescing map, and each mutation fenced by the instance
 that issued it. `awaitMutationClient` / `awaitMutationServer` settle a mutation
 on the instance that issued it no matter which client you call them on; take
