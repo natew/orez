@@ -803,7 +803,7 @@ void client.enqueueBackgroundMutation(
   () => client.zero.mutate.note.update(note),
   { coalesceKey: `note:${note.id}` }
 )
-await client.drainBackgroundMutations()
+const drain = await client.drainBackgroundMutations({ timeoutMs: 30_000 })
 ```
 
 the queue settles the client commit by default; use `settle: 'server'` only when
@@ -814,10 +814,13 @@ fence queued and in-flight work internally. direct settlement rejects with
 quietly. `MutationTimeoutError`, `MutationResultError`, and
 `mutationErrorMessage()` expose typed failure details.
 
-`drainBackgroundMutations()` waits for the serial queue and the server
-acknowledgements of client-settled writes that are still in flight. call it
-after stopping the producers and before releasing an authorization claim or
-disposing the client that those writes need.
+`drainBackgroundMutations()` boundedly waits for the serial queue and the server
+acknowledgements of client-settled writes that are still in flight. it returns
+any server errors, timeout state, and pending counts instead of throwing, so a
+failed write cannot cancel teardown. passive observation of a client-settled
+write never enters the acknowledgement-timeout recovery counter or reconnects
+the client. call it after stopping the producers and before releasing an
+authorization claim or disposing the client that those writes need.
 
 `combineZeroClients` exposes the same helpers across every instance: one
 serial queue with one coalescing map, and each mutation fenced by the instance

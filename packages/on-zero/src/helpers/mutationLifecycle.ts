@@ -11,6 +11,13 @@ export type BackgroundMutationOptions = {
   timeoutMs?: number
 }
 
+export type BackgroundMutationDrainResult = {
+  errors: unknown[]
+  pendingBackgroundMutations: number
+  pendingServerAcknowledgements: number
+  timedOut: boolean
+}
+
 export type MutationPhase = 'client' | 'server'
 
 export class StaleGenerationError extends Error {
@@ -81,7 +88,9 @@ function describeMutationError(error: unknown): string {
 export type MutationLifecycle = {
   activate: () => void
   fence: () => void
-  drainBackgroundMutations: () => Promise<void>
+  drainBackgroundMutations: (options?: {
+    timeoutMs?: number
+  }) => Promise<BackgroundMutationDrainResult>
   enqueueBackgroundMutation: (
     label: string,
     create: () => unknown,
@@ -157,6 +166,7 @@ type BackgroundMutationQueue = {
   tail: Promise<void>
   lastErrorMessage: string | null
   coalesceSequence: Map<string, number>
+  pendingMutations: number
   serverSettlements: Set<Promise<void>>
   serverErrors: unknown[]
 }
@@ -179,6 +189,7 @@ function createBackgroundMutationQueue(instances: {
     tail: Promise.resolve(),
     lastErrorMessage: null,
     coalesceSequence: new Map(),
+    pendingMutations: 0,
     serverSettlements: new Set(),
     serverErrors: [],
   }
@@ -215,22 +226,32 @@ function createBackgroundMutationQueue(instances: {
         // the helpers route to the issuing instance themselves; entering
         // through the fallback only decides where an UNTAGGED mutation settles
         const settleOn = instances.fallback()
-        const serverSettlement = mutation.server
-          ? settleOn.awaitMutationServer(mutation, label, timeoutMs)
-          : null
         if (settle === 'server' && mutation.server) {
-          await serverSettlement
+          await settleOn.awaitMutationServer(mutation, label, timeoutMs)
         } else {
-          if (serverSettlement) {
-            const trackedServerSettlement = serverSettlement.then(
-              () => {},
+          if (mutation.server) {
+            // draining observes the raw server result without entering the
+            // acknowledgement-timeout recovery counter. a passive teardown
+            // observer must never reconnect the client it is trying to drain.
+            const trackedServerSettlement = mutation.server.then(
+              (serverResult) => {
+                const message = mutationErrorMessage(serverResult)
+                if (message) {
+                  throw new MutationResultError(label, 'server', serverResult, message)
+                }
+              },
               (error: unknown) => {
                 queue.serverErrors.push(error)
               }
             )
-            queue.serverSettlements.add(trackedServerSettlement)
-            void trackedServerSettlement.then(() => {
-              queue.serverSettlements.delete(trackedServerSettlement)
+            const completedServerSettlement = trackedServerSettlement.catch(
+              (error: unknown) => {
+                queue.serverErrors.push(error)
+              }
+            )
+            queue.serverSettlements.add(completedServerSettlement)
+            void completedServerSettlement.then(() => {
+              queue.serverSettlements.delete(completedServerSettlement)
             })
           }
           await settleOn.awaitMutationClient(mutation, label, timeoutMs)
@@ -252,21 +273,60 @@ function createBackgroundMutationQueue(instances: {
       }
       throw error
     })
-    queue.tail = result.catch(() => {})
-    return result
-  }
-
-  async function drainBackgroundMutations() {
-    for (;;) {
-      const tail = queue.tail
-      await tail
-      const pending = [...queue.serverSettlements]
-      await Promise.all(pending)
-      if (queue.serverErrors.length > 0) {
-        const [error] = queue.serverErrors.splice(0)
+    queue.pendingMutations += 1
+    const trackedResult = result.then(
+      (value) => {
+        queue.pendingMutations -= 1
+        return value
+      },
+      (error: unknown) => {
+        queue.pendingMutations -= 1
         throw error
       }
-      if (tail === queue.tail && queue.serverSettlements.size === 0) return
+    )
+    queue.tail = trackedResult.catch(() => {})
+    return trackedResult
+  }
+
+  async function drainBackgroundMutations(options: { timeoutMs?: number } = {}) {
+    const timeoutMs = options.timeoutMs ?? 30_000
+    const deadline = Date.now() + Math.max(0, timeoutMs)
+    for (;;) {
+      const tail = queue.tail
+      const pending = [...queue.serverSettlements]
+      const remainingMs = Math.max(0, deadline - Date.now())
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const settled = await Promise.race([
+        Promise.all([tail, ...pending]).then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), remainingMs)
+        }),
+      ])
+      if (timer) clearTimeout(timer)
+      if (!settled) {
+        return {
+          errors: queue.serverErrors.splice(0),
+          pendingBackgroundMutations: queue.pendingMutations,
+          pendingServerAcknowledgements: queue.serverSettlements.size,
+          timedOut: true,
+        }
+      }
+      if (tail === queue.tail && queue.serverSettlements.size === 0) {
+        return {
+          errors: queue.serverErrors.splice(0),
+          pendingBackgroundMutations: queue.pendingMutations,
+          pendingServerAcknowledgements: 0,
+          timedOut: false,
+        }
+      }
+      if (Date.now() >= deadline) {
+        return {
+          errors: queue.serverErrors.splice(0),
+          pendingBackgroundMutations: queue.pendingMutations,
+          pendingServerAcknowledgements: queue.serverSettlements.size,
+          timedOut: true,
+        }
+      }
     }
   }
 

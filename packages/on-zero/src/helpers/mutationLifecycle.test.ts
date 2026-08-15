@@ -96,23 +96,37 @@ describe('mutation lifecycle', () => {
   })
 
   test('drains server acknowledgements for client-settled background writes', async () => {
-    const { lifecycle } = setup()
-    const server = deferred<unknown>()
-    await lifecycle.enqueueBackgroundMutation('final stamp', () => ({
-      client: Promise.resolve({}),
-      server: server.promise,
-    }))
+    vi.useFakeTimers()
+    try {
+      const { lifecycle } = setup()
+      const server = deferred<unknown>()
+      await lifecycle.enqueueBackgroundMutation('final stamp', () => ({
+        client: Promise.resolve({}),
+        server: server.promise,
+      }))
 
-    let drained = false
-    const draining = lifecycle.drainBackgroundMutations().then(() => {
-      drained = true
-    })
-    await Promise.resolve()
-    expect(drained).toBe(false)
+      let drainResult: Awaited<
+        ReturnType<typeof lifecycle.drainBackgroundMutations>
+      > | null = null
+      const draining = lifecycle
+        .drainBackgroundMutations({ timeoutMs: 100 })
+        .then((result) => {
+          drainResult = result
+        })
+      await vi.advanceTimersByTimeAsync(99)
+      expect(drainResult).toBeNull()
 
-    server.resolve({})
-    await draining
-    expect(drained).toBe(true)
+      server.resolve({})
+      await draining
+      expect(drainResult).toEqual({
+        errors: [],
+        pendingBackgroundMutations: 0,
+        pendingServerAcknowledgements: 0,
+        timedOut: false,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('drain reports a server rejection that settled before it started', async () => {
@@ -125,7 +139,56 @@ describe('mutation lifecycle', () => {
     }))
     await Promise.resolve()
 
-    await expect(lifecycle.drainBackgroundMutations()).rejects.toBe(rejected)
+    const result = await lifecycle.drainBackgroundMutations()
+    expect(result.errors).toEqual([rejected])
+    expect(result.timedOut).toBe(false)
+  })
+
+  test('drain timeout neither reconnects nor waits forever', async () => {
+    vi.useFakeTimers()
+    try {
+      const { lifecycle, recoverFromAckTimeout } = setup(1)
+      const server = deferred<unknown>()
+      await lifecycle.enqueueBackgroundMutation('final stamp', () => ({
+        client: Promise.resolve({}),
+        server: server.promise,
+      }))
+
+      const draining = lifecycle.drainBackgroundMutations({ timeoutMs: 20 })
+      await vi.advanceTimersByTimeAsync(20)
+      await expect(draining).resolves.toEqual({
+        errors: [],
+        pendingBackgroundMutations: 0,
+        pendingServerAcknowledgements: 1,
+        timedOut: true,
+      })
+      expect(recoverFromAckTimeout).not.toHaveBeenCalled()
+      server.resolve({})
+      await vi.runAllTimersAsync()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('drain bounds a background mutation still waiting on its client commit', async () => {
+    vi.useFakeTimers()
+    try {
+      const { lifecycle } = setup()
+      const client = deferred<unknown>()
+      const queued = lifecycle.enqueueBackgroundMutation('final stamp', () => ({
+        client: client.promise,
+      }))
+      const draining = lifecycle.drainBackgroundMutations({ timeoutMs: 20 })
+      await vi.advanceTimersByTimeAsync(20)
+      await expect(draining).resolves.toMatchObject({
+        pendingBackgroundMutations: 1,
+        timedOut: true,
+      })
+      client.resolve({})
+      await queued
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('recovery or close quietly drops in-flight and queued background work', async () => {

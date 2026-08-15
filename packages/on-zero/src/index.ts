@@ -61,6 +61,7 @@ export {
   MutationResultError,
   MutationTimeoutError,
   StaleGenerationError,
+  type BackgroundMutationDrainResult,
   type BackgroundMutationOptions,
   type CombinedMutationLifecycle,
   type MutationLifecycle,
