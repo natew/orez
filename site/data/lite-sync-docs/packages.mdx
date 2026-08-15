@@ -1,0 +1,33 @@
+---
+title: Packages and source map
+description: The public package boundary and internal source areas behind Lite Sync.
+---
+
+# Packages and source map
+
+Lite Sync is being separated from Orez in this repository. The website uses the
+new product name first; the current preview still ships through the `orez-lite`
+package while the package boundary is moved.
+
+## Public JavaScript exports
+
+| Package/export              | Purpose                                                        | Status  |
+| --------------------------- | -------------------------------------------------------------- | ------- |
+| `orez-lite/client`          | Browser transport plugin for the real Zero client              | Preview |
+| `orez-lite/browser`         | Durable browser worker host with Bedrock SQLite and IndexedDB  | Preview |
+| `orez-lite/native`          | Native SQLite host entrypoint                                  | Preview |
+| `orez-lite/cloudflare`      | Cloudflare deployment tools                                    | Preview |
+| `orez-lite/cloudflare/sync` | Rust/WASM sync host for Cloudflare Workers and Durable Objects | Preview |
+
+## Engine and host packages
+
+| Source package      | Role                                                                 |
+| ------------------- | -------------------------------------------------------------------- |
+| `sync-core`         | Deterministic pull, push, value, retention, query, and schema engine |
+| `sync-native`       | Axum and rusqlite native host                                        |
+| `sync-wasm`         | WASM boundary for constrained JavaScript hosts                       |
+| `orez-sync-cf-host` | Cloudflare Worker and Durable Object integration                     |
+
+Applications should use the documented parent-package exports. The internal
+`sync-*` packages remain repository build units and may change as the public
+Lite Sync package is established.

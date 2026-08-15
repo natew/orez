@@ -1,55 +1,52 @@
 ---
 title: Orez documentation
-description: Run Zero as one coordinated system with the Node runner or the SQLite-native Orez Lite engine.
+description: Run stock Zero locally with one command and one coordinated configuration.
 ---
 
 # Orez documentation
 
-Orez is an easy, all-in-one way to run Zero. The Node runtime manages
-zero-cache, its databases, replica storage, and local lifecycle from one
-configuration. Orez Lite is a SQLite-native Zero server that uses the real
-`@rocicorp/zero` client unchanged.
+Orez is an easy, all-in-one way to run Zero locally. It manages zero-cache,
+its databases, replica storage, migrations, and process lifecycle from one
+configuration.
 
 ```sh
 bunx orez
 ```
 
 <CardGrid>
-  <DocCard href="/docs/node" title="Node">
-    Run stock zero-cache with either Embedded Postgres or the portable PGlite/WASM
-    profile.
+  <DocCard href="/docs/getting-started" title="Get started">
+    Start the default portable stack, connect the real Zero client, and add your
+    application endpoints.
   </DocCard>
-  <DocCard href="/docs/orez-lite" title="Orez Lite" badge="Preview">
-    Replace zero-cache with Orez's smaller SQLite-native server in a Cloudflare Durable
-    Object. Keep the real Zero client unchanged.
+  <DocCard href="/docs/node/pglite" title="PGlite / WASM">
+    Run without Docker, a separately installed database, or native compilation.
   </DocCard>
-  <DocCard href="/docs/runtimes" title="Choose a runtime">
-    Compare compatibility, deployment shape, native dependencies, and support status
-    before choosing.
+  <DocCard href="/docs/node/embedded-postgres" title="Embedded Postgres">
+    Use a real PostgreSQL server when tests need concurrent connections and stock logical
+    replication.
   </DocCard>
 </CardGrid>
 
-## Two promises
+## What Orez manages
 
-### Zero, made easy
+Orez coordinates the services around a stock Zero application:
 
-The Node runtime is the core Orez experience. It packages stock Zero into one command and one configuration. Built-in admin and recovery tools cover the routine work around the stack.
+- zero-cache and its replica storage;
+- PGlite or Embedded Postgres;
+- migrations and application lifecycle hooks;
+- local object storage and admin controls; and
+- stable addresses for development and CI.
 
-### A smaller Zero server
-
-Orez Lite implements Zero's server side through a deterministic Rust core. The
-application still owns queries, mutators, authentication, and permissions.
+Your application keeps the real `@rocicorp/zero` client, schema, named queries,
+custom mutators, and optimistic local state.
 
 ## Recommended path
 
-1. Run the [Node quick start](/docs/getting-started).
-2. Use [PGlite/WASM](/docs/node/pglite) for the smallest local and CI setup.
-3. Switch to [Embedded Postgres](/docs/node/embedded-postgres) when you need real PostgreSQL concurrency and logical replication.
-4. Evaluate [Orez Lite](/docs/orez-lite) for a compact SQLite-native deployment.
+1. Run the [quick start](/docs/getting-started).
+2. Keep [PGlite/WASM](/docs/node/pglite) for the smallest local and CI setup.
+3. Switch to [Embedded Postgres](/docs/node/embedded-postgres) when you need
+   production-like concurrency and logical replication.
+4. Move repeatable settings into [Configuration and CLI](/docs/node/configuration).
 
-## Clear boundaries
-
-Node orchestrates `zero-cache`. Orez Lite replaces it with a deterministic
-SQLite-native Zero server while the real `@rocicorp/zero` client and the same
-application endpoints remain in place. Each runtime documents its server
-architecture, operations, and test evidence independently.
+Lite Sync, the SQLite-native replacement sync server, now has its own
+[documentation site](https://lite-sync-docs.natewienert.workers.dev).

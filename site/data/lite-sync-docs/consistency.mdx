@@ -1,17 +1,17 @@
 ---
 title: Consistency
-description: The contract Orez tests against, the four properties it proves, and what it deliberately does not claim.
+description: The contract Lite Sync tests against, the four properties it proves, and what it deliberately does not claim.
 ---
 
 # Consistency
 
-Orez is an asynchronous client cache over a transactional authority. A client
+Lite Sync is an asynchronous client cache over a transactional authority. A client
 may read an older committed snapshot while another client's acknowledged write
 is still propagating. That is the contract Zero documents for its clients, and
-Orez does not reinterpret it: the validation suite makes no claim of global
+Lite Sync does not reinterpret it: the validation suite makes no claim of global
 linearizability or strict serializability for cache reads.
 
-What Orez does own is a database's core job. The server decides what a query
+What Lite Sync does own is a database's core job. The server decides what a query
 returns and whether a mutation commits. If those are wrong, they are wrong
 regardless of consistency model. So the test suite is organized around four
 properties, in priority order:
@@ -62,7 +62,7 @@ other is not enough.
 
 ## How the checks run
 
-- **Differential lanes** compare Orez against stock zero-cache and against a
+- **Differential lanes** compare Lite Sync against stock zero-cache and against a
   TypeScript reference core: fixed query shapes, seeded randomized sweeps
   with shrinking, and a generated operation-trace differential inside the
   Rust engine's test suite whose seeded vocabulary includes the query layer —
@@ -100,8 +100,8 @@ other is not enough.
 ## What is deliberately not claimed
 
 - Global linearizability or strict serializability across clients. An
-  asynchronous cache cannot honestly claim either, and Orez does not.
-- CAP-theorem positioning. Orez inherits Zero's model: reads are local and
+  asynchronous cache cannot honestly claim either, and Lite Sync does not.
+- CAP-theorem positioning. Lite Sync inherits Zero's model: reads are local and
   fast, writes are authoritative and acknowledged.
 - Green-badge completeness. The suite's own documentation records the gaps it
   has not closed — checks that exist but do not yet run against every target,

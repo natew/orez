@@ -1,11 +1,11 @@
 ---
-title: Orez Lite architecture
-description: How the real Zero client connects to Orez Lite's SQLite-native server.
+title: Lite Sync architecture
+description: How the real Zero client connects to Lite Sync's SQLite-native server.
 ---
 
 # Architecture
 
-Orez Lite implements Zero's server side with a deterministic Rust engine and
+Lite Sync implements Zero's server side with a deterministic Rust engine and
 SQLite storage. The browser runs the real `@rocicorp/zero` client unchanged.
 
 ## Request and data flow
@@ -14,7 +14,7 @@ SQLite storage. The browser runs the real `@rocicorp/zero` client unchanged.
                            query name + args
                       ┌────────────────────────→ app query endpoint
                       │                              │ authorized ZQL
-@rocicorp/zero client ── Zero protocol ──→ Orez Lite host ←──────┘
+@rocicorp/zero client ── Zero protocol ──→ Lite Sync host ←──────┘
    ▲                  │
    │ row patches      │ mutation push
    │                  └────────────────────────→ app mutate endpoint
@@ -24,14 +24,14 @@ SQLite storage. The browser runs the real `@rocicorp/zero` client unchanged.
 ```
 
 The two application endpoints are the same endpoints used with stock
-`zero-cache`. Orez forwards the original authenticated request instead of
+`zero-cache`. Lite Sync forwards the original authenticated request instead of
 reimplementing application logic.
 
 ## Query path
 
 The client sends a registered query name and arguments. The application query
 endpoint authenticates the request and resolves that name to authorized ZQL.
-Orez tracks the resulting row membership and sends an initial snapshot followed
+Lite Sync tracks the resulting row membership and sends an initial snapshot followed
 by incremental patches.
 
 The engine stores an internal query representation and reference counts.
@@ -39,7 +39,7 @@ Application authors continue to use Zero's named queries and ZQL.
 
 ## Mutation path
 
-The client runs its registered mutator optimistically, then Orez forwards the
+The client runs its registered mutator optimistically, then Lite Sync forwards the
 mutation to the application push endpoint. The endpoint authenticates the
 request and executes the server-side mutator in the authoritative database.
 Committed rows return through the database change feed.

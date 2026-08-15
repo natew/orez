@@ -1,4 +1,4 @@
-import evidence from '~/data/orez-lite-evidence.json' with { type: 'json' }
+import evidence from '~/data/lite-sync-evidence.json' with { type: 'json' }
 import { classifyEvidenceIdentity } from '~/lib/evidence-identity'
 
 import { AppLink } from './AppLink'
@@ -111,10 +111,7 @@ export function VerifiedBuildCard() {
           ? evidence.supportedContracts.join(' · ')
           : 'None advertised until every required job passes at the exact build SHA.'}
       </p>
-      <AppLink
-        href="/docs/orez-lite/testing#evidence-ledger"
-        className="evidence-card-link"
-      >
+      <AppLink href="/docs/testing#evidence-ledger" className="evidence-card-link">
         Open the full evidence ledger →
       </AppLink>
     </aside>

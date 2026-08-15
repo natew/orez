@@ -3,16 +3,15 @@ import { createRoute, useLoader } from 'one'
 import { useMemo } from 'react'
 
 import { components } from '~/components/MDXComponents'
+import { docsPages } from '~/features/docs/docsRoutes'
+import { siteConfig } from '~/lib/site-config'
 
 const route = createRoute<'/docs/[...slug]'>()
 
 export async function generateStaticParams() {
-  const { getAllFrontmatter } = await import(/* @vite-ignore */ '@vxrn/mdx-rust')
-  return getAllFrontmatter('data/docs')
-    .map(({ slug }) => ({
-      slug: slug.replace(/.*docs\//, '').replace(/\/index$/, ''),
-    }))
-    .filter(({ slug }) => slug.length > 0 && slug !== 'index')
+  return docsPages.slice(1).map(({ route }) => ({
+    slug: route.replace('/docs/', ''),
+  }))
 }
 
 export const loader = route.createLoader(async ({ params }) => {
@@ -20,9 +19,11 @@ export const loader = route.createLoader(async ({ params }) => {
   const slug = Array.isArray(params.slug) ? params.slug.join('/') : params.slug
 
   try {
-    return await getMDXBySlug('data/docs', slug, { expressiveCode: false })
+    return await getMDXBySlug(siteConfig.docsRoot, slug, { expressiveCode: false })
   } catch {
-    return getMDXBySlug('data/docs', `${slug}/index`, { expressiveCode: false })
+    return getMDXBySlug(siteConfig.docsRoot, `${slug}/index`, {
+      expressiveCode: false,
+    })
   }
 })
 
@@ -32,7 +33,7 @@ export default function DocPage() {
 
   return (
     <>
-      <title>{`${frontmatter.title} · Orez docs`}</title>
+      <title>{`${frontmatter.title} · ${siteConfig.titleSuffix}`}</title>
       {frontmatter.description ? (
         <meta name="description" content={frontmatter.description} />
       ) : null}

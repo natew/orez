@@ -4,8 +4,17 @@ import { one } from 'one/vite'
 import { defineConfig } from 'vite'
 
 const satteriWasiStub = fileURLToPath(new URL('./satteri-wasi-stub.mjs', import.meta.url))
+const siteId = process.env.VITE_SITE
+
+if (siteId !== 'orez' && siteId !== 'lite-sync') {
+  throw new Error('VITE_SITE must be either "orez" or "lite-sync"')
+}
 
 export default defineConfig({
+  build: {
+    outDir: `dist/${siteId}`,
+  },
+
   resolve: {
     // satteri's browser.js re-exports its wasm-wasi binding, which the workerd
     // build tries to resolve. the MDX parse only runs at build time via the

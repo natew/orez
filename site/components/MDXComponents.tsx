@@ -1,7 +1,7 @@
 import { H1, H2, H3, Paragraph, SizableText, Text, XStack, YStack } from 'tamagui'
 
 import { AppLink } from './AppLink'
-import { EvidenceLedger, VerifiedBuildCard } from './OrezLiteEvidence'
+import { EvidenceLedger, VerifiedBuildCard } from './LiteSyncEvidence'
 
 import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 
@@ -135,9 +135,7 @@ function DocCard({
             </Status>
           ) : null}
         </XStack>
-        <Paragraph color="$color10" fontSize={14} lineHeight={21}>
-          {children}
-        </Paragraph>
+        <YStack className="doc-card-copy">{children}</YStack>
       </YStack>
     </AppLink>
   )

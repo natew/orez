@@ -1,12 +1,18 @@
 {
-  "name": "orez-site",
+  "name": "orez-sites",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "one dev",
-    "build": "one build",
-    "serve": "one serve"
+    "dev": "VITE_SITE=orez one dev",
+    "dev:lite-sync": "VITE_SITE=lite-sync one dev",
+    "build": "rm -rf dist && bun run build:orez && bun run build:lite-sync",
+    "build:orez": "VITE_SITE=orez one build",
+    "build:lite-sync": "VITE_SITE=lite-sync one build",
+    "serve": "bun run serve:orez",
+    "serve:orez": "VITE_SITE=orez one serve --outDir=dist/orez",
+    "serve:lite-sync": "VITE_SITE=lite-sync one serve --outDir=dist/lite-sync",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@tamagui/config": "2.3.1",

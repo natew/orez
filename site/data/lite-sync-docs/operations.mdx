@@ -1,13 +1,13 @@
 ---
-title: Orez Lite operations
+title: Lite Sync operations
 description: Namespace storage, health, observability, retention, recovery, and safe cutovers.
 ---
 
 # Operations
 
-The application database remains the write authority. Orez Lite keeps a
+The application database remains the write authority. Lite Sync keeps a
 per-namespace replica plus the sync state needed to serve Zero clients. Operate
-the application endpoints, database change feed, and Orez host as one path.
+the application endpoints, database change feed, and Lite Sync host as one path.
 
 ## Health and status
 
@@ -42,7 +42,7 @@ queries.
 
 An upstream resnapshot reads source tables in keyset pages and stages them as a
 new durable generation. A restart resumes from stored progress. After paging,
-Orez replays concurrent changes, atomically swaps the staged tables into place,
+Lite Sync replays concurrent changes, atomically swaps the staged tables into place,
 and bumps the engine epoch. Every client then performs one full resync. That
 reset is expected and ensures old cookies cannot address the new generation.
 

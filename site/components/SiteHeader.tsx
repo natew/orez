@@ -2,6 +2,8 @@ import { usePathname } from 'one'
 import { useState } from 'react'
 import { Button, SizableText, Text, XStack, YStack } from 'tamagui'
 
+import { isLiteSyncSite, siteConfig } from '~/lib/site-config'
+
 import { AppLink } from './AppLink'
 import { ThemeSwitch } from './ThemeSwitch'
 
@@ -14,10 +16,12 @@ function Mark() {
   )
 }
 
-const primaryLinks = [
-  { href: '/docs', label: 'Docs' },
-  { href: '/docs/runtimes', label: 'Runtimes' },
-] as const
+const primaryLinks = isLiteSyncSite
+  ? [
+      { href: '/docs', label: 'Docs' },
+      { href: '/docs/architecture', label: 'Architecture' },
+    ]
+  : [{ href: '/docs', label: 'Docs' }]
 
 export function SiteHeader() {
   const pathname = usePathname()
@@ -33,11 +37,11 @@ export function SiteHeader() {
         justify="space-between"
         gap="$4"
       >
-        <AppLink href="/" aria-label="Orez home" className="brand-link">
+        <AppLink href="/" aria-label={`${siteConfig.name} home`} className="brand-link">
           <XStack items="center" gap="$2">
-            <Mark />
+            {siteConfig.showLogo ? <Mark /> : null}
             <Text color="$color12" fontSize={17} fontWeight="700" letterSpacing={-0.4}>
-              orez
+              {siteConfig.name.toLowerCase()}
             </Text>
           </XStack>
         </AppLink>
@@ -52,7 +56,7 @@ export function SiteHeader() {
           {primaryLinks.map((item) => {
             const active =
               item.href === '/docs'
-                ? pathname.startsWith('/docs') && !pathname.startsWith('/docs/runtimes')
+                ? pathname.startsWith('/docs') && pathname !== '/docs/architecture'
                 : pathname.startsWith(item.href)
             return (
               <AppLink
@@ -66,6 +70,15 @@ export function SiteHeader() {
               </AppLink>
             )
           })}
+          <AppLink
+            href={siteConfig.relatedSite.href}
+            target="_blank"
+            color="$color10"
+            fontSize={14}
+            fontWeight="500"
+          >
+            {siteConfig.relatedSite.label} ↗
+          </AppLink>
           <AppLink
             href="https://github.com/natew/orez"
             target="_blank"
@@ -111,8 +124,7 @@ export function SiteHeader() {
         >
           {[
             ...primaryLinks,
-            { href: '/docs/node', label: 'Node' },
-            { href: '/docs/orez-lite', label: 'Orez Lite' },
+            ...(isLiteSyncSite ? [] : [{ href: '/docs/node', label: 'Node' }]),
           ].map((item) => (
             <AppLink
               key={item.href}
@@ -127,6 +139,9 @@ export function SiteHeader() {
               {item.label}
             </AppLink>
           ))}
+          <AppLink href={siteConfig.relatedSite.href} target="_blank" px="$3" py="$3">
+            {siteConfig.relatedSite.label} ↗
+          </AppLink>
           <AppLink href="https://github.com/natew/orez" target="_blank" px="$3" py="$3">
             GitHub ↗
           </AppLink>

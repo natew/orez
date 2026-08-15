@@ -1,28 +1,28 @@
 ---
-title: Orez Lite
+title: Lite Sync
 description: Replace Zero's server with a compact SQLite-native engine while keeping the real Zero client unchanged.
 ---
 
-# Orez Lite
+# Lite Sync
 
 <Status tone="preview">Preview</Status>
 
-Orez Lite is a server for Zero. It speaks the Zero protocol to the real
+Lite Sync is a server for Zero. It speaks the Zero protocol to the real
 `@rocicorp/zero` client and replaces Zero's server-side sync machinery.
-Orez provides the small `orez-lite/client` transport plugin needed to connect the
+The current preview package provides the small `orez-lite/client` transport plugin needed to connect the
 stock client. There is no client fork, query model, or mutator model to adopt.
 
 Your schema, named queries, custom mutators, optimistic updates, authentication,
 and application query and mutate endpoints remain ordinary Zero. Install and
 use the client exactly as the [Zero documentation](https://zero.rocicorp.dev/docs)
 describes, install the [`orez-lite/client` transport](/docs/client), then point it at
-the Orez Lite server instead of `zero-cache`.
+the Lite Sync server instead of `zero-cache`.
 
 <VerifiedBuildCard />
 
-## What Orez Lite replaces
+## What Lite Sync replaces
 
-Orez Lite replaces `zero-cache` and the server infrastructure behind it with a
+Lite Sync replaces `zero-cache` and the server infrastructure behind it with a
 Rust sync engine backed by SQLite. The current public host runs as a Cloudflare
 Worker and SQLite Durable Object.
 
@@ -30,7 +30,7 @@ Worker and SQLite Durable Object.
 real @rocicorp/zero client
   │ Zero protocol
   ▼
-Orez Lite server
+Lite Sync server
   ├── application query and mutate endpoints
   └── authoritative database change feed
 ```
@@ -43,7 +43,7 @@ and authoritative database.
 ## What changes in an application
 
 Only the server deployment and address change. Client components continue to
-use the same Zero queries, mutators, hooks, and local cache. Orez-specific code
+use the same Zero queries, mutators, hooks, and local cache. Lite Sync-specific code
 belongs at the server hosting boundary.
 
 For client APIs and application endpoint implementation, use Zero's own docs:
@@ -55,9 +55,9 @@ For client APIs and application endpoint implementation, use Zero's own docs:
 
 ## Start here
 
-1. Read [Cloudflare setup](/docs/orez-lite/cloudflare) for the Orez-specific
+1. Read [Cloudflare setup](/docs/cloudflare) for the Lite Sync-specific
    server boundary.
-2. Read [Architecture](/docs/orez-lite/architecture) for replication and
+2. Read [Architecture](/docs/architecture) for replication and
    recovery behavior.
-3. Review [Testing](/docs/orez-lite/testing) and
-   [Limitations](/docs/orez-lite/limitations) before deployment.
+3. Review [Testing](/docs/testing) and
+   [Limitations](/docs/limitations) before deployment.

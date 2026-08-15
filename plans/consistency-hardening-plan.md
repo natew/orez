@@ -177,9 +177,9 @@ logs. Evidence nobody can audit is not evidence.
 The docs site should own the consistency story publicly.
 
 - `plans/consistency-validation-architecture.md` stays the private working
-  document; a cleaned-up public version ships under `site/data/docs/`
+  document; a cleaned-up public version ships under `site/data/lite-sync-docs/`
   (alongside the existing `testing.mdx`), deployed by the existing
-  `orez-lite-evidence` job's `wrangler deploy --name orez-docs` step.
+  `orez-lite-evidence` job's `lite-sync-docs` deployment step.
 - The public version states the contract (asynchronous cache over a
   transactional authority, the four properties above, what is deliberately not
   claimed) and drops internal scheduling, retracted-run history, and

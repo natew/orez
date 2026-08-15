@@ -1,45 +1,25 @@
 ---
 title: Packages and source map
-description: The public packages and internal source areas that make up Orez’s runtimes.
+description: The public packages and source areas that make up the Orez local runner.
 ---
 
 # Packages and source map
 
-The table below lists Orez’s public packages and internal implementation packages. An export is supported when its runtime documentation marks it as supported.
+The table below lists Orez’s public packages and supporting implementation packages.
 
 ## JavaScript packages
 
-| Package/export                 | Purpose                                                                   | Status                         |
-| ------------------------------ | ------------------------------------------------------------------------- | ------------------------------ |
-| `orez`                         | Node all-in-one runner, CLI, configuration, and `startZeroLite()`         | Primary                        |
-| `orez/vite`                    | Bind the Node runner to a Vite dev-server lifecycle                       | Primary                        |
-| `orez/s3`                      | Small local S3-compatible server for development                          | Primary, intentionally limited |
-| `orez/change-tracking`         | PGlite change-tracking implementation details                             | Internal/advanced              |
-| `orez-lite/client`             | Browser transport plugin for connecting the real Zero client to Orez Lite | Preview                        |
-| `orez-lite/client`             | Compatibility alias for `orez-lite/client`                                | Preview                        |
-| `orez-lite/browser`            | Durable browser worker host with Bedrock SQLite and IndexedDB             | Preview                        |
-| `orez-lite/cloudflare`         | Orez Lite Cloudflare deployment tools                                     | Preview                        |
-| `orez-lite/cloudflare/runtime` | Orez Lite workerd runtime and Durable Object primitives                   | Preview                        |
-| `orez-lite/cloudflare/sync`    | Orez Lite Rust sync host                                                  | Preview                        |
-| `drizzle-zero-sqlite`          | Generate a Zero schema from Drizzle SQLite definitions                    | Public utility                 |
-| `bedrock-sqlite`               | WASM SQLite adapter used by Zero-oriented runtimes                        | Workspace package              |
-
-## Orez Lite crates and host
-
-| Source package      | Role                                                                 |
-| ------------------- | -------------------------------------------------------------------- |
-| `sync-core`         | Deterministic pull, push, value, retention, query, and schema engine |
-| `sync-native`       | Axum and rusqlite native host                                        |
-| `sync-wasm`         | WASM boundary for constrained JavaScript hosts                       |
-| `orez-sync-cf-host` | Cloudflare Worker and Durable Object integration                     |
-
-Orez Lite is the public name and `orez-lite/cloudflare` is its public Cloudflare
-entrypoint. The `sync-*` packages are internal build units and may change
-without requiring applications to add another direct dependency.
+| Package/export         | Purpose                                                          | Status                         |
+| ---------------------- | ---------------------------------------------------------------- | ------------------------------ |
+| `orez`                 | All-in-one runner, CLI, configuration, and `startZeroLite()`     | Primary                        |
+| `orez/vite`            | Bind Orez to a Vite dev-server lifecycle                         | Primary                        |
+| `orez/s3`              | Small local S3-compatible server for development                 | Primary, intentionally limited |
+| `orez/change-tracking` | PGlite change-tracking implementation details                    | Internal/advanced              |
+| `drizzle-zero-sqlite`  | Generate a Zero schema from Drizzle SQLite definitions           | Public utility                 |
+| `bedrock-sqlite`       | WASM SQLite adapter used by Orez and related repository packages | Workspace package              |
 
 ## Versioning guidance
 
 - Pin Orez and Zero together in applications that depend on internal compatibility layers.
-- Treat preview and experimental package paths as revision-specific.
 - Prefer documented top-level APIs over worker, proxy, or change-tracking internals.
-- Record runtime, profile, Zero version, and SQLite implementation in reproducible test reports.
+- Record the database profile, Zero version, and SQLite implementation in reproducible test reports.

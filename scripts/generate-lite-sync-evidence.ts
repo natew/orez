@@ -70,7 +70,7 @@ type ActionsJob = {
 }
 
 const root = resolve(import.meta.dir, '..')
-const evidencePath = join(root, 'site/data/orez-lite-evidence.json')
+const evidencePath = join(root, 'site/data/lite-sync-evidence.json')
 const githubRepository = process.env.GITHUB_REPOSITORY ?? 'natew/orez'
 const repositoryUrl = `https://github.com/${githubRepository}`
 
@@ -590,7 +590,7 @@ async function generate(): Promise<void> {
   writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`)
   const identity = evidence.release.sha === sha ? 'release' : 'build'
   console.log(
-    `generated ${evidence.status} Orez Lite ${identity} evidence for ${sha} from run ${runId}`
+    `generated ${evidence.status} Lite Sync ${identity} evidence for ${sha} from run ${runId}`
   )
 }
 
@@ -600,8 +600,8 @@ if (import.meta.main) {
   else if (mode === 'check') {
     const evidence = readJson<Evidence>(evidencePath)
     validate(evidence, process.env.EXPECTED_EVIDENCE_SHA)
-    console.log(`valid ${evidence.status} Orez Lite evidence ledger`)
+    console.log(`valid ${evidence.status} Lite Sync evidence ledger`)
   } else {
-    throw new Error('usage: bun scripts/generate-orez-lite-evidence.ts [check|generate]')
+    throw new Error('usage: bun scripts/generate-lite-sync-evidence.ts [check|generate]')
   }
 }

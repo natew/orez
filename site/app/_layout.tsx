@@ -7,6 +7,7 @@ import { YStack } from 'tamagui'
 import { SiteFooter } from '~/components/SiteFooter'
 import { SiteHeader } from '~/components/SiteHeader'
 import { TamaguiRootProvider } from '~/components/TamaguiRootProvider'
+import { siteConfig } from '~/lib/site-config'
 
 export default function Layout() {
   return (
@@ -19,7 +20,7 @@ export default function Layout() {
           content="width=device-width, initial-scale=1, maximum-scale=5"
         />
         <meta name="theme-color" content="#fdfdfc" />
-        <link rel="icon" href="/favicon.svg" />
+        {siteConfig.showLogo ? <link rel="icon" href="/favicon.svg" /> : null}
       </head>
       <body>
         <TamaguiRootProvider>

@@ -1,3 +1,5 @@
+import { isLiteSyncSite } from '~/lib/site-config'
+
 export type DocsPage = {
   title: string
   route: string
@@ -10,16 +12,12 @@ export type DocsSection = {
   pages: DocsPage[]
 }
 
-export const docsSections: DocsSection[] = [
+const orezDocsSections: DocsSection[] = [
   {
     title: 'Start',
     pages: [
       { title: 'Overview', route: '/docs' },
       { title: 'Get started', route: '/docs/getting-started' },
-      { title: 'Choose a runtime', route: '/docs/runtimes' },
-      { title: 'The Zero client', route: '/docs/zero-compatibility' },
-      { title: 'Client transport', route: '/docs/client', status: 'preview' },
-      { title: 'Consistency', route: '/docs/consistency' },
     ],
   },
   {
@@ -38,17 +36,6 @@ export const docsSections: DocsSection[] = [
     ],
   },
   {
-    title: 'Orez Lite',
-    pages: [
-      { title: 'Overview', route: '/docs/orez-lite', status: 'preview' },
-      { title: 'Cloudflare setup', route: '/docs/orez-lite/cloudflare' },
-      { title: 'Architecture', route: '/docs/orez-lite/architecture' },
-      { title: 'Operations', route: '/docs/orez-lite/operations' },
-      { title: 'Testing', route: '/docs/orez-lite/testing' },
-      { title: 'Limitations', route: '/docs/orez-lite/limitations' },
-    ],
-  },
-  {
     title: 'Reference',
     pages: [
       { title: 'Packages', route: '/docs/reference/packages' },
@@ -56,6 +43,33 @@ export const docsSections: DocsSection[] = [
     ],
   },
 ]
+
+const liteSyncDocsSections: DocsSection[] = [
+  {
+    title: 'Start',
+    pages: [
+      { title: 'Overview', route: '/docs', status: 'preview' },
+      { title: 'Client transport', route: '/docs/client', status: 'preview' },
+      { title: 'Consistency', route: '/docs/consistency' },
+    ],
+  },
+  {
+    title: 'Deploy',
+    pages: [
+      { title: 'Cloudflare setup', route: '/docs/cloudflare' },
+      { title: 'Architecture', route: '/docs/architecture' },
+      { title: 'Operations', route: '/docs/operations' },
+      { title: 'Testing', route: '/docs/testing' },
+      { title: 'Limitations', route: '/docs/limitations' },
+    ],
+  },
+  {
+    title: 'Reference',
+    pages: [{ title: 'Packages', route: '/docs/packages' }],
+  },
+]
+
+export const docsSections = isLiteSyncSite ? liteSyncDocsSections : orezDocsSections
 
 export const docsPages = docsSections.flatMap((section) => section.pages)
 

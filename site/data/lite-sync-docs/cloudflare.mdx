@@ -1,13 +1,13 @@
 ---
-title: Orez Lite on Cloudflare
-description: Deploy Orez Lite as the Zero server in a Cloudflare Worker and SQLite Durable Object.
+title: Lite Sync on Cloudflare
+description: Deploy Lite Sync as the Zero server in a Cloudflare Worker and SQLite Durable Object.
 ---
 
 # Cloudflare setup
 
 <Status tone="preview">Server host · Preview</Status>
 
-The Cloudflare host runs Orez Lite's Rust/WASM engine inside a SQLite Durable
+The Cloudflare host runs Lite Sync's Rust/WASM engine inside a SQLite Durable
 Object. It replaces the `zero-cache` deployment. The browser still runs the
 real `@rocicorp/zero` client, and the application still exposes its ordinary
 Zero query and mutate endpoints.
@@ -15,7 +15,7 @@ Zero query and mutate endpoints.
 <Callout title="Zero stays the application contract" tone="note">
   Follow Zero's [installation guide](https://zero.rocicorp.dev/docs/install) for the
   schema, client, queries, mutators, and application endpoints. This page covers only the
-  Orez Lite server boundary.
+  Lite Sync server boundary.
 </Callout>
 
 ## Server boundary
@@ -30,7 +30,7 @@ Application-specific server configuration supplies:
 - a change feed from the authoritative database.
 
 ```text
-real Zero client ── Zero protocol ──→ Orez Lite
+real Zero client ── Zero protocol ──→ Lite Sync
                                          │
                          query and mutate│requests
                                          ▼
@@ -38,16 +38,16 @@ real Zero client ── Zero protocol ──→ Orez Lite
                                          │
                                   authoritative writes
                                          ▼
-                              database change feed ──→ Orez Lite replica
+                              database change feed ──→ Lite Sync replica
 ```
 
-Orez forwards authenticated query and mutation work to the application rather
+Lite Sync forwards authenticated query and mutation work to the application rather
 than copying application logic into the sync host. Committed rows return through
 the database change feed.
 
 ## Client connection
 
-Install the `orez-lite/client` transport with the deployed Orez Lite address, then
+Install the `orez-lite/client` transport with the deployed Lite Sync address, then
 set the existing Zero client's server to that address. Components keep using
 the same `@rocicorp/zero` queries, mutators, hooks, and optimistic local state.
 The standard transport polls every five minutes. Applications whose sync host
@@ -73,12 +73,12 @@ mutations plus a change feed from the authoritative data service. Packaging the
 consumer adapter and stable configuration surface is still in progress, so the
 host remains preview.
 
-Application code should not depend on Orez's internal query AST, replication
+Application code should not depend on Lite Sync's internal query AST, replication
 cursor, Durable Object schema, or cache invalidation tables. Those are server
 implementation details.
 
 ## Next steps
 
-1. Read [Architecture](/docs/orez-lite/architecture).
-2. Review [Operations](/docs/orez-lite/operations).
-3. Read [Limitations](/docs/orez-lite/limitations) before a production rollout.
+1. Read [Architecture](/docs/architecture).
+2. Review [Operations](/docs/operations).
+3. Read [Limitations](/docs/limitations) before a production rollout.

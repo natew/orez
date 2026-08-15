@@ -10,12 +10,12 @@ import {
   validate,
   type Evidence,
   type Status,
-} from './generate-orez-lite-evidence'
+} from './generate-lite-sync-evidence'
 
 const releaseSha = '1111111111111111111111111111111111111111'
 const mainBuildSha = '2222222222222222222222222222222222222222'
 const fallback = JSON.parse(
-  readFileSync(new URL('../site/data/orez-lite-evidence.json', import.meta.url), 'utf8')
+  readFileSync(new URL('../site/data/lite-sync-evidence.json', import.meta.url), 'utf8')
 ) as Evidence
 
 function fixture(status: Status, buildSha: string): Evidence {
