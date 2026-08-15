@@ -30,7 +30,10 @@ for (const packageDir of [
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
 }
 
-execFileSync('cargo', ['metadata', '--format-version=1', '--no-deps'], {
+// resolve the whole graph so Cargo.lock picks up the new workspace member
+// versions; --no-deps skips resolution, leaving the lock stale and the
+// --locked cargo about call below failing on it.
+execFileSync('cargo', ['metadata', '--format-version=1', '--offline'], {
   cwd: root,
   stdio: 'ignore',
 })
