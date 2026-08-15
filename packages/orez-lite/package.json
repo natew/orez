@@ -1,6 +1,6 @@
 {
   "name": "orez-lite",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "description": "SQLite and Rust sync engine for Zero applications",
   "type": "module",
   "sideEffects": [
