@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { combineZeroClients } from './combineZeroClients'
 import { createZeroClient } from './createZeroClient'
 import { createEmitter } from './helpers/emitter'
+import { createMutationLifecycle } from './helpers/mutationLifecycle'
 import { runWithContext } from './helpers/mutatorContext'
 import {
   getInstanceForNamespace,
@@ -56,8 +57,14 @@ function fakeClient(name: string, namespaces: string[], zeroStub: unknown) {
     // boundary stub: dispatch tests never resolve queries through it
     customQueries: {} as AnyQueryRegistry,
   })
+  const mutationLifecycle = createMutationLifecycle({
+    ackTimeoutRecoveryThreshold: 2,
+    recoverFromAckTimeout: () => {},
+  })
+  mutationLifecycle.activate()
   return {
     instanceName: name,
+    mutationLifecycle,
     useQuery: vi.fn(() => `${name}-useQuery`),
     useQueryDirect: vi.fn(() => `${name}-useQueryDirect`),
     usePermission: vi.fn(() => `${name}-usePermission`),

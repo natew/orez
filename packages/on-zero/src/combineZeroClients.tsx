@@ -1,17 +1,24 @@
 import { createEmitter } from './helpers/emitter'
+import { combineMutationLifecycles } from './helpers/mutationLifecycle'
 import { getInstanceForNamespace, getInstanceForQueryFn } from './instanceRegistry'
 import { run } from './run'
 
+import type {
+  CombinedMutationLifecycle,
+  MutationLifecycle,
+} from './helpers/mutationLifecycle'
 import type { ZeroEvent, ZeroEventsEmitter } from './types'
 import type { ReactNode } from 'react'
 
 // combines multiple createZeroClient instances into one consumer surface:
 // useQuery/run/preload/getQuery dispatch to the instance that claimed the
 // query fn's namespace, zero.mutate.<namespace> dispatches by model
-// namespace, and everything unclaimed (plus non-mutate zero access like
-// userID/clientID) goes to the FIRST client — the primary. consumers render
-// each client's ProvideZero themselves; this facade does not use react
-// context, matching the existing global-zero-import style.
+// namespace, mutation acknowledgement (awaitMutation*/background queue)
+// dispatches to the instance that issued the mutation, and everything
+// unclaimed (plus non-mutate zero access like userID/clientID) goes to the
+// FIRST client — the primary. consumers render each client's ProvideZero
+// themselves; this facade does not use react context, matching the existing
+// global-zero-import style.
 //
 // PROVIDER NESTING CONTRACT: zero-react's useQuery resolves its instance from
 // the NEAREST ZeroProvider context, so only ONE instance — the one whose
@@ -40,6 +47,7 @@ type CombinableZeroClient = {
   zero: any
   preload: (...args: any[]) => any
   getQuery: (...args: any[]) => any
+  mutationLifecycle: MutationLifecycle
   zeroEvents: ZeroEventsEmitter
   reloadPage: () => boolean
   ControlQueries: (props: ControlQueriesProps) => ReactNode
@@ -76,7 +84,7 @@ export type CombinedZeroClients<Clients extends readonly CombinableZeroClient[]>
   zeroEvents: ZeroEventsEmitter
   reloadPage: () => boolean
   ControlQueries: (props: ControlQueriesProps) => ReactNode
-}
+} & CombinedMutationLifecycle
 
 export function combineZeroClients<
   const Clients extends readonly [CombinableZeroClient, ...CombinableZeroClient[]],
@@ -203,6 +211,13 @@ export function combineZeroClients<
       children
     )
 
+  // one queue across every instance, fenced per instance: a mutation is only
+  // ever cancelled by the recovery of the client that issued it.
+  const mutations = combineMutationLifecycles([
+    primary.mutationLifecycle,
+    ...clients.slice(1).map((client) => client.mutationLifecycle),
+  ])
+
   const combined = {
     useQuery,
     usePermission,
@@ -213,6 +228,7 @@ export function combineZeroClients<
     zeroEvents,
     reloadPage: primary.reloadPage,
     ControlQueries,
+    ...mutations,
   }
 
   // boundary assertion: the dispatching wrappers are untyped internally; the

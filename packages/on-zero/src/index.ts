@@ -62,6 +62,8 @@ export {
   MutationTimeoutError,
   StaleGenerationError,
   type BackgroundMutationOptions,
+  type CombinedMutationLifecycle,
+  type MutationLifecycle,
   type MutationLike,
   type MutationPhase,
 } from './helpers/mutationLifecycle'

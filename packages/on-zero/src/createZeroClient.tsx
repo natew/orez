@@ -462,8 +462,13 @@ export function createZeroClientInternal<
         return lazyMutatePath([...path, key])
       },
       apply(_, __, args) {
+        // a queued background write pins the instance it was queued against;
+        // this throws StaleGenerationError (before the catch below, so it is
+        // never reported as a mutation failure) when that instance is gone.
+        mutationLifecycle.assertWritable()
         try {
           const result = resolve()(...args)
+          mutationLifecycle.claimMutation(result)
           void observeMutation(result)
           return result
         } catch (error) {
@@ -1344,6 +1349,8 @@ export function createZeroClientInternal<
     getQuery,
     waitForZero,
     remint,
+    // combineZeroClients dispatches acknowledgement through this
+    mutationLifecycle,
     enqueueBackgroundMutation: mutationLifecycle.enqueueBackgroundMutation,
     awaitMutationClient: mutationLifecycle.awaitMutationClient,
     awaitMutationServer: mutationLifecycle.awaitMutationServer,

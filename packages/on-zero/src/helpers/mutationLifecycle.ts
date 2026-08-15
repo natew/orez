@@ -1,3 +1,5 @@
+import { globalValue } from './globalValue'
+
 export type MutationLike = {
   client: Promise<unknown>
   server?: Promise<unknown>
@@ -76,8 +78,78 @@ function describeMutationError(error: unknown): string {
   return String(error)
 }
 
-type GenerationWaiter = {
-  reject: () => void
+export type MutationLifecycle = {
+  activate: () => void
+  fence: () => void
+  enqueueBackgroundMutation: (
+    label: string,
+    create: () => unknown,
+    options?: BackgroundMutationOptions
+  ) => Promise<void>
+  awaitMutationClient: (
+    mutation: MutationLike,
+    label: string,
+    timeoutMs?: number
+  ) => Promise<unknown>
+  awaitMutationServer: (
+    mutation: MutationLike,
+    label: string,
+    timeoutMs?: number
+  ) => Promise<unknown>
+  // the owning client calls these at its mutate boundary: assertWritable
+  // refuses a queued write whose instance was replaced since it was queued,
+  // claimMutation records who issued the mutation so acknowledgement finds it.
+  assertWritable: () => void
+  claimMutation: (result: unknown) => void
+  // generation a queued write pins to, or null when this instance has no
+  // published client (nothing to pin to, so a later write is not fenced)
+  pinnedGeneration: () => number | null
+  isCurrentGeneration: (generation: number) => boolean
+}
+
+type MutationOrigin = {
+  lifecycle: MutationLifecycle
+  generation: number
+}
+
+// every mutation a client's mutate facade issues is recorded with the instance
+// that issued it and the generation that instance was on. acknowledgement
+// follows this tag, so one instance recovering can never cancel another
+// instance's in-flight mutation. globalValue keeps one map when a bundler
+// dual-loads the package (cjs + esm copies).
+const mutationOrigins = globalValue<WeakMap<object, MutationOrigin>>(
+  'on-zero:mutation-origins',
+  () => new WeakMap()
+)
+
+function mutationOrigin(mutation: unknown): MutationOrigin | undefined {
+  return mutation && typeof mutation === 'object'
+    ? mutationOrigins.get(mutation as object)
+    : undefined
+}
+
+// generations pinned when a background mutation was queued. the queue installs
+// this for the synchronous window in which create() calls zero.mutate, so the
+// OWNING client refuses a write whose instance was replaced while the write sat
+// in the queue, and every other instance keeps writing.
+type MutationGuard = {
+  generations: ReadonlyMap<MutationLifecycle, number>
+  label: string
+}
+
+const guard = globalValue<{ current: MutationGuard | null }>(
+  'on-zero:mutation-guard',
+  () => ({ current: null })
+)
+
+function runGuarded<T>(next: MutationGuard, create: () => T): T {
+  const previous = guard.current
+  guard.current = next
+  try {
+    return create()
+  } finally {
+    guard.current = previous
+  }
 }
 
 type BackgroundMutationQueue = {
@@ -86,7 +158,76 @@ type BackgroundMutationQueue = {
   coalesceSequence: Map<string, number>
 }
 
-export type MutationLifecycle = ReturnType<typeof createMutationLifecycle>
+// one serial queue, however many instances it spans. each item pins the
+// generation of every live instance when it is queued, then acknowledges
+// through whichever instance actually issued the write.
+function createBackgroundMutationQueue(instances: {
+  all: () => readonly MutationLifecycle[]
+  // settles work no instance claimed: a create() that returns a plain promise,
+  // or a mutation issued by a client outside this set
+  fallback: () => MutationLifecycle
+}): MutationLifecycle['enqueueBackgroundMutation'] {
+  const queue: BackgroundMutationQueue = {
+    tail: Promise.resolve(),
+    lastErrorMessage: null,
+    coalesceSequence: new Map(),
+  }
+
+  return function enqueueBackgroundMutation(label, create, mutationOptions = {}) {
+    const { coalesceKey = '', settle = 'client', timeoutMs = 120_000 } = mutationOptions
+    const pinned = new Map<MutationLifecycle, number>()
+    for (const lifecycle of instances.all()) {
+      const generation = lifecycle.pinnedGeneration()
+      if (generation !== null) pinned.set(lifecycle, generation)
+    }
+    const anyPinnedCurrent = () =>
+      [...pinned].some(([lifecycle, generation]) =>
+        lifecycle.isCurrentGeneration(generation)
+      )
+    const sequence = coalesceKey ? (queue.coalesceSequence.get(coalesceKey) ?? 0) + 1 : 0
+    if (coalesceKey) queue.coalesceSequence.set(coalesceKey, sequence)
+
+    const queued = queue.tail.then(async () => {
+      if (coalesceKey) {
+        if (queue.coalesceSequence.get(coalesceKey) !== sequence) return
+        queue.coalesceSequence.delete(coalesceKey)
+      }
+      // every instance this write could have reached is gone
+      if (!anyPinnedCurrent()) throw new StaleGenerationError(label)
+
+      const result = await runGuarded({ generations: pinned, label }, create)
+      if (result && typeof result === 'object' && 'client' in result) {
+        const mutation = result as MutationLike
+        const owner = mutationOrigin(mutation)?.lifecycle ?? instances.fallback()
+        if (settle === 'server' && mutation.server) {
+          await owner.awaitMutationServer(mutation, label, timeoutMs)
+        } else {
+          await owner.awaitMutationClient(mutation, label, timeoutMs)
+        }
+      }
+      queue.lastErrorMessage = null
+    })
+
+    const result = queued.catch((error: unknown) => {
+      if (isStaleGenerationError(error)) return
+      if (!anyPinnedCurrent()) return
+      const message = describeMutationError(error)
+      // a write that keeps failing the same way logs once, not once per retry
+      const alreadyLogged = queue.lastErrorMessage === message
+      queue.lastErrorMessage = message
+      if (!alreadyLogged) {
+        console.warn(`[on-zero] ${label} background mutation failed:`, error)
+      }
+      throw error
+    })
+    queue.tail = result.catch(() => {})
+    return result
+  }
+}
+
+type GenerationWaiter = {
+  reject: () => void
+}
 
 export function createMutationLifecycle(options: {
   ackTimeoutRecoveryThreshold: number
@@ -95,12 +236,7 @@ export function createMutationLifecycle(options: {
     timeoutMs: number
     consecutiveTimeouts: number
   }) => void
-}) {
-  const queue: BackgroundMutationQueue = {
-    tail: Promise.resolve(),
-    lastErrorMessage: null,
-    coalesceSequence: new Map(),
-  }
+}): MutationLifecycle {
   const waiters = new Set<GenerationWaiter>()
   let generation = 0
   let active = false
@@ -115,7 +251,6 @@ export function createMutationLifecycle(options: {
     active = false
     generation += 1
     consecutiveServerAckTimeouts = 0
-    queue.coalesceSequence.clear()
     for (const waiter of [...waiters]) {
       waiters.delete(waiter)
       waiter.reject()
@@ -127,7 +262,35 @@ export function createMutationLifecycle(options: {
     generation += 1
     active = true
     consecutiveServerAckTimeouts = 0
-    queue.lastErrorMessage = null
+  }
+
+  function pinnedGeneration(): number | null {
+    return active ? generation : null
+  }
+
+  function isCurrentGeneration(pinned: number): boolean {
+    return active && pinned === generation
+  }
+
+  function assertWritable() {
+    const pending = guard.current
+    if (!pending) return
+    const pinned = pending.generations.get(lifecycle)
+    if (pinned === undefined) return
+    if (!isCurrentGeneration(pinned)) throw stale(pending.label)
+  }
+
+  function claimMutation(result: unknown) {
+    if (!result || typeof result !== 'object') return
+    mutationOrigins.set(result as object, { lifecycle, generation })
+  }
+
+  // a mutation is acknowledged in the generation that ISSUED it: a client
+  // replaced between the call and the await never settles that call, so its
+  // waiter has to fail fast instead of running out the timeout.
+  function issuedGeneration(mutation: MutationLike): number {
+    const origin = mutationOrigin(mutation)
+    return origin?.lifecycle === lifecycle ? origin.generation : generation
   }
 
   function observeGeneration(capturedGeneration: number, label: string) {
@@ -213,7 +376,13 @@ export function createMutationLifecycle(options: {
     label: string,
     timeoutMs = 30_000
   ): Promise<unknown> {
-    return settleMutationClient(mutation, label, timeoutMs, generation, true)
+    return settleMutationClient(
+      mutation,
+      label,
+      timeoutMs,
+      issuedGeneration(mutation),
+      true
+    )
   }
 
   async function awaitMutationServer(
@@ -221,7 +390,7 @@ export function createMutationLifecycle(options: {
     label: string,
     timeoutMs = 30_000
   ): Promise<unknown> {
-    const capturedGeneration = generation
+    const capturedGeneration = issuedGeneration(mutation)
     const clientResult = await settleMutationClient(
       mutation,
       label,
@@ -258,56 +427,49 @@ export function createMutationLifecycle(options: {
     }
   }
 
-  function enqueueBackgroundMutation(
-    label: string,
-    create: () => unknown,
-    mutationOptions: BackgroundMutationOptions = {}
-  ): Promise<void> {
-    const capturedGeneration = generation
-    const { coalesceKey = '', settle = 'client', timeoutMs = 120_000 } = mutationOptions
-    const sequence = coalesceKey ? (queue.coalesceSequence.get(coalesceKey) ?? 0) + 1 : 0
-    if (coalesceKey) queue.coalesceSequence.set(coalesceKey, sequence)
-
-    const queued = queue.tail.then(async () => {
-      if (!active || capturedGeneration !== generation) throw stale(label)
-      if (coalesceKey) {
-        if (queue.coalesceSequence.get(coalesceKey) !== sequence) return
-        queue.coalesceSequence.delete(coalesceKey)
-      }
-      const result = await create()
-      if (result && typeof result === 'object' && 'client' in result) {
-        const mutation = result as MutationLike
-        if (settle === 'server' && mutation.server) {
-          await awaitMutationServer(mutation, label, timeoutMs)
-        } else {
-          await settleMutationClient(mutation, label, timeoutMs, capturedGeneration, true)
-        }
-      } else {
-        await result
-      }
-      queue.lastErrorMessage = null
-    })
-
-    const result = queued.catch((error: unknown) => {
-      if (isStaleGenerationError(error)) return
-      if (!active || capturedGeneration !== generation) return
-      const message = describeMutationError(error)
-      const alreadyLogged = queue.lastErrorMessage === message
-      queue.lastErrorMessage = message
-      if (!alreadyLogged) {
-        console.warn(`[on-zero] ${label} background mutation failed:`, error)
-      }
-      throw error
-    })
-    queue.tail = result.catch(() => {})
-    return result
-  }
-
-  return {
+  const lifecycle: MutationLifecycle = {
     activate,
     fence,
-    enqueueBackgroundMutation,
+    enqueueBackgroundMutation: createBackgroundMutationQueue({
+      all: () => [lifecycle],
+      fallback: () => lifecycle,
+    }),
     awaitMutationClient,
     awaitMutationServer,
+    assertWritable,
+    claimMutation,
+    pinnedGeneration,
+    isCurrentGeneration,
+  }
+  return lifecycle
+}
+
+export type CombinedMutationLifecycle = Pick<
+  MutationLifecycle,
+  'awaitMutationClient' | 'awaitMutationServer' | 'enqueueBackgroundMutation'
+>
+
+// the mutation half of combineZeroClients: acknowledgement goes to the instance
+// that issued the mutation, over ONE background queue whose serial order and
+// coalescing span every instance. binding these to a single instance is what
+// let a control-plane recovery cancel unrelated project mutations.
+export function combineMutationLifecycles(
+  lifecycles: readonly [MutationLifecycle, ...MutationLifecycle[]]
+): CombinedMutationLifecycle {
+  const primary = lifecycles[0]
+  // a mutation from outside these clients has no owner to fence it — settle it
+  // on the primary, the same instance the facade sends unclaimed work to.
+  const ownerOf = (mutation: MutationLike): MutationLifecycle =>
+    mutationOrigin(mutation)?.lifecycle ?? primary
+
+  return {
+    awaitMutationClient: (mutation, label, timeoutMs) =>
+      ownerOf(mutation).awaitMutationClient(mutation, label, timeoutMs),
+    awaitMutationServer: (mutation, label, timeoutMs) =>
+      ownerOf(mutation).awaitMutationServer(mutation, label, timeoutMs),
+    enqueueBackgroundMutation: createBackgroundMutationQueue({
+      all: () => lifecycles,
+      fallback: () => primary,
+    }),
   }
 }

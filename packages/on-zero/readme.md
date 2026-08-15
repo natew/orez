@@ -566,8 +566,19 @@ const ProvideControlZero = clients.providers.control
 const ProvideProjectZero = clients.providers.project
 
 // useQuery/run/preload/getQuery dispatch by the query fn's namespace,
-// zero.mutate.<namespace> dispatches by model namespace
-export const { useQuery, zero, run, preload, getQuery, zeroEvents } = clients.combined
+// zero.mutate.<namespace> dispatches by model namespace, and the mutation
+// lifecycle helpers dispatch to the instance that issued the mutation
+export const {
+  useQuery,
+  zero,
+  run,
+  preload,
+  getQuery,
+  zeroEvents,
+  awaitMutationClient,
+  awaitMutationServer,
+  enqueueBackgroundMutation,
+} = clients.combined
 ;<ProvideControlZero cacheURL={controlUrl} userID={user.id}>
   <ProvideProjectZero cacheURL={projectUrl} userID={`${user.id}:${projectId}`}>
     <App />
@@ -588,6 +599,9 @@ constraints:
 - a mutator may only read/write tables owned by its own instance. its
   transaction runs on that instance alone; cross-instance writes are not
   detectable at registration and will silently miss the other store.
+- take the mutation lifecycle helpers from `clients.combined`, never from one
+  instance. one instance's helpers fence on THAT instance's recovery, so a
+  control-plane remint would cancel every project mutation in flight.
 - omitting `instanceName` keeps the exact single-instance behavior.
 
 ### server validation hooks
@@ -797,6 +811,12 @@ fence queued and in-flight work internally. direct settlement rejects with
 `StaleGenerationError`; the best-effort background queue drops that condition
 quietly. `MutationTimeoutError`, `MutationResultError`, and
 `mutationErrorMessage()` expose typed failure details.
+
+`combineZeroClients` exposes the same three helpers across every instance: one
+serial queue with one coalescing map, and each mutation fenced by the instance
+that issued it. a queued write is pinned to the generation its instance was on
+when it was queued, so an instance replaced in the meantime refuses that write
+instead of replaying it onto its replacement.
 
 ## getAuth
 
