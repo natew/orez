@@ -198,11 +198,13 @@ function createBackgroundMutationQueue(instances: {
       const result = await runGuarded({ generations: pinned, label }, create)
       if (result && typeof result === 'object' && 'client' in result) {
         const mutation = result as MutationLike
-        const owner = mutationOrigin(mutation)?.lifecycle ?? instances.fallback()
+        // the helpers route to the issuing instance themselves; entering
+        // through the fallback only decides where an UNTAGGED mutation settles
+        const settleOn = instances.fallback()
         if (settle === 'server' && mutation.server) {
-          await owner.awaitMutationServer(mutation, label, timeoutMs)
+          await settleOn.awaitMutationServer(mutation, label, timeoutMs)
         } else {
-          await owner.awaitMutationClient(mutation, label, timeoutMs)
+          await settleOn.awaitMutationClient(mutation, label, timeoutMs)
         }
       }
       queue.lastErrorMessage = null
@@ -212,7 +214,8 @@ function createBackgroundMutationQueue(instances: {
       if (isStaleGenerationError(error)) return
       if (!anyPinnedCurrent()) return
       const message = describeMutationError(error)
-      // a write that keeps failing the same way logs once, not once per retry
+      // a write that keeps failing the same way logs once per queue, until a
+      // queued write succeeds — a recovery in between does not re-arm it
       const alreadyLogged = queue.lastErrorMessage === message
       queue.lastErrorMessage = message
       if (!alreadyLogged) {
@@ -285,12 +288,21 @@ export function createMutationLifecycle(options: {
     mutationOrigins.set(result as object, { lifecycle, generation })
   }
 
-  // a mutation is acknowledged in the generation that ISSUED it: a client
-  // replaced between the call and the await never settles that call, so its
-  // waiter has to fail fast instead of running out the timeout.
-  function issuedGeneration(mutation: MutationLike): number {
+  // acknowledgement follows the mutation's own tag: the instance that issued
+  // it, in the generation it was issued in. asked to settle another instance's
+  // mutation, a client hands it to that instance rather than fencing it on a
+  // generation that has nothing to do with it — so the per-client helpers are
+  // correct in a multi-instance app too, and only an untagged mutation settles
+  // wherever it was handed in.
+  function foreignOwner(mutation: MutationLike): MutationLifecycle | null {
     const origin = mutationOrigin(mutation)
-    return origin?.lifecycle === lifecycle ? origin.generation : generation
+    return origin && origin.lifecycle !== lifecycle ? origin.lifecycle : null
+  }
+
+  // a client replaced between the call and the await can never settle that
+  // call, so its waiter fails fast instead of running out the timeout
+  function issuedGeneration(mutation: MutationLike): number {
+    return mutationOrigin(mutation)?.generation ?? generation
   }
 
   function observeGeneration(capturedGeneration: number, label: string) {
@@ -376,6 +388,8 @@ export function createMutationLifecycle(options: {
     label: string,
     timeoutMs = 30_000
   ): Promise<unknown> {
+    const owner = foreignOwner(mutation)
+    if (owner) return owner.awaitMutationClient(mutation, label, timeoutMs)
     return settleMutationClient(
       mutation,
       label,
@@ -390,6 +404,8 @@ export function createMutationLifecycle(options: {
     label: string,
     timeoutMs = 30_000
   ): Promise<unknown> {
+    const owner = foreignOwner(mutation)
+    if (owner) return owner.awaitMutationServer(mutation, label, timeoutMs)
     const capturedGeneration = issuedGeneration(mutation)
     const clientResult = await settleMutationClient(
       mutation,
@@ -457,16 +473,15 @@ export function combineMutationLifecycles(
   lifecycles: readonly [MutationLifecycle, ...MutationLifecycle[]]
 ): CombinedMutationLifecycle {
   const primary = lifecycles[0]
-  // a mutation from outside these clients has no owner to fence it — settle it
-  // on the primary, the same instance the facade sends unclaimed work to.
-  const ownerOf = (mutation: MutationLike): MutationLifecycle =>
-    mutationOrigin(mutation)?.lifecycle ?? primary
 
   return {
-    awaitMutationClient: (mutation, label, timeoutMs) =>
-      ownerOf(mutation).awaitMutationClient(mutation, label, timeoutMs),
-    awaitMutationServer: (mutation, label, timeoutMs) =>
-      ownerOf(mutation).awaitMutationServer(mutation, label, timeoutMs),
+    // every lifecycle already hands a mutation to the instance that issued it,
+    // so entering through the primary only decides where a mutation from
+    // outside these clients settles — the instance the facade sends all its
+    // other unclaimed work to. the queue is what the combined form adds: one
+    // serial tail and one coalescing map spanning every instance.
+    awaitMutationClient: primary.awaitMutationClient,
+    awaitMutationServer: primary.awaitMutationServer,
     enqueueBackgroundMutation: createBackgroundMutationQueue({
       all: () => lifecycles,
       fallback: () => primary,

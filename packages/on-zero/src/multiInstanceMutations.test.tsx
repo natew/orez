@@ -190,6 +190,50 @@ test('a mutation issued before a rotation never settles on the replacement', asy
   ).rejects.toSatisfy(isStaleGenerationError)
 })
 
+test('a per-instance helper hands a foreign mutation to its owner', async () => {
+  await mount('ctl-13', 'prj-13')
+
+  // the wrong client to settle a project write: it must pass it to project
+  // rather than fence it on its own generation
+  const ack = track(
+    control.awaitMutationServer(projectWrite('p6'), 'project write', 5000)
+  )
+  await tick()
+
+  await mount('ctl-14', 'prj-13')
+  await tick()
+  expect(ack.status).toBe('pending')
+
+  await mount('ctl-14', 'prj-14')
+  await tick()
+  expect(ack.status).toBe('rejected')
+  expect(isStaleGenerationError(ack.error)).toBe(true)
+})
+
+test('a create that awaits before writing is not pinned to its queued generation', async () => {
+  await mount('ctl-11', 'prj-11')
+
+  const release = deferred<void>()
+  const queued = combined.enqueueBackgroundMutation(
+    'control read then write',
+    async () => {
+      await release.promise
+      return controlWrite('c7')
+    }
+  )
+
+  // documented boundary: the pin covers the synchronous window in which
+  // create() calls zero.mutate, so a create that awaits first writes on
+  // whichever instance is live when it fires and is acknowledged there
+  await mount('ctl-12', 'prj-11')
+  release.resolve()
+  await act(async () => {
+    await queued
+  })
+
+  expect(writes).toEqual(['control:c7'])
+})
+
 test('a fenced instance drops only its own queued background writes', async () => {
   await mount('ctl-5', 'prj-5')
 

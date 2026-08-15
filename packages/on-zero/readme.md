@@ -599,9 +599,9 @@ constraints:
 - a mutator may only read/write tables owned by its own instance. its
   transaction runs on that instance alone; cross-instance writes are not
   detectable at registration and will silently miss the other store.
-- take the mutation lifecycle helpers from `clients.combined`, never from one
-  instance. one instance's helpers fence on THAT instance's recovery, so a
-  control-plane remint would cancel every project mutation in flight.
+- take `enqueueBackgroundMutation` from `clients.combined`. a per-instance queue
+  gives the app a second serial queue with its own coalescing map, so same-key
+  writes stop superseding each other across instances.
 - omitting `instanceName` keeps the exact single-instance behavior.
 
 ### server validation hooks
@@ -814,9 +814,19 @@ quietly. `MutationTimeoutError`, `MutationResultError`, and
 
 `combineZeroClients` exposes the same three helpers across every instance: one
 serial queue with one coalescing map, and each mutation fenced by the instance
-that issued it. a queued write is pinned to the generation its instance was on
-when it was queued, so an instance replaced in the meantime refuses that write
-instead of replaying it onto its replacement.
+that issued it. `awaitMutationClient` / `awaitMutationServer` settle a mutation
+on the instance that issued it no matter which client you call them on; take
+`enqueueBackgroundMutation` from `clients.combined` so the app keeps ONE queue
+and one coalescing map instead of one per instance.
+
+a queued write is pinned to the generation its instance was on when it was
+queued, so an instance replaced in the meantime refuses that write instead of
+replaying it onto its replacement. **the pin covers the synchronous window in
+which `create()` calls `zero.mutate`.** a `create()` that awaits first — a
+read-then-write — is outside it: that write goes to whichever instance is live
+when it fires, exactly like a direct call, and is still acknowledged by the
+instance that issued it. keep read-modify-write inside the mutator (`tx.run` in
+the same transaction) and the queued write stays pinned.
 
 ## getAuth
 
