@@ -1395,26 +1395,46 @@ export function createSyncDurableObject<
       let lastError: unknown = null
       for (let attempt = 1; attempt <= delegateMaxAttempts; attempt++) {
         let response: Response | null = null
+        const attemptTimeoutMs = provisioning
+          ? Math.max(delegateTimeoutMs, 25_000)
+          : delegateTimeoutMs
+        // ask the signal, not the rejection: this signal aborts for exactly one
+        // reason, so `aborted` names a timeout without depending on how the
+        // runtime shapes its DOMException.
+        const timeout = AbortSignal.timeout(attemptTimeoutMs)
         try {
           response = await binding.fetch(endpoint.toString(), {
             method: 'POST',
             headers,
             body,
-            signal: AbortSignal.timeout(
-              provisioning ? Math.max(delegateTimeoutMs, 25_000) : delegateTimeoutMs
-            ),
+            signal: timeout,
           })
         } catch (error) {
           lastError = error
         }
+        const timedOut = response === null && timeout.aborted
         if (
           !shouldRetryDelegatedPush(
             response?.status ?? null,
             attempt,
-            delegateMaxAttempts
+            delegateMaxAttempts,
+            timedOut
           )
         ) {
           if (response) return response
+          // the retry log below is the only place a delegated push failure was
+          // ever named, and a terminal failure skips it. log here too, or the
+          // host answers 500 and says nothing about why.
+          console.warn(
+            JSON.stringify({
+              event: 'sync_delegated_push_failed',
+              attempt,
+              maxAttempts: delegateMaxAttempts,
+              timedOut,
+              timeoutMs: attemptTimeoutMs,
+              error: errorMessage(lastError),
+            })
+          )
           throw lastError
         }
         await response?.body?.cancel()

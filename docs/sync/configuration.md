@@ -49,7 +49,17 @@ neither.
 `delegatedPushRetry` fields and defaults: `maxAttempts` 3 (including the first
 request), `initialBackoffMs` 100, `maxBackoffMs` 1000, `timeoutMs` 5000 per
 attempt. Retries fire only on transport failure, HTTP 429, and HTTP 5xx. Any
-other 4xx returns immediately.
+other 4xx returns immediately, and so does an attempt that used its whole
+`timeoutMs`: that work was killed mid-flight, so a retry repeats its full cost.
+
+An attempt that times out is therefore the host's total budget, not
+`maxAttempts * timeoutMs`. Size `timeoutMs` against the client that is waiting
+on the push. orez-lite's browser transport aborts any push or pull whose
+response headers miss its own 60s deadline, and treats any push failure as a
+transport failure, which closes its socket and reconnects. A host budget at or
+above that deadline turns one slow mutation into a full sync teardown that the
+user sees as an interrupted-sync notice, and the client then re-pushes the same
+batch into the same wall.
 
 ## Upstream ingest
 

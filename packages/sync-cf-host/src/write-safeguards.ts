@@ -173,11 +173,27 @@ export function retryDelayMs(
   return Math.min(maxBackoffMs, initialBackoffMs * 2 ** Math.max(0, attempt - 1))
 }
 
+/**
+ * A timeout is terminal, every other transport failure is retryable.
+ *
+ * Retrying a 429 or a transient 5xx is cheap: the app answered in
+ * milliseconds and the second attempt usually lands. Retrying a TIMEOUT is
+ * not. The work was killed mid-flight, so the retry repeats its full cost and
+ * the caller's total budget becomes `maxAttempts * timeoutMs`. The client is
+ * what that total has to fit inside: orez-lite's browser transport aborts any
+ * push whose response headers miss its own 60s deadline, and any push failure
+ * closes its socket, so a doubled budget turns one slow mutation into a full
+ * sync teardown. Contrast ran 30s x 2 attempts against that 60s deadline and
+ * on 2026-08-15 a real user's connection was torn down 19 times in 40 minutes,
+ * once every ~68s, on a push the host answered at ~60.2s.
+ */
 export function shouldRetryDelegatedPush(
   responseStatus: number | null,
   attempt: number,
-  maxAttempts: number
+  maxAttempts: number,
+  timedOut: boolean
 ): boolean {
   if (attempt >= maxAttempts) return false
+  if (timedOut) return false
   return responseStatus === null || responseStatus === 429 || responseStatus >= 500
 }
