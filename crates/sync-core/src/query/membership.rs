@@ -1056,6 +1056,15 @@ pub(crate) fn recompute_group_with_rehydrate(
             )?;
             *ref_delta.entry((table, pk)).or_insert(0) -= 1;
         }
+        // The definition is derived from a client's put operation. Once the
+        // last desire is gone, retaining it only makes every later recompute
+        // revisit a query that cannot produce membership. A future put calls
+        // register_query before restoring the desire, so it recreates the
+        // definition through the same path as a new query.
+        db.exec(
+            "DELETE FROM _zsync_queries WHERE clientGroupID = ? AND hash = ?",
+            &[text(group), text(hash)],
+        )?;
     }
 
     // apply net deltas; emit a put on 0 -> positive, a del on positive -> 0

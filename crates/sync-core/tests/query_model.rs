@@ -110,10 +110,6 @@ fn run_trace(seed: u64, steps: u64) {
     init_query_schema(&mut db).unwrap();
 
     let pool = query_pool();
-    for (hash, ast) in &pool {
-        register_query(&mut db, &tables, G, hash, ast, 0).unwrap();
-    }
-
     let mut store: BTreeSet<String> = BTreeSet::new();
     let mut desired: BTreeSet<usize> = BTreeSet::new();
     let mut changed: BTreeSet<(String, String)> = BTreeSet::new();
@@ -162,6 +158,7 @@ fn run_trace(seed: u64, steps: u64) {
             3 => {
                 // desire a random pool query
                 let q = rng.below(pool.len() as u64) as usize;
+                register_query(&mut db, &tables, G, pool[q].0, &pool[q].1, 0).unwrap();
                 set_desire(&mut db, G, "c1", pool[q].0, 1).unwrap();
                 desired.insert(q);
             }

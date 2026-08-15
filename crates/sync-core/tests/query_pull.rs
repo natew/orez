@@ -172,7 +172,7 @@ fn deleting_a_client_removes_its_queries_membership_and_lmid() {
         keeper["cookie"].clone(),
         Some(json!({
             "version": 1,
-            "patch": [{ "op": "put", "hash": "closed", "ast": closed_query }],
+            "patch": [{ "op": "put", "hash": "closed", "ast": closed_query.clone() }],
         })),
     );
     assert_eq!(put_ids(&retired), vec!["i2"]);
@@ -209,6 +209,24 @@ fn deleting_a_client_removes_its_queries_membership_and_lmid() {
             .unwrap();
         assert!(rows.is_empty(), "{table} retained the deleted client");
     }
+
+    let definitions =
+        h.db.query(
+            "SELECT 1 FROM _zsync_queries WHERE clientGroupID = ? AND hash = ?",
+            &[SqlValue::Text("g1".into()), SqlValue::Text("closed".into())],
+        )
+        .unwrap();
+    assert!(definitions.is_empty());
+
+    let redesired = h.pull(
+        "keeper",
+        response["cookie"].clone(),
+        Some(json!({
+            "version": 2,
+            "patch": [{ "op": "put", "hash": "closed", "ast": closed_query }],
+        })),
+    );
+    assert_eq!(put_ids(&redesired), vec!["i2"]);
 }
 
 #[test]
