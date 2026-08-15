@@ -40,7 +40,7 @@ export function SiteHeader() {
         <AppLink href="/" aria-label={`${siteConfig.name} home`} className="brand-link">
           <XStack items="center" gap="$2">
             {siteConfig.showLogo ? <Mark /> : null}
-            <Text color="$color12" fontSize={17} fontWeight="700" letterSpacing={-0.4}>
+            <Text color="$color12" fontSize={17} fontWeight="700">
               {siteConfig.name.toLowerCase()}
             </Text>
           </XStack>
