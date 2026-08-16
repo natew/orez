@@ -45,13 +45,14 @@ non-ASCII case pairs can diverge from PostgreSQL.
 Every runtime uses the same `orez-sync-cf-host/wasm-module.wasm` import and the same
 `initSync` path. Configure the loader that matches the host:
 
-| Host                         | Configuration                                                                                         | Module value                                                 |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Workerd / Wrangler           | Map the package's `wasm-module.wasm` export as a compiled Wasm module; do not install the Vite plugin | Cloudflare `CompiledWasm`                                    |
-| Bun                          | Preload `orez-sync-cf-host/bun-wasm-loader`                                                           | `WebAssembly.Module` compiled by the Bun loader              |
-| Vite serve / SSR development | Add `orezSyncCfHostWasm()` from `orez-sync-cf-host/vite-wasm-loader`                                  | `WebAssembly.Module` built from package bytes by Vite        |
-| Direct Node >= 22.15         | Preload `orez-sync-cf-host/node-wasm-loader` with `NODE_OPTIONS=--import`                             | `WebAssembly.Module` compiled by the Node loader             |
-| Node production bundle       | Keep the same Vite plugin active for the production SSR build                                         | `WebAssembly.Module` built from bytes embedded in the bundle |
+| Host                         | Configuration                                                                                                                                   | Module value                                                 |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Workerd / Wrangler           | Map the package's `wasm-module.wasm` export as a compiled Wasm module                                                                           | Cloudflare `CompiledWasm`                                    |
+| Workerd build through Vite   | Add `orezSyncCfHostWasm({ runtime: 'workerd' })`, preload the Node or Bun loader during the build, and map the export as a compiled Wasm module | Cloudflare `CompiledWasm`                                    |
+| Bun                          | Preload `orez-sync-cf-host/bun-wasm-loader`                                                                                                     | `WebAssembly.Module` compiled by the Bun loader              |
+| Vite serve / SSR development | Add `orezSyncCfHostWasm()` from `orez-sync-cf-host/vite-wasm-loader`                                                                            | `WebAssembly.Module` built from package bytes by Vite        |
+| Direct Node >= 22.15         | Preload `orez-sync-cf-host/node-wasm-loader` with `NODE_OPTIONS=--import`                                                                       | `WebAssembly.Module` compiled by the Node loader             |
+| Node production bundle       | Keep the same Vite plugin active for the production SSR build                                                                                   | `WebAssembly.Module` built from bytes embedded in the bundle |
 
 The Vite plugin also keeps `orez-sync-cf-host` inside Vite's SSR pipeline.
 
@@ -95,9 +96,12 @@ export default {
 }
 ```
 
-If one Vite config targets both Node and Workerd, include this plugin only for
-the Node target. The Workerd target uses the `CompiledWasm` mapping above and
-must not run the Vite loader.
+If one Vite config targets both Node and Workerd, pass `runtime: 'workerd'` for
+the Workerd build. Serve mode still embeds the module for Vite's Node SSR
+runtime. Build mode preserves the Wasm import for the platform's `CompiledWasm`
+mapping instead of embedding bytes that Workerd cannot compile. Because Vite
+imports the generated server chunks while rendering static routes, start that
+build with the Node or Bun loader shown above.
 
 ## Wake channel and eviction
 
