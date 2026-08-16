@@ -20,6 +20,17 @@ belong in
 `ctx.defer`, which runs only after commit. Application failures use the
 required second transaction to advance the LMID marker.
 
+The Worker emits structured `sync_worker_stage` logs around `authenticate` and
+the namespace Durable Object `fetch`. Successful requests are sampled at 1%.
+Errors are always logged, and a stage still waiting after five seconds emits an
+unsampled `waiting` event before the request can be terminated externally. A
+slow stage that later completes also logs its final duration. The event carries
+request kind, host version, duration, outcome, response status, and the existing
+hashed namespace once forwarding begins. Healthy requests pay
+one random comparison per request plus one timer arm, timer cancellation, and
+one clock read per measured stage. The sampled completion reads the clock once
+more. No extra fetch, storage operation, or await is added.
+
 Every pull is query-driven. Set `config.queries` to the same registry used by
 the client. The host resolves desired named queries in-process and passes
 authenticated claims as their context, so permission scoping remains inside the

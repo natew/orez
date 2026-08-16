@@ -66,6 +66,8 @@ const WAKE_SUBSCRIBER_TAG = 'orez:wake-subscriber'
 const IDENTITY_HEADER = 'x-orez-sync-identity'
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MIN_SNAPSHOT_PAGE_ROWS = 100
+const WORKER_STAGE_TELEMETRY_SAMPLE_RATE = 0.01
+const WORKER_STAGE_WAITING_MS = 5_000
 
 type PushMutation = {
   id: string
@@ -344,6 +346,54 @@ async function namespaceHash(namespace: string): Promise<string> {
   ).join('')
 }
 
+type WorkerStage = 'authenticate' | 'sync_do_forward'
+
+async function timeWorkerStage<Value>(
+  fields: {
+    hostVersion: string
+    requestKind: string
+    stage: WorkerStage
+    namespaceHash: string | null
+    sampled: boolean
+  },
+  work: () => Value | Promise<Value>
+): Promise<Value> {
+  const started = performance.now()
+  let waited = false
+  const emit = (outcome: 'success' | 'error' | 'waiting', value?: Value): void => {
+    try {
+      console.log(
+        JSON.stringify({
+          event: 'sync_worker_stage',
+          hostVersion: fields.hostVersion,
+          requestKind: fields.requestKind,
+          stage: fields.stage,
+          outcome,
+          durationMs: Math.round((performance.now() - started) * 1_000) / 1_000,
+          namespaceHash: fields.namespaceHash,
+          status: value instanceof Response ? value.status : null,
+          sampleRate:
+            outcome === 'success' && !waited ? WORKER_STAGE_TELEMETRY_SAMPLE_RATE : 1,
+        })
+      )
+    } catch {}
+  }
+  const waitingTimer = setTimeout(() => {
+    waited = true
+    emit('waiting')
+  }, WORKER_STAGE_WAITING_MS)
+  try {
+    const value = await work()
+    clearTimeout(waitingTimer)
+    if (fields.sampled || waited) emit('success', value)
+    return value
+  } catch (error) {
+    clearTimeout(waitingTimer)
+    emit('error')
+    throw error
+  }
+}
+
 function socketAttachment(socket: WebSocket): SocketAttachment | null {
   const value = socket.deserializeAttachment() as SocketAttachment | null
   return value && typeof value.clientID === 'string' ? value : null
@@ -428,6 +478,8 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         if (!namespace) return new Response('orez sync-cf-host', { status: 200 })
 
         const route = routeAfterNamespace(new URL(request.url).pathname)
+        const requestKind = route.startsWith('/') ? route.slice(1) : route
+        const sampled = Math.random() < WORKER_STAGE_TELEMETRY_SAMPLE_RATE
         const isAdmin = route.startsWith('/admin/')
         let wakeUserID: string | null = null
         if (route === '/wake') {
@@ -506,7 +558,16 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           // the callback attached survives to the wire.
           let claims: Awaited<ReturnType<typeof config.authenticate>>
           try {
-            claims = await config.authenticate(request, env)
+            claims = await timeWorkerStage(
+              {
+                hostVersion: config.hostVersion,
+                requestKind,
+                stage: 'authenticate',
+                namespaceHash: null,
+                sampled,
+              },
+              () => config.authenticate(request, env)
+            )
           } catch (error) {
             return errorResponse(error)
           }
@@ -535,7 +596,8 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         // group against this userID before it will read a single row, so there is
         // nothing gained by moving them here.
         if (wakeUserID) headers.set(IDENTITY_HEADER, encodeURIComponent(wakeUserID))
-        headers.set(NAMESPACE_HEADER, await namespaceHash(namespace))
+        const hashedNamespace = await namespaceHash(namespace)
+        headers.set(NAMESPACE_HEADER, hashedNamespace)
         try {
           const path = upstreamPath(namespace)
           if (path !== null) headers.set(UPSTREAM_PATH_HEADER, path)
@@ -547,7 +609,16 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           ? jsonBodyRequest(request, headers, forwardedBody)
           : new Request(request, { headers })
         const id = env.SYNC_DO.idFromName(namespace)
-        return env.SYNC_DO.get(id).fetch(forwarded)
+        return timeWorkerStage(
+          {
+            hostVersion: config.hostVersion,
+            requestKind,
+            stage: 'sync_do_forward',
+            namespaceHash: hashedNamespace,
+            sampled,
+          },
+          () => env.SYNC_DO.get(id).fetch(forwarded)
+        )
       }
       return withCors(await handle())
     },
