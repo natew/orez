@@ -67,8 +67,17 @@ describe('IngestCircuitBreaker', () => {
 test('delegated push retries are bounded and exponentially capped', () => {
   expect(retryDelayMs(1, 100, 250)).toBe(100)
   expect(retryDelayMs(3, 100, 250)).toBe(250)
-  expect(shouldRetryDelegatedPush(null, 1, 3)).toBe(true)
-  expect(shouldRetryDelegatedPush(503, 2, 3)).toBe(true)
-  expect(shouldRetryDelegatedPush(503, 3, 3)).toBe(false)
-  expect(shouldRetryDelegatedPush(400, 1, 3)).toBe(false)
+  expect(shouldRetryDelegatedPush(null, 1, 3, false)).toBe(true)
+  expect(shouldRetryDelegatedPush(503, 2, 3, false)).toBe(true)
+  expect(shouldRetryDelegatedPush(503, 3, 3, false)).toBe(false)
+  expect(shouldRetryDelegatedPush(400, 1, 3, false)).toBe(false)
+})
+
+test('a timed out delegated push is terminal, so a hang costs one budget', () => {
+  // the same transport failure retries when the app answered fast and does not
+  // when the attempt burned its whole timeout. `maxAttempts * timeoutMs` is
+  // what the client's own request deadline has to accommodate.
+  expect(shouldRetryDelegatedPush(null, 1, 3, false)).toBe(true)
+  expect(shouldRetryDelegatedPush(null, 1, 3, true)).toBe(false)
+  expect(shouldRetryDelegatedPush(null, 1, 2, true)).toBe(false)
 })
