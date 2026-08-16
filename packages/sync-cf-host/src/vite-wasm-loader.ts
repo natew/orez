@@ -7,17 +7,25 @@ const resolvedWasmModuleID = `\0${wasmModuleID}`
 
 type OrezSyncCfHostWasmOptions = {
   noExternal?: string[]
+  runtime?: 'node' | 'workerd'
 }
 
-/** load the sync engine for Vite's Node serve, SSR, and production build paths. */
+/** load the sync engine into a Vite SSR graph for Node or Workerd. */
 export function orezSyncCfHostWasm(options: OrezSyncCfHostWasmOptions = {}): Plugin[] {
   const noExternal = ['orez-sync-cf-host', ...(options.noExternal ?? [])]
+  let command: 'build' | 'serve' = 'serve'
   return [
     {
       name: 'orez-sync-cf-host-wasm',
       enforce: 'pre',
+      configResolved(config) {
+        command = config.command
+      },
       resolveId(source) {
-        return source === wasmModuleID ? resolvedWasmModuleID : null
+        if (source !== wasmModuleID) return null
+        return options.runtime === 'workerd' && command === 'build'
+          ? { id: wasmModuleID, external: true }
+          : resolvedWasmModuleID
       },
       async load(id) {
         if (id !== resolvedWasmModuleID) return null
