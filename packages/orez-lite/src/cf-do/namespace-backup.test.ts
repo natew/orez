@@ -98,13 +98,25 @@ function writableBucket() {
 
 const BetterSqlite3 = BedrockSqlite.Database
 
+// every export read runs in one session. these tests exercise the scan itself,
+// so the session is a pass-through over the same query callback.
+function backupManager<Env>(options: any) {
+  return createNamespaceBackupManager<Env>({
+    readSession: (env: any, namespace: string, work: any) =>
+      work((sql: string, params: readonly unknown[] = []) =>
+        options.query(env, namespace, sql, params)
+      ),
+    ...options,
+  })
+}
+
 function realSqliteManager(
   db: InstanceType<typeof BetterSqlite3>,
   bucket: NamespaceBackupBucket,
   batchSizes: number[] = [],
   metrics?: { queries: string[]; rowsRead: number }
 ) {
-  return createNamespaceBackupManager({
+  return backupManager({
     format: 'test-v3',
     markerTable: '_test_backup_meta',
     excludedTables: ['_test_backup_meta'],
@@ -140,7 +152,7 @@ function realSqliteManager(
 describe('namespace backup export', () => {
   it('records per-table row counts in the durable summary without another scan', async () => {
     const stored = writableBucket()
-    const manager = createNamespaceBackupManager({
+    const manager = backupManager({
       format: 'test-v3',
       markerTable: '_test_backup_meta',
       files: () => stored.bucket,
@@ -183,7 +195,7 @@ describe('namespace backup export', () => {
       body: `body-${index}`,
     }))
     const pageQueries: Array<{ sql: string; params: readonly unknown[] }> = []
-    const manager = createNamespaceBackupManager({
+    const manager = backupManager({
       format: 'test-v3',
       markerTable: '_test_backup_meta',
       files: () => stored.bucket,
@@ -274,6 +286,94 @@ describe('namespace backup export', () => {
   })
 })
 
+describe('namespace backup export consistency', () => {
+  it('dumps a state that some transaction actually produced', async () => {
+    const db = new BetterSqlite3(':memory:')
+    db.exec(
+      'CREATE TABLE account (id TEXT PRIMARY KEY, balance INTEGER NOT NULL);' +
+        'CREATE TABLE ledger (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id), amount INTEGER NOT NULL)'
+    )
+    db.exec("INSERT INTO account VALUES ('a1', 0)")
+
+    // The durable object admits no write session while a read session is open
+    // (worker.ts canAdmitApplicationSqlSession). A scan that owns one session
+    // for its whole length therefore cannot observe half of a deposit; a scan
+    // that opens a session per statement can.
+    let readersOpen = 0
+    const queuedWrites: Array<() => void> = []
+    const admitWrites = () => {
+      while (readersOpen === 0 && queuedWrites.length > 0) queuedWrites.shift()!()
+    }
+    let depositRequested = false
+    const requestDepositOnce = (sql: string) => {
+      if (depositRequested || !sql.includes('FROM "ledger"')) return
+      depositRequested = true
+      // one transaction, so sum(ledger.amount) always equals account.balance
+      queuedWrites.push(() => {
+        db.exec('BEGIN')
+        db.exec("UPDATE account SET balance = balance + 100 WHERE id = 'a1'")
+        db.exec("INSERT INTO ledger VALUES ('l1', 'a1', 100)")
+        db.exec('COMMIT')
+      })
+      admitWrites()
+    }
+    const run = (sql: string, params: readonly unknown[]) => {
+      requestDepositOnce(sql)
+      const statement = db.prepare(sql)
+      const rows = statement.reader
+        ? statement.all(...params)
+        : (statement.run(...params), [])
+      admitWrites()
+      return rows
+    }
+
+    const stored = writableBucket()
+    const manager = createNamespaceBackupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      excludedTables: ['_test_backup_meta'],
+      files: () => stored.bucket,
+      query: async (_env, _namespace, sql, params) => run(sql, params),
+      readSession: async (_env, _namespace, work) => {
+        readersOpen++
+        try {
+          return await work(async (sql, params = []) => run(sql, params))
+        } finally {
+          readersOpen--
+          admitWrites()
+        }
+      },
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await manager.exportNamespace({}, 'singleton')
+
+    const pointer = JSON.parse(
+      stored.pointers.get('backups/singleton/latest.json') ?? '{}'
+    )
+    const dumped = (stored.pointers.get(String(pointer.key)) ?? '')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((line) => line.kind === 'rows')
+    const rowsOf = (table: string) =>
+      dumped.filter((line) => line.table === table).flatMap((line) => line.rows)
+    const balance = Number(rowsOf('account').find((row: any) => row.id === 'a1')?.balance)
+    const ledgerTotal = rowsOf('ledger').reduce(
+      (total: number, row: any) => total + Number(row.amount),
+      0
+    )
+
+    expect(depositRequested).toBe(true)
+    expect(ledgerTotal).toBe(balance)
+    // the deposit is delayed by the scan, never dropped
+    expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
+      balance: 100,
+    })
+  })
+})
+
 describe('namespace backup restore', () => {
   it('validates the complete dump before mutating the namespace', async () => {
     const key = 'backups/singleton/truncated.ndjson'
@@ -296,7 +396,7 @@ describe('namespace backup restore', () => {
     )
     const queries: string[] = []
     const batches: NamespaceBackupStatement[][] = []
-    const manager = createNamespaceBackupManager({
+    const manager = backupManager({
       format: 'test-v3',
       markerTable: '_test_backup_meta',
       files: () => stored.bucket,
@@ -344,7 +444,7 @@ describe('namespace backup restore', () => {
       ])
     )
     const batches: NamespaceBackupStatement[][] = []
-    const manager = createNamespaceBackupManager({
+    const manager = backupManager({
       format: 'test-v3',
       markerTable: '_test_backup_meta',
       files: () => stored.bucket,
@@ -404,7 +504,7 @@ describe('namespace backup restore', () => {
       ])
     )
     const batches: NamespaceBackupStatement[][] = []
-    const manager = createNamespaceBackupManager({
+    const manager = backupManager({
       format: 'test-v3',
       markerTable: '_test_backup_meta',
       files: () => stored.bucket,
@@ -523,7 +623,7 @@ describe('namespace backup restore', () => {
         { kind: 'footer', tables: 1, rows: 1 },
       ])
     )
-    const manager = createNamespaceBackupManager({
+    const manager = backupManager({
       format: 'test-v3',
       acceptedFormats: ['test-v2'],
       markerTable: '_test_backup_meta',

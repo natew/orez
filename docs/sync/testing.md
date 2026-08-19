@@ -339,3 +339,29 @@ list-append --consistency-models serializable`, failing the job on `false`,
    bound (see `docs/sync/nemesis-red-proof.md`). PR CI is untouched. Still
    historical single runs, not gated: multi-hour longevity, the larger bench/load
    grids in `harness/scripts/nightly.sh`, and the CF-side memory soaks.
+
+9. **The R2 namespace backup has unit coverage only, and had no concurrency
+   coverage at all until 2026-08-18.** `harness/src/backup-restore.ts` covers
+   the sync host's own backup and stops the writer first
+   (`/admin/writer`, `backup-restore.ts:52`), so it structurally cannot observe
+   a write racing an export. The separate `orez-lite` namespace backup, which
+   dumps a whole namespace to R2 for disaster recovery
+   (`packages/orez-lite/src/cf-do/namespace-backup.ts`), is covered by
+   `namespace-backup.test.ts` alone. That suite tested paging, ordering, and
+   restore, never a concurrent commit. It missed a real defect: the export read
+   one page per application-SQL session, and because the durable object admits a
+   write session the moment the reader set drains
+   (`worker.ts` `canAdmitApplicationSqlSession`), a commit landed between two
+   pages and the dump held a state no transaction produced — a parent row read
+   before the write next to child rows read after it. The scan now owns one read
+   session for its whole length, and
+   `namespace backup export consistency > dumps a state that some transaction
+actually produced` pins it (red proof: with per-statement reads the dump
+   carries `balance 0` against a ledger summing to `100`). Two gaps remain
+   stated rather than closed: the durable object's own maintenance writes
+   (transaction rollback, recovery) run outside the admission queue, so a read
+   session is writer exclusion and not snapshot isolation
+   (`application-sql.ts`, `readTransaction`); and holding one session for the
+   whole scan blocks application writes for the export's duration, which a
+   queued writer surfaces as a 30-second admission timeout
+   (`APPLICATION_SQL_TURN_WAIT_MS`) rather than as a backup failure.
