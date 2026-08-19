@@ -504,6 +504,35 @@ describe('Orez HTTP transport', () => {
     expect(fetch).toHaveBeenCalledTimes(3)
   })
 
+  test('a data-changed pull that lands during an in-flight pull runs again after it', async () => {
+    // hosts that know the server advanced call transport.pull() as their
+    // data-changed nudge (pullHttpPullTransports, and sootsim's render worker
+    // reaching the registry directly). the in-flight pull was issued before
+    // that write committed, so joining it and stopping there loses the row
+    // until the 5-minute safety interval.
+    const releaseFirstPull = defer<void>()
+    let pulls = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      expect(request.path).toBe('/pull')
+      pulls++
+      if (pulls === 1) await releaseFirstPull.promise
+      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+    })
+    const transport = installHttpPullTransport({ origin: ORIGIN, fetch })
+    transports.push(transport)
+    openRawSocketWithMessages()
+
+    await eventually(() => expect(pulls).toBe(1))
+    const nudge = transport.pull()
+    releaseFirstPull.resolve()
+    await nudge
+
+    await eventually(() => expect(pulls).toBe(2))
+    await sleep(400)
+    expect(pulls).toBe(2)
+  })
+
   test('a push burst schedules one ack pull after the drain, not one per batch', async () => {
     const firstPushStarted = defer<void>()
     const releaseFirstPush = defer<void>()

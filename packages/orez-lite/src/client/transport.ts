@@ -678,7 +678,16 @@ class ZeroHttpSocket {
 
   pull(): Promise<void> {
     if (this.readyState !== this.OPEN) return Promise.resolve()
-    if (this.pullInFlight) return this.pullInFlight
+    // a pull requested while one is in flight cannot be answered by the one in
+    // flight: that request left with an older cookie, so a row committed after
+    // it went out is not in its response. joining it and stopping there drops
+    // the request silently and leaves convergence to pullIntervalMs, five
+    // minutes away. every caller wants "go get what is there now", so mark the
+    // re-run here rather than making each of them remember to.
+    if (this.pullInFlight) {
+      this.pullAfterCurrent = true
+      return this.pullInFlight
+    }
     // a starting pull satisfies any pull the spacing timer was holding
     if (this.nextPullTimer !== undefined) {
       clearTimeout(this.nextPullTimer)
@@ -811,11 +820,11 @@ class ZeroHttpSocket {
         this.wakeSocket = undefined
         this.scheduleWakeReconnect()
       }
-      // route through requestPullAfterCurrent, NOT pull() directly: a wake that
-      // lands while a pull is already in flight must set pullAfterCurrent so the
-      // in-flight pull re-runs and picks up the woken change. calling pull()
-      // directly would return the existing promise and silently drop the wake,
-      // leaving convergence to the safety poll (a burst-storm latency bug).
+      // route through requestPullAfterCurrent, NOT pull() directly: a wake
+      // storm must coalesce into one leading pull plus one trailing pull, and
+      // only this path applies the spacing window that gets that. pull() no
+      // longer drops a request that lands mid-flight, but it also ignores the
+      // spacing, so a storm of five wakes would issue five pulls.
       socket.onmessage = () => this.requestPullAfterCurrent()
       socket.onclose = reconnect
       socket.onerror = reconnect
