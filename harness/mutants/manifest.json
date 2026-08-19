@@ -2,6 +2,7 @@
   "mutants": [
     {
       "id": "Q1-ignore-and-branch",
+      "target": "rust-engine",
       "property": "query",
       "file": "crates/sync-core/src/query/compile.rs",
       "description": "AND junction compiles only its first branch; remaining filters silently dropped",
@@ -9,6 +10,7 @@
     },
     {
       "id": "Q2-orderby-flip",
+      "target": "rust-engine",
       "property": "query",
       "file": "crates/sync-core/src/query/compile.rs",
       "description": "orderBy direction inverted (ASC and DESC swapped) on every ordered column",
@@ -16,6 +18,7 @@
     },
     {
       "id": "Q3-limit-off-by-one",
+      "target": "rust-engine",
       "property": "query",
       "file": "crates/sync-core/src/query/compile.rs",
       "description": "root LIMIT binds limit+1, returning one extra row",
@@ -23,6 +26,7 @@
     },
     {
       "id": "Q4-related-window-drop",
+      "target": "rust-engine",
       "property": "query",
       "file": "crates/sync-core/src/query/compile.rs",
       "description": "related() window keeps rank < limit instead of <=, dropping the last related row per parent",
@@ -30,6 +34,7 @@
     },
     {
       "id": "M1-skip-finalize",
+      "target": "rust-engine",
       "property": "mutator",
       "file": "crates/sync-core/src/push.rs",
       "description": "mutator rows commit but finalize is skipped: LMID never advances, every retry re-applies",
@@ -37,6 +42,7 @@
     },
     {
       "id": "M2-replay-double-apply",
+      "target": "rust-engine",
       "property": "mutator",
       "file": "crates/sync-core/src/push.rs",
       "description": "preflight treats id == lmid as Applied instead of Replay: an exact replay of the last mutation double-applies",
@@ -44,6 +50,7 @@
     },
     {
       "id": "M3-swallow-rollback",
+      "target": "rust-engine",
       "property": "mutator",
       "file": "crates/sync-core/src/push.rs",
       "description": "app-error mutations commit their partial row effects and ack success instead of rolling back",
@@ -51,6 +58,7 @@
     },
     {
       "id": "L1-prune-no-floor",
+      "target": "rust-engine",
       "property": "loss",
       "file": "crates/sync-core/src/store.rs",
       "description": "retention prunes packed segments without raising the floor: stale cookies diff across a silent gap",
@@ -58,10 +66,35 @@
     },
     {
       "id": "O1-nondurable-watermark",
+      "target": "rust-engine",
       "property": "ordering",
       "file": "crates/sync-core/src/store.rs",
       "description": "watermark ignores the durable high-water and never bumps it: cookie can regress if the log is ever emptied (invariant 7)",
       "expectedLanes": ["cargo-sync-core", "eviction"]
+    },
+    {
+      "id": "H1-backup-scan-without-read-session",
+      "target": "typescript-host",
+      "property": "backup-consistency",
+      "file": "packages/orez-lite/src/cf-do/lite-data-worker.ts",
+      "description": "namespace backup pages bypass the shared read session, so a writer can commit between pages and produce a torn dump",
+      "expectedLanes": ["orez-lite-host"]
+    },
+    {
+      "id": "H2-admit-writer-with-reader-open",
+      "target": "typescript-host",
+      "property": "transaction-isolation",
+      "file": "packages/orez-lite/src/cf-do/worker.ts",
+      "description": "the application SQL admission queue grants a writer while read sessions are still open",
+      "expectedLanes": ["orez-lite-host"]
+    },
+    {
+      "id": "H3-skip-pending-change-promotion",
+      "target": "typescript-host",
+      "property": "commit-visibility",
+      "file": "packages/orez-lite/src/cf-do/worker.ts",
+      "description": "a committed application transaction deletes its pending change records without publishing them to the durable change log",
+      "expectedLanes": ["orez-lite-host"]
     }
   ]
 }

@@ -276,6 +276,76 @@ describe('createOrezDataWorker', () => {
     ).toThrow(/tablePrefix/)
   })
 
+  it('runs a namespace backup through one read-only application SQL session', async () => {
+    const rowsFor = (sql: string) =>
+      sql.includes('SELECT write_seq') ? [{ write_seq: 7 }] : []
+    const session = {
+      [Symbol.dispose]: vi.fn(),
+      begin: vi.fn(async () => undefined),
+      query: vi.fn(async (sql: string) => rowsFor(sql)),
+      exec: vi.fn(),
+      queryPlan: vi.fn(),
+      registerTables: vi.fn(),
+      commit: vi.fn(async () => undefined),
+      rollback: vi.fn(async () => undefined),
+    }
+    const applicationSqlSession = vi.fn(
+      async (_sessionID: string, options?: { readOnly?: boolean }) => {
+        expect(options).toEqual({ readOnly: true })
+        return session
+      }
+    )
+    const applicationSqlQuery = vi.fn(
+      async (sql: string) => rowsFor(sql) as Record<string, unknown>[]
+    )
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      backup: {
+        bucket: () => ({
+          async createMultipartUpload() {
+            return {
+              async uploadPart(partNumber: number) {
+                return { partNumber }
+              },
+              async complete() {},
+              async abort() {},
+            }
+          },
+          async get() {
+            return null
+          },
+          async put() {},
+          async list() {
+            return { objects: [] }
+          },
+          async delete() {},
+        }),
+        async inventory() {
+          return []
+        },
+        async authorize() {
+          return true
+        },
+      },
+    })
+    const env = {
+      ZERO_SQL_DO: {
+        idFromName: (name: string) => name,
+        get: () => ({ applicationSqlSession, applicationSqlQuery }),
+      },
+    }
+
+    await runtime.backupManager!.exportNamespace(env as any, 'singleton')
+
+    expect(applicationSqlSession).toHaveBeenCalledOnce()
+    expect(applicationSqlQuery).not.toHaveBeenCalled()
+    expect(session.begin).toHaveBeenCalledOnce()
+    expect(session.query).toHaveBeenCalledTimes(2)
+    expect(session.commit).toHaveBeenCalledOnce()
+    expect(session.rollback).not.toHaveBeenCalled()
+  })
+
   it('schedules an application consumer only after a published commit', async () => {
     const notified = vi.fn(() => undefined)
     const runtime = createOrezDataWorker({

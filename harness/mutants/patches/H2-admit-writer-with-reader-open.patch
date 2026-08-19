@@ -1,0 +1,11 @@
+diff --git a/packages/orez-lite/src/cf-do/worker.ts b/packages/orez-lite/src/cf-do/worker.ts
+--- a/packages/orez-lite/src/cf-do/worker.ts
++++ b/packages/orez-lite/src/cf-do/worker.ts
+@@ -1675,5 +1675,6 @@ export class ZeroDO extends DurableObject<Env> {
+    */
+   private canAdmitApplicationSqlSession(session: ApplicationSqlSessionTarget): boolean {
+     if (this.applicationSqlWriter) return false
+-    return session.readOnly || this.applicationSqlReaders.size === 0
++    void session
++    return true
+   }

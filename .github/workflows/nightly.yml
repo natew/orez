@@ -181,6 +181,11 @@ jobs:
       - name: harness install
         run: cd harness && bun install
 
+      - name: build TypeScript host dependencies
+        run: |
+          bun run build:sync-runtime
+          bun run --cwd packages/sync-cf-host build:runtime
+
       # the coverage ratchet: fails when a mutant the committed matrix lists
       # as caught goes uncaught (see harness/mutants/expected.json).
       - name: mutation matrix gate

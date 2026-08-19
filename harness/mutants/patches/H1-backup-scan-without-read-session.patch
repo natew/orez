@@ -1,0 +1,19 @@
+diff --git a/packages/orez-lite/src/cf-do/lite-data-worker.ts b/packages/orez-lite/src/cf-do/lite-data-worker.ts
+--- a/packages/orez-lite/src/cf-do/lite-data-worker.ts
++++ b/packages/orez-lite/src/cf-do/lite-data-worker.ts
+@@ -905,13 +905,8 @@ export function createOrezDataWorker<
+         markerTable: backupMarkerTable,
+         files: options.backup.bucket,
+         query: queryNamespace,
+-        readSession: (env, namespace, work) =>
+-          applicationSqlClient(env, namespace).readTransaction(
+-            () => {
+-              throw new Error('backup export does not compile ZQL')
+-            },
+-            (tx) => work((sql, params = []) => tx.query(sql, params))
+-          ),
++        readSession: (env, namespace, work) =>
++          work((sql, params = []) => queryNamespace(env, namespace, sql, params)),
+         batch: async (env, namespace, statements) => {
+           const instance = canonical(namespace)
+           const id = env.ZERO_SQL_DO.idFromName(instance)
