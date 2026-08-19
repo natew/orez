@@ -141,6 +141,7 @@ describe('buildMigrationModuleSource', () => {
         if (applied) return applied
         if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
         if (sql.includes("SELECT name FROM sqlite_master WHERE type = 'table'")) return []
+        if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables')) return []
         throw new Error(`unexpected query: ${sql}`)
       },
       async exec(sql: string, params: unknown[] = []) {
@@ -237,6 +238,7 @@ describe('buildMigrationModuleSource', () => {
           return [...tables].map((name) => ({ name, type: 'table' }))
         }
         if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
+        if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables')) return []
         throw new Error(`unexpected query: ${sql}`)
       },
       async exec(sql: string, params: readonly unknown[] = []) {
@@ -321,6 +323,7 @@ describe('buildMigrationModuleSource', () => {
         if (sql.includes("SELECT name FROM sqlite_master WHERE type = 'table'")) {
           return [{ name: 'account' }]
         }
+        if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables')) return []
         throw new Error(`unexpected query: ${sql}`)
       },
       async exec(sql: string) {
@@ -391,6 +394,7 @@ describe('buildMigrationModuleSource', () => {
         if (sql.startsWith('PRAGMA table_info("customer")')) {
           return [{ name: 'id' }]
         }
+        if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables')) return []
         throw new Error(`unexpected query: ${sql}`)
       },
       async exec(sql: string, params: unknown[] = []) {
@@ -488,6 +492,7 @@ describe('buildMigrationModuleSource', () => {
             columnPk: 0,
           }))
         }
+        if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables')) return []
         throw new Error(`unexpected query: ${sql}`)
       },
       async exec(sql: string, params: unknown[] = []) {
