@@ -176,6 +176,78 @@ function schemaRows(sql: DurableSqlStorage, txID: string): SchemaRow[] {
     }))
 }
 
+interface SchemaSnapshotObject {
+  type: string
+  name: string
+  table: string
+  sql: string
+}
+
+interface CdcRegistrationSnapshot {
+  columns_json: string
+  physical_table: string
+  publish: number
+  schema_version: number
+  table_name: string
+}
+
+interface ParsedSchemaSnapshot {
+  present: boolean
+  objects: SchemaSnapshotObject[]
+  cdc: CdcRegistrationSnapshot[]
+}
+
+/**
+ * Cloudflare bills every journal row this snapshot writes and every one its
+ * commit deletes, and a production-sized namespace has hundreds of
+ * sqlite_master objects, so the per-object encoding made the snapshot the
+ * dominant cost of any transaction containing DDL: 86% of a measured
+ * stale-namespace migration replay was this bookkeeping. The snapshot is now
+ * one JSON row per ~1MB of schema (one row for any realistic schema; Durable
+ * Object SQLite caps a row at 2MB).
+ *
+ * A journal written by the previous worker version can still be recovered
+ * after a deploy kills its transaction, so this reader accepts both the JSON
+ * rows and the legacy one-row-per-object encoding.
+ */
+function readSchemaSnapshot(sql: DurableSqlStorage, txID: string): ParsedSchemaSnapshot {
+  const rows = schemaRows(sql, txID)
+  const jsonRows = rows.filter((row) => row.type === 'schema' && row.sql)
+  if (jsonRows.length > 0) {
+    const objects: SchemaSnapshotObject[] = []
+    const cdc: CdcRegistrationSnapshot[] = []
+    for (const row of jsonRows) {
+      const chunk = JSON.parse(row.sql!) as {
+        objects?: SchemaSnapshotObject[]
+        cdc?: CdcRegistrationSnapshot[]
+      }
+      for (const object of chunk.objects ?? []) objects.push(object)
+      for (const registration of chunk.cdc ?? []) cdc.push(registration)
+    }
+    return { present: true, objects, cdc }
+  }
+  if (!rows.some((row) => row.type === 'marker')) {
+    return { present: false, objects: [], cdc: [] }
+  }
+  return {
+    present: true,
+    objects: rows
+      .filter(
+        (row) =>
+          row.type !== 'marker' && row.type !== 'active' && row.type !== 'cdc' && row.sql
+      )
+      .map((row) => ({
+        type: row.type,
+        name: row.name,
+        table: row.table,
+        sql: row.sql!,
+      })),
+    cdc: rows
+      .filter((row) => row.type === 'cdc' && row.sql)
+      .map((row) => JSON.parse(row.sql!) as CdcRegistrationSnapshot),
+  }
+}
+
 function manifestRows(sql: DurableSqlStorage, txID: string): ManifestRow[] {
   return sql
     .exec(
@@ -247,16 +319,10 @@ export function schemaRestoreOwnsTable(
   txID: string,
   table: string
 ): boolean {
-  if (!schemaTableExists(sql)) return false
-  const rows = sql
-    .exec(
-      `SELECT type, name, sql FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? AND type IN ('marker', 'table')`,
-      txID
-    )
-    .toArray()
-  if (!rows.some((row) => String(row.type) === 'marker')) return false
-  const original = rows.find(
-    (row) => String(row.type) === 'table' && String(row.name) === table
+  const snapshot = readSchemaSnapshot(sql, txID)
+  if (!snapshot.present) return false
+  const original = snapshot.objects.find(
+    (object) => object.type === 'table' && object.name === table
   )
   const current = sql
     .exec(
@@ -265,7 +331,7 @@ export function schemaRestoreOwnsTable(
     )
     .toArray()[0]
   if (!original || !current) return true
-  return String(original.sql ?? '') !== String(current.sql ?? '')
+  return original.sql !== String(current.sql ?? '')
 }
 
 /**
@@ -283,7 +349,7 @@ export function snapshotTxSchema(
   sql.exec(TX_SCHEMA_DDL)
   const exists = sql
     .exec(
-      `SELECT 1 AS ok FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? AND type = 'marker' LIMIT 1`,
+      `SELECT 1 AS ok FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? AND type = 'schema' LIMIT 1`,
       txID
     )
     .toArray()
@@ -303,25 +369,36 @@ export function snapshotTxSchema(
       }))
       .filter((row) => row.name && !isInternalObject(row.name))
 
-    // A marker makes even an empty pre-transaction schema recoverable after a
-    // kill between CREATE TABLE and the client COMMIT/ROLLBACK.
-    sql.exec(
-      `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES (?, ?, 'marker', '', '', NULL)`,
-      txID,
-      owner
-    )
+    // One JSON row per ~1MB of schema (see readSchemaSnapshot). The first
+    // chunk exists even for an empty schema, so a kill between CREATE TABLE
+    // and the client COMMIT/ROLLBACK still finds a recoverable snapshot, and
+    // it carries the cdc registrations (see snapshotCdcRegistrations for why
+    // registration reverts at the same whole-database scope as the triggers).
+    const chunkBytes = 1_000_000
+    const chunks: SchemaSnapshotObject[][] = []
+    let current: SchemaSnapshotObject[] = []
+    let size = 0
     for (const object of objects) {
+      const objectSize = object.sql.length + object.name.length + object.table.length + 64
+      if (size + objectSize > chunkBytes && current.length > 0) {
+        chunks.push(current)
+        current = []
+        size = 0
+      }
+      current.push(object)
+      size += objectSize
+    }
+    chunks.push(current)
+    const cdc = readCdcRegistrations(sql)
+    for (const [index, chunk] of chunks.entries()) {
       sql.exec(
-        `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES (?, ?, 'schema', ?, '', ?)`,
         txID,
         owner,
-        object.type,
-        object.name,
-        object.table,
-        object.sql
+        String(index),
+        JSON.stringify(index === 0 ? { objects: chunk, cdc } : { objects: chunk })
       )
     }
-    snapshotCdcRegistrations(sql, txID, owner)
   }
 
   for (const table of new Set(affectedTables)) {
@@ -361,34 +438,27 @@ export function snapshotTxSchema(
  * `drain`), so it holds in-flight changes rather than state describing a table;
  * restoring it would re-emit change records for writes the rollback just undid.
  */
-function snapshotCdcRegistrations(
-  sql: DurableSqlStorage,
-  txID: string,
-  owner: string
-): void {
+function readCdcRegistrations(sql: DurableSqlStorage): CdcRegistrationSnapshot[] {
   const registrationTableExists = sql
     .exec(
       "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
       CDC_REGISTRATION_TABLE
     )
     .toArray()
-  if (registrationTableExists.length === 0) return
-  const rows = sql
+  if (registrationTableExists.length === 0) return []
+  return sql
     .exec(
       `SELECT physical_table, table_name, columns_json, publish, schema_version ` +
         `FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`
     )
     .toArray()
-  for (const row of rows) {
-    sql.exec(
-      `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES (?, ?, 'cdc', ?, ?, ?)`,
-      txID,
-      owner,
-      String(row.physical_table ?? ''),
-      String(row.physical_table ?? ''),
-      JSON.stringify(row)
-    )
-  }
+    .map((row) => ({
+      columns_json: String(row.columns_json ?? ''),
+      physical_table: String(row.physical_table ?? ''),
+      publish: Number(row.publish ?? 0),
+      schema_version: Number(row.schema_version ?? 0),
+      table_name: String(row.table_name ?? ''),
+    }))
 }
 
 /** persist one cheap recovery marker only when a transaction first mutates data. */
@@ -411,7 +481,7 @@ export function beginTxJournal(
 function restoreSchemaSnapshot(
   sql: DurableSqlStorage,
   txID: string,
-  schema: SchemaRow[],
+  snapshot: ParsedSchemaSnapshot,
   manifest: ManifestRow[]
 ): void {
   const current = sql
@@ -429,7 +499,7 @@ function restoreSchemaSnapshot(
     }))
     .filter((row) => row.name && !isInternalObject(row.name))
 
-  const original = schema.filter((row) => row.type !== 'marker' && row.sql)
+  const original = snapshot.objects
   const key = (row: { type: string; name: string }) => `${row.type}\0${row.name}`
   const originalByKey = new Map(original.map((row) => [key(row), row]))
   const currentByKey = new Map(current.map((row) => [key(row), row]))
@@ -530,14 +600,7 @@ function restoreSchemaSnapshot(
       .toArray().length > 0
   ) {
     sql.exec(`DELETE FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`)
-    for (const row of schema.filter((item) => item.type === 'cdc' && item.sql)) {
-      const registration = JSON.parse(row.sql!) as {
-        columns_json: string
-        physical_table: string
-        publish: number
-        schema_version: number
-        table_name: string
-      }
+    for (const registration of snapshot.cdc) {
       sql.exec(
         `INSERT INTO ${quoteIdent(CDC_REGISTRATION_TABLE)} ` +
           '(physical_table, table_name, columns_json, publish, schema_version) VALUES (?, ?, ?, ?, ?)',
@@ -594,14 +657,14 @@ export function commitTxJournal(sql: DurableSqlStorage, txID: string): void {
  * re-fire change tracking. must run inside an atomic storage transaction.
  */
 export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
-  const schema = schemaRows(sql, txID)
+  const snapshot = readSchemaSnapshot(sql, txID)
   const rows = manifestTableExists(sql) ? manifestRows(sql, txID).reverse() : []
-  if (schema.some((row) => row.type === 'marker')) {
-    restoreSchemaSnapshot(sql, txID, schema, rows)
+  if (snapshot.present) {
+    restoreSchemaSnapshot(sql, txID, snapshot, rows)
     return
   }
   if (rows.length === 0) {
-    if (schema.length > 0) {
+    if (schemaTableExists(sql)) {
       sql.exec(`DELETE FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ?`, txID)
     }
     return
@@ -654,7 +717,7 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
   }
   restoreTriggers(sql, triggers)
   sql.exec(`DELETE FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`, txID)
-  if (schema.length > 0) {
+  if (schemaTableExists(sql)) {
     sql.exec(`DELETE FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ?`, txID)
   }
 }

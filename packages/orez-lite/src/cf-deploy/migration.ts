@@ -808,7 +808,16 @@ async function applyNativeSchema(tx, instance, {
         'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)',
       )
       try {
+        // every row here is rewritten on every schema-version change across the
+        // whole fleet, so only write the rows whose json actually changed.
+        const publishedRows = await tx.query(
+          'SELECT name, schema_json FROM _zero_schema_tables',
+        )
+        const published = new Map(
+          publishedRows.map((row) => [String(row.name), String(row.schema_json)]),
+        )
         for (const statement of schemaMetadataStatements()) {
+          if (published.get(statement.params[0]) === statement.params[1]) continue
           await tx.exec(statement.sql, statement.params)
         }
         await tx.registerTables(publicTables())
