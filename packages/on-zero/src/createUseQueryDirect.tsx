@@ -279,7 +279,10 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
     const disableMode = useContext(DisabledContext)
     const [fn, paramsOrOptions, optionsArg] = args
 
-    const version = useEmitterValue(zeroVersion)
+    // subscribe so a swap re-renders this hook even when it has no provider
+    // above it re-rendering the subtree (connectHeadless publishes with no
+    // react tree at all). the instance identity below decides what changes.
+    useEmitterValue(zeroVersion)
     const { params, options } = parseUseQueryArgs(paramsOrOptions, optionsArg)
 
     let enabled = true
@@ -306,26 +309,28 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
     const emptyForQuery = useMemo(() => emptyResponseFor(queryRequest), [queryRequest])
     const lastRef = useRef<any>(emptyForQuery)
 
+    // the published instance is the memo's dependency, so a swap re-keys the
+    // view and nothing else does. keying on `version` instead left the memo
+    // holding a null view through every render between the emitter's bump and
+    // the instance actually appearing, and made a redundant bump tear down and
+    // rebuild a view that was already pointed at the right client.
+    const zeroInstance = getZero()
     const view = useMemo((): DirectView | null => {
-      const zero = getZero()
-      if (!zero) return null
-      // when ProvideZero renders with disable=true (or pre-instance), the
-      // ZeroContext.value is the inert stub which has no `.materialize` —
-      // calling it throws "this[#zero].materialize is not a function". detect
-      // the stub and short-circuit to the disabled snapshot via enabled=false
-      // (mirroring the wrapper-useQuery path at createUseQuery.tsx).
-      // DisabledContext is not a reliable signal here: it flips 'empty' →
-      // false within one render once the active instance is created, which
-      // would re-key the useMemo and re-materialize the view — that breaks
-      // the "subscribers share one materialized view" invariant.
+      if (!zeroInstance) return null
+      // when ProvideZero renders with disable=true, the ZeroContext.value is
+      // the inert stub which has no `.materialize` — calling it throws
+      // "this[#zero].materialize is not a function". detect the stub and
+      // short-circuit to the disabled snapshot via enabled=false (mirroring
+      // the wrapper-useQuery path at createUseQuery.tsx). DisabledContext is
+      // not a reliable signal here: it flips 'empty' → false as the provider
+      // enables, which would re-key the useMemo and re-materialize the view —
+      // that breaks the "subscribers share one materialized view" invariant.
       const effectiveEnabled =
-        typeof (zero as { materialize?: unknown }).materialize === 'function'
+        typeof (zeroInstance as { materialize?: unknown }).materialize === 'function'
           ? enabled
           : false
-      return directViewStore.getView(zero, queryRequest, effectiveEnabled, ttl)
-      // version re-materializes on a new zero
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [queryRequest, enabled, ttl, version])
+      return directViewStore.getView(zeroInstance, queryRequest, effectiveEnabled, ttl)
+    }, [queryRequest, enabled, ttl, zeroInstance])
 
     const getEmpty = () => emptyForQuery as DirectSnapshot
     const out = useSyncExternalStore(

@@ -521,6 +521,13 @@ transport. mount the shared client without a `transport` prop:
 configure `zero-cache`, `ZERO_QUERY_URL`, and `ZERO_MUTATE_URL` using the
 standard [Zero installation guide](https://zero.rocicorp.dev/docs/install).
 
+`ProvideZero` creates the client during its own render, so descendants get a
+live instance in their FIRST render — `zero.query`, `zero.preload`, and a
+`transport` all work without waiting for an effect. that matters in any host
+where passive effects are delayed or never flush. the exception is a server
+runtime, where `ProvideZero` creates nothing and descendants get the inert stub
+with every `useQuery` returning its empty shape.
+
 ### multiple client instances
 
 one page can run several zero clients (e.g. a global control-plane instance

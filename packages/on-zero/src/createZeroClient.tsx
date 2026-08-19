@@ -395,6 +395,10 @@ export function createZeroClientInternal<
   // run(), and waitForZero() resolve identically either way.
   function publishZeroInstance(zeroInstance: ZeroInstance): boolean {
     if (zeroInstance === zeroRuntime.zero) return false
+    // retiring the outgoing client and activating the replacement is one step:
+    // a write queued against the client being replaced must not land on its
+    // replacement, and fencing from a separate effect let the two orders drift.
+    if (zeroRuntime.zero) mutationLifecycle.fence()
     zeroRuntime.zero = zeroInstance
     mutationLifecycle.activate()
     const runner: ZeroRunner = (query, options) => zeroInstance.run(query as any, options)
@@ -430,12 +434,12 @@ export function createZeroClientInternal<
     })
   }
 
-  // the provider creates the instance one effect-tick after mount, so on a
-  // fresh page load (deep link) components render once before it exists. the
-  // documented `useMutation(zero.mutate.x.y)` pattern dereferences `mutate`
-  // during that render — hand back a lazy path that resolves the live instance
-  // at CALL time instead of throwing at property access. a call that fires
-  // with still-no instance throws the same error, so real misuse stays loud.
+  // the documented `useMutation(zero.mutate.x.y)` pattern dereferences
+  // `mutate` wherever it is written, including above the provider and in
+  // module scope where no instance exists yet — hand back a lazy path that
+  // resolves the live instance at CALL time instead of throwing at property
+  // access. a call that fires with still-no instance throws the same error, so
+  // real misuse stays loud.
   function lazyMutatePath(path: string[]): any {
     const resolve = () => {
       if (zeroRuntime.zero === null) {
@@ -627,14 +631,21 @@ export function createZeroClientInternal<
   // created zero inside its own effect, every such cycle closed the live
   // instance mid-connect ("Failed to connect / Store is closed") and built a
   // replacement, killing in-flight queries and preloads. instead the instance
-  // is created in an effect, cached here per identity key, handed to
-  // ZeroProvider as an external `zero` (which it never closes), and the
-  // previous instance is closed only when the key truly changes — a real
+  // is created during the provider's render, cached here per identity key,
+  // handed to ZeroProvider as an external `zero` (which it never closes), and
+  // the previous instance is closed only when the key truly changes — a real
   // identity change (user, storage, server, logged in/out), never a react
   // lifecycle artifact. single-provider assumption: one mounted ProvideZero
   // per client (true of every consumer); two simultaneously mounted providers
   // with different identities would thrash this slot.
   let cachedZero: { key: string; instance: ZeroInstance } | null = null
+
+  // instances the render phase displaced, waiting for a commit to close them.
+  // react can throw a render away, so a rotation is only PROVISIONAL until
+  // something commits: closing there would kill an instance the committed tree
+  // still holds. keyed so a render that swings back to a retired identity
+  // revives that instance instead of constructing a twin beside it.
+  const retiredZero = new Map<string, ZeroInstance>()
 
   // in-place re-mint: drop the current instance's local state then reconstruct a
   // fresh client WITHOUT a page reload — the native-safe recovery path (a reload
@@ -944,66 +955,69 @@ export function createZeroClientInternal<
       remintGeneration,
     ])
 
-    // create/rotate in an effect — commit-safe: a discarded concurrent render
-    // can never close an instance the committed tree still uses. a suspense
-    // hide/reveal re-runs this effect with an unchanged key — cache hit, no
-    // churn, no cleanup-close. children mounting one effect-tick after the
-    // provider matches ZeroProvider's internal-creation timing, which consumer
-    // boot orchestration observes.
-    const [instance, setInstance] = useState<ZeroInstance | undefined>()
+    // create/rotate DURING RENDER. a consumer that reads `zero`, or a
+    // transport that has to be installed before the first connect, has to find
+    // a live client in its very first render — an effect is one tick too late,
+    // and in any environment where passive effects are delayed, discarded, or
+    // never flushed (workers, double-rendered roots, concurrent react) that
+    // tick may never arrive at all. idempotent by instanceKey, so strictmode's
+    // double-invoked render and a suspense hide/reveal both hit the cache: no
+    // churn, no second client.
+    //
+    // disable=true creates nothing. consumers toggle disable on/off mid-mount,
+    // and every hook below still runs in both states, so rules-of-hooks holds.
+    let liveInstance: ZeroInstance | undefined
+    if (!disable) {
+      if (cachedZero?.key !== instanceKey) {
+        if (cachedZero) retiredZero.set(cachedZero.key, cachedZero.instance)
+        const revived = retiredZero.get(instanceKey)
+        retiredZero.delete(instanceKey)
+        cachedZero = {
+          key: instanceKey,
+          instance:
+            revived ??
+            constructZeroInstance({
+              options: scopedProps as Omit<
+                ZeroOptions<Schema, ZeroMutators>,
+                'schema' | 'mutators'
+              >,
+              transport,
+              beforeReload,
+              scheduleReload,
+              guardStorage,
+              benignLogPatterns,
+            }),
+        }
+      }
+      liveInstance = cachedZero.instance
+    }
 
-    // a changed identity or disabled provider stops being ready before
-    // descendant passive effects run. the outgoing instance remains cached
-    // until the commit-safe rotation effect below closes or reuses it.
+    // a disabled provider stops being ready before descendant passive effects
+    // run. the instance stays cached — disable is a gate, not a teardown — so
+    // flipping back on reuses it. a rotation needs nothing here: the render
+    // above already published the replacement.
     useLayoutEffect(() => {
-      if (zeroRuntime.zero && (disable || cachedZero?.key !== instanceKey)) {
+      if (disable && zeroRuntime.zero) {
         mutationLifecycle.fence()
         unpublishZeroInstance(zeroRuntime.zero)
       }
-    }, [disable, instanceKey])
+    }, [disable])
 
+    // disposal is commit-only, so construction and teardown are deliberately
+    // asymmetric. render can be thrown away and a provider can render without
+    // ever mounting; closing an instance the committed tree still holds would
+    // blank the app, so the render phase only retires and this closes. runs
+    // after every commit because a discarded rotation can retire an instance
+    // without instanceKey ever changing between two committed renders.
     useEffect(() => {
-      // disable=true: do not create / rotate any instance. consumers can
-      // toggle disable on/off mid-mount without violating rules-of-hooks
-      // because every hook still runs every render — only the effect body
-      // (and the returned JSX, below) varies with disable.
-      if (disable) {
-        if (instance !== undefined) setInstance(undefined)
-        return
-      }
-      let cached = cachedZero
-      const options = scopedProps as Omit<
-        ZeroOptions<Schema, ZeroMutators>,
-        'schema' | 'mutators'
-      >
-
-      if (cached?.key !== instanceKey) {
-        if (cached) {
-          // the replacement's SetZeroInstance effect publishes one version
-          // change; clearing the old references here must not emit a second.
-          clearZeroInstanceReferences(cached.instance)
-          mutationLifecycle.fence()
-          cached.instance.close()
-        }
-        cached = {
-          key: instanceKey,
-          instance: constructZeroInstance({
-            options,
-            transport,
-            beforeReload,
-            scheduleReload,
-            guardStorage,
-            benignLogPatterns,
-          }),
-        }
-        cachedZero = cached
-      }
-      setInstance(cached.instance)
-      // identity is captured by instanceKey; function props are bound at
-      // construction. transport is also a dependency so a same-origin behavior
-      // change reaches the strict conflict check above.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [instanceKey, disable, transport])
+      if (retiredZero.size === 0) return
+      const outgoing = [...retiredZero.values()]
+      retiredZero.clear()
+      // close only. the replacement is already published and already fenced
+      // the outgoing client's writes, and SetZeroInstance's effect emits the
+      // one version change a rotation is allowed to produce.
+      for (const zeroInstance of outgoing) zeroInstance.close()
+    })
 
     // a changed token on the same identity refreshes auth in place — zero
     // sends an auth update over the live connection instead of reconnecting
@@ -1014,24 +1028,21 @@ export function createZeroClientInternal<
       const prevAuth = prevAuthRef.current
       prevAuthRef.current = auth
       if (
-        instance &&
+        liveInstance &&
         typeof prevAuth === 'string' &&
         typeof auth === 'string' &&
         prevAuth !== auth
       ) {
-        instance.connection.connect({ auth })
+        liveInstance.connection.connect({ auth })
       }
-    }, [instance, auth])
+    }, [liveInstance, auth])
 
     // Always render the same shell shape, with or without an instance, and
-    // whether disable is true or false. While the instance is being
-    // constructed (first effect tick) — OR while disable=true — we hand
-    // descendants the stub Zero plus DisabledContext='empty' so
-    // useZero/useQuery short-circuit instead of throwing. SetZeroInstance +
-    // ConnectionMonitor only mount once an active instance exists, as
-    // siblings of children — they NEVER wrap children, so toggling them
-    // never re-parents.
-    const liveInstance = disable ? undefined : instance
+    // whether disable is true or false. While disable=true we hand descendants
+    // the stub Zero plus DisabledContext='empty' so useZero/useQuery
+    // short-circuit instead of throwing. SetZeroInstance + ConnectionMonitor
+    // only mount once an active instance exists, as siblings of children —
+    // they NEVER wrap children, so toggling them never re-parents.
     return (
       <AuthDataContext.Provider value={authData}>
         <DisabledContext.Provider value={liveInstance ? false : 'empty'}>

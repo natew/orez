@@ -142,8 +142,8 @@ function ControlUserProbe({ id, ttl }: { id: string; ttl?: number }) {
 
 function MaterializeProbe() {
   const zero = useZero() as any
-  // ProvideZero hands children a stub Zero (no .materialize) until the real
-  // instance is created in an effect. skip on the stub render.
+  // ProvideZero hands children a stub Zero (no .materialize) when disable=true.
+  // skip on the stub render.
   if (typeof zero.materialize !== 'function') return null
   if (!zero.__onZeroMaterializeProbe) {
     zero.__onZeroMaterializeProbe = true
