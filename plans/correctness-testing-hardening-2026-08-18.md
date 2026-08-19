@@ -78,8 +78,9 @@ blocks application writes for its duration, which a queued writer surfaces as a
 This is the part worth acting on. Three structural reasons, each a gap that
 generalizes past this one bug.
 
-1. **The mutation matrix only mutates the Rust engine.** All 14 mutants in
-   `harness/mutants/` are engine mutants. The defect was in the TypeScript
+1. **The mutation matrix only mutated the Rust engine.** At the time of the
+   finding, all nine runnable mutants in `harness/mutants/` were engine mutants.
+   The defect was in the TypeScript
    host, which is where most of the invented mechanism lives (the undo journal,
    the admission lane, the change feed, the backup). "Every mutant is caught by
    at least one suite" is therefore a claim about the engine, not the system.
@@ -118,12 +119,14 @@ timing and OS faults uncovered.
 
 ## Work, highest signal first
 
-1. **Host mutants.** Extend `harness/mutants/` past the Rust engine with
-   TypeScript host mutants: drop the pending-change promotion at commit, skip a
-   manifest row on rollback, admit a writer while a reader is open, return the
-   feed head as the cursor after a truncated page, read a backup page outside
-   the session. Record which lane catches each. A mutant nothing catches is the
-   deliverable.
+1. **Host mutants, first tranche complete 2026-08-19.** The matrix now targets
+   both the Rust engine and TypeScript host. Its pull-request host lane applies
+   three patches: drop pending-change promotion at commit, admit a writer while
+   readers are open, and run a namespace backup outside its read session. All
+   three are caught. The backup patch first survived the host suite, which
+   proved the production worker wiring had no test; the added test closed that
+   gap before the catch was ratcheted into CI. Add further host mutants only at
+   a concrete contract boundary with a compatible behavioral lane.
 2. **Observation invariants.** Give the harness a declared cross-table
    invariant per fixture (the account/ledger shape above generalizes) and check
    it against every observation the system can produce: a client view, a

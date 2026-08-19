@@ -8,10 +8,10 @@ already-transformed ZQL ASTs, membership, multi-table writes, and in-place
 permission-transform replacement, with a live cross-check against stock
 zero-cache. The Cloudflare host has a real
 workerd fault, soak, and qualification matrix; and the jepsen-style ambitions
-were scoped down to what this system honestly needs — a composed fault nemesis
-with arm/fire/heal receipts, an engine mutation matrix that proves each lane can
-go red, and the pinned Elle checker running on a real recorded workload history
-— rather than a full Jepsen rig.
+were scoped down to what this system honestly needs: a composed fault nemesis
+with arm/fire/heal receipts, an engine and host mutation matrix that proves each
+included lane can go red, and the pinned Elle checker running on a real recorded
+workload history instead of a full Jepsen rig.
 
 ## The three test tiers
 
@@ -189,14 +189,15 @@ overlaps a fired engine fault, fails as invalid instead of passing vacuously
 (replays and shrink candidates are judged on execution alone). See
 `docs/sync/nemesis-red-proof.md` for the red proofs.
 
-**The engine mutation matrix** (`harness/mutants/`, runner
+**The engine and host mutation matrix** (`harness/mutants/`, runner
 `harness/scripts/mutation-matrix.ts`, results `docs/sync/mutation-matrix.md`)
-keeps 14 known engine bugs as compile-checked patches and records which lane
-catches which, each verdict verified against the lane's actual failure output.
-It is the proof that the net can catch bugs at all: every mutant is caught by
-at least one suite, and dedicated system lanes cover rollback handling, query
-membership changes, and durable watermarks. A new lane earns its place by going
-red on at least one mutant.
+keeps twelve known bugs as compile-checked patches: nine in the Rust engine and
+three in the TypeScript Durable Object host. It records which compatible lane
+catches each patch and verifies the verdict against the lane's actual failure
+output. The host corpus covers a backup scan that bypasses its read session, a
+writer admitted while readers are active, and a commit that drops its pending
+changes instead of publishing them. Every mutant is caught by at least one
+suite. A new lane earns its place by going red on at least one mutant.
 
 **PR-gate budget** (audited 2026-07-16, run 29560870553): total wall clock is
 about ten minutes and the reliability lanes are not the bottleneck. The
@@ -340,17 +341,18 @@ list-append --consistency-models serializable`, failing the job on `false`,
    historical single runs, not gated: multi-hour longevity, the larger bench/load
    grids in `harness/scripts/nightly.sh`, and the CF-side memory soaks.
 
-9. **The R2 namespace backup has unit coverage only, and had no concurrency
+9. **The R2 namespace backup has in-process host coverage, and had no concurrency
    coverage at all until 2026-08-18.** `harness/src/backup-restore.ts` covers
    the sync host's own backup and stops the writer first
    (`/admin/writer`, `backup-restore.ts:52`), so it structurally cannot observe
    a write racing an export. The separate `orez-lite` namespace backup, which
    dumps a whole namespace to R2 for disaster recovery
    (`packages/orez-lite/src/cf-do/namespace-backup.ts`), is covered by
-   `namespace-backup.test.ts` alone. That suite tested paging, ordering, and
-   restore, never a concurrent commit. It missed a real defect: the export read
-   one page per application-SQL session, and because the durable object admits a
-   write session the moment the reader set drains
+   `namespace-backup.test.ts` plus the production wiring test in
+   `lite-data-worker.test.ts`. The suite tests paging, ordering, restore, and an
+   invariant-preserving commit racing the scan. The race was added after a real
+   defect: the export read one page per application-SQL session, and because the
+   durable object admits a write session the moment the reader set drains
    (`worker.ts` `canAdmitApplicationSqlSession`), a commit landed between two
    pages and the dump held a state no transaction produced — a parent row read
    before the write next to child rows read after it. The scan now owns one read

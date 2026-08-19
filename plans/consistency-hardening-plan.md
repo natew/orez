@@ -203,7 +203,8 @@ Items 1–3 and the docs work are DONE and merged to local main (commit
   `ts-oracle/run-oracle.ts`; red-proofed with shrinking in
   `docs/sync/query-oracle-red-proof.md`; nullable start-cursor axis added to
   the sweep generator.
-- **Item 1** — 14-mutant matrix committed: `harness/mutants/`,
+- **Item 1:** nine runnable Rust mutants were committed at the time. The
+  matrix now also carries three TypeScript host mutants: `harness/mutants/`,
   `harness/scripts/mutation-matrix.ts`, results and analysis in
   `docs/sync/mutation-matrix.md`.
 - Docs: `docs/sync/testing.md` §4 reconciled; public page

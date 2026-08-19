@@ -1,0 +1,22 @@
+diff --git a/packages/orez-lite/src/cf-do/worker.ts b/packages/orez-lite/src/cf-do/worker.ts
+--- a/packages/orez-lite/src/cf-do/worker.ts
++++ b/packages/orez-lite/src/cf-do/worker.ts
+@@ -2714,17 +2714,7 @@ export class ZeroDO extends DurableObject<Env> {
+   private commitPendingTrackedChanges(transactionID: string): number {
+     this.ensurePendingTrackedChangesTable()
+     this.watermarks.ensureTables()
+-    const rows = this.sql
+-      .exec(
+-        `INSERT INTO _zero_changes (table_name, op, row_data, old_data)
+-         SELECT table_name, op, row_data, old_data
+-         FROM _zero_pending_changes
+-         WHERE transaction_id = ? AND publish != 0
+-         ORDER BY id
+-         RETURNING watermark`,
+-        transactionID
+-      )
+-      .toArray()
++    const rows: Record<string, unknown>[] = []
+     let watermark = 0
+     for (const row of rows) watermark = Math.max(watermark, Number(row.watermark ?? 0))
+     if (watermark > 0) {

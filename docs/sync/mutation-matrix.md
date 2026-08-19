@@ -1,26 +1,48 @@
-# Engine mutation matrix — 2026-07-16
+# Engine and host mutation matrix
 
-Which lanes catch which known engine bugs. Mutants live in
-`harness/mutants/` (10 patches, one defect each, all compile-checked);
-the runner is `harness/scripts/mutation-matrix.ts`. Every cell below is a
-verified verdict: each CAUGHT was confirmed against the lane's actual failure
-output, not just its exit code (see "vacuity incident" below for why).
+The runnable corpus contains twelve known-bug patches under `harness/mutants/`:
+nine for the Rust engine and three for the TypeScript Durable Object host. The
+runner is `harness/scripts/mutation-matrix.ts`. It compile-checks each patch,
+runs only compatible lanes, and records which lanes go red. Every CAUGHT verdict
+below was checked against the lane's failure output, not only its exit code.
+
+Replay the complete corpus with `cd harness && bun scripts/mutation-matrix.ts`.
+Every named mutation target must be clean because the runner applies and
+reverts patches in place.
+
+## Current TypeScript host matrix
+
+Run `host-matrix-final` on 2026-08-19 started from a green
+`packages/orez-lite/src/cf-do` baseline. All three host patches compiled and
+were caught by `orez-lite-host`.
+
+| mutant                                     | host lane | failure that catches it                                                        |
+| ------------------------------------------ | --------- | ------------------------------------------------------------------------------ |
+| H1 backup scan bypasses its read session   | CAUGHT    | production worker wiring no longer opens one read-only application SQL session |
+| H2 writer admitted while readers are open  | CAUGHT    | the queued writer resolves before the active reader set drains                 |
+| H3 commit skips pending-change publication | CAUGHT    | committed CDC rows never reach `_zero_changes`                                 |
+
+H1 first ran against the complete host suite before its production wiring test
+existed. The lane stayed green, so the matrix reported **NOTHING** and the gate
+failed. The added `createOrezDataWorker` backup test closed that gap. The same
+patch now turns the lane red, while the lower-level account and ledger race
+proves why one session matters.
+
+The pull-request `test` job runs these three host patches and uploads the
+matrix artifact. Nightly CI runs the complete Rust and host corpus.
+
+## Historical Rust engine matrix
 
 Run provenance: engine tree = main @ 261e27d merged with
 `test/wire-consistency-lanes` @ ce43931 and `test/query-differential-oracle`
-@ 19d9003. Six lanes from run `run-2026-07-16-v2`; the two consistency lanes
-from `run-2026-07-16-v3` after the seed fix. O1 and M4 were re-run across all
+@ 19d9003. Six lanes came from run `run-2026-07-16-v2`; the two consistency
+lanes came from `run-2026-07-16-v3` after the seed fix. O1 was re-run across all
 lanes after adding the engine-invariant tests in
 `run-2026-07-16-engine-invariants-v3`. All lanes were green at baseline in each
 cited run.
 
 This historical full-matrix run predates the single query-pull mode. The table
 retains only lanes and mutants that still exist.
-
-Replay: `cd harness && bun scripts/mutation-matrix.ts` (clean crates/ tree
-required; ~35 min).
-
-## Matrix
 
 Lanes: cargo = `cargo test -p sync-core` (unit + TS-oracle differentials),
 smoke/state-machine/metamorphic/eviction/sweep = harness system lanes against
@@ -39,7 +61,6 @@ lanes green at baseline, every retained mutant caught by at least one lane.
 | M1 rows commit, LMID skipped     | CAUGHT | CAUGHT | CAUGHT        | ·           | CAUGHT   | CAUGHT | ·          | CAUGHT       | ·           |
 | M2 replay double-applies         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | CAUGHT       | ·           |
 | M3 rollback swallowed            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | CAUGHT       | ·           |
-| M4 LMID advances, no change row  | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | ·           |
 | L1 prune without floor raise     | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | ·           |
 | O1 non-durable watermark         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | ·           |
 
