@@ -487,6 +487,18 @@ export function createZeroClientInternal<
       // rotations, this is the one boundary that can observe raw
       // fire-and-forget calls before callers discard Zero's result promises.
       if (key === 'mutate') return lazyMutatePath([])
+      // `zero` is a module export, and tooling reads identity properties off
+      // module exports without ever intending to touch Zero. metro's fast
+      // refresh registers every export as a family and then reads `.prototype`
+      // on the next hot update (registerExportsForReactRefresh ->
+      // canPreserveStateBetween -> isReactClass); symbol keys arrive the same
+      // way from Object.prototype.toString, structuredClone and console
+      // inspection. those reads land in the ordinary window where the provider
+      // has not created the instance yet, and throwing there aborted the whole
+      // refresh pass and dropped every pending update. no such key can be Zero
+      // API, so answer them without needing an instance; real API access below
+      // still throws loudly.
+      if (typeof key === 'symbol' || key === 'prototype') return undefined
       if (zeroRuntime.zero === null) {
         throw new Error(
           `Zero instance not initialized. Ensure ZeroProvider is mounted before accessing 'zero'.`
