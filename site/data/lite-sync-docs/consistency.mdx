@@ -88,14 +88,13 @@ other is not enough.
   scheduled fault carries receipts: armed, then fired or an explicitly
   recorded cancellation, with heals recorded for outages. A generated fault
   schedule that fires nothing fails as invalid instead of passing vacuously.
-- **Mutation testing at the system level** keeps a suite of fourteen known
-  engine bugs (dropped filter branches, skipped LMID writes, over-pruned
-  retention, leaked invisible rows, swallowed rollbacks, non-durable
-  watermarks, ack-before-effect orderings) and records which lanes catch
-  which, with every verdict verified against the lane's actual failure
-  output. A mutant nothing catches is treated as a named hole to close, not
-  a pass; each formerly cargo-only catch now also has a dedicated
-  system-level lane that goes red on it.
+- **Mutation testing** keeps twelve runnable known-bug patches: nine in the Rust
+  engine and three in the TypeScript host. They cover dropped filter branches,
+  skipped LMID writes, over-pruned retention, swallowed rollbacks,
+  non-durable watermarks, reader/writer admission, committed-change
+  publication, and torn namespace backups. The matrix records which compatible
+  lane catches each patch and verifies every verdict against the lane's actual
+  failure output. A mutant nothing catches is a named gap to close.
 
 ## What is deliberately not claimed
 
@@ -104,12 +103,12 @@ other is not enough.
 - CAP-theorem positioning. Lite Sync inherits Zero's model: reads are local and
   fast, writes are authoritative and acknowledged.
 - Green-badge completeness. The suite's own documentation records the gaps it
-  has not closed — checks that exist but do not yet run against every target,
+  has not closed, including checks that do not yet run against every target,
   fault modes not yet composed, and scale numbers that are historical single
   runs rather than gated assertions. A claim stronger than the evidence would
   be a regression, not a feature. (The machinery itself has pinned real bugs:
   the metamorphic guard caught an upstream zero-cache defect, and the
-  mutation matrix proves each lane goes red on known engine bugs.)
+  mutation matrix proves each included engine and host lane goes red on known bugs.)
 
 The repository's internal testing documentation tracks the current gap list
 with the same candor; `/docs/testing` describes how evidence is scoped per

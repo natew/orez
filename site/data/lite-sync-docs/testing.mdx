@@ -5,4 +5,61 @@ description: Model, differential, host, fault, permission, and deployment eviden
 
 # Testing
 
+Lite Sync treats a green build as evidence only when the check can fail for the
+bug it claims to catch. The suite combines independent reference
+implementations, generated histories, injected faults, and known-bug patches.
+Each layer answers a different question.
+
+<Callout>
+  The exact build ledger below stays unverified until every required CI job passes at one
+  commit. Historical runs and local checks never become release evidence by implication.
+</Callout>
+
+## Coverage model
+
+<CardGrid>
+  <DocCard title="Reference agreement" href="/docs/consistency">
+    Seeded traces compare the Rust engine with the TypeScript reference core and stock
+    Zero for the exercised query and mutation corpus.
+  </DocCard>
+  <DocCard title="State and history invariants" href="/docs/consistency">
+    Generated workloads check atomic visibility, exactly-once mutation application,
+    permission transitions, cookie ordering, and convergence.
+  </DocCard>
+  <DocCard title="Fault and lifecycle testing" href="/docs/operations">
+    Named transaction faults, transport outages, restarts, retention pruning, storage
+    failures, and Durable Object eviction run through real host lanes.
+  </DocCard>
+  <DocCard title="Mutation testing" href="#known-bug-matrix">
+    Known-bug patches prove the Rust and TypeScript suites go red when core guarantees are
+    removed.
+  </DocCard>
+</CardGrid>
+
+## Known-bug matrix
+
+The runnable corpus currently contains twelve patches. Nine mutate the Rust
+engine. Three mutate the TypeScript Durable Object host, where admission,
+change publication, and namespace backup behavior live.
+
+| Target          | Known bugs exercised                                                                | Gate                                                          |
+| --------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Rust engine     | 9 query, mutation, retention, and watermark defects                                 | Full matrix nightly; focused behavioral lanes on every change |
+| TypeScript host | 3 reader/writer admission, committed-change publication, and backup-session defects | All three patches on every pull request                       |
+
+The backup mutant earned its place by exposing a real hole. It bypassed the
+production worker's read-session wiring and the complete host suite stayed
+green. The added wiring test now drives `createOrezDataWorker` with backups
+enabled and requires one read-only application SQL session for the whole scan.
+The lower-level test races an invariant-preserving account and ledger write
+against that scan. Together they make the same mutant fail for the reason the
+production bug mattered: a dump must represent a state that one transaction
+actually produced.
+
+The pull-request gate stores the matrix result as a workflow artifact. The
+nightly run widens the matrix across the Rust system lanes. A mutant that
+compiles and survives every compatible lane is reported as an uncovered gap.
+
+## Exact build evidence
+
 <EvidenceLedger />
