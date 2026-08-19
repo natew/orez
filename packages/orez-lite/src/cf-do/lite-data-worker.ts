@@ -905,6 +905,13 @@ export function createOrezDataWorker<
         markerTable: backupMarkerTable,
         files: options.backup.bucket,
         query: queryNamespace,
+        readSession: (env, namespace, work) =>
+          applicationSqlClient(env, namespace).readTransaction(
+            () => {
+              throw new Error('backup export does not compile ZQL')
+            },
+            (tx) => work((sql, params = []) => tx.query(sql, params))
+          ),
         batch: async (env, namespace, statements) => {
           const instance = canonical(namespace)
           const id = env.ZERO_SQL_DO.idFromName(instance)
