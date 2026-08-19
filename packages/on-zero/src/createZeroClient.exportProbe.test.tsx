@@ -20,7 +20,9 @@ describe('zero proxy identity probes with no instance', () => {
     schema,
     models: {},
     groupedQueries: {
-      probe: { byId: (args: { id: string }) => args as unknown as Query<'user', typeof schema> },
+      probe: {
+        byId: (args: { id: string }) => args as unknown as Query<'user', typeof schema>,
+      },
     },
     instanceName: 'export-probe',
   })
@@ -28,7 +30,9 @@ describe('zero proxy identity probes with no instance', () => {
   test('reads that can never be Zero API answer undefined instead of throwing', () => {
     expect((zero as unknown as { prototype?: unknown }).prototype).toBeUndefined()
     expect(Object.prototype.toString.call(zero)).toBe('[object Object]')
-    expect((zero as unknown as Record<symbol, unknown>)[Symbol.toPrimitive]).toBeUndefined()
+    expect(
+      (zero as unknown as Record<symbol, unknown>)[Symbol.toPrimitive]
+    ).toBeUndefined()
     expect((zero as unknown as Record<symbol, unknown>)[Symbol.iterator]).toBeUndefined()
   })
 
