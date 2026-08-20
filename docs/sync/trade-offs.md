@@ -134,6 +134,49 @@ rust cookie domain, so starting fresh there was free; the apex cutover inherits
 the reset-on-cutover client story deliberately rather than trying to preserve
 cookies across the domain change (`plans/rust-sync-upstream-ingest.md`).
 
+## Ledger format 2 is a one-way migration
+
+Orez 0.15 moved last-mutation-ids out of the packed ledger payload and into
+`_zsync_clients`, and bumped the payload to format 2. The schema pass migrates a
+format-1 namespace in place on the first boot after the upgrade: it copies the
+active segment's `lmids` map into `_zsync_clients`, rewrites every retained
+segment to format 2, and leaves the version boundary alone. The migration is
+idempotent and runs inside the single `transactionSync` that wraps the whole
+schema pass, so a crash part-way rolls all of it back and the next boot retries
+from the original state.
+
+**There is no rollback.** A 0.14.4 engine rejects a format-2 payload outright,
+so pointing an older build at a migrated namespace fails every pull and every
+push with `packed ledger format is unsupported` (HTTP 500). Roll forward to fix
+a problem found after the upgrade; do not roll the host back. Plan the upgrade
+as a one-way door per namespace.
+
+What the migration is worth doing, from the operator's side, is that it also
+repairs two states that permanently wedged namespaces on 0.14.4:
+
+- **An oversized lmid map.** Once the map alone crossed the 768 KiB rotation
+  threshold, the active segment could sit empty (`startVersion == endVersion +
+1`) and still be over the threshold, so every write tried to rotate and its
+  insert collided with the active row's own primary key
+  (`UNIQUE constraint failed: _zsync_log_segments.startVersion`). Moving the map
+  out of the payload takes the segment back under the threshold. Both rotate
+  paths, the SQLite trigger and the engine, hit this and both recover.
+- **An orphaned `captureMode = 1`.** The executor toggles that column through
+  plain SQL mid-transaction, so a delegated push abandoned between the toggle and
+  its commit used to leave it set forever. Every later push then failed with
+  `packed ledger has uncommitted capture state`, and on the engine path the
+  trigger bodies (gated on `captureMode = 0`) silently dropped the next write's
+  change envelope while still writing its row, so the row went live and no client
+  could pull it. The transaction journal restores the column on session disposal
+  now, and the schema pass clears whatever a namespace was already stuck with.
+  It leaves the column alone while `_orez_tx_manifest` holds rows, because those
+  rows mean a transaction is still in flight and its own commit or rollback owns
+  the toggle.
+
+Pending trigger keys are not cleared by any of this. The engine drains them into
+the next transaction, which is the correct handling; deleting them would discard
+changes clients still need.
+
 ## Where this engine fits, and where it does not
 
 It fits an app that wants Zero's client experience without operating Postgres and

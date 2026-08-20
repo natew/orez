@@ -185,53 +185,90 @@ export async function initializePackedLedger(
     // read only the active segment here: this runs on every executor start,
     // and scanning every retained payload belongs to the format-1 migration
     // alone.
-    const activeRows = await tx.query<{ payload: string }>(
-      `SELECT "payload" AS "payload" FROM "_zsync_log_segments"
-       ORDER BY "startVersion" DESC LIMIT 1`
+    // captureMode rides along on the row we already read, so the residue check
+    // below costs nothing on a settled namespace.
+    const activeRows = await tx.query<{
+      payload: string
+      captureMode: number | bigint | string
+    }>(
+      `SELECT "payload" AS "payload", "captureMode" AS "captureMode"
+       FROM "_zsync_log_segments" ORDER BY "startVersion" DESC LIMIT 1`
     )
     if (activeRows.length > 0) {
-      let activePayload: LegacyPackedLedgerPayload
+      const active = activeRows[0]!
+      let activePayload: LegacyPackedLedgerPayload | null = null
       try {
-        parsePayload(activeRows[0]!.payload)
-        return
+        parsePayload(active.payload)
       } catch {
-        activePayload = parseLegacyPayload(activeRows[0]!.payload)
+        activePayload = parseLegacyPayload(active.payload)
       }
-      for (const [clientGroupID, clients] of Object.entries(activePayload.lmids)) {
-        for (const [clientID, mutationID] of Object.entries(clients)) {
+      if (activePayload) {
+        for (const [clientGroupID, clients] of Object.entries(activePayload.lmids)) {
+          for (const [clientID, mutationID] of Object.entries(clients)) {
+            await tx.exec(
+              `INSERT INTO "_zsync_clients"
+                 ("clientGroupID", "clientID", "lastMutationID", "userID")
+               VALUES (?, ?, ?, NULL)
+               ON CONFLICT ("clientGroupID", "clientID")
+               DO UPDATE SET "lastMutationID" = excluded."lastMutationID"`,
+              [clientGroupID, clientID, counter(mutationID, 'legacy last mutation id')]
+            )
+          }
+        }
+        const segments = await tx.query<{
+          startVersion: number | bigint | string
+          payload: string
+        }>(
+          `SELECT "startVersion" AS "startVersion", "payload" AS "payload"
+           FROM "_zsync_log_segments" ORDER BY "startVersion"`
+        )
+        for (const segment of segments) {
+          const legacy = parseLegacyPayload(segment.payload)
           await tx.exec(
-            `INSERT INTO "_zsync_clients"
-               ("clientGroupID", "clientID", "lastMutationID", "userID")
-             VALUES (?, ?, ?, NULL)
-             ON CONFLICT ("clientGroupID", "clientID")
-             DO UPDATE SET "lastMutationID" = excluded."lastMutationID"`,
-            [clientGroupID, clientID, counter(mutationID, 'legacy last mutation id')]
+            `UPDATE "_zsync_log_segments" SET "payload" = ? WHERE "startVersion" = ?`,
+            [
+              JSON.stringify({
+                format: 2,
+                transactions: legacy.transactions.map(({ changes, reset, version }) => ({
+                  version,
+                  changes,
+                  ...(reset ? { reset: true as const } : {}),
+                })),
+              } satisfies PackedLedgerPayload),
+              counter(segment.startVersion, 'start version'),
+            ]
           )
         }
       }
-      const segments = await tx.query<{
-        startVersion: number | bigint | string
-        payload: string
-      }>(
-        `SELECT "startVersion" AS "startVersion", "payload" AS "payload"
-         FROM "_zsync_log_segments" ORDER BY "startVersion"`
-      )
-      for (const segment of segments) {
-        const legacy = parseLegacyPayload(segment.payload)
-        await tx.exec(
-          `UPDATE "_zsync_log_segments" SET "payload" = ? WHERE "startVersion" = ?`,
-          [
-            JSON.stringify({
-              format: 2,
-              transactions: legacy.transactions.map(({ changes, reset, version }) => ({
-                version,
-                changes,
-                ...(reset ? { reset: true as const } : {}),
-              })),
-            } satisfies PackedLedgerPayload),
-            counter(segment.startVersion, 'start version'),
-          ]
+      // a committed captureMode = 1 is orphaned capture state. this column is
+      // toggled through plain sql mid-transaction, so a delegated push
+      // abandoned before commit or rollback used to leave it set forever: every
+      // later push then failed preparePackedLedger with "uncommitted capture
+      // state", and the trigger bodies (gated on captureMode = 0) silently
+      // dropped the next write's change envelope while still writing its row.
+      // the tx journal restores the column on session disposal now, so anything
+      // still set at start-up belongs to a namespace wedged before that landed
+      // and no live writer owns it.
+      //
+      // one exception: while a transaction is journaled in flight, the toggle is
+      // that transaction's, and its commit or rollback (not this pass) resolves
+      // it. `_orez_tx_manifest` rows exist exactly until a transaction commits,
+      // so their absence is the proof that no writer is mid-flight; a host that
+      // keeps no journal has no such writer either.
+      if (counter(active.captureMode, 'capture mode') !== 0) {
+        const journaling = await tx.query(
+          `SELECT 1 FROM sqlite_schema
+           WHERE type = 'table' AND name = '_orez_tx_manifest'`
         )
+        const inFlight =
+          journaling.length > 0 &&
+          (await tx.query(`SELECT 1 FROM "_orez_tx_manifest" LIMIT 1`)).length > 0
+        if (!inFlight) {
+          await tx.exec(
+            `UPDATE "_zsync_log_segments" SET "captureMode" = 0
+             WHERE "startVersion" = (SELECT MAX("startVersion") FROM "_zsync_log_segments")`
+          )
+        }
       }
       return
     }

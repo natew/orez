@@ -358,12 +358,18 @@ fn a_large_lmid_checkpoint_does_not_wedge_the_next_mutation() {
         1,
     );
 
+    // the wedge shape a namespace reaches once its lmid map alone crosses
+    // ROTATE_AT_BYTES: the active segment is EMPTY (start == end + 1) and still
+    // oversized, so both rotate paths insert at the active row's own
+    // startVersion and every write dies on the primary key forever.
+    let historical = 18_000;
+    let lmid_of = |index: usize| 1 + (index % 3) as i64;
     let mut lmids = serde_json::Map::new();
     lmids.insert("g1".into(), json!({ "c1": "1" }));
-    for index in 0..18_000 {
+    for index in 0..historical {
         lmids.insert(
             format!("historical-group-{index:05}"),
-            json!({ format!("historical-client-{index:05}"): "1" }),
+            json!({ format!("historical-client-{index:05}"): lmid_of(index).to_string() }),
         );
     }
     let payload = serde_json::to_string(&json!({
@@ -380,7 +386,62 @@ fn a_large_lmid_checkpoint_does_not_wedge_the_next_mutation() {
             rusqlite::params![payload],
         )
         .unwrap();
+    let active = |h: &mut Host| -> (i64, i64, i64) {
+        h.db.conn
+            .query_row(
+                "SELECT startVersion, endVersion, length(CAST(payload AS BLOB))
+                 FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    let (start, end, bytes) = active(&mut h);
+    assert_eq!(start, end + 1, "the wedged segment is empty");
+    assert!(
+        bytes >= 768 * 1_024,
+        "the wedged segment is still oversized"
+    );
+
+    let before = h.db.conn.total_changes() as i64;
     h.init();
+    let migration_cost = h.db.conn.total_changes() as i64 - before;
+    let before = h.db.conn.total_changes() as i64;
+    h.init();
+    let settled_cost = h.db.conn.total_changes() as i64 - before;
+    // the migration owns one upsert per client in the active map plus one
+    // rewrite of the single retained segment, and a namespace this size pays
+    // that bill exactly once — a durable object re-runs the schema pass on
+    // every hibernation wake.
+    assert_eq!(settled_cost, 0, "a settled schema pass must write nothing");
+    assert_eq!(migration_cost, historical as i64 + 1 + 1);
+
+    // the map moved out of the payload, which is what takes the segment back
+    // under the rotation threshold and unwedges the namespace
+    let (healed_start, healed_end, healed_bytes) = active(&mut h);
+    assert_eq!((healed_start, healed_end), (start, end));
+    assert!(healed_bytes < 768 * 1_024);
+
+    // every client's lastMutationID survives the move, exactly
+    let lmid = |h: &mut Host, group: String, client: String| -> i64 {
+        h.db.conn
+            .query_row(
+                "SELECT lastMutationID FROM _zsync_clients
+                 WHERE clientGroupID = ?1 AND clientID = ?2",
+                [group, client],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    for index in 0..historical {
+        let actual = lmid(
+            &mut h,
+            format!("historical-group-{index:05}"),
+            format!("historical-client-{index:05}"),
+        );
+        assert_eq!(actual, lmid_of(index), "historical client {index}");
+    }
+    assert_eq!(lmid(&mut h, "g1".into(), "c1".into()), 1);
 
     h.put(
         "second",
@@ -388,6 +449,118 @@ fn a_large_lmid_checkpoint_does_not_wedge_the_next_mutation() {
         2,
     );
     assert!(h.query_item("second").is_some());
+    assert_eq!(
+        lmid(&mut h, "g1".into(), "c1".into()),
+        2,
+        "the next mutation advances from the migrated lmid"
+    );
+}
+
+#[test]
+fn orphaned_capture_mode_is_cleared_by_the_schema_pass() {
+    let mut h = setup();
+    h.put(
+        "first",
+        json!({ "id": "first", "label": "first", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
+    let capture_mode = |h: &mut Host| -> i64 {
+        h.db.conn
+            .query_row(
+                "SELECT captureMode FROM _zsync_log_segments
+                 ORDER BY startVersion DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    // a delegated push abandoned between the capture toggle and its commit
+    // leaves the column set with no writer behind it
+    h.db.conn
+        .execute(
+            "UPDATE _zsync_log_segments SET captureMode = 1
+             WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)",
+            [],
+        )
+        .unwrap();
+
+    h.init();
+    assert_eq!(
+        capture_mode(&mut h),
+        0,
+        "the schema pass clears the residue"
+    );
+    let before = h.db.conn.total_changes() as i64;
+    h.init();
+    assert_eq!(
+        h.db.conn.total_changes() as i64 - before,
+        0,
+        "a settled schema pass must write nothing"
+    );
+
+    // the trigger bodies are gated on captureMode = 0, so an uncleared column
+    // wrote the row while silently dropping its change envelope: the row went
+    // live and no client could ever pull it.
+    let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
+    h.put(
+        "second",
+        json!({ "id": "second", "label": "second", "rank": 2, "done": false, "meta": null }),
+        2,
+    );
+    assert!(h.query_item("second").is_some());
+    let puts = puts(patch_of(&h.pull(json!(cookie), "u1").unwrap())).len();
+    assert_eq!(puts, 1, "the first write after the pass must be pullable");
+}
+
+#[test]
+fn capture_mode_is_left_alone_while_a_transaction_is_journaled() {
+    let mut h = setup();
+    h.put(
+        "first",
+        json!({ "id": "first", "label": "first", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
+    // the journal owns the toggle until its transaction commits or rolls back;
+    // a schema pass that clobbered it would strand a live writer.
+    h.db.conn
+        .execute_batch(
+            "CREATE TABLE _orez_tx_manifest (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT 'default', original TEXT NOT NULL,
+                snapshot TEXT);
+             INSERT INTO _orez_tx_manifest (tx_id, original)
+             VALUES ('live-tx', '_zsync_log_segments');
+             UPDATE _zsync_log_segments SET captureMode = 1
+             WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments);",
+        )
+        .unwrap();
+    h.init();
+    let capture_mode: i64 =
+        h.db.conn
+            .query_row(
+                "SELECT captureMode FROM _zsync_log_segments
+                 ORDER BY startVersion DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(capture_mode, 1, "an in-flight transaction keeps its toggle");
+
+    // once that transaction is gone the next pass clears it
+    h.db.conn
+        .execute("DELETE FROM _orez_tx_manifest", [])
+        .unwrap();
+    h.init();
+    let capture_mode: i64 =
+        h.db.conn
+            .query_row(
+                "SELECT captureMode FROM _zsync_log_segments
+                 ORDER BY startVersion DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(capture_mode, 0);
 }
 
 #[test]
