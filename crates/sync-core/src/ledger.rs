@@ -32,7 +32,13 @@ struct LedgerPayload {
     transactions: Vec<LedgerTransaction>,
 }
 
+// parsed for validation only: the set-based migration rewrites payloads in
+// sql, so these fields are deserialized to fail fast on a malformed legacy
+// payload rather than read. the per-transaction `lmid` key survives the
+// in-place rewrite; format-2 parsing ignores it and the next payload
+// rewrite drops it.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct LegacyLedgerTransaction {
     version: String,
     #[serde(default)]
@@ -47,6 +53,7 @@ struct LegacyLedgerTransaction {
 struct LegacyLedgerPayload {
     format: u8,
     lmids: BTreeMap<String, BTreeMap<String, String>>,
+    #[allow(dead_code)]
     transactions: Vec<LegacyLedgerTransaction>,
 }
 
@@ -243,64 +250,62 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
                 if active.format != 1 {
                     return Err(DbError("packed ledger payload has an unknown shape".into()));
                 }
-                for (group, clients) in active.lmids {
-                    for (client, mutation) in clients {
-                        let mutation = mutation
+                // validate every lmid before writing anything, matching the
+                // row-by-row parse this replaces: a value that is not a
+                // non-negative integer fails the migration instead of CASTing
+                // to a silently wrong number.
+                for clients in active.lmids.values() {
+                    for mutation in clients.values() {
+                        mutation
                             .parse::<i64>()
                             .ok()
                             .filter(|value| *value >= 0)
                             .ok_or_else(|| DbError("legacy client lmid is invalid".into()))?;
-                        db.exec(
-                            "INSERT INTO _zsync_clients
-                               (clientGroupID, clientID, lastMutationID, userID)
-                             VALUES (?, ?, ?, NULL)
-                             ON CONFLICT (clientGroupID, clientID)
-                             DO UPDATE SET lastMutationID = excluded.lastMutationID",
-                            &[
-                                text(group.clone()),
-                                text(client),
-                                SqlValue::Integer(mutation),
-                            ],
-                        )?;
                     }
                 }
-                let segments = db.query(
-                    "SELECT CAST(startVersion AS TEXT) AS startVersion, payload
-                     FROM _zsync_log_segments ORDER BY startVersion",
+                // every retained payload must be a known format before the
+                // set-based rewrite below silently skips non-format-1 rows.
+                if !db
+                    .query(
+                        "SELECT 1 FROM _zsync_log_segments
+                         WHERE CAST(json_extract(payload, '$.format') AS INTEGER)
+                               NOT IN (1, 2)
+                         LIMIT 1",
+                        &[],
+                    )
+                    .map_err(|_| DbError("packed ledger payload has an unknown shape".into()))?
+                    .is_empty()
+                {
+                    return Err(DbError("packed ledger payload has an unknown shape".into()));
+                }
+                // the whole active lmids map lands in one set-based statement.
+                // the row-per-client loop this replaces paid one engine->sql
+                // crossing per client, which timed a 12k-client production
+                // namespace out of every push budget; sqlite walks the payload
+                // json itself in milliseconds.
+                db.exec(
+                    "INSERT INTO _zsync_clients
+                       (clientGroupID, clientID, lastMutationID, userID)
+                     SELECT grp.key, client.key, CAST(client.value AS INTEGER), NULL
+                     FROM _zsync_log_segments segment,
+                          json_each(segment.payload, '$.lmids') grp,
+                          json_each(grp.value) client
+                     WHERE segment.startVersion =
+                           (SELECT MAX(startVersion) FROM _zsync_log_segments)
+                     ON CONFLICT (clientGroupID, clientID)
+                     DO UPDATE SET lastMutationID = excluded.lastMutationID",
                     &[],
                 )?;
-                for row in &segments {
-                    let start = parse_counter(row.get("startVersion"), "start version")
-                        .map_err(|error| DbError(error.message))?;
-                    let payload = match row.get("payload") {
-                        Some(SqlValue::Text(value)) => value,
-                        _ => return Err(DbError("packed ledger payload is not text".into())),
-                    };
-                    let legacy: LegacyLedgerPayload =
-                        serde_json::from_str(payload).map_err(|_| {
-                            DbError("packed ledger payload has an unknown shape".into())
-                        })?;
-                    if legacy.format != 1 {
-                        return Err(DbError("packed ledger payload has an unknown shape".into()));
-                    }
-                    let payload = serde_json::to_string(&LedgerPayload {
-                        format: LEDGER_FORMAT,
-                        transactions: legacy
-                            .transactions
-                            .into_iter()
-                            .map(|transaction| LedgerTransaction {
-                                version: transaction.version,
-                                changes: transaction.changes,
-                                reset: transaction.reset,
-                            })
-                            .collect(),
-                    })
-                    .map_err(|error| DbError(error.to_string()))?;
-                    db.exec(
-                        "UPDATE _zsync_log_segments SET payload = ? WHERE startVersion = ?",
-                        &[text(payload), SqlValue::Integer(start)],
-                    )?;
-                }
+                // one rewrite strips lmids and stamps format 2 across every
+                // retained format-1 segment. transactions are carried verbatim:
+                // both formats serialize the same {version, changes, reset?}
+                // entries, and the parsers ignore unknown fields.
+                db.exec(
+                    "UPDATE _zsync_log_segments
+                     SET payload = json_remove(json_set(payload, '$.format', 2), '$.lmids')
+                     WHERE CAST(json_extract(payload, '$.format') AS INTEGER) = 1",
+                    &[],
+                )?;
             }
             _ => return Err(DbError("packed ledger format is unsupported".into())),
         }

@@ -203,42 +203,50 @@ export async function initializePackedLedger(
         activePayload = parseLegacyPayload(active.payload)
       }
       if (activePayload) {
-        for (const [clientGroupID, clients] of Object.entries(activePayload.lmids)) {
-          for (const [clientID, mutationID] of Object.entries(clients)) {
-            await tx.exec(
-              `INSERT INTO "_zsync_clients"
-                 ("clientGroupID", "clientID", "lastMutationID", "userID")
-               VALUES (?, ?, ?, NULL)
-               ON CONFLICT ("clientGroupID", "clientID")
-               DO UPDATE SET "lastMutationID" = excluded."lastMutationID"`,
-              [clientGroupID, clientID, counter(mutationID, 'legacy last mutation id')]
-            )
+        // validate every lmid before writing anything, matching the row-by-row
+        // parse this replaces: a value that is not a non-negative integer fails
+        // the migration instead of CASTing to a silently wrong number.
+        for (const clients of Object.values(activePayload.lmids)) {
+          for (const mutationID of Object.values(clients)) {
+            counter(mutationID, 'legacy last mutation id')
           }
         }
-        const segments = await tx.query<{
-          startVersion: number | bigint | string
-          payload: string
-        }>(
-          `SELECT "startVersion" AS "startVersion", "payload" AS "payload"
-           FROM "_zsync_log_segments" ORDER BY "startVersion"`
+        // every retained payload must be a known format before the set-based
+        // rewrite below silently skips non-format-1 rows.
+        const unknown = await tx.query(
+          `SELECT 1 FROM "_zsync_log_segments"
+           WHERE CAST(json_extract("payload", '$.format') AS INTEGER) NOT IN (1, 2)
+           LIMIT 1`
         )
-        for (const segment of segments) {
-          const legacy = parseLegacyPayload(segment.payload)
-          await tx.exec(
-            `UPDATE "_zsync_log_segments" SET "payload" = ? WHERE "startVersion" = ?`,
-            [
-              JSON.stringify({
-                format: 2,
-                transactions: legacy.transactions.map(({ changes, reset, version }) => ({
-                  version,
-                  changes,
-                  ...(reset ? { reset: true as const } : {}),
-                })),
-              } satisfies PackedLedgerPayload),
-              counter(segment.startVersion, 'start version'),
-            ]
-          )
+        if (unknown.length > 0) {
+          throw new MutationWriteSetError('packed ledger payload has an unknown shape')
         }
+        // the whole active lmids map lands in one set-based statement. the
+        // row-per-client loop this replaces paid one wire round trip per
+        // client, which timed a 12k-client production namespace out of every
+        // delegated-push budget; sqlite walks the payload json itself in
+        // milliseconds.
+        await tx.exec(
+          `INSERT INTO "_zsync_clients"
+             ("clientGroupID", "clientID", "lastMutationID", "userID")
+           SELECT "grp"."key", "client"."key", CAST("client"."value" AS INTEGER), NULL
+           FROM "_zsync_log_segments" "segment",
+                json_each("segment"."payload", '$.lmids') "grp",
+                json_each("grp"."value") "client"
+           WHERE "segment"."startVersion" =
+                 (SELECT MAX("startVersion") FROM "_zsync_log_segments")
+           ON CONFLICT ("clientGroupID", "clientID")
+           DO UPDATE SET "lastMutationID" = excluded."lastMutationID"`
+        )
+        // one rewrite strips lmids and stamps format 2 across every retained
+        // format-1 segment. transactions are carried verbatim: both formats
+        // serialize the same {version, changes, reset?} entries, and the
+        // parsers ignore unknown fields.
+        await tx.exec(
+          `UPDATE "_zsync_log_segments"
+           SET "payload" = json_remove(json_set("payload", '$.format', 2), '$.lmids')
+           WHERE CAST(json_extract("payload", '$.format') AS INTEGER) = 1`
+        )
       }
       // a committed captureMode = 1 is orphaned capture state. this column is
       // toggled through plain sql mid-transaction, so a delegated push
