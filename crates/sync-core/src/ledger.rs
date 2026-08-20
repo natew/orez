@@ -191,8 +191,11 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
     )?;
     // read only the active segment here: this runs on every schema pass, and
     // scanning every retained payload belongs to the format-1 migration alone.
+    // captureMode rides along on the row we already read, so the residue check
+    // below costs nothing on a settled namespace.
     let active_row = db.query(
-        "SELECT payload FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
+        "SELECT payload, CAST(captureMode AS TEXT) AS captureMode
+         FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
         &[],
     )?;
     if active_row.is_empty() {
@@ -300,6 +303,46 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
                 }
             }
             _ => return Err(DbError("packed ledger format is unsupported".into())),
+        }
+        // a committed captureMode = 1 is orphaned capture state. the executor
+        // toggles the column through plain sql mid-transaction, so a delegated
+        // push abandoned before commit or rollback used to leave it set
+        // forever: every later push then failed preflight with "uncommitted
+        // capture state", and on this path the trigger bodies (gated on
+        // captureMode = 0) silently dropped the next write's change envelope
+        // while still writing its row. the tx journal restores the column on
+        // session disposal now, so anything still set at a schema pass belongs
+        // to a namespace wedged before that landed and no live writer owns it.
+        //
+        // one exception: while a transaction is journaled in flight, the toggle
+        // is that transaction's, and its commit or rollback (not this pass)
+        // resolves it. `_orez_tx_manifest` rows exist exactly until a
+        // transaction commits, so their absence is the proof that no writer is
+        // mid-flight; a host that keeps no journal has no such writer either.
+        let capture_mode = parse_counter(
+            active_row.first().and_then(|row| row.get("captureMode")),
+            "capture mode",
+        )
+        .map_err(|error| DbError(error.message))?;
+        if capture_mode != 0 {
+            let journaling = !db
+                .query(
+                    "SELECT 1 FROM sqlite_schema
+                     WHERE type = 'table' AND name = '_orez_tx_manifest'",
+                    &[],
+                )?
+                .is_empty();
+            let in_flight = journaling
+                && !db
+                    .query("SELECT 1 FROM _orez_tx_manifest LIMIT 1", &[])?
+                    .is_empty();
+            if !in_flight {
+                db.exec(
+                    "UPDATE _zsync_log_segments SET captureMode = 0
+                     WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)",
+                    &[],
+                )?;
+            }
         }
     }
     if legacy_table {

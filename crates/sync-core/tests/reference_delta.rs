@@ -457,6 +457,113 @@ fn a_large_lmid_checkpoint_does_not_wedge_the_next_mutation() {
 }
 
 #[test]
+fn orphaned_capture_mode_is_cleared_by_the_schema_pass() {
+    let mut h = setup();
+    h.put(
+        "first",
+        json!({ "id": "first", "label": "first", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
+    let capture_mode = |h: &mut Host| -> i64 {
+        h.db.conn
+            .query_row(
+                "SELECT captureMode FROM _zsync_log_segments
+                 ORDER BY startVersion DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    // a delegated push abandoned between the capture toggle and its commit
+    // leaves the column set with no writer behind it
+    h.db.conn
+        .execute(
+            "UPDATE _zsync_log_segments SET captureMode = 1
+             WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)",
+            [],
+        )
+        .unwrap();
+
+    h.init();
+    assert_eq!(
+        capture_mode(&mut h),
+        0,
+        "the schema pass clears the residue"
+    );
+    let before = h.db.conn.total_changes() as i64;
+    h.init();
+    assert_eq!(
+        h.db.conn.total_changes() as i64 - before,
+        0,
+        "a settled schema pass must write nothing"
+    );
+
+    // the trigger bodies are gated on captureMode = 0, so an uncleared column
+    // wrote the row while silently dropping its change envelope: the row went
+    // live and no client could ever pull it.
+    let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
+    h.put(
+        "second",
+        json!({ "id": "second", "label": "second", "rank": 2, "done": false, "meta": null }),
+        2,
+    );
+    assert!(h.query_item("second").is_some());
+    let puts = puts(patch_of(&h.pull(json!(cookie), "u1").unwrap())).len();
+    assert_eq!(puts, 1, "the first write after the pass must be pullable");
+}
+
+#[test]
+fn capture_mode_is_left_alone_while_a_transaction_is_journaled() {
+    let mut h = setup();
+    h.put(
+        "first",
+        json!({ "id": "first", "label": "first", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
+    // the journal owns the toggle until its transaction commits or rolls back;
+    // a schema pass that clobbered it would strand a live writer.
+    h.db.conn
+        .execute_batch(
+            "CREATE TABLE _orez_tx_manifest (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT 'default', original TEXT NOT NULL,
+                snapshot TEXT);
+             INSERT INTO _orez_tx_manifest (tx_id, original)
+             VALUES ('live-tx', '_zsync_log_segments');
+             UPDATE _zsync_log_segments SET captureMode = 1
+             WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments);",
+        )
+        .unwrap();
+    h.init();
+    let capture_mode: i64 =
+        h.db.conn
+            .query_row(
+                "SELECT captureMode FROM _zsync_log_segments
+                 ORDER BY startVersion DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(capture_mode, 1, "an in-flight transaction keeps its toggle");
+
+    // once that transaction is gone the next pass clears it
+    h.db.conn
+        .execute("DELETE FROM _orez_tx_manifest", [])
+        .unwrap();
+    h.init();
+    let capture_mode: i64 =
+        h.db.conn
+            .query_row(
+                "SELECT captureMode FROM _zsync_log_segments
+                 ORDER BY startVersion DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(capture_mode, 0);
+}
+
+#[test]
 fn a_previous_trigger_generation_is_dropped_by_the_schema_pass() {
     let mut h = setup();
     // a stale-generation trigger (versioned or unversioned) left installed

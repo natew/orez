@@ -378,6 +378,123 @@ describe('sync executor', () => {
     expect(versions).toEqual(['1', '2', '3', '4'])
   })
 
+  test('an orphaned captureMode is cleared when the executor starts', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    const mutators = {
+      create: async ({ tx, args }) => {
+        await tx.mutate.item.insert(args)
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const first = createSyncExecutor({ database, effects, mutators, schema })
+    await first.push(push('create'), { userID: 'user-1' })
+
+    // a delegated push abandoned between the capture toggle and its commit
+    // leaves the column set with no writer behind it
+    sqlite.exec('UPDATE _zsync_log_segments SET captureMode = 1')
+
+    const captureMode = () =>
+      sqlite
+        .prepare(
+          'SELECT captureMode FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1'
+        )
+        .get()!.captureMode
+    const totalChanges = () =>
+      Number(sqlite.prepare('SELECT total_changes() AS total').get()!.total)
+
+    const restarted = createSyncExecutor({ database, effects, mutators, schema })
+    const transactionsBefore = packedPayload(sqlite).transactions.length
+    await restarted.push(
+      {
+        clientGroupID: 'group-1',
+        pushVersion: 1,
+        mutations: [
+          {
+            type: 'custom',
+            id: 2,
+            clientID: 'client-1',
+            name: 'create',
+            args: [{ id: 'second', value: 'v2' }],
+          },
+        ],
+      },
+      { userID: 'user-1' }
+    )
+    expect(captureMode()).toBe(0)
+    // the trigger bodies are gated on captureMode = 0, so an uncleared column
+    // wrote the row while silently dropping its change envelope
+    expect(sqlite.prepare("SELECT value FROM item WHERE id = 'second'").get()).toEqual({
+      value: 'v2',
+    })
+    const appended = packedPayload(sqlite).transactions.slice(transactionsBefore)
+    expect(appended.flatMap((transaction) => transaction.changes)).toEqual([
+      ['item', { id: 'second' }],
+    ])
+    expect(storedLMID(sqlite)).toBe(2)
+
+    // a settled start-up writes nothing
+    const before = totalChanges()
+    const settled = createSyncExecutor({ database, effects, mutators, schema })
+    await settled.push(push('create', 2), { userID: 'user-1' })
+    expect(totalChanges() - before).toBe(0)
+  })
+
+  test('a journaled transaction keeps its captureMode across a restart', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    const mutators = {
+      create: async ({ tx, args }) => {
+        await tx.mutate.item.insert(args)
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const first = createSyncExecutor({ database, effects, mutators, schema })
+    await first.push(push('create'), { userID: 'user-1' })
+
+    // the journal owns the toggle until its transaction commits or rolls back;
+    // a start-up that clobbered it would strand a live writer
+    sqlite.exec(`
+      CREATE TABLE _orez_tx_manifest (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL,
+        owner TEXT NOT NULL DEFAULT 'default', original TEXT NOT NULL,
+        snapshot TEXT);
+      INSERT INTO _orez_tx_manifest (tx_id, original)
+      VALUES ('live-tx', '_zsync_log_segments');
+      UPDATE _zsync_log_segments SET captureMode = 1;
+    `)
+    const captureMode = () =>
+      sqlite
+        .prepare(
+          'SELECT captureMode FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1'
+        )
+        .get()!.captureMode
+
+    const blocked = createSyncExecutor({ database, effects, mutators, schema })
+    await expect(blocked.push(push('create', 2), { userID: 'user-1' })).rejects.toThrow(
+      'packed ledger has uncommitted capture state'
+    )
+    expect(captureMode()).toBe(1)
+
+    // once that transaction is gone the next start-up clears it
+    sqlite.exec('DELETE FROM _orez_tx_manifest')
+    const recovered = createSyncExecutor({ database, effects, mutators, schema })
+    await recovered.push(
+      {
+        clientGroupID: 'group-1',
+        pushVersion: 1,
+        mutations: [
+          {
+            type: 'custom',
+            id: 2,
+            clientID: 'client-1',
+            name: 'create',
+            args: [{ id: 'second', value: 'v2' }],
+          },
+        ],
+      },
+      { userID: 'user-1' }
+    )
+    expect(captureMode()).toBe(0)
+    expect(storedLMID(sqlite)).toBe(2)
+  })
+
   test('insert conflict keeps the existing row and commits the later insert', async () => {
     const { database, sqlite } = sqliteDatabase()
     sqlite.prepare('INSERT INTO item (id, value) VALUES (?, ?)').run('a', 'original')
