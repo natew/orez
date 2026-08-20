@@ -306,6 +306,78 @@ describe('sync executor', () => {
     })
   })
 
+  test('format-1 migration rewrites every retained segment', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    const mutators = {
+      create: async ({ tx, ctx }) => {
+        await tx.mutate.item.insert({
+          id: `item-${ctx.mutationID}`,
+          value: `value-${ctx.mutationID}`,
+        })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const firstExecutor = createSyncExecutor({ database, effects, mutators, schema })
+    await firstExecutor.push(push('create'), { userID: 'user-1' })
+
+    const legacySegment = (
+      versions: number[],
+      lmids: Record<string, Record<string, string>>
+    ) =>
+      JSON.stringify({
+        format: 1,
+        lmids,
+        transactions: versions.map((version) => ({
+          version: String(version),
+          changes: [['item', { id: `legacy-${version}` }]],
+        })),
+      })
+    sqlite.prepare('DELETE FROM _zsync_log_segments').run()
+    const insert = sqlite.prepare(
+      `INSERT INTO _zsync_log_segments
+         (startVersion, endVersion, payload, pending, captureMode)
+       VALUES (?, ?, ?, '[]', 0)`
+    )
+    // non-active maps are rotation-time copies and must be ignored: only the
+    // active segment's map is canonical at migration time.
+    insert.run(1, 2, legacySegment([1, 2], { 'group-1': { 'client-1': '999' } }))
+    insert.run(
+      3,
+      3,
+      legacySegment([3], {
+        'group-1': { 'client-1': '7' },
+        'historical-group': { 'historical-client': '3' },
+      })
+    )
+
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+    await expect(executor.push(push('create', 8), { userID: 'user-1' })).resolves.toEqual(
+      {
+        pushResponse: {
+          mutations: [{ id: { clientID: 'client-1', id: 8 }, result: {} }],
+        },
+      }
+    )
+    expect(storedLMID(sqlite)).toBe(8)
+    expect(storedLMID(sqlite, 'historical-group', 'historical-client')).toBe(3)
+
+    const segments = sqlite
+      .prepare('SELECT payload FROM _zsync_log_segments ORDER BY startVersion')
+      .all() as { payload: string }[]
+    expect(segments).toHaveLength(2)
+    const versions: string[] = []
+    for (const segment of segments) {
+      const payload = JSON.parse(segment.payload) as {
+        format: number
+        lmids?: unknown
+        transactions: { version: string }[]
+      }
+      expect(payload.format).toBe(2)
+      expect(payload.lmids).toBeUndefined()
+      versions.push(...payload.transactions.map((transaction) => transaction.version))
+    }
+    expect(versions).toEqual(['1', '2', '3', '4'])
+  })
+
   test('insert conflict keeps the existing row and commits the later insert', async () => {
     const { database, sqlite } = sqliteDatabase()
     sqlite.prepare('INSERT INTO item (id, value) VALUES (?, ?)').run('a', 'original')

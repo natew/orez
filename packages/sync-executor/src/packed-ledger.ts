@@ -182,21 +182,20 @@ export async function initializePackedLedger(
       "pending" TEXT NOT NULL,
       "captureMode" INTEGER NOT NULL CHECK ("captureMode" IN (0, 1))
     ) WITHOUT ROWID`)
-    const existing = await tx.query<{
-      startVersion: number | bigint | string
-      payload: string
-    }>(
-      `SELECT "startVersion" AS "startVersion", "payload" AS "payload"
-       FROM "_zsync_log_segments" ORDER BY "startVersion"`
+    // read only the active segment here: this runs on every executor start,
+    // and scanning every retained payload belongs to the format-1 migration
+    // alone.
+    const activeRows = await tx.query<{ payload: string }>(
+      `SELECT "payload" AS "payload" FROM "_zsync_log_segments"
+       ORDER BY "startVersion" DESC LIMIT 1`
     )
-    if (existing.length > 0) {
-      const active = existing.at(-1)!
+    if (activeRows.length > 0) {
       let activePayload: LegacyPackedLedgerPayload
       try {
-        parsePayload(active.payload)
+        parsePayload(activeRows[0]!.payload)
         return
       } catch {
-        activePayload = parseLegacyPayload(active.payload)
+        activePayload = parseLegacyPayload(activeRows[0]!.payload)
       }
       for (const [clientGroupID, clients] of Object.entries(activePayload.lmids)) {
         for (const [clientID, mutationID] of Object.entries(clients)) {
@@ -210,7 +209,14 @@ export async function initializePackedLedger(
           )
         }
       }
-      for (const segment of existing) {
+      const segments = await tx.query<{
+        startVersion: number | bigint | string
+        payload: string
+      }>(
+        `SELECT "startVersion" AS "startVersion", "payload" AS "payload"
+         FROM "_zsync_log_segments" ORDER BY "startVersion"`
+      )
+      for (const segment of segments) {
         const legacy = parseLegacyPayload(segment.payload)
         await tx.exec(
           `UPDATE "_zsync_log_segments" SET "payload" = ? WHERE "startVersion" = ?`,

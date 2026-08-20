@@ -183,8 +183,9 @@ The cookie is the high watermark of the per-namespace packed ledger
 (`_zsync_log_segments`; the data worker has its separate `_zero_changes` CDC
 queue). SQLite triggers installed per table append touched primary keys to the
 active segment on every write path, whether the write came from a mutator, from
-admin SQL, or from upstream ingest. The ledger stores keys, cookies, and
-last-mutation-id checkpoints, never row values. Retention prunes completed
+admin SQL, or from upstream ingest. The ledger stores keys and cookies, never
+row values or last-mutation-ids (those live only in the clients table below).
+Retention prunes completed
 segments and raises the floor. A client whose cookie has fallen below the floor
 gets a snapshot on its next pull.
 

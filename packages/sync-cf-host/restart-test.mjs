@@ -146,7 +146,7 @@ try {
   )
   const triggerRows = await admin('/admin/sql', {
     query:
-      "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '_zsync_tr_%_v2' ORDER BY name LIMIT 1",
+      "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '_zsync_tr_%' ORDER BY name LIMIT 1",
   })
   assert.equal(triggerRows.rows.length, 1, 'the restart probe found a packed trigger')
   const beforeTriggerReplay = await admin('/admin/sql-billing')

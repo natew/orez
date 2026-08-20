@@ -7,7 +7,7 @@ use common::{Host, item_tables};
 use serde_json::{Value, json};
 
 use sync_core::query::handle_query_pull;
-use sync_core::{EngineError, SyncDb, Transactor, invalidate, push_validate};
+use sync_core::{EngineError, SqlValue, SyncDb, Transactor, invalidate, push_validate};
 
 // ---- helpers mirroring the TS suite's push()/pull()/patchOf() -------------
 
@@ -386,6 +386,174 @@ fn a_large_lmid_checkpoint_does_not_wedge_the_next_mutation() {
         "second",
         json!({ "id": "second", "label": "second", "rank": 2, "done": false, "meta": null }),
         2,
+    );
+    assert!(h.query_item("second").is_some());
+}
+
+#[test]
+fn a_previous_trigger_generation_is_dropped_by_the_schema_pass() {
+    let mut h = setup();
+    // a stale-generation trigger (versioned or unversioned) left installed
+    // would fire beside the current set on every raw write. the canary table
+    // records any such firing.
+    h.db.conn
+        .execute_batch(
+            "CREATE TABLE trigger_canary (n INTEGER);
+             CREATE TRIGGER _zsync_tr_item_record_i_v2 AFTER INSERT ON item_record
+             BEGIN INSERT INTO trigger_canary VALUES (1); END;
+             CREATE TRIGGER _zsync_tr_item_record_i AFTER INSERT ON item_record
+             BEGIN INSERT INTO trigger_canary VALUES (1); END;",
+        )
+        .unwrap();
+    h.init();
+    h.put(
+        "first",
+        json!({ "id": "first", "label": "first", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
+    let fired: i64 =
+        h.db.conn
+            .query_row("SELECT count(*) FROM trigger_canary", [], |row| row.get(0))
+            .unwrap();
+    assert_eq!(
+        fired, 0,
+        "stale trigger generations must be dropped by init"
+    );
+    let current: i64 =
+        h.db.conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema
+                 WHERE type = 'trigger' AND name GLOB '_zsync_tr_*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(
+        current, 3,
+        "current-generation triggers must stay installed"
+    );
+}
+
+#[test]
+fn format_1_migration_rewrites_every_retained_segment() {
+    let mut h = setup();
+    h.put(
+        "first",
+        json!({ "id": "first", "label": "first", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
+
+    let segment = |versions: &[(i64, &str)], lmids: Value| {
+        serde_json::to_string(&json!({
+            "format": 1,
+            "lmids": lmids,
+            "transactions": versions
+                .iter()
+                .map(|(version, id)| json!({
+                    "version": version.to_string(),
+                    "changes": [["item", { "id": id }]],
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    };
+    h.db.conn
+        .execute("DELETE FROM _zsync_log_segments", [])
+        .unwrap();
+    let insert = "INSERT INTO _zsync_log_segments
+                    (startVersion, endVersion, payload, pending, captureMode)
+                  VALUES (?, ?, ?, '[]', 0)";
+    // non-active maps are rotation-time copies and must be ignored: only the
+    // active segment's map is canonical at migration time.
+    h.db.conn
+        .execute(
+            insert,
+            rusqlite::params![
+                1,
+                2,
+                segment(&[(1, "a"), (2, "b")], json!({ "g1": { "c1": "999" } }))
+            ],
+        )
+        .unwrap();
+    h.db.conn
+        .execute(
+            insert,
+            rusqlite::params![
+                3,
+                4,
+                segment(&[(3, "c"), (4, "d")], json!({ "g1": { "c1": "999" } }))
+            ],
+        )
+        .unwrap();
+    h.db.conn
+        .execute(
+            insert,
+            rusqlite::params![
+                5,
+                5,
+                segment(
+                    &[(5, "e")],
+                    json!({ "g1": { "c1": "7" }, "historical-group": { "historical-client": "3" } })
+                )
+            ],
+        )
+        .unwrap();
+
+    let before = h.db.conn.total_changes() as i64;
+    h.init();
+    let migration_cost = h.db.conn.total_changes() as i64 - before;
+    let before = h.db.conn.total_changes() as i64;
+    h.init();
+    let settled_cost = h.db.conn.total_changes() as i64 - before;
+    // the migration owns exactly one rewrite per retained segment plus one
+    // upsert per client in the active map, over whatever a settled pass costs.
+    assert_eq!(settled_cost, 0, "a settled schema pass must write nothing");
+    assert_eq!(migration_cost, settled_cost + 3 + 2);
+
+    let rows =
+        h.db.query(
+            "SELECT payload FROM _zsync_log_segments ORDER BY startVersion",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    let mut versions = Vec::new();
+    for row in &rows {
+        let Some(SqlValue::Text(payload)) = row.values.first() else {
+            panic!("payload is not text");
+        };
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload["format"], json!(2));
+        assert!(payload.get("lmids").is_none());
+        for transaction in payload["transactions"].as_array().unwrap() {
+            versions.push(transaction["version"].as_str().unwrap().to_string());
+            assert_eq!(transaction["changes"].as_array().unwrap().len(), 1);
+        }
+    }
+    assert_eq!(versions, ["1", "2", "3", "4", "5"]);
+
+    let lmid = |group: &str, client: &str| -> i64 {
+        h.db.conn
+            .query_row(
+                "SELECT lastMutationID FROM _zsync_clients
+                 WHERE clientGroupID = ?1 AND clientID = ?2",
+                [group, client],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        lmid("g1", "c1"),
+        7,
+        "the active map must overwrite a stale row"
+    );
+    assert_eq!(lmid("historical-group", "historical-client"), 3);
+
+    // the migrated ledger accepts the next mutation for the imported lmid
+    h.put(
+        "second",
+        json!({ "id": "second", "label": "second", "rank": 2, "done": false, "meta": null }),
+        8,
     );
     assert!(h.query_item("second").is_some());
 }

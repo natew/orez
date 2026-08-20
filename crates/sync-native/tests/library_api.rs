@@ -1808,7 +1808,7 @@ async fn delegated_cleanup_only_settlement_needs_no_acknowledgement() {
                     (SELECT count(*) \
                      FROM _zsync_log_segments AS segment, \
                           json_each(segment.payload, '$.transactions') AS tx \
-                     WHERE json_type(tx.value, '$.lmid') = 'object') AS lmidRows",
+                     WHERE json_array_length(json_extract(tx.value, '$.changes')) = 0) AS lmidRows",
             None,
             None,
         ),
@@ -1860,7 +1860,7 @@ async fn delegated_push_settlement_rejects_a_mismatched_ack_without_advancing_lm
                     (SELECT count(*) \
                      FROM _zsync_log_segments AS segment, \
                           json_each(segment.payload, '$.transactions') AS tx \
-                     WHERE json_type(tx.value, '$.lmid') = 'object') AS lmidRows",
+                     WHERE json_array_length(json_extract(tx.value, '$.changes')) = 0) AS lmidRows",
             None,
             None,
         ),

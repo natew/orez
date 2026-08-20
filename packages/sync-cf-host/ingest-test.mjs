@@ -147,10 +147,10 @@ try {
   }
   assert.deepEqual(restoreCost, {
     totalChanges: 19,
-    rowsRead: 2_653,
+    rowsRead: 2_821,
     rowsWritten: 29,
     sessions: 9,
-    statements: 158,
+    statements: 164,
     callbacks: 0,
   })
   assert.deepEqual(
@@ -871,7 +871,7 @@ try {
                 (SELECT count(*)
                  FROM _zsync_log_segments AS segment,
                       json_each(segment.payload, '$.transactions') AS tx
-                 WHERE json_type(tx.value, '$.lmid') = 'object') AS lmidRows`,
+                 WHERE json_array_length(json_extract(tx.value, '$.changes')) = 0) AS lmidRows`,
     }),
   }).then((response) => response.json())
   assert.deepEqual(cleanupOnlyState.rows[0], { clients: 0, lmidRows: 0 })

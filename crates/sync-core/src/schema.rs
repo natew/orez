@@ -9,7 +9,8 @@
 //   and are installed after any seed so the initial dataset stays out of the
 //   log (fresh clients snapshot anyway).
 // - generated helpers suppress their triggers transactionally and append their
-//   exact returned keys with the cookie and lmid checkpoint in one envelope.
+//   exact returned keys with the cookie in one envelope; lmid checkpoints live
+//   in _zsync_clients, never in the ledger payload.
 
 use std::collections::BTreeSet;
 
@@ -725,6 +726,30 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 
     crate::upstream::reconcile_snapshot_schema(db, tables)
         .map_err(|error| DbError(error.message))?;
+    // drop every engine trigger from another version before installing the
+    // current set. the versioned names make CREATE idempotent, but a version
+    // bump would otherwise leave the previous generation installed and firing
+    // alongside the new one, double-appending envelopes and (before format 2)
+    // rotating stale payload shapes back in.
+    let current_suffix = format!("_v{TRIGGER_VERSION}");
+    let stale: Vec<String> = db
+        .query("SELECT name FROM sqlite_schema WHERE type = 'trigger'", &[])?
+        .into_iter()
+        .filter_map(|row| match row.values.first() {
+            Some(SqlValue::Text(name))
+                if name.starts_with("_zsync_tr_") && !name.ends_with(&current_suffix) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for name in stale {
+        db.exec(
+            &format!("DROP TRIGGER IF EXISTS {}", quote_ident(&name)),
+            &[],
+        )?;
+    }
     for sql in trigger_ddl(tables) {
         db.exec(&sql, &[])?;
     }
@@ -756,9 +781,6 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
         let trigger_key = tables
             .physical_name(table)
             .expect("iterated table has physical mapping");
-        let legacy_tr_i = quote_ident(&format!("_zsync_tr_{trigger_key}_i"));
-        let legacy_tr_u = quote_ident(&format!("_zsync_tr_{trigger_key}_u"));
-        let legacy_tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d"));
         // trigger bodies are immutable within a version. the versioned names
         // make startup idempotent while a future body migration can install a
         // new version once instead of dropping and rewriting every trigger on
@@ -791,9 +813,6 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
                 ) > 1048576
                 THEN RAISE(ABORT, 'packed ledger transaction exceeds the 1 MiB limit')
             END;";
-        out.push(format!("DROP TRIGGER IF EXISTS {legacy_tr_i}"));
-        out.push(format!("DROP TRIGGER IF EXISTS {legacy_tr_u}"));
-        out.push(format!("DROP TRIGGER IF EXISTS {legacy_tr_d}"));
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_i} AFTER INSERT ON {tq} BEGIN
                 {rotate}

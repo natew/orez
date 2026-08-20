@@ -189,12 +189,13 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
          ) WITHOUT ROWID",
         &[],
     )?;
-    let segments = db.query(
-        "SELECT CAST(startVersion AS TEXT) AS startVersion, payload
-         FROM _zsync_log_segments ORDER BY startVersion",
+    // read only the active segment here: this runs on every schema pass, and
+    // scanning every retained payload belongs to the format-1 migration alone.
+    let active_row = db.query(
+        "SELECT payload FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
         &[],
     )?;
-    if segments.is_empty() {
+    if active_row.is_empty() {
         let durable_head = db.query(
             "SELECT CAST(high AS TEXT) AS watermark FROM _zsync_watermark WHERE lock = 1",
             &[],
@@ -223,7 +224,7 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
             ],
         )?;
     } else {
-        let active_payload = match segments.last().and_then(|row| row.get("payload")) {
+        let active_payload = match active_row.first().and_then(|row| row.get("payload")) {
             Some(SqlValue::Text(value)) => value,
             _ => return Err(DbError("packed ledger payload is not text".into())),
         };
@@ -260,6 +261,11 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
                         )?;
                     }
                 }
+                let segments = db.query(
+                    "SELECT CAST(startVersion AS TEXT) AS startVersion, payload
+                     FROM _zsync_log_segments ORDER BY startVersion",
+                    &[],
+                )?;
                 for row in &segments {
                     let start = parse_counter(row.get("startVersion"), "start version")
                         .map_err(|error| DbError(error.message))?;

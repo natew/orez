@@ -168,8 +168,9 @@ pub fn preflight(
     Ok(Preflight::Applied)
 }
 
-// tx1 step, after the mutator succeeds: advance the LMID and append an 'lmid'
-// change row (invariants 3, 4).
+// tx1 step, after the mutator succeeds: advance the canonical LMID row in
+// _zsync_clients and append an empty change envelope so the cookie moves
+// (invariants 3, 4).
 pub fn finalize(
     db: &mut dyn SyncDb,
     client_group_id: &str,

@@ -254,7 +254,7 @@ fn preflight_then_application_write_then_finalize_preserves_ledger_order() {
         &db,
         "SELECT CASE
                    WHEN json_array_length(json_extract(tx.value, '$.changes')) > 0 THEN 'row'
-                   WHEN json_type(tx.value, '$.lmid') = 'object' THEN 'lmid'
+                   ELSE 'lmid'
                  END AS kind
          FROM _zsync_log_segments AS segment,
               json_each(segment.payload, '$.transactions') AS tx

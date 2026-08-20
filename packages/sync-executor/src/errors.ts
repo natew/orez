@@ -23,7 +23,7 @@ export class MutationApplicationError extends Error {
 //
 // the distinction is load-bearing whenever the reason for refusing IS cost. a
 // budget or rate limit that acknowledges "I refuse to write" with a ledger
-// advance and its lmid change row makes the mechanism that exists to stop
+// advance and its lmid row update makes the mechanism that exists to stop
 // spending spend on every refusal, and drops the caller's data on the floor
 // while doing it.
 export class MutationRetryError extends Error {
