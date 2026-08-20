@@ -2380,8 +2380,8 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- sync-core 0.1.5
-- sync-native 0.1.5
+- sync-core 0.1.6
+- sync-native 0.1.6
 - windows-link 0.2.1
 - windows-sys 0.52.0
 - windows-sys 0.61.2
