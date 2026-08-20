@@ -127,13 +127,25 @@ function packedPayload(sqlite: DatabaseSync) {
     .prepare('SELECT payload FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1')
     .get() as { payload: string }
   return JSON.parse(row.payload) as {
-    lmids: Record<string, Record<string, string>>
+    format: 2
     transactions: {
       version: string
       changes: [string, Record<string, unknown>][]
-      lmid?: { clientGroupID: string; clientID: string; mutationID: string }
     }[]
   }
+}
+
+function storedLMID(
+  sqlite: DatabaseSync,
+  clientGroupID = 'group-1',
+  clientID = 'client-1'
+) {
+  return sqlite
+    .prepare(
+      `SELECT lastMutationID FROM _zsync_clients
+       WHERE clientGroupID = ? AND clientID = ?`
+    )
+    .get(clientGroupID, clientID)?.lastMutationID
 }
 
 const effects: EffectScheduler = {
@@ -164,7 +176,7 @@ function push(name: string, id = 1, clientID = 'client-1') {
 }
 
 describe('sync executor', () => {
-  test('packed helper capture amortizes to two ledger writes per warm mutation', async () => {
+  test('packed helper capture keeps warm mutation writes bounded', async () => {
     const measureRowsWritten = async (
       lane: 'raw' | 'helper',
       logicalRows: 1 | 2 | 32
@@ -198,14 +210,14 @@ describe('sync executor', () => {
       return after - before
     }
 
-    await expect(measureRowsWritten('raw', 1)).resolves.toBe(3)
-    await expect(measureRowsWritten('helper', 1)).resolves.toBe(3)
-    await expect(measureRowsWritten('helper', 2)).resolves.toBe(4)
-    await expect(measureRowsWritten('raw', 32)).resolves.toBe(65)
-    await expect(measureRowsWritten('helper', 32)).resolves.toBe(34)
+    await expect(measureRowsWritten('raw', 1)).resolves.toBe(4)
+    await expect(measureRowsWritten('helper', 1)).resolves.toBe(4)
+    await expect(measureRowsWritten('helper', 2)).resolves.toBe(5)
+    await expect(measureRowsWritten('raw', 32)).resolves.toBe(66)
+    await expect(measureRowsWritten('helper', 32)).resolves.toBe(35)
   })
 
-  test('helper rotation copies the LMID checkpoint into the new segment', async () => {
+  test('helper rotation keeps the per-client LMID checkpoint', async () => {
     for (const [fillerBytes, expectedSegments] of [
       [760_000, 1],
       [790_000, 2],
@@ -243,11 +255,55 @@ describe('sync executor', () => {
       expect(
         sqlite.prepare('SELECT COUNT(*) AS count FROM _zsync_log_segments').get()
       ).toEqual({ count: expectedSegments })
-      expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('2')
+      expect(storedLMID(sqlite)).toBe(2)
       expect(sqlite.prepare("SELECT value FROM item WHERE id = 'second'").get()).toEqual({
         value: 'v2',
       })
     }
+  })
+
+  test('a large LMID checkpoint does not wedge the next mutation', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    const mutators = {
+      create: async ({ tx, ctx }) => {
+        await tx.mutate.item.insert({
+          id: `item-${ctx.mutationID}`,
+          value: `value-${ctx.mutationID}`,
+        })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const firstExecutor = createSyncExecutor({ database, effects, mutators, schema })
+    await firstExecutor.push(push('create'), { userID: 'user-1' })
+
+    const lmids: Record<string, Record<string, string>> = {
+      'group-1': { 'client-1': '1' },
+    }
+    for (let index = 0; index < 18_000; index++) {
+      lmids[`historical-group-${index.toString().padStart(5, '0')}`] = {
+        [`historical-client-${index.toString().padStart(5, '0')}`]: '1',
+      }
+    }
+    const payload = JSON.stringify({ format: 1, lmids, transactions: [] })
+    expect(Buffer.byteLength(payload)).toBeGreaterThanOrEqual(768 * 1_024)
+    sqlite
+      .prepare(
+        'UPDATE _zsync_log_segments SET endVersion = startVersion - 1, payload = ?'
+      )
+      .run(payload)
+
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(executor.push(push('create', 2), { userID: 'user-1' })).resolves.toEqual(
+      {
+        pushResponse: {
+          mutations: [{ id: { clientID: 'client-1', id: 2 }, result: {} }],
+        },
+      }
+    )
+    expect(storedLMID(sqlite)).toBe(2)
+    expect(sqlite.prepare("SELECT value FROM item WHERE id = 'item-2'").get()).toEqual({
+      value: 'value-2',
+    })
   })
 
   test('insert conflict keeps the existing row and commits the later insert', async () => {
@@ -271,7 +327,7 @@ describe('sync executor', () => {
       { id: 'a', value: 'original' },
       { id: 'b', value: 'later' },
     ])
-    expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('1')
+    expect(storedLMID(sqlite)).toBe(1)
   })
 
   test('the push endpoint returns zero mutate response shape, not an internal wrapper', async () => {
@@ -429,9 +485,7 @@ describe('sync executor', () => {
         .map((id) => JSON.stringify(['item', { id }]))
         .sort()
     )
-    expect(
-      committed.transactions.filter((transaction) => transaction.lmid !== undefined)
-    ).toHaveLength(1)
+    expect(storedLMID(sqlite)).toBe(1)
     expect(
       new Set(committed.transactions.map((transaction) => transaction.version)).size
     ).toBe(committed.transactions.length)
@@ -634,7 +688,7 @@ describe('sync executor', () => {
       },
     })
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
-    expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('1')
+    expect(storedLMID(sqlite)).toBe(1)
 
     // the next mutation must land: a stalled ledger would reject id 2 as
     // out-of-order and the client would retry the failed mutation forever
@@ -678,7 +732,7 @@ describe('sync executor', () => {
     // the whole point of refusing a write is that refusing is free. an
     // acknowledged rejection would move the ledger and append its lmid change
     // row, so the mechanism that exists to stop spending would itself spend.
-    expect(packedPayload(sqlite)).toMatchObject({ lmids: {}, transactions: [] })
+    expect(packedPayload(sqlite)).toMatchObject({ format: 2, transactions: [] })
     expect(sqlite.prepare('SELECT COUNT(*) AS n FROM _zsync_clients').get()).toEqual({
       n: 0,
     })
@@ -726,7 +780,7 @@ describe('sync executor', () => {
       details: { error: 'cloudSpendBudgetExceeded' },
       retryAfterMs: 300_000,
     })
-    expect(packedPayload(sqlite)).toMatchObject({ lmids: {}, transactions: [] })
+    expect(packedPayload(sqlite)).toMatchObject({ format: 2, transactions: [] })
   })
 
   test('replay acknowledges without invoking the mutator or effects again', async () => {
@@ -845,6 +899,6 @@ describe('sync executor', () => {
       },
     })
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
-    expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('1')
+    expect(storedLMID(sqlite)).toBe(1)
   })
 })

@@ -1686,18 +1686,15 @@ async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempot
                FROM _zsync_log_segments AS segment, \
                     json_each(segment.payload, '$.transactions') AS tx \
              ) \
-             SELECT CAST(json_extract(active.payload, \
-                       '$.lmids.\"shared-group\".\"client-a\"') AS INTEGER) AS lastMutationID, \
+             SELECT clients.lastMutationID AS lastMutationID, \
                     (SELECT count(*) FROM transactions \
-                     WHERE json_extract(envelope, '$.lmid.clientGroupID') = 'shared-group' \
-                       AND json_extract(envelope, '$.lmid.clientID') = 'client-a') AS lmidRows, \
+                     WHERE json_array_length(json_extract(envelope, '$.changes')) = 0) AS lmidRows, \
                     (SELECT MAX(version) FROM transactions \
                      WHERE json_array_length(json_extract(envelope, '$.changes')) > 0) AS effectWatermark, \
                     (SELECT MAX(version) FROM transactions \
-                     WHERE json_extract(envelope, '$.lmid.clientGroupID') = 'shared-group' \
-                       AND json_extract(envelope, '$.lmid.clientID') = 'client-a') AS lmidWatermark \
-             FROM _zsync_log_segments AS active \
-             ORDER BY active.startVersion DESC LIMIT 1",
+                     WHERE json_array_length(json_extract(envelope, '$.changes')) = 0) AS lmidWatermark \
+             FROM _zsync_clients AS clients \
+             WHERE clients.clientGroupID = 'shared-group' AND clients.clientID = 'client-a'",
             None,
             None,
         ),
@@ -1762,9 +1759,8 @@ async fn delegated_push_settlement_ignores_unacknowledged_cleanup_mutations() {
         &router,
         admin_sql_req(
             "mixed-cleanup-ns",
-            "SELECT CAST(json_extract(payload, \
-                     '$.lmids.\"cleanup-group\".\"client-a\"') AS INTEGER) AS lastMutationID \
-             FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
+            "SELECT lastMutationID FROM _zsync_clients \
+             WHERE clientGroupID = 'cleanup-group' AND clientID = 'client-a'",
             None,
             None,
         ),

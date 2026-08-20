@@ -1061,8 +1061,8 @@ try {
     },
     body: JSON.stringify({
       query: `SELECT id, label,
-                (SELECT CAST(json_extract(payload, '$.lmids."group"."writer"') AS INTEGER)
-                 FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lastMutationID
+                (SELECT lastMutationID FROM _zsync_clients
+                 WHERE clientGroupID = 'group' AND clientID = 'writer') AS lastMutationID
          FROM item WHERE id IN ('up-1', 'during-resnapshot') ORDER BY id`,
     }),
   }).then((response) => response.json())

@@ -319,8 +319,7 @@ fn raw_trigger_rotation_preserves_the_incremental_boundary() {
         let mut h = setup();
         h.pull(json!(null), "u1").unwrap();
         let payload = serde_json::to_string(&json!({
-            "format": 1,
-            "lmids": {},
+            "format": 2,
             "transactions": [{
                 "version": "1",
                 "changes": [["item", { "id": "x".repeat(filler_bytes) }]],
@@ -348,6 +347,47 @@ fn raw_trigger_rotation_preserves_the_incremental_boundary() {
         let response = h.pull(json!(1), "u1").unwrap();
         assert_eq!(puts(patch_of(&response))[0]["value"]["item_id"], "rotated");
     }
+}
+
+#[test]
+fn a_large_lmid_checkpoint_does_not_wedge_the_next_mutation() {
+    let mut h = setup();
+    h.put(
+        "first",
+        json!({ "id": "first", "label": "first", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
+
+    let mut lmids = serde_json::Map::new();
+    lmids.insert("g1".into(), json!({ "c1": "1" }));
+    for index in 0..18_000 {
+        lmids.insert(
+            format!("historical-group-{index:05}"),
+            json!({ format!("historical-client-{index:05}"): "1" }),
+        );
+    }
+    let payload = serde_json::to_string(&json!({
+        "format": 1,
+        "lmids": lmids,
+        "transactions": [],
+    }))
+    .unwrap();
+    assert!(payload.len() >= 768 * 1_024);
+    h.db.conn
+        .execute(
+            "UPDATE _zsync_log_segments
+             SET endVersion = startVersion - 1, payload = ?",
+            rusqlite::params![payload],
+        )
+        .unwrap();
+    h.init();
+
+    h.put(
+        "second",
+        json!({ "id": "second", "label": "second", "rank": 2, "done": false, "meta": null }),
+        2,
+    );
+    assert!(h.query_item("second").is_some());
 }
 
 #[test]

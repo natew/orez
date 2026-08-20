@@ -112,7 +112,7 @@ function createPackedLedger(sql: { exec: (s: string, ...p: unknown[]) => any }) 
     `INSERT INTO "_zsync_log_segments"
        ("startVersion", "endVersion", "payload", "pending", "captureMode")
      VALUES (1, 0, ?, '[]', 0)`,
-    JSON.stringify({ format: 1, lmids: {}, transactions: [] })
+    JSON.stringify({ format: 2, transactions: [] })
   )
 }
 
@@ -130,8 +130,7 @@ describe('abandoned application session and the packed ledger', () => {
     const core = await createWorkerCore()
     createPackedLedger(core.sql)
     const payload = JSON.stringify({
-      format: 1,
-      lmids: {},
+      format: 2,
       transactions: [
         {
           version: '1',

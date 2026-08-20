@@ -11,20 +11,10 @@ const MAX_PAYLOAD_BYTES: usize = 1_024 * 1_024;
 
 // bump when the packed payload shape changes; part of schema_revision so hosts
 // re-run the schema pass exactly once when a new format ships.
-pub const LEDGER_FORMAT: u8 = 1;
+pub const LEDGER_FORMAT: u8 = 2;
 
 fn is_false(value: &bool) -> bool {
     !value
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LedgerLmid {
-    #[serde(rename = "clientGroupID")]
-    client_group_id: String,
-    #[serde(rename = "clientID")]
-    client_id: String,
-    #[serde(rename = "mutationID")]
-    mutation_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,8 +22,6 @@ struct LedgerTransaction {
     version: String,
     #[serde(default)]
     changes: Vec<(String, Value)>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lmid: Option<LedgerLmid>,
     #[serde(default, skip_serializing_if = "is_false")]
     reset: bool,
 }
@@ -41,8 +29,25 @@ struct LedgerTransaction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LedgerPayload {
     format: u8,
-    lmids: BTreeMap<String, BTreeMap<String, String>>,
     transactions: Vec<LedgerTransaction>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyLedgerTransaction {
+    version: String,
+    #[serde(default)]
+    changes: Vec<(String, Value)>,
+    #[serde(default, rename = "lmid")]
+    _lmid: Option<Value>,
+    #[serde(default)]
+    reset: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyLedgerPayload {
+    format: u8,
+    lmids: BTreeMap<String, BTreeMap<String, String>>,
+    transactions: Vec<LegacyLedgerTransaction>,
 }
 
 struct ActiveSegment {
@@ -136,7 +141,6 @@ fn rotate_if_full(
     }
     let payload = encoded_payload(&LedgerPayload {
         format: LEDGER_FORMAT,
-        lmids: segment.payload.lmids,
         transactions: Vec::new(),
     })?;
     db.exec(
@@ -185,10 +189,12 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
          ) WITHOUT ROWID",
         &[],
     )?;
-    let has_segment = !db
-        .query("SELECT 1 FROM _zsync_log_segments LIMIT 1", &[])?
-        .is_empty();
-    if !has_segment {
+    let segments = db.query(
+        "SELECT CAST(startVersion AS TEXT) AS startVersion, payload
+         FROM _zsync_log_segments ORDER BY startVersion",
+        &[],
+    )?;
+    if segments.is_empty() {
         let durable_head = db.query(
             "SELECT CAST(high AS TEXT) AS watermark FROM _zsync_watermark WHERE lock = 1",
             &[],
@@ -201,30 +207,8 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
             _ => 0,
         };
         let head = legacy_head.max(durable_head);
-        let mut lmids: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-        for row in db.query(
-            "SELECT clientGroupID, clientID, CAST(lastMutationID AS TEXT) AS lmid
-         FROM _zsync_clients",
-            &[],
-        )? {
-            let (Some(SqlValue::Text(group)), Some(SqlValue::Text(client))) =
-                (row.get("clientGroupID"), row.get("clientID"))
-            else {
-                return Err(DbError("legacy client identity is invalid".into()));
-            };
-            let lmid = match row.get("lmid") {
-                Some(SqlValue::Text(value)) => value.clone(),
-                Some(SqlValue::Integer(value)) => value.to_string(),
-                _ => return Err(DbError("legacy client lmid is invalid".into())),
-            };
-            lmids
-                .entry(group.clone())
-                .or_default()
-                .insert(client.clone(), lmid);
-        }
         let payload = serde_json::to_string(&LedgerPayload {
             format: LEDGER_FORMAT,
-            lmids,
             transactions: Vec::new(),
         })
         .map_err(|error| DbError(error.to_string()))?;
@@ -238,6 +222,79 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
                 text(payload),
             ],
         )?;
+    } else {
+        let active_payload = match segments.last().and_then(|row| row.get("payload")) {
+            Some(SqlValue::Text(value)) => value,
+            _ => return Err(DbError("packed ledger payload is not text".into())),
+        };
+        let format = serde_json::from_str::<Value>(active_payload)
+            .ok()
+            .and_then(|payload| payload.get("format").and_then(Value::as_u64))
+            .ok_or_else(|| DbError("packed ledger payload has an unknown shape".into()))?;
+        match format {
+            format if format == u64::from(LEDGER_FORMAT) => {}
+            1 => {
+                let active: LegacyLedgerPayload = serde_json::from_str(active_payload)
+                    .map_err(|_| DbError("packed ledger payload has an unknown shape".into()))?;
+                if active.format != 1 {
+                    return Err(DbError("packed ledger payload has an unknown shape".into()));
+                }
+                for (group, clients) in active.lmids {
+                    for (client, mutation) in clients {
+                        let mutation = mutation
+                            .parse::<i64>()
+                            .ok()
+                            .filter(|value| *value >= 0)
+                            .ok_or_else(|| DbError("legacy client lmid is invalid".into()))?;
+                        db.exec(
+                            "INSERT INTO _zsync_clients
+                               (clientGroupID, clientID, lastMutationID, userID)
+                             VALUES (?, ?, ?, NULL)
+                             ON CONFLICT (clientGroupID, clientID)
+                             DO UPDATE SET lastMutationID = excluded.lastMutationID",
+                            &[
+                                text(group.clone()),
+                                text(client),
+                                SqlValue::Integer(mutation),
+                            ],
+                        )?;
+                    }
+                }
+                for row in &segments {
+                    let start = parse_counter(row.get("startVersion"), "start version")
+                        .map_err(|error| DbError(error.message))?;
+                    let payload = match row.get("payload") {
+                        Some(SqlValue::Text(value)) => value,
+                        _ => return Err(DbError("packed ledger payload is not text".into())),
+                    };
+                    let legacy: LegacyLedgerPayload =
+                        serde_json::from_str(payload).map_err(|_| {
+                            DbError("packed ledger payload has an unknown shape".into())
+                        })?;
+                    if legacy.format != 1 {
+                        return Err(DbError("packed ledger payload has an unknown shape".into()));
+                    }
+                    let payload = serde_json::to_string(&LedgerPayload {
+                        format: LEDGER_FORMAT,
+                        transactions: legacy
+                            .transactions
+                            .into_iter()
+                            .map(|transaction| LedgerTransaction {
+                                version: transaction.version,
+                                changes: transaction.changes,
+                                reset: transaction.reset,
+                            })
+                            .collect(),
+                    })
+                    .map_err(|error| DbError(error.to_string()))?;
+                    db.exec(
+                        "UPDATE _zsync_log_segments SET payload = ? WHERE startVersion = ?",
+                        &[text(payload), SqlValue::Integer(start)],
+                    )?;
+                }
+            }
+            _ => return Err(DbError("packed ledger format is unsupported".into())),
+        }
     }
     if legacy_table {
         db.exec(
@@ -263,89 +320,6 @@ pub(crate) fn watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
         segment.first().and_then(|row| row.get("watermark")),
         "watermark",
     )
-}
-
-// the packed ledger is the ONLY live lmid store. _zsync_clients.lastMutationID
-// is imported once when the packed ledger is created (see the seeding above)
-// and never read again: a fallback read of that column is how an executor/host
-// format skew serves lmid 0 forever instead of failing loudly. a client with
-// no packed entry has simply never had a mutation applied, and its lmid is 0.
-pub(crate) fn read_lmid(
-    db: &mut dyn SyncDb,
-    client_group_id: &str,
-    client_id: &str,
-) -> Result<i64, EngineError> {
-    let segment = active(db)?;
-    match segment
-        .payload
-        .lmids
-        .get(client_group_id)
-        .and_then(|group| group.get(client_id))
-    {
-        Some(value) => value
-            .parse::<i64>()
-            .ok()
-            .filter(|value| *value >= 0)
-            .ok_or_else(|| EngineError::internal("packed ledger lmid is invalid")),
-        None => Ok(0),
-    }
-}
-
-pub(crate) fn all_lmids(
-    db: &mut dyn SyncDb,
-    client_group_id: &str,
-) -> Result<BTreeMap<String, i64>, EngineError> {
-    let segment = active(db)?;
-    let mut out = BTreeMap::new();
-    for (client, value) in segment
-        .payload
-        .lmids
-        .get(client_group_id)
-        .into_iter()
-        .flatten()
-    {
-        let lmid = value
-            .parse::<i64>()
-            .ok()
-            .filter(|value| *value >= 0)
-            .ok_or_else(|| EngineError::internal("packed ledger lmid is invalid"))?;
-        out.insert(client.clone(), lmid);
-    }
-    Ok(out)
-}
-
-pub(crate) fn delete_clients(
-    db: &mut dyn SyncDb,
-    client_group_id: &str,
-    client_ids: &BTreeSet<String>,
-) -> Result<(), EngineError> {
-    if client_ids.is_empty() {
-        return Ok(());
-    }
-    let mut segment = active(db)?;
-    let mut changed = false;
-    let remove_group = if let Some(group) = segment.payload.lmids.get_mut(client_group_id) {
-        for client_id in client_ids {
-            changed |= group.remove(client_id).is_some();
-        }
-        group.is_empty()
-    } else {
-        false
-    };
-    if !changed {
-        return Ok(());
-    }
-    if remove_group {
-        segment.payload.lmids.remove(client_group_id);
-    }
-    db.exec(
-        "UPDATE _zsync_log_segments SET payload = ? WHERE startVersion = ?",
-        &[
-            text(encoded_payload(&segment.payload)?),
-            SqlValue::Integer(segment.start),
-        ],
-    )?;
-    Ok(())
 }
 
 pub(crate) fn finalize(
@@ -377,23 +351,16 @@ pub(crate) fn finalize(
     }
     segment = rotate_if_full(db, segment)?;
     let version = segment.end + 1;
-    let lmid = identity.map(|(group, client, mutation)| {
-        segment
-            .payload
-            .lmids
-            .entry(group.to_string())
-            .or_default()
-            .insert(client.to_string(), mutation.to_string());
-        LedgerLmid {
-            client_group_id: group.to_string(),
-            client_id: client.to_string(),
-            mutation_id: mutation.to_string(),
-        }
-    });
+    if let Some((group, client, mutation)) = identity {
+        db.exec(
+            "UPDATE _zsync_clients SET lastMutationID = ?
+             WHERE clientGroupID = ? AND clientID = ?",
+            &[SqlValue::Integer(mutation), text(group), text(client)],
+        )?;
+    }
     segment.payload.transactions.push(LedgerTransaction {
         version: version.to_string(),
         changes: changes.into_values().collect(),
-        lmid,
         reset,
     });
     let payload = encoded_payload(&segment.payload)?;

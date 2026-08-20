@@ -617,8 +617,9 @@ try {
   faultRows = await admin('/admin/sql', {
     query:
       "SELECT (SELECT COUNT(*) FROM project WHERE id = 'fault-after-commit-row') AS projectCount, " +
-      `(SELECT json_extract(payload, '$.lmids."group-fault-after-commit-client"."fault-after-commit-client"')
-        FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lmid`,
+      `(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients
+        WHERE clientGroupID = 'group-fault-after-commit-client'
+          AND clientID = 'fault-after-commit-client') AS lmid`,
   })
   equal(
     faultRows.rows,
@@ -821,8 +822,8 @@ try {
   rows = await admin('/admin/sql', {
     query:
       "SELECT (SELECT COUNT(*) FROM project WHERE id = 'effect-rollback') AS projectCount, " +
-      `(SELECT json_extract(payload, '$.lmids."group-client-a"."client-a"')
-        FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lmid`,
+      `(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients
+        WHERE clientGroupID = 'group-client-a' AND clientID = 'client-a') AS lmid`,
   })
   equal(
     rows.rows,
@@ -853,8 +854,8 @@ try {
     query:
       "SELECT (SELECT COUNT(*) FROM project WHERE id = 'retry-later') AS projectCount, " +
       '(SELECT endVersion FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS ledgerHead, ' +
-      `(SELECT json_extract(payload, '$.lmids."group-client-a"."client-a"')
-        FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lmid`,
+      `(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients
+        WHERE clientGroupID = 'group-client-a' AND clientID = 'client-a') AS lmid`,
   })
   equal(
     rows.rows,

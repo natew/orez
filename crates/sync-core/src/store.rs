@@ -145,7 +145,7 @@ pub(crate) fn delete_clients(
         ),
         &params,
     )?;
-    ledger::delete_clients(db, client_group_id, client_ids)
+    Ok(())
 }
 
 pub(crate) fn read_lmid(
@@ -153,7 +153,12 @@ pub(crate) fn read_lmid(
     client_group_id: &str,
     client_id: &str,
 ) -> Result<i64, EngineError> {
-    ledger::read_lmid(db, client_group_id, client_id)
+    read_i64(
+        db,
+        "SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients
+         WHERE clientGroupID = ? AND clientID = ?",
+        &[text(client_group_id), text(client_id)],
+    )
 }
 
 // the full current lmid map for a group (snapshot responses read it directly)
@@ -161,11 +166,32 @@ pub(crate) fn all_lmids(
     db: &mut dyn SyncDb,
     client_group_id: &str,
 ) -> Result<BTreeMap<String, i64>, EngineError> {
-    ledger::all_lmids(db, client_group_id)
+    let rows = db.query(
+        "SELECT clientID, CAST(lastMutationID AS TEXT) AS lmid FROM _zsync_clients
+         WHERE clientGroupID = ?",
+        &[text(client_group_id)],
+    )?;
+    let mut out = BTreeMap::new();
+    for row in rows {
+        let Some(SqlValue::Text(client)) = row.get("clientID") else {
+            return Err(EngineError::internal("client identity is invalid"));
+        };
+        let lmid = match row.get("lmid") {
+            Some(SqlValue::Text(value)) => value
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| EngineError::internal("client lmid is invalid"))?,
+            Some(SqlValue::Integer(value)) if *value >= 0 => *value,
+            _ => return Err(EngineError::internal("client lmid is invalid")),
+        };
+        out.insert(client.clone(), lmid);
+    }
+    Ok(out)
 }
 
-// advance a client's lmid in the active segment checkpoint. an lmid-only push
-// still appends an empty envelope and moves the cookie.
+// advance a client's lmid beside an empty change envelope, so an lmid-only
+// push still moves the cookie and settles on the next pull.
 pub(crate) fn advance_lmid(
     db: &mut dyn SyncDb,
     client_group_id: &str,

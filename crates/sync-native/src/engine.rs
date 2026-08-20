@@ -298,7 +298,7 @@ pub fn reset_cursor(conn: &Connection) -> Result<(), DbError> {
          DELETE FROM _zsync_log_segments;
          INSERT INTO _zsync_log_segments
            (startVersion, endVersion, payload, pending, captureMode)
-         VALUES (1, 0, '{\"format\":1,\"lmids\":{},\"transactions\":[]}', '[]', 0);
+         VALUES (1, 0, '{\"format\":2,\"transactions\":[]}', '[]', 0);
          UPDATE _zsync_meta SET floor = 0;
          UPDATE _zsync_watermark SET high = 0;
          COMMIT;",

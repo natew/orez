@@ -4,7 +4,7 @@
 import { parseArgs } from 'node:util'
 
 import { mutators } from './fixture.js'
-import { readPackedLmidCheckpoint } from './packed-lmids.js'
+import { readLmidCheckpoint } from './lmids.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startRustCf } from './targets/rust-cf.js'
 import { startRustLocal } from './targets/rust-local.js'
@@ -60,7 +60,7 @@ try {
       throw new Error(`application timestamp changed for skew row ${index}`)
     }
   }
-  const checkpoint = await readPackedLmidCheckpoint(target)
+  const checkpoint = await readLmidCheckpoint(target)
   const maxLmid = Math.max(
     0,
     ...Object.values(checkpoint).flatMap((clients) => Object.values(clients).map(Number))

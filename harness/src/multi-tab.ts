@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { mutators, queries } from './fixture.js'
-import { readPackedLmidCheckpoint } from './packed-lmids.js'
+import { readLmidCheckpoint } from './lmids.js'
 import { persistentKVStoreProvider } from './persistent-kv.js'
 import { assertServerOutcome } from './server-outcome.js'
 
@@ -130,7 +130,7 @@ try {
     if (!viewB.hasEvery(allIDs)) throw new Error('tab B has not converged')
   }, 'two-tab convergence')
 
-  const initialLMIDs = await readPackedLmidCheckpoint(target)
+  const initialLMIDs = await readLmidCheckpoint(target)
   const initialByClient = new Map(
     Object.entries(initialLMIDs[groupA] ?? {}).map(([client, lmid]) => [
       client,
@@ -173,7 +173,7 @@ try {
       throw new Error('replacement tab missed surviving writes')
   }, 'replacement/survivor convergence')
 
-  const finalLMIDs = await readPackedLmidCheckpoint(target)
+  const finalLMIDs = await readLmidCheckpoint(target)
   const finalByClient = new Map(
     Object.entries(finalLMIDs[groupA] ?? {}).map(([client, lmid]) => [
       client,

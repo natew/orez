@@ -34,13 +34,13 @@ import {
 } from './consistency/history.js'
 import { HistoryRecorder } from './consistency/recorder.js'
 import { mutators, queries } from './fixture.js'
+import { readLmidCheckpoint } from './lmids.js'
 import {
   createPullQuiescenceFetch,
   observedSyncFetch,
   PullAbortedByQuiesceControllerError,
   type SyncHttpObservation,
 } from './observed-fetch.js'
-import { readPackedLmidCheckpoint } from './packed-lmids.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startRustLocal } from './targets/rust-local.js'
 
@@ -410,7 +410,7 @@ try {
     const clients = await target.oracle(
       `SELECT clientID FROM _zsync_clients WHERE clientGroupID = '${identity!.clientGroupId}' AND clientID = '${identity!.clientId}'`
     )
-    const checkpoint = await readPackedLmidCheckpoint(target)
+    const checkpoint = await readLmidCheckpoint(target)
     return recorder.record({
       opId,
       process: `authority-${observation}`,

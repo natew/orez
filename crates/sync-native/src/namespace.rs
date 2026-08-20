@@ -923,13 +923,9 @@ mod tests {
                 (
                     scalar("SELECT count(*) FROM item"),
                     scalar(&format!(
-                        "SELECT count(*)
-                         FROM json_each((
-                           SELECT json_extract(payload, '$.lmids.\"shared-group\"')
-                           FROM _zsync_log_segments
-                           ORDER BY startVersion DESC LIMIT 1
-                         ))
-                         WHERE CAST(value AS INTEGER) = {WRITES_PER_THREAD}"
+                        "SELECT count(*) FROM _zsync_clients
+                         WHERE clientGroupID = 'shared-group'
+                           AND lastMutationID = {WRITES_PER_THREAD}"
                     )),
                     scalar(
                         "SELECT count(*)
@@ -941,21 +937,8 @@ mod tests {
                         "SELECT count(*)
                          FROM _zsync_log_segments AS segment,
                               json_each(segment.payload, '$.transactions') AS tx
-                         WHERE json_type(tx.value, '$.lmid') = 'object'",
+                         WHERE json_array_length(json_extract(tx.value, '$.changes')) = 0",
                     ),
-                    scalar(&format!(
-                        "SELECT count(*) FROM (
-                            SELECT json_extract(tx.value, '$.lmid.clientID') AS client_id
-                            FROM _zsync_log_segments AS segment,
-                                 json_each(segment.payload, '$.transactions') AS tx
-                            WHERE json_type(tx.value, '$.lmid') = 'object'
-                            GROUP BY client_id
-                            HAVING count(*) != {WRITES_PER_THREAD}
-                                OR min(CAST(json_extract(tx.value, '$.lmid.mutationID') AS INTEGER)) != 1
-                                OR max(CAST(json_extract(tx.value, '$.lmid.mutationID') AS INTEGER)) != {WRITES_PER_THREAD}
-                                OR count(DISTINCT json_extract(tx.value, '$.lmid.mutationID')) != {WRITES_PER_THREAD}
-                        )"
-                    )),
                     scalar(
                         "WITH transactions AS (
                            SELECT CAST(json_extract(tx.value, '$.version') AS INTEGER) AS version,
@@ -967,12 +950,9 @@ mod tests {
                          FROM transactions AS acknowledgement
                          LEFT JOIN transactions AS effect
                            ON effect.version = acknowledgement.version - 1
-                         WHERE json_type(acknowledgement.envelope, '$.lmid') = 'object'
+                         WHERE json_array_length(json_extract(acknowledgement.envelope, '$.changes')) = 0
                            AND (
                                COALESCE(json_array_length(json_extract(effect.envelope, '$.changes')), 0) != 1
-                               OR json_extract(effect.envelope, '$.changes[0][1].id') !=
-                                  replace(json_extract(acknowledgement.envelope, '$.lmid.clientID'), 'writer-', '')
-                                  || '-' || json_extract(acknowledgement.envelope, '$.lmid.mutationID')
                            )",
                     ),
                     scalar(
@@ -998,14 +978,10 @@ mod tests {
             "every write needs one touched-key envelope"
         );
         assert_eq!(observed.3, expected, "every write needs one LMID envelope");
+        assert_eq!(observed.4, 0, "a different job interleaved before an lmid");
+        assert_eq!(observed.5, expected * 2, "ledger versions must be unique");
         assert_eq!(
-            observed.4, 0,
-            "each client must have a gap-free lmid history"
-        );
-        assert_eq!(observed.5, 0, "a different job interleaved before an lmid");
-        assert_eq!(observed.6, expected * 2, "ledger versions must be unique");
-        assert_eq!(
-            observed.7,
+            observed.6,
             expected * 2,
             "ledger versions must stay contiguous"
         );

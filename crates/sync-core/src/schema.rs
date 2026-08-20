@@ -737,7 +737,7 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 // bump when the trigger bodies change shape. versioned names make startup
 // idempotent, and the version feeds schema_revision so hosts re-run the
 // schema pass exactly once when new bodies ship.
-pub const TRIGGER_VERSION: u32 = 2;
+pub const TRIGGER_VERSION: u32 = 3;
 
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();
@@ -774,7 +774,6 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
             SELECT endVersion + 1, endVersion,
                    json_object(
                        'format', {ledger_format},
-                       'lmids', json_extract(payload, '$.lmids'),
                        'transactions', json('[]')
                    ),
                    '[]', 0

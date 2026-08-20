@@ -18,6 +18,15 @@ export type PackedLedgerIdentity = {
 }
 
 type PackedLedgerPayload = {
+  format: 2
+  transactions: {
+    version: string
+    changes: [string, Readonly<Record<string, JsonPrimitive>>][]
+    reset?: true
+  }[]
+}
+
+type LegacyPackedLedgerPayload = {
   format: 1
   lmids: Record<string, Record<string, string>>
   transactions: {
@@ -65,6 +74,26 @@ function parsePayload(value: unknown): PackedLedgerPayload {
     throw new MutationWriteSetError('packed ledger payload is not an object')
   }
   const payload = parsed as Partial<PackedLedgerPayload>
+  if (payload.format !== 2 || !Array.isArray(payload.transactions)) {
+    throw new MutationWriteSetError('packed ledger payload has an unknown shape')
+  }
+  return payload as PackedLedgerPayload
+}
+
+function parseLegacyPayload(value: unknown): LegacyPackedLedgerPayload {
+  if (typeof value !== 'string') {
+    throw new MutationWriteSetError('packed ledger payload is not text')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new MutationWriteSetError('packed ledger payload is invalid JSON')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new MutationWriteSetError('packed ledger payload is not an object')
+  }
+  const payload = parsed as Partial<LegacyPackedLedgerPayload>
   if (
     payload.format !== 1 ||
     !payload.lmids ||
@@ -74,7 +103,7 @@ function parsePayload(value: unknown): PackedLedgerPayload {
   ) {
     throw new MutationWriteSetError('packed ledger payload has an unknown shape')
   }
-  return payload as PackedLedgerPayload
+  return payload as LegacyPackedLedgerPayload
 }
 
 function activeSegment(rows: readonly ActiveSegment[]): ActiveSegment {
@@ -95,14 +124,13 @@ async function readActiveSegment(tx: ApplicationTransaction): Promise<ActiveSegm
   )
 }
 
-function emptyPayload(lmids: PackedLedgerPayload['lmids']): PackedLedgerPayload {
-  return { format: 1, lmids, transactions: [] }
+function emptyPayload(): PackedLedgerPayload {
+  return { format: 2, transactions: [] }
 }
 
 async function rotatePackedLedger(
   tx: ApplicationTransaction,
-  active: ActiveSegment,
-  payload: PackedLedgerPayload
+  active: ActiveSegment
 ): Promise<ActiveSegment> {
   const start = counter(active.startVersion, 'start version')
   const end = counter(active.endVersion, 'end version')
@@ -135,7 +163,7 @@ async function rotatePackedLedger(
     `INSERT INTO "_zsync_log_segments"
        ("startVersion", "endVersion", "payload", "pending", "captureMode")
      VALUES (?, ?, ?, '[]', ?)`,
-    [end + 1, end, JSON.stringify(emptyPayload(payload.lmids)), mode]
+    [end + 1, end, JSON.stringify(emptyPayload()), mode]
   )
   if (inserted.changes !== 1) {
     throw new MutationWriteSetError('packed ledger rotation did not create a segment')
@@ -154,10 +182,53 @@ export async function initializePackedLedger(
       "pending" TEXT NOT NULL,
       "captureMode" INTEGER NOT NULL CHECK ("captureMode" IN (0, 1))
     ) WITHOUT ROWID`)
-    const existing = await tx.query<{ count: number | bigint | string }>(
-      'SELECT COUNT(*) AS "count" FROM "_zsync_log_segments"'
+    const existing = await tx.query<{
+      startVersion: number | bigint | string
+      payload: string
+    }>(
+      `SELECT "startVersion" AS "startVersion", "payload" AS "payload"
+       FROM "_zsync_log_segments" ORDER BY "startVersion"`
     )
-    if (counter(existing[0]?.count ?? 0, 'segment count') > 0) return
+    if (existing.length > 0) {
+      const active = existing.at(-1)!
+      let activePayload: LegacyPackedLedgerPayload
+      try {
+        parsePayload(active.payload)
+        return
+      } catch {
+        activePayload = parseLegacyPayload(active.payload)
+      }
+      for (const [clientGroupID, clients] of Object.entries(activePayload.lmids)) {
+        for (const [clientID, mutationID] of Object.entries(clients)) {
+          await tx.exec(
+            `INSERT INTO "_zsync_clients"
+               ("clientGroupID", "clientID", "lastMutationID", "userID")
+             VALUES (?, ?, ?, NULL)
+             ON CONFLICT ("clientGroupID", "clientID")
+             DO UPDATE SET "lastMutationID" = excluded."lastMutationID"`,
+            [clientGroupID, clientID, counter(mutationID, 'legacy last mutation id')]
+          )
+        }
+      }
+      for (const segment of existing) {
+        const legacy = parseLegacyPayload(segment.payload)
+        await tx.exec(
+          `UPDATE "_zsync_log_segments" SET "payload" = ? WHERE "startVersion" = ?`,
+          [
+            JSON.stringify({
+              format: 2,
+              transactions: legacy.transactions.map(({ changes, reset, version }) => ({
+                version,
+                changes,
+                ...(reset ? { reset: true as const } : {}),
+              })),
+            } satisfies PackedLedgerPayload),
+            counter(segment.startVersion, 'start version'),
+          ]
+        )
+      }
+      return
+    }
 
     // seed above every watermark the retired `_zsync_changes` journal ever
     // assigned, so cookies issued against it cannot regress. the DO drops that
@@ -182,32 +253,11 @@ export async function initializePackedLedger(
       )
       head = Math.max(head, counter(durable[0]?.high ?? 0, 'durable watermark'))
     }
-    const clients = await tx.query<{
-      clientGroupID: string
-      clientID: string
-      lastMutationID: number | bigint | string
-    }>(
-      `SELECT "clientGroupID" AS "clientGroupID", "clientID" AS "clientID",
-              "lastMutationID" AS "lastMutationID" FROM "_zsync_clients"`
-    )
-    const lmids: PackedLedgerPayload['lmids'] = {}
-    for (const client of clients) {
-      if (
-        typeof client.clientGroupID !== 'string' ||
-        typeof client.clientID !== 'string'
-      ) {
-        throw new MutationWriteSetError('packed ledger client identity is invalid')
-      }
-      const group = (lmids[client.clientGroupID] ??= {})
-      group[client.clientID] = String(
-        counter(client.lastMutationID, 'legacy last mutation id')
-      )
-    }
     await tx.exec(
       `INSERT INTO "_zsync_log_segments"
          ("startVersion", "endVersion", "payload", "pending", "captureMode")
        VALUES (?, ?, ?, '[]', 0)`,
-      [head + 1, head, JSON.stringify(emptyPayload(lmids))]
+      [head + 1, head, JSON.stringify(emptyPayload())]
     )
   })
 }
@@ -217,9 +267,9 @@ export async function preparePackedLedger(tx: ApplicationTransaction): Promise<n
   if (counter(active.captureMode, 'capture mode') !== 0 || active.pending !== '[]') {
     throw new MutationWriteSetError('packed ledger has uncommitted capture state')
   }
-  const payload = parsePayload(active.payload)
+  parsePayload(active.payload)
   if (new TextEncoder().encode(active.payload).byteLength >= ROTATE_AT_BYTES) {
-    active = await rotatePackedLedger(tx, active, payload)
+    active = await rotatePackedLedger(tx, active)
   }
   return counter(active.endVersion, 'end version')
 }
@@ -320,7 +370,7 @@ export async function commitPackedLedger(
     return
   }
   if (new TextEncoder().encode(active.payload).byteLength >= ROTATE_AT_BYTES) {
-    active = await rotatePackedLedger(tx, active, payload)
+    active = await rotatePackedLedger(tx, active)
     payload = parsePayload(active.payload)
   }
   const start = counter(active.startVersion, 'start version')
@@ -333,8 +383,14 @@ export async function commitPackedLedger(
     if (!Number.isSafeInteger(identity.mutationID) || identity.mutationID < 0) {
       throw new MutationWriteSetError('packed ledger mutation id is unsafe')
     }
-    const group = (payload.lmids[identity.clientGroupID] ??= {})
-    group[identity.clientID] = String(identity.mutationID)
+    const advanced = await tx.exec(
+      `UPDATE "_zsync_clients" SET "lastMutationID" = ?
+       WHERE "clientGroupID" = ? AND "clientID" = ?`,
+      [identity.mutationID, identity.clientGroupID, identity.clientID]
+    )
+    if (advanced.changes !== 1) {
+      throw new MutationWriteSetError('packed ledger client identity is missing')
+    }
   }
   payload.transactions.push({
     version: String(version),
@@ -345,15 +401,6 @@ export async function commitPackedLedger(
         )
       )
       .map(({ table, key }) => [table, key]),
-    ...(identity
-      ? {
-          lmid: {
-            clientGroupID: identity.clientGroupID,
-            clientID: identity.clientID,
-            mutationID: String(identity.mutationID),
-          },
-        }
-      : {}),
   })
   const encoded = JSON.stringify(payload)
   if (new TextEncoder().encode(encoded).byteLength > MAX_PAYLOAD_BYTES) {
@@ -375,7 +422,10 @@ export async function readPackedLMID(
   clientGroupID: string,
   clientID: string
 ): Promise<number> {
-  const active = await readActiveSegment(tx)
-  const value = parsePayload(active.payload).lmids[clientGroupID]?.[clientID]
-  return value === undefined ? 0 : counter(value, 'last mutation id')
+  const rows = await tx.query<{ lastMutationID: number | bigint | string }>(
+    `SELECT "lastMutationID" AS "lastMutationID" FROM "_zsync_clients"
+     WHERE "clientGroupID" = ? AND "clientID" = ?`,
+    [clientGroupID, clientID]
+  )
+  return counter(rows[0]?.lastMutationID ?? 0, 'last mutation id')
 }
