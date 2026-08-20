@@ -56,7 +56,7 @@ dependencies.@rocicorp/zero-sqlite3`. Only relevant to the legacy embedded
    unless you start using a new API, so consumers are not forced to upgrade.
    In orez that is 5 exact pins: root, `harness`, `sync-executor`,
    `drizzle-zero-sqlite`, `orez-lite`.
-4. **Bump every consumer in the same pass.** `~/chat`, `~/soot`, `~/agentbus`.
+4. **Bump every consumer in the same pass.** `~/chat`, `~/soot`, `~/team-machine`.
    Mixing client minors across a client and its host is not a tested
    configuration. **`~/chat` also pins orez's RUST crates by git rev
    (`rust-sync/chat-native/Cargo.toml`) — that drifts independently of its npm
@@ -467,8 +467,8 @@ Verify the binary exists for the resolved version:
     worktrees (zero disruption to co-tenant sessions): **chat** `952308370` (npm +
     CI `ZERO_VERSION` + docker-compose defaults → 1.7.0, orez 0.4.26→0.4.37),
     **soot** `adaf36086` (root + orez-web + 5 templates + 4 examples + 2 orez-\*
-    packages), **agentbus** `bb827ea9` (`gui` only). soot had 3 live agents and
-    agentbus one mid-RCA on an orez doom loop — coordinated, none disrupted.
+    packages), **team-machine** `bb827ea9` (`gui` only). soot had 3 live agents and
+    team-machine one mid-RCA on an orez doom loop — coordinated, none disrupted.
 
 ### 1.6 → 1.7.0-canary.3 (June 2026)
 
@@ -798,10 +798,10 @@ bunfig.toml**. After 06-09 the exclude is unnecessary.
 
 ### 7.2 Coordination & safety (soot is a live multi-agent repo)
 
-`~/soot` has **many** concurrent agent sessions (seen via `agentbus list`).
+`~/soot` has **many** concurrent agent sessions (seen via `tm list`).
 Before doing anything that binds ports, mutates the working tree, or deploys:
 
-- Announce intent via `agentbus mail` to the soot manager session; check the
+- Announce intent via `tm mail` to the soot manager session; check the
   roster first.
 - Pick a non-default `PORT_OFFSET` for the playwright tests; orez's own cf-do
   `wrangler dev` must avoid soot's `:8799` (use `:8798`).

@@ -1,6 +1,6 @@
 # perf/scratch — 2026-07-03 mutex-contention investigation
 
-Rough probes behind the findings recorded in agentbus
+Rough probes behind the findings recorded in team-machine
 `plans/orez-fundamentals.md` ("Perf investigation findings"). Not wired into
 `perf:*` scripts; run directly with `bun perf/scratch/bench-<name>.ts`.
 

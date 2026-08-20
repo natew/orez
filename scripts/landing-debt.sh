@@ -6,7 +6,7 @@
 # the work is done, nobody merged it. read-only; safe to run anywhere, anytime.
 #
 # usage:  scripts/landing-debt.sh            # human table, oldest debt first
-#         scripts/landing-debt.sh --tsv      # machine-readable (agentbus cron)
+#         scripts/landing-debt.sh --tsv      # machine-readable (team-machine cron)
 #
 # columns: BRANCH  AHEAD(commits not on main)  AGE(days since last commit)
 #          WORKTREE(checked out somewhere?)    MERGE(clean vs main?)

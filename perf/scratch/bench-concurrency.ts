@@ -99,7 +99,7 @@ const readLat: number[] = []
 const changeLat: number[] = []
 let stop = false
 
-// writers: upsert full-body messages (agentbus shape). 3 concurrent.
+// writers: upsert full-body messages (team-machine shape). 3 concurrent.
 async function writer(w: number) {
   while (!stop) {
     const id = `m${w}-${idc++ % 500}` // recycle ids to force real UPDATEs (change rows w/ old+new)

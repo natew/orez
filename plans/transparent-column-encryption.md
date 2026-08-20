@@ -302,7 +302,7 @@ Expo Hermes still needs to run the same Orez conformance entry. Its explicit Exp
 
 ## Desktop daemon writer path
 
-History originates in the Rust `agentbus` daemon, while the only encryption implementation is the TypeScript transport codec. The daemon therefore must not write cloud rows directly and must not implement Rust column encryption.
+History originates in the Rust `team-machine` daemon, while the only encryption implementation is the TypeScript transport codec. The daemon therefore must not write cloud rows directly and must not implement Rust column encryption.
 
 ### Components
 
@@ -315,9 +315,9 @@ History originates in the Rust `agentbus` daemon, while the only encryption impl
 
 The sidecar is a daemon-supervised process and is independent of the visible desktop window, so closing the GUI does not stop history upload. Add its entry point as `gui/server/src/cloud-writer.ts`, package it in the installed GUI runtime, and add a small `src/commands/cloud_writer.rs` supervisor using the existing detached-child pattern. `src/serve.rs` ensures that supervisor is running whenever a cloud network is configured.
 
-Do not attach the writer lifecycle to `agentbus orez start`. `src/commands/orez.rs` currently supervises an optional local PGlite, zero-cache, and on-zero stack, while the cloud topology has the one sync server in the Durable Object. At cutover, the headless cloud writer is the only daemon history publishing process; the local `src/pg_writer.rs` to PGlite path is retired from production cloud publishing.
+Do not attach the writer lifecycle to `team-machine orez start`. `src/commands/orez.rs` currently supervises an optional local PGlite, zero-cache, and on-zero stack, while the cloud topology has the one sync server in the Durable Object. At cutover, the headless cloud writer is the only daemon history publishing process; the local `src/pg_writer.rs` to PGlite path is retired from production cloud publishing.
 
-The sidecar imports the canonical Agentbus schema, `cloud.applyBatch` mutator, manifest, and orez codec modules. It must not contain its own row projection or crypto rules. The visible desktop client and writer share those modules.
+The sidecar imports the canonical Team Machine schema, `cloud.applyBatch` mutator, manifest, and orez codec modules. It must not contain its own row projection or crypto rules. The visible desktop client and writer share those modules.
 
 The canonical writer defines this mutator with Zero's current `defineMutators` API and submits its `MutateRequest` through `zero.mutate(...)`. Its serialized wire name is `cloud.applyBatch`, and `EncryptedColumnManifest.rowMutations` is keyed by that exact name because transport transformation happens after Zero constructs the push. The legacy function-mutator API uses a different `|` separator and is not the production writer path.
 
@@ -336,7 +336,7 @@ GET /api/cloud/rows?after=<acked-seq>&limit=<n>
 }
 ```
 
-Refactor the row construction currently embedded in `src/pg_writer.rs` into one canonical `CloudRowOp` projection module. Every public history writer constructs `CloudRowOp` first. During migration the local PG serializer may consume that same value, but it cannot build a second projection. The cloud path appends the value to `~/.agentbus/cloud-outbox/<networkID>/<sourceID>.jsonl` before reporting the mirror operation complete. Records are length-framed or newline-safe canonical JSON, checksummed, flushed, and `fsync`ed. Files and atomic acknowledgement metadata use mode `0600`.
+Refactor the row construction currently embedded in `src/pg_writer.rs` into one canonical `CloudRowOp` projection module. Every public history writer constructs `CloudRowOp` first. During migration the local PG serializer may consume that same value, but it cannot build a second projection. The cloud path appends the value to `~/.team-machine/cloud-outbox/<networkID>/<sourceID>.jsonl` before reporting the mirror operation complete. Records are length-framed or newline-safe canonical JSON, checksummed, flushed, and `fsync`ed. Files and atomic acknowledgement metadata use mode `0600`.
 
 The daemon assigns a monotonically increasing outbox sequence after local projection. Each record contains a complete canonical logical row operation, not SQL and not an already encrypted value. Periodic reconciliation emits authoritative upserts and deletes through the same projector, covering a daemon crash between an authoritative local state change and outbox append. The stable `sourceID` is the machine ID. The endpoint uses the daemon's existing local bearer authentication and is unavailable on unauthenticated remote routes.
 
@@ -358,7 +358,7 @@ The daemon outbox remains the upload authority until it records the acknowledgem
 
 ### Commands
 
-Agentbus command mutators such as message send or session control have arbitrary arguments and trigger daemon RPC. They do not use `cloud.applyBatch` and are excluded from the transparent manifest. Each command protocol defines a versioned E2E envelope containing its confidential arguments, recipient/context binding, nonce, and authentication tag. Clear command routing fields must be explicitly documented. The server forwards or stores the envelope without generic recursive transformation.
+Team Machine command mutators such as message send or session control have arbitrary arguments and trigger daemon RPC. They do not use `cloud.applyBatch` and are excluded from the transparent manifest. Each command protocol defines a versioned E2E envelope containing its confidential arguments, recipient/context binding, nonce, and authentication tag. Clear command routing fields must be explicitly documented. The server forwards or stores the envelope without generic recursive transformation.
 
 ## Rust opacity guard
 
@@ -613,7 +613,7 @@ Stage 3 currently has these proofs:
 - GPUI's separate runtime conformance covers the OS-backed random host function
 - a stock Zero custom mutation starts with a plaintext logical row, is observed as ciphertext at the `/push` server boundary, is returned as ciphertext by `/pull`, and materializes as plaintext through a normal query
 
-The stock Zero test proves the in-process transport composition. It does not claim the full Agentbus deployment flow. Expo Hermes plus the real Agentbus encrypt/push/persist/pull/decrypt flow remain deployment-stage gates. They depend on stage 4 key storage and enrollment, stage 5 daemon outbox and headless writer, and stage 6 schema migration and cutover. Until those pieces exist there is no package-correct production path that can exercise the complete flow or inspect migrated Durable Object storage.
+The stock Zero test proves the in-process transport composition. It does not claim the full Team Machine deployment flow. Expo Hermes plus the real Team Machine encrypt/push/persist/pull/decrypt flow remain deployment-stage gates. They depend on stage 4 key storage and enrollment, stage 5 daemon outbox and headless writer, and stage 6 schema migration and cutover. Until those pieces exist there is no package-correct production path that can exercise the complete flow or inspect migrated Durable Object storage.
 
 ## Implementation order
 

@@ -10,7 +10,7 @@ coordinator session: `ab-mqok354p-64475` (this Claude session)
 ## Goal in one paragraph
 
 Upgrade `@rocicorp/zero` from `1.6.1` → `1.7.0-canary.3` across orez + chat +
-soot (orez-web + orez-cf), driven by Codex sub-agents under agentbus.
+soot (orez-web + orez-cf), driven by Codex sub-agents under team-machine.
 Orez stays on the canary; downstream consumers already on React 19, so the
 1.7 peer bump is a non-issue. Runbook is `plans/upgrade-zero.md` — both the
 existing §6 worked example for 1.5→1.6 and the brand-new §6 entry for
@@ -218,19 +218,19 @@ overwrites zero-cache's compiled `write-worker-client.js` with an inline
 implementation — its exports + signatures must mirror upstream
 `write-worker.js`. Diff before editing.
 
-### Codex via agentbus — the harness pattern
+### Codex via team-machine — the harness pattern
 
 Each Codex worker is spawned with:
 
 ```bash
-agentbus spawn --role worker --cwd <repo-or-worktree> --name <alias> --quiet \
+team-machine spawn --role worker --cwd <repo-or-worktree> --name <alias> --quiet \
   -- codex --yolo "$(cat prompt.txt)"
 ```
 
 The session can be addressed by id (`ab-mq...`) or by alias. Mail back to the
-coordinator with `agentbus mail send ab-mqok354p-64475 "<body>"`. The
-coordinator reads with `agentbus mail read` and inspects turns with
-`agentbus show turns <id>` or `agentbus tail <id>`.
+coordinator with `tm mail send ab-mqok354p-64475 "<body>"`. The
+coordinator reads with `tm mail read` and inspects turns with
+`tm show turns <id>` or `tm tail <id>`.
 
 Coordinator (me) does plan + review only. Codex does the editing + commits.
 This rule is from the user mid-session — see the goal directive (also
@@ -247,8 +247,8 @@ saved as the active Stop-hook condition on this session).
 
 For the next agent, in order:
 
-- [ ] **Soot codex finished cleanly.** Verify: `agentbus list --all | grep ab-mqon44j7-43562` shows `idle` or `exited`. If `running`, read the latest mail at `agentbus mail read` and decide whether to let it continue or escalate.
-- [ ] **Stage 5 mail landed.** Verify: `agentbus mail read` shows a final mail from `ab-mqon44j7-43562` summarizing 3 template deploys + commit SHAs. If not, `agentbus show turns ab-mqon44j7-43562 | tail -50` to see where it stopped.
+- [ ] **Soot codex finished cleanly.** Verify: `tm list --all | grep ab-mqon44j7-43562` shows `idle` or `exited`. If `running`, read the latest mail at `tm mail read` and decide whether to let it continue or escalate.
+- [ ] **Stage 5 mail landed.** Verify: `tm mail read` shows a final mail from `ab-mqon44j7-43562` summarizing 3 template deploys + commit SHAs. If not, `tm show turns ab-mqon44j7-43562 | tail -50` to see where it stopped.
 - [ ] **Orez fixes committed.** Verify: `cd ~/orez && git diff --stat` is empty AND `git log --oneline origin/main..HEAD` shows 5-6 commits including the node-stub fix and the do-backend fix. The bare 3-commit state (3da0cc4 / fc6f96f / 670de46) means the fixes were NOT committed and the branch is incomplete.
 - [ ] **Soot worktree commits are clean.** Verify: `cd ~/.worktrees/soot-zero-17 && git log --oneline origin/main..HEAD` shows commits that DO NOT touch `src/features/f2c/*`, `src/database/migrations/*`, `public/orez-web-pglite.worker.js`, or stray template files. If they do, those commits were contamination from the dev-boot fix and should be amended or split.
 - [ ] **soot worktree env files are not staged.** Verify: `cd ~/.worktrees/soot-zero-17 && git status --short | grep -E '\.env(\.|$)'` returns nothing. They should be silently gitignored.

@@ -26,13 +26,13 @@ query engine.
 
 ## Findings
 
-The hard fingerprint gate is downstream, in Agentbus, rather than orez:
+The hard fingerprint gate is downstream, in Team Machine, rather than orez:
 
-- `gui/features/agentbus/zeroClient.tsx` sets `disable=true` while the gate is
+- `gui/features/tm/zeroClient.tsx` sets `disable=true` while the gate is
   checking, unavailable, or blocked.
-- `gui/features/agentbus/zeroSchemaFingerprint.ts` treats every unequal hash as
+- `gui/features/tm/zeroSchemaFingerprint.ts` treats every unequal hash as
   incompatible.
-- `gui/features/agentbus/zeroSchemaGate.ts` maps that inequality to `blocked`.
+- `gui/features/tm/zeroSchemaGate.ts` maps that inequality to `blocked`.
 - The server health response reports the schema hash and whether its publication
   contains the server's own expected tables and columns. It does not compare the
   client requirements with the server shape.
@@ -56,7 +56,7 @@ confirmed:
 | shared column changes type              | `SchemaVersionNotSupported` |
 | shared table changes primary key        | `SchemaVersionNotSupported` |
 
-Recent Agentbus schema changes added optional server-projected fields such as
+Recent Team Machine schema changes added optional server-projected fields such as
 `session.latest_summary_status` and
 `session.latest_summary_status_confidence`. An older client that does not declare
 those columns is the compatible subset Zero is designed to accept. The exact-hash
@@ -132,7 +132,7 @@ Use the following policy:
 For a general Zero client API, expose an explicit policy such as
 `schemaSkew: 'strict' | 'read-only' | 'allow-compatible'`. The safe default is
 `read-only`. `allow-compatible` should require server-side mutation validation
-and visible operation errors. Agentbus's mutators are daemon-owned triggers and
+and visible operation errors. Team Machine's mutators are daemon-owned triggers and
 its new columns are optional projections, so it can deliberately opt into writes
 after verifying each mutator contract.
 
@@ -174,7 +174,7 @@ and server disagree.
 
 ### Phase 1: downstream safe fix
 
-1. Remove schema health state from Agentbus's `ProvideZeroCore.disable`
+1. Remove schema health state from Team Machine's `ProvideZeroCore.disable`
    expression. Keep URL validity, fixtures, and explicit re-mint recovery as the
    only disable reasons.
 2. Change an unequal fingerprint from `blocked` to `skew-detected`.
@@ -214,7 +214,7 @@ This phase needs no orez protocol change.
 
 ## Decision
 
-Implement Phase 1 in Agentbus after review. Keep orez unchanged for now. The
+Implement Phase 1 in Team Machine after review. Keep orez unchanged for now. The
 evidence shows orez and Zero already accept the important additive case; the
 downstream exact-hash admission gate and destructive mismatch recovery create the
 outage. Consider Phase 2 only if more applications need a preflight API or true

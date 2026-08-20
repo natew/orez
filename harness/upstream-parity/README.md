@@ -2,7 +2,7 @@
 
 Machine-readable accounting of upstream ZQL/Zero conformance assets versus the
 Orez black-box harness, so parity is auditable and drift is explicit. Owned by
-the upstream-parity worker (agentbus task `t-mrgqz3g5-6030`).
+the upstream-parity worker (tm task `t-mrgqz3g5-6030`).
 
 ## files
 

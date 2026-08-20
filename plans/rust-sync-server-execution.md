@@ -2,18 +2,18 @@
 
 Branch: `rust-sync-server`, worktree `~/.worktrees/orez-rust-sync`.
 Spec: [rust-sync-server-final-plan.md](./rust-sync-server-final-plan.md).
-Coordinator: the fable session that owns this file (agentbus scope orez).
+Coordinator: the fable session that owns this file (team-machine scope orez).
 
 Multiple agents work this worktree concurrently. Rules:
 
 - Own your paths (table below). Do not edit another track's files; if you
-  need a change there, message the owner or the coordinator on agentbus.
+  need a change there, message the owner or the coordinator on team-machine.
 - Commit with explicit pathspecs only (`git add <files> && git commit -m
 "..." -- <files>`). Conventional commits. Never `git add -A`, never
   stash, never amend, never reset.
 - `crates/sync-core`'s public API (esp. `db.rs` SyncDb/SqlValue/Row) is
   shared by all tracks. M1 owns it; announce any signature change on
-  agentbus to the M0 and M2 owners before committing it.
+  team-machine to the M0 and M2 owners before committing it.
 - No publishing, no deploys to shared infra without the coordinator
   relaying explicit user approval. The lslcf test worker deploys for M3
   probes are allowed (harness already deploys there).
@@ -189,7 +189,7 @@ propagation p50/p95 70/84 ms), eviction (SIGKILL, outage 1563 ms, zero
 409s, cookies monotone) — all PASS vs rust-local on a fresh checkout.
 
 Mini-16 extended matrix at 726ac0c (2026-07-10, run headless over SSH
-since mini's agentbus daemon cannot launch agents — bare PATH + a
+since mini's tm daemon cannot launch agents — bare PATH + a
 deepseek-proxied claude): protocol fuzz 3 x 34,000 structural cases
 (seeds 1/7/13), 102,000 total, every case 400, ~590 ms per seed batch;
 storm 100 clients ack p50/p95/p99 9/17/17 ms, propagation 71/97/97 ms,

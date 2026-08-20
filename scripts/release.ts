@@ -155,7 +155,7 @@ function stageForPack(
 // A consumer nests a second copy of a package whenever two of its dependencies
 // want different versions, and the nested one wins for anything resolving from
 // inside that subtree. Refreshing only the hoisted copy leaves the consumer
-// running two versions of the family at once with nothing to say so: agentbus
+// running two versions of the family at once with nothing to say so: team-machine
 // resolved orez-lite's realtime re-export into a stale nested sync-executor
 // that had no such export, and the import simply failed.
 function installedCopies(targetDir: string, name: string): string[] {

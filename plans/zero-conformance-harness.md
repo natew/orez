@@ -10,7 +10,7 @@ deferred (revisit only if the load generator hits client-count ceilings in
 TS). we start from upstream's just-landed fuzzer assets (apache-2.0, portable
 with attribution), add heavy query-shape lanes and load lanes, and the
 harness MUST run against a pure-sqlite local target as well as cloudflare.
-runners: nate's mac mini (already an agentbus peer, `mini-16`, isolated and
+runners: nate's mac mini (already an team-machine peer, `mini-16`, isolated and
 ownable) plus cloudflare (api key + credits available; lslcf account already
 wired for orez experiments). see EXECUTION PLAN below; the jepsen and rust
 sections that follow are kept as research context only.
@@ -447,7 +447,7 @@ findings pinned:
   grid + stock baseline) committed; bun 1.3.14 installed on the mini
   (user nathanwienert, 10 cores/16GB, node+git present, ~/orez + ~/takeout
   checkouts fetch fine over ssh). BLOCKED mid-setup 2026-07-09: the
-  coordinator's agentbus machine identity regenerated (machine.json
+  coordinator's tm machine identity regenerated (machine.json
   corruption) and peers now reject spawns ("no connected peer"), so the
   crontab install is unverified — re-run the crontab install once
   federation is re-paired, and note the nightly only becomes live after
@@ -573,7 +573,7 @@ rerun after harness deploy]:**
 
 - `work` (this machine): all development, M0 initial validation, backbone
   lanes, smokes.
-- `mini-16` (mac mini, agentbus peer, online, idle/isolated): the runner
+- `mini-16` (mac mini, team-machine peer, online, idle/isolated): the runner
   for the big stuff only — sweep lanes, load grids, longevity runs. it has
   been idle a while; provision on first use (bun, docker/colima, checkouts).
   note: spawn cwd must be a real path on the peer, `~` did not resolve.
