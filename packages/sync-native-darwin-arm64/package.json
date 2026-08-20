@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-native-darwin-arm64",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Prebuilt Orez sync-native host for macOS ARM64",
   "license": "MIT",
   "repository": {
