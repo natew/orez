@@ -189,6 +189,11 @@ Retention prunes completed
 segments and raises the floor. A client whose cookie has fallen below the floor
 gets a snapshot on its next pull.
 
+The payload is versioned. Format 2 (orez 0.15) keeps last-mutation-ids out of
+the payload entirely; the schema pass migrates a format-1 namespace in place on
+first boot and cannot be rolled back. See
+[Trade-offs](./trade-offs.md#ledger-format-2-is-a-one-way-migration).
+
 This is the whole recovery model. Fresh clients, below-floor cookies, and epoch
 invalidation clear the client store and rehydrate the group's current query
 membership. Desired queries and row membership are durable engine state, along
