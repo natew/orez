@@ -32,7 +32,7 @@ Consumed by soot as of `soot@0bfa3274`, against `orez-lite@0.10.7-canary.1785181
 - **No Cloudflare DO host adapter.** `realtime/host.ts` routes frames and
   `realtime/hub.ts` holds the state, but nothing wires them into a Durable
   Object. The design below is settled; only the implementation is missing.
-- **No Rust producer client.** agentbus writes `session.latest_summary_body`
+- **No Rust producer client.** team-machine writes `session.latest_summary_body`
   from `src/pg_writer.rs`, so its producer is a Rust process and cannot use
   `producer-socket.ts`. It needs either a small Rust client for the begin/publish
   frames, or a TypeScript relay point that already sees the summary chunks.

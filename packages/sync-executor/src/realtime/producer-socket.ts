@@ -1,7 +1,7 @@
 // A PublisherTransport backed by a socket, for a producer that is not in the
 // same process as the hub.
 //
-// This is the shape soot does NOT need and the shape agentbus and chat do: an
+// This is the shape soot does NOT need and the shape team-machine and chat do: an
 // application server generates the values, and the subscribers are browsers
 // somewhere else, so the updates have to cross a network to reach the hub that
 // fans them out.

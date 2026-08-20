@@ -11,7 +11,7 @@
     "not-applicable": "Cannot or should not be ported black-box AND Orez has no black-box behavioral analog. Reason names the coupling (mono planner/plan-flag/in-process transform) or the app/demo scope. NOTE: a test being implementation-coupled (in-process) does NOT by itself make it not-applicable — if Orez re-expresses the behavior black-box it is equivalent/equivalent-partial. Test portability and behavioral coverage are tracked separately (see inventory.json)."
   },
   "meta": {
-    "generatedBy": "upstream-parity worker (agentbus task t-mrgqz3g5-6030)",
+    "generatedBy": "upstream-parity worker (team-machine task t-mrgqz3g5-6030)",
     "generatedDate": "2026-07-11",
     "monoLocalCheckout": "/Users/n8/github/mono",
     "auditedUpstreamSha": "7139287da3c84ec5050c1eff0d9444d912d462aa",

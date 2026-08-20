@@ -1,6 +1,6 @@
 # Paged, resumable upstream snapshots for the rust sync host
 
-Tracked by agentbus task `t-mrmjcw7h-1h660` (urgent). 2026-07-15.
+Tracked by tm task `t-mrmjcw7h-1h660` (urgent). 2026-07-15.
 
 ## Problem
 

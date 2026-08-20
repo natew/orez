@@ -78,7 +78,7 @@ async function mount() {
   root = createRoot(container)
   await act(async () => {
     root?.render(
-      <client.ProvideZero cacheURL="http://127.0.0.1:7777/zero" userID="agentbus">
+      <client.ProvideZero cacheURL="http://127.0.0.1:7777/zero" userID="team-machine">
         <span>ok</span>
       </client.ProvideZero>
     )

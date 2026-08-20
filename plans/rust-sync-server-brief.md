@@ -143,7 +143,7 @@ CF Durable Object over `ctx.storage.sql`. for Rust decide early:
 
 - **native binary** (dedicated box / OVH / fly): rusqlite, easiest and
   fastest; the harness local lanes point at any HTTP base URL already.
-  nate has an OVH account + an isolated mac mini (agentbus peer `mini-16`)
+  nate has an OVH account + an isolated mac mini (team-machine peer `mini-16`)
   for big runs.
 - **cloudflare**: Rust→wasm workers exist (workers-rs) but DO SqlStorage
   bindings from wasm are awkward and orez's whole pg-facade/DoBackend moat
@@ -164,7 +164,7 @@ CF Durable Object over `ctx.storage.sql`. for Rust decide early:
   project-namespace zero-cache embed. your work is greenfield beside this.
 - the orez WORKTREE `~/.worktrees/orez-zero-sync-server` belongs to the
   codex worker (ab-mre5wzth-59453, harness owner). base your reading on
-  **orez main (v0.4.46)**. coordinate via agentbus; the worker is the
+  **orez main (v0.4.46)**. coordinate via team-machine; the worker is the
   person to ask about harness targets/lanes.
 - soot main + ~/soot are shared with active co-tenants; you shouldn't need
   to touch soot at all.

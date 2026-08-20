@@ -6,7 +6,7 @@ import {
   purgeConsumedChanges,
 } from '../../src/replication/change-tracker.ts'
 
-// realistic-ish agentbus message body (~1KB)
+// realistic-ish team-machine message body (~1KB)
 const BODY = 'x'.repeat(1024)
 function pct(arr: number[], p: number) {
   const s = [...arr].sort((a, b) => a - b)
@@ -49,7 +49,7 @@ for (const withTriggers of [false, true]) {
     }
     stat(`${tag}INSERT`, t.slice(100)) // drop warmup
   }
-  // UPSERT (ON CONFLICT DO UPDATE) — the real agentbus write shape
+  // UPSERT (ON CONFLICT DO UPDATE) — the real team-machine write shape
   {
     const t: number[] = []
     for (let i = 0; i < 2000; i++) {
