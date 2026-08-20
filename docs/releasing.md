@@ -39,3 +39,14 @@ already have been published.
 Stable `bun release --patch`, `bun release --minor`, and `bun release --major`
 remain explicit. They use the interactive npm credential on the local machine,
 then commit and tag the stable version.
+
+If npm stops after publishing only part of the package family, retry with:
+
+```sh
+bun release --republish
+```
+
+`--republish` keeps the versions already written to the manifests and checks npm
+before publishing, so packages that reached the registry are skipped. It reuses
+the build and checks from the failed release. The retry refuses to publish if a
+configured package artifact is missing.

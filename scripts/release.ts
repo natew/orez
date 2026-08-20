@@ -32,6 +32,27 @@ import {
 } from './sync-native-package.js'
 
 const args = process.argv.slice(2)
+const knownArgs = new Set([
+  '--canary',
+  '--ci',
+  '--dry-run',
+  '--into',
+  '--major',
+  '--minor',
+  '--pack-only',
+  '--patch',
+  '--republish',
+  '--skip-all',
+  '--skip-build',
+  '--skip-test',
+])
+for (let index = 0; index < args.length; index++) {
+  const arg = args[index]
+  if (!knownArgs.has(arg)) {
+    throw new Error(`Unknown release argument: ${arg}`)
+  }
+  if (arg === '--into') index++
+}
 const dryRun = args.includes('--dry-run')
 const patch = args.includes('--patch')
 const minor = args.includes('--minor')
@@ -39,7 +60,9 @@ const major = args.includes('--major')
 const canary = args.includes('--canary')
 const ci = args.includes('--ci')
 const rePublish = args.includes('--republish')
-const skipTest = args.includes('--skip-test') || args.includes('--skip-all')
+const skipAll = args.includes('--skip-all')
+const skipTest = args.includes('--skip-test') || skipAll || rePublish
+const skipBuild = args.includes('--skip-build') || skipAll || rePublish
 const packOnly = args.includes('--pack-only')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null
@@ -50,7 +73,7 @@ const trustedPublishing =
 
 if (!patch && !minor && !major && !canary && !rePublish && !packOnly && !into) {
   console.info(
-    'usage: bun scripts/release.ts --patch|--minor|--major|--canary|--republish [--dry-run] [--skip-test] [--pack-only] [--into <dir>]\n       bun scripts/release.ts --pack-only [--patch|--minor|--major|--canary]'
+    'usage: bun scripts/release.ts --patch|--minor|--major|--canary|--republish [--dry-run] [--skip-build] [--skip-test] [--pack-only] [--into <dir>]\n       bun scripts/release.ts --pack-only [--patch|--minor|--major|--canary] [--skip-build]'
   )
   process.exit(1)
 }
@@ -110,11 +133,19 @@ function bumpVersion(current: string): string {
 // import that then fails outright in the consumer.
 function stageForPack(
   dir: string,
-  pkg: { files?: string[]; scripts?: Record<string, string> },
+  pkg: { name?: string; files?: string[]; scripts?: Record<string, string> },
   version: string,
   versionMap: Map<string, string>,
   destDir: string
 ): void {
+  for (const file of pkg.files ?? []) {
+    if (!existsSync(resolve(dir, file))) {
+      throw new Error(
+        `${pkg.name ?? dir}: package file '${file}' is missing. Build before publishing or remove --skip-build.`
+      )
+    }
+  }
+
   const filesToCopy = [...(pkg.files ?? []), 'package.json']
   if (existsSync(resolve(dir, 'README.md'))) filesToCopy.push('README.md')
   if (existsSync(resolve(dir, 'LICENSE'))) filesToCopy.push('LICENSE')
@@ -518,13 +549,14 @@ if (!packOnly && !dryRun && !trustedPublishing) {
 }
 
 // check: format, lint, types, tests
-if (!packOnly) {
+if (!packOnly && !rePublish) {
   console.info('\nchecking...')
   run('make -B dist/package.json', { cwd: sqliteWasmDir })
   run('bun run format')
   run('bun run format:check')
   run('bun run lint')
-  run('bun run check')
+  if (skipBuild) console.info('skipping build-dependent checks')
+  else run('bun run check')
   if (!skipTest) {
     run('bun run test')
     run('bun run test:sync-browser-host')
@@ -543,22 +575,25 @@ if (!packOnly) {
 // (soot factory defect #49, 2026-08-06). compare the schema revision the two
 // binaries actually report, and hold the stable release until the dispatched
 // sync-native release catches npm up.
-if (!packOnly && !canary) {
+if (!packOnly && !canary && !rePublish) {
   console.info('\nchecking npm sync-native contract...')
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
     throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
   }
-  run('cargo build --release -p sync-native --bin sync-native')
+  const localBinary = resolve(root, 'target', 'release', nativePlatform.executable)
+  if (!skipBuild) run('cargo build --release -p sync-native --bin sync-native')
+  if (!existsSync(localBinary)) {
+    throw new Error(
+      `sync-native release binary is missing at ${localBinary}. Build before publishing or remove --skip-build.`
+    )
+  }
   // "sync-native <pkg version> <schema revision>"; an old binary prints no
   // revision at all, which compares as a mismatch, which is correct.
   const revisionOf = (versionOutput: string) =>
     versionOutput.trim().split(/\s+/).slice(2).join(' ')
   const localRevision = revisionOf(
-    execSync(
-      `${resolve(root, 'target', 'release', nativePlatform.executable)} --version`,
-      { encoding: 'utf8' }
-    )
+    execSync(`${localBinary} --version`, { encoding: 'utf8' })
   )
   const guardDir = mkdtempSync(join(tmpdir(), 'orez-sync-native-guard-'))
   run(`npm pack ${nativePlatform.npmPackage}@latest --silent`, { cwd: guardDir })
@@ -577,14 +612,19 @@ if (!packOnly && !canary) {
   }
 }
 
-// build orez
-console.info('\nbuilding...')
-cleanRootDist()
-run('bun run build')
-run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
+if (rePublish) {
+  console.info('\nrepublishing existing package artifacts')
+} else if (skipBuild) {
+  console.info('\nskipping build; using existing package artifacts')
+} else {
+  console.info('\nbuilding...')
+  cleanRootDist()
+  run('bun run build')
+  run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
+}
 
 // bump versions in source (skip for --pack-only and --canary)
-if (!packOnly && !canary) {
+if (!packOnly && !canary && !rePublish) {
   for (const p of packages) {
     p.pkg.version = p.next
     writeFileSync(p.pkgPath, JSON.stringify(p.pkg, null, 2) + '\n')
@@ -599,13 +639,15 @@ if (dryRun) {
   for (const p of packages) {
     console.info(`  ${p.pkg.name}@${p.next}`)
   }
-  // revert versions
-  for (const p of packages) {
-    const original = JSON.parse(readFileSync(p.pkgPath, 'utf-8'))
-    original.version = p.originalVersion
-    writeFileSync(p.pkgPath, JSON.stringify(original, null, 2) + '\n')
+  if (!rePublish) {
+    // revert versions
+    for (const p of packages) {
+      const original = JSON.parse(readFileSync(p.pkgPath, 'utf-8'))
+      original.version = p.originalVersion
+      writeFileSync(p.pkgPath, JSON.stringify(original, null, 2) + '\n')
+    }
+    run('bun install')
   }
-  run('bun install')
   process.exit(0)
 }
 
@@ -613,19 +655,23 @@ if (dryRun) {
 const tmpBase = mkdtempSync(join(tmpdir(), 'orez-publish-'))
 console.info(`\n${packOnly ? 'packing to' : 'publishing from'} ${tmpBase}`)
 
-const preparedPackages: Array<{ name: string; version: string; cwd: string }> = []
+const preparedPackages: Array<{
+  name: string
+  version: string
+  cwd: string
+  source: WorkspacePkg
+}> = []
 
 for (const p of packages) {
   const name = p.pkg.name
   const tmpDir = join(tmpBase, name)
 
-  stageForPack(p.dir, p.pkg, p.next, versionMap, tmpDir)
-
   if (packOnly) {
+    stageForPack(p.dir, p.pkg, p.next, versionMap, tmpDir)
     console.info(`\npacking ${name}@${p.next}...`)
     run('npm pack', { cwd: tmpDir })
   } else {
-    preparedPackages.push({ name, version: p.next, cwd: tmpDir })
+    preparedPackages.push({ name, version: p.next, cwd: tmpDir, source: p })
   }
 }
 
@@ -636,7 +682,7 @@ if (packOnly) {
 
 function isPublished({ name, version }: (typeof preparedPackages)[number]) {
   try {
-    const output = run(`npm view ${name}@${version} version --json`, {
+    const output = run(`npm view ${name}@${version} version --json --prefer-online`, {
       cwd: tmpBase,
       silent: true,
     }).toString()
@@ -663,6 +709,10 @@ const pendingPackages = preparedPackages.filter((pkg) => {
 
 if (pendingPackages.length > 0) {
   const tag = canary ? '--tag canary' : ''
+
+  for (const { cwd, source } of pendingPackages) {
+    stageForPack(source.dir, source.pkg, source.next, versionMap, cwd)
+  }
 
   try {
     if (trustedPublishing) {
@@ -701,14 +751,23 @@ if (pendingPackages.length > 0) {
       })
     }
   } catch (error) {
-    const postflight = pendingPackages.map((pkg) => ({
+    let postflight = pendingPackages.map((pkg) => ({
       pkg,
       published: isPublished(pkg),
     }))
+    if (postflight.some(({ published }) => !published)) {
+      // npm can return before its package metadata is visible to `npm view`.
+      // give successful workspaces one propagation window before reporting them.
+      await Bun.sleep(10_000)
+      postflight = postflight.map(({ pkg, published }) => ({
+        pkg,
+        published: published || isPublished(pkg),
+      }))
+    }
     const completed = postflight.filter(({ published }) => published)
     const missing = postflight.filter(({ published }) => !published)
     throw new Error(
-      `Publish stopped after ${completed.length} packages. Still missing:\n${missing.map(({ pkg }) => pkg.name).join('\n')}\n\nRe-run with --republish to retry only these packages.`,
+      `Publish stopped after ${completed.length} packages${completed.length > 0 ? ` (${completed.map(({ pkg }) => pkg.name).join(', ')})` : ''}. Still missing:\n${missing.map(({ pkg }) => pkg.name).join('\n')}\n\nRe-run with --republish to retry only these packages with the existing build.`,
       { cause: error }
     )
   }
