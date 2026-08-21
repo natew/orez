@@ -67,6 +67,66 @@ cursor delta through `toArray()`, `one()`, `next()`, iteration, and `raw()`
 iteration (`packages/sync-cf-host/src/write-safeguards.ts`,
 `trackBillableCursorRows`).
 
+### Six billable rows per captured change
+
+Measured 2026-08-21 and pinned by `bills six rows per captured change` in
+`packages/orez-lite/src/cf-do/worker-write-amplification.test.ts`. The test
+measures the slope between a one-row and a ten-row synced `UPDATE`, so it
+reports the marginal cost of one more captured row rather than a total that
+fixed per-transaction overhead would muddy.
+
+One captured row costs six billable rows, and only two of them are the point:
+
+| stage                                                                      | rows |
+| -------------------------------------------------------------------------- | ---- |
+| application row, plus its capture trigger's insert into `_orez_cdc_buffer` | 2    |
+| `DELETE FROM _orez_cdc_buffer` on drain                                    | 1    |
+| `INSERT INTO _zero_pending_changes`                                        | 1    |
+| `INSERT INTO _zero_changes` (the durable changefeed)                       | 1    |
+| `DELETE FROM _zero_pending_changes` after promotion                        | 1    |
+
+Plus three rows per transaction regardless of size: the `_orez_tx_schema` guard
+in and out, and the `_zero_change_state` watermark bump. Add `N_indexes` to the
+application row on top of all of this.
+
+Four of the six are a row's round trip through two staging tables, each written
+and then deleted. That is the shape to attack if this cost ever needs to come
+down, and it is worth knowing it is four rows rather than the one the ledger
+packing already handles: `_zsync_log_segments` writes one row per transaction,
+so the ledger is not what scales here.
+
+Two things that are NOT available, both verified against local workerd on
+2026-08-21 rather than reasoned about:
+
+- **The staging tables cannot move off durable storage.** `CREATE TEMP TABLE`,
+  `ATTACH DATABASE ':memory:'`, and `PRAGMA temp_store` all fail with
+  `SQLITE_AUTH`. A trigger body naming a temp table is accepted when the trigger
+  is created and then fails when it fires, reporting the table missing under
+  `main`, because unqualified names inside a trigger body resolve against the
+  main database. There is no unbilled scratch surface inside a Durable Object.
+- **Cloudflare exposes no write-ahead log.** Its own WAL is what backs
+  point-in-time recovery, but the only handles on it are the opaque bookmark
+  APIs (`getCurrentBookmark`, `getBookmarkForTime`,
+  `onNextSessionRestoreBookmark`). There is no readable change stream, no
+  `sqlite3_wal_hook`, no session extension, and no user-defined functions
+  callable from a trigger body. Writing images to a table and reading them back
+  is the only capture mechanism the platform allows, which is why the buffer
+  exists at all.
+
+Reads are the cheap side of this meter by three orders of magnitude: rows
+written bill at $1.00/million against $0.001/million for rows read, both after
+generous included tiers (50 million writes and 25 billion reads per month). Any
+restructuring that converts a capture write into a capture read is close to
+free. `INSERT`/`DELETE ... RETURNING` hand back the affected images at no extra
+write cost, though `RETURNING` sees only the statement's own target table, so
+it cannot observe rows a foreign-key cascade touched. That is the open question
+against removing a staging hop, not a settled design.
+
+At current volumes none of this costs anything. The 50-million-writes included
+tier covers roughly 8 million captured changes per month before a single dollar
+is billed, so this is a number to watch as a namespace grows rather than a
+problem to fix today.
+
 ### The circuit breakers
 
 Because a runaway writer bills real money and can wedge an object, the system has

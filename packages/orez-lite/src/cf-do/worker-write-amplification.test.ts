@@ -434,6 +434,67 @@ describe('billable write amplification on a synced namespace', () => {
     expect(write.billed).toBeGreaterThan(1_000)
   })
 
+  it('bills six rows per captured change, four of them staging churn', async () => {
+    const ns = await controlNamespace()
+    for (let index = 2; index <= 10; index++) {
+      ns.sql.exec(`INSERT INTO file VALUES ('f${index}', 'p1', 'body')`)
+    }
+    ns.zero.cdc.drain()
+
+    /** Bill one write and attribute its rows to the stage that wrote them. */
+    const stages = (label: string, sql: string) => {
+      const billed = ns.syncedWrite(label, sql, ns.fileUpdate).billed
+      const byStage: Record<string, number> = {}
+      for (const write of ns.written) {
+        const statement = write.sql.replace(/\s+/g, ' ')
+        const stage = /^UPDATE file/.test(statement)
+          ? 'application row + capture trigger'
+          : /^DELETE FROM "_orez_cdc_buffer"/.test(statement)
+            ? 'cdc buffer drain'
+            : /^INSERT INTO _zero_pending_changes/.test(statement)
+              ? 'pending changes insert'
+              : /^INSERT INTO _zero_changes/.test(statement)
+                ? 'changefeed insert'
+                : /^DELETE FROM _zero_pending_changes/.test(statement)
+                  ? 'pending changes delete'
+                  : 'fixed per transaction'
+        byStage[stage] = (byStage[stage] ?? 0) + write.rows
+      }
+      return { billed, byStage }
+    }
+
+    // the first synced write on a namespace seeds `_zero_change_state`, so warm
+    // that one-off row off before measuring, or it lands entirely in the
+    // single-row arm and skews the slope to 5.89.
+    stages('tx-warm', "UPDATE file SET body = 'warm' WHERE id = 'f1'")
+    const one = stages('tx-one', "UPDATE file SET body = 'x1' WHERE id = 'f1'")
+    const ten = stages('tx-ten', "UPDATE file SET body = 'x2'")
+
+    // the marginal cost of one more captured row, which is the number that
+    // decides the Cloudflare bill on a busy namespace.
+    expect((ten.billed - one.billed) / 9).toBe(6)
+
+    // and where those six go. only two are load-bearing: the application row
+    // itself and the durable changefeed row. the other four are a row's round
+    // trip through two staging tables, each of which is written then deleted.
+    const perRow: Record<string, number> = {}
+    for (const stage of Object.keys(ten.byStage)) {
+      perRow[stage] = (ten.byStage[stage]! - (one.byStage[stage] ?? 0)) / 9
+    }
+    expect(perRow).toEqual({
+      'application row + capture trigger': 2,
+      'cdc buffer drain': 1,
+      'pending changes insert': 1,
+      'changefeed insert': 1,
+      'pending changes delete': 1,
+      'fixed per transaction': 0,
+    })
+
+    // three rows per transaction regardless of size: the tx schema guard in and
+    // out, plus the change-state watermark bump.
+    expect(one.billed).toBe(6 + 3)
+  })
+
   it('counts logical rows as rows changed, not rows returned', async () => {
     const ns = await controlNamespace()
     // exactly the statement shape packages/sync-executor/src/crud.ts emits: no
