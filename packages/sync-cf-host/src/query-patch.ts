@@ -19,9 +19,16 @@ const NAME_SEPARATOR = /[.|]/
  * `asQueryInternals`, whose instance-tag check fails whenever the app's
  * registry and this host resolve different copies of the zero module.
  *
- * A resolution error fails the whole patch (the pull is refused as one unit),
- * but the refusal names the query it came from, so a client that registers
- * one unknown query alongside nine good ones is told which one is unknown.
+ * A query the registry does not contain at all is version skew, not a bug: a
+ * shipped native client is always older than the server it talks to, so it can
+ * ask for a query that has since been renamed or removed. That put is dropped
+ * and the rest of the patch resolves, leaving the client without rows for that
+ * one query. Refusing the whole pull instead would take an app that is one
+ * feature out of date and stop it syncing anything at all, which is what
+ * happened to Contrast mobile on 2026-08-20.
+ *
+ * A query that IS registered but fails to build is a real fault in the app's
+ * own code, so it still fails the whole patch and names the query it came from.
  */
 export function resolveQueryPatch(
   patch: readonly unknown[],
@@ -30,11 +37,17 @@ export function resolveQueryPatch(
   transformVersion: number,
   fail: (message: string) => Error
 ): unknown[] {
-  const result = [...patch]
-  patch.forEach((operation, index) => {
-    if (!operation || typeof operation !== 'object') return
+  const result: unknown[] = []
+  for (const operation of patch) {
+    if (!operation || typeof operation !== 'object') {
+      result.push(operation)
+      continue
+    }
     const op = operation as Record<string, unknown>
-    if (op.op !== 'put') return
+    if (op.op !== 'put') {
+      result.push(operation)
+      continue
+    }
     if (typeof op.name !== 'string') {
       throw fail('query put requires a server-resolved named query')
     }
@@ -50,7 +63,9 @@ export function resolveQueryPatch(
       | { fn?: (options: { args: unknown; ctx: unknown }) => unknown }
       | undefined
     if (!custom || typeof custom.fn !== 'function') {
-      throw fail(`unknown or unsupported named query: ${op.name}`)
+      // version skew: drop this query and keep syncing the rest.
+      console.warn(`orez: dropping unknown named query from pull: ${op.name}`)
+      continue
     }
     let ast: JsonValue
     try {
@@ -64,14 +79,14 @@ export function resolveQueryPatch(
       ast = built.ast as JsonValue
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      throw fail(`unknown or unsupported named query: ${op.name}: ${detail}`)
+      throw fail(`named query failed to build: ${op.name}: ${detail}`)
     }
-    result[index] = {
+    result.push({
       op: 'put',
       hash: op.hash,
       ast,
       transformVersion,
-    }
-  })
+    })
+  }
   return result
 }
