@@ -21,8 +21,8 @@ use crate::wire;
 
 use super::membership::{
     advance_query_ack, canonical_pk_text, clear_desires, client_query_version, delete_clients,
-    desired_hashes, prepare_transform_version, recompute_group_with_rehydrate, register_query,
-    remove_desire, set_desire, validate_active_queries,
+    desired_hashes, prepare_transform_version, prune_tombstones, recompute_group_with_rehydrate,
+    register_query, remove_desire, set_desire, transitions_since, validate_active_queries,
 };
 
 const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
@@ -243,8 +243,30 @@ pub fn handle_query_pull(
         scan_changed(db, tables, cookie.unwrap())?
     };
     let rehydrate = applied_queries.as_ref().cloned().unwrap_or_default();
-    let mut rows_patch =
-        recompute_group_with_rehydrate(db, tables, group, &changed, &rehydrate, full_response)?;
+    let (mut rows_patch, emitted) = recompute_group_with_rehydrate(
+        db,
+        tables,
+        group,
+        &changed,
+        &rehydrate,
+        full_response,
+        current,
+    )?;
+    if !full_response {
+        // replay membership transitions another client of this group already
+        // consumed: the recompute only emits a transition to the pull that
+        // observes it, and this client's replica may predate ones settled
+        // between its cookie and the watermark.
+        rows_patch.extend(transitions_since(
+            db,
+            tables,
+            group,
+            cookie.unwrap(),
+            &emitted,
+        )?);
+        let floor = store::floor(db)?;
+        prune_tombstones(db, floor)?;
+    }
     if full_response {
         // membership departures were already applied durably. after a clear,
         // only the current union belongs in the snapshot response.

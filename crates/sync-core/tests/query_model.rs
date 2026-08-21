@@ -206,8 +206,10 @@ fn run_trace(seed: u64, steps: u64) {
             *expected_refs.entry(id).or_insert(0) += 1;
         }
     }
+    // refcount-0 rows are departure tombstones (kept for per-client transition
+    // replay), not part of the live cover
     let ref_rows = db
-        .query("SELECT rowPk, CAST(refcount AS TEXT) AS c FROM _zsync_row_refs WHERE clientGroupID = ?", &[SqlValue::Text(G.into())])
+        .query("SELECT rowPk, CAST(refcount AS TEXT) AS c FROM _zsync_row_refs WHERE clientGroupID = ? AND refcount > 0", &[SqlValue::Text(G.into())])
         .unwrap();
     let mut actual_refs: HashMap<String, i64> = HashMap::new();
     for row in &ref_rows {

@@ -16,7 +16,16 @@
 // - _zsync_row_refs:   (group, rowTable, rowPk) -> how many of the group's active
 //                      queries reference the row; the row is delivered while the
 //                      count is positive and deleted only when it reaches zero
-//                      (invariant 14).
+//                      (invariant 14). each membership transition carries the
+//                      watermark that observed it: addedVersion while live, and a
+//                      refcount-0 TOMBSTONE with removedVersion after departure.
+//                      a recompute delivers a transition inline only to the client
+//                      whose pull observed it, so every other client in the group
+//                      (its own replica, an older cookie) must find the
+//                      transition here — otherwise its cookie advances past a
+//                      departure it never received and the row ghosts forever.
+//                      tombstones at or below the retain floor are pruned; a
+//                      client below the floor gets a full response anyway.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -79,7 +88,11 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 // columns, so those stored keys no longer match a recompute. the query-aware
 // tables rebuild from the next desiredQueriesPatch, so the version bump resets
 // them instead of migrating each key.
-pub(crate) const QUERY_SCHEMA_VERSION: i64 = 3;
+//
+// v4: _zsync_row_refs gained addedVersion/removedVersion so membership
+// transitions replay to every client of a group, not only the one whose pull
+// observed them. the reset path rebuilds the tables at the new shape.
+pub(crate) const QUERY_SCHEMA_VERSION: i64 = 4;
 
 fn table_exists(db: &mut dyn SyncDb, name: &str) -> Result<bool, EngineError> {
     let rows = db.query(
@@ -242,8 +255,22 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
             rowTable TEXT NOT NULL,
             rowPk TEXT NOT NULL,
             refcount INTEGER NOT NULL,
+            addedVersion INTEGER NOT NULL,
+            removedVersion INTEGER,
             PRIMARY KEY (clientGroupID, rowTable, rowPk)
         )",
+        &[],
+    )?;
+    // the transition replay in every non-full pull filters by version; without
+    // these the OR predicate scans the group's whole membership each pull.
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS _zsync_row_refs_added
+         ON _zsync_row_refs (clientGroupID, addedVersion)",
+        &[],
+    )?;
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS _zsync_row_refs_removed
+         ON _zsync_row_refs (clientGroupID, removedVersion) WHERE refcount = 0",
         &[],
     )?;
     // marks a (group, query) whose membership has been computed at least once.
@@ -726,24 +753,60 @@ fn read_ref(db: &mut dyn SyncDb, group: &str, table: &str, pk: &str) -> Result<i
     }
 }
 
+// apply a refcount change, stamping membership transitions with the watermark
+// that observed them. positive -> 0 keeps the row as a tombstone carrying
+// removedVersion instead of deleting it, and 0 -> positive stamps addedVersion
+// (clearing any tombstone), so a later pull from another client of the group
+// can replay the transition against its own cookie.
 fn set_ref(
     db: &mut dyn SyncDb,
     group: &str,
     table: &str,
     pk: &str,
+    old: i64,
     count: i64,
+    version: i64,
 ) -> Result<(), EngineError> {
     if count <= 0 {
+        if old > 0 {
+            db.exec(
+                "UPDATE _zsync_row_refs SET refcount = 0, removedVersion = ?
+                 WHERE clientGroupID = ? AND rowTable = ? AND rowPk = ?",
+                &[
+                    SqlValue::Integer(version),
+                    text(group),
+                    text(table),
+                    text(pk),
+                ],
+            )?;
+        }
+    } else if old <= 0 {
         db.exec(
-            "DELETE FROM _zsync_row_refs WHERE clientGroupID = ? AND rowTable = ? AND rowPk = ?",
-            &[text(group), text(table), text(pk)],
+            "INSERT INTO _zsync_row_refs
+               (clientGroupID, rowTable, rowPk, refcount, addedVersion, removedVersion)
+             VALUES (?, ?, ?, ?, ?, NULL)
+             ON CONFLICT (clientGroupID, rowTable, rowPk) DO UPDATE SET
+               refcount = excluded.refcount,
+               addedVersion = excluded.addedVersion,
+               removedVersion = NULL",
+            &[
+                text(group),
+                text(table),
+                text(pk),
+                SqlValue::Text(count.to_string()),
+                SqlValue::Integer(version),
+            ],
         )?;
     } else {
         db.exec(
-            "INSERT INTO _zsync_row_refs (clientGroupID, rowTable, rowPk, refcount)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT (clientGroupID, rowTable, rowPk) DO UPDATE SET refcount = excluded.refcount",
-            &[text(group), text(table), text(pk), SqlValue::Text(count.to_string())],
+            "UPDATE _zsync_row_refs SET refcount = ?
+             WHERE clientGroupID = ? AND rowTable = ? AND rowPk = ?",
+            &[
+                SqlValue::Text(count.to_string()),
+                text(group),
+                text(table),
+                text(pk),
+            ],
         )?;
     }
     Ok(())
@@ -897,13 +960,16 @@ fn query_relevant(
 // first reference in the group) and dels (its last reference gone). `changed`
 // carries the (table, pk) touched since the client's cookie so a row whose DATA
 // changed but whose membership did not is re-emitted with its current value.
+// direct-recompute entry for tests and tooling; handle_query_pull is the
+// production path. transitions stamped 0 replay to nobody, which is fine for a
+// caller that only reads the returned patch.
 pub fn recompute_group(
     db: &mut dyn SyncDb,
     tables: &Tables,
     group: &str,
     changed: &BTreeSet<(String, String)>,
 ) -> Result<Vec<Value>, EngineError> {
-    recompute_group_with_rehydrate(db, tables, group, changed, &BTreeSet::new(), false)
+    Ok(recompute_group_with_rehydrate(db, tables, group, changed, &BTreeSet::new(), false, 0)?.0)
 }
 
 pub(crate) fn recompute_group_with_rehydrate(
@@ -913,7 +979,8 @@ pub(crate) fn recompute_group_with_rehydrate(
     changed: &BTreeSet<(String, String)>,
     rehydrate: &BTreeSet<String>,
     rehydrate_all: bool,
-) -> Result<Vec<Value>, EngineError> {
+    version: i64,
+) -> Result<(Vec<Value>, BTreeSet<(String, String)>), EngineError> {
     let queries = active_queries(db, group)?;
     validate_queries(tables, &queries)?;
 
@@ -1067,7 +1134,9 @@ pub(crate) fn recompute_group_with_rehydrate(
         )?;
     }
 
-    // apply net deltas; emit a put on 0 -> positive, a del on positive -> 0
+    // apply net deltas; emit a put on 0 -> positive, a del on positive -> 0.
+    // transitions are stamped with the caller's watermark so other clients of
+    // the group replay them from their own cookies (see _zsync_row_refs).
     let mut patch: Vec<Value> = Vec::new();
     let mut emitted: BTreeSet<(String, String)> = BTreeSet::new();
     for ((table, pk), delta) in &ref_delta {
@@ -1076,7 +1145,7 @@ pub(crate) fn recompute_group_with_rehydrate(
         }
         let old = read_ref(db, group, table, pk)?;
         let new = old + delta;
-        set_ref(db, group, table, pk, new)?;
+        set_ref(db, group, table, pk, old, new, version)?;
         if old == 0 && new > 0 {
             let value = values
                 .get(&(table.clone(), pk.clone()))
@@ -1137,7 +1206,96 @@ pub(crate) fn recompute_group_with_rehydrate(
             .physical_name(&key.0)
             .expect("member table has physical mapping");
         patch.push(json!({ "op": "put", "tableName": physical_table, "value": value }));
+        emitted.insert(key);
     }
 
+    Ok((patch, emitted))
+}
+
+// membership transitions the group recorded after `cookie`, for a client whose
+// replica predates them. a recompute writes each transition durably ONCE (the
+// pull that observed it), so a second client of the same group pulling from an
+// older cookie finds an already-settled membership and an empty diff — without
+// this replay its cookie would advance past a departure it never received and
+// the row would ghost in its replica forever. `skip` carries the keys the
+// current response already emits. cost: one primary-key-prefix scan of the
+// group's refs per non-full pull; a put re-reads the live row by pk.
+pub(crate) fn transitions_since(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    group: &str,
+    cookie: i64,
+    skip: &BTreeSet<(String, String)>,
+) -> Result<Vec<Value>, EngineError> {
+    let rows = db.query(
+        "SELECT rowTable, rowPk, CAST(refcount AS TEXT) AS c FROM _zsync_row_refs
+         WHERE clientGroupID = ?
+           AND (addedVersion > ? OR (refcount = 0 AND removedVersion > ?))",
+        &[
+            text(group),
+            SqlValue::Integer(cookie),
+            SqlValue::Integer(cookie),
+        ],
+    )?;
+    let mut patch = Vec::new();
+    for row in &rows {
+        let table = str_col(row.get("rowTable"))?;
+        let pk = str_col(row.get("rowPk"))?;
+        if skip.contains(&(table.clone(), pk.clone())) {
+            continue;
+        }
+        let live = match row.get("c") {
+            Some(SqlValue::Text(s)) => s.parse::<i64>().unwrap_or(0) > 0,
+            _ => false,
+        };
+        let spec = tables
+            .get(&table)
+            .ok_or_else(|| EngineError::internal(format!("member table '{table}' missing")))?;
+        let physical_table = tables
+            .physical_name(&table)
+            .expect("member table has physical mapping");
+        let pk_obj: Value = serde_json::from_str(&pk).unwrap_or(Value::Null);
+        if live {
+            let predicate = spec
+                .primary_key
+                .iter()
+                .map(|col| format!("\"{col}\" = ?"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let params: Vec<SqlValue> = spec
+                .primary_key
+                .iter()
+                .map(|col| json_pk_to_sql(pk_obj.get(col)))
+                .collect();
+            let sql = format!("SELECT * FROM \"{physical_table}\" WHERE {predicate}");
+            let Some(app_row) = db.query(&sql, &params)?.into_iter().next() else {
+                // membership says live but the row is gone: the departure will
+                // settle on the next recompute; skip rather than invent state.
+                continue;
+            };
+            patch.push(json!({
+                "op": "put",
+                "tableName": physical_table,
+                "value": zero_row(tables, &table, spec, &app_row)?,
+            }));
+        } else {
+            patch.push(json!({
+                "op": "del",
+                "tableName": physical_table,
+                "id": zero_pk_id(tables, &table, spec, &pk_obj)?,
+            }));
+        }
+    }
     Ok(patch)
+}
+
+// tombstones no client can need any more: a cookie at or below the retain
+// floor gets a full response, so a departure stamped at or below it will never
+// be asked for again.
+pub(crate) fn prune_tombstones(db: &mut dyn SyncDb, floor: i64) -> Result<(), EngineError> {
+    db.exec(
+        "DELETE FROM _zsync_row_refs WHERE refcount = 0 AND removedVersion <= ?",
+        &[SqlValue::Integer(floor)],
+    )?;
+    Ok(())
 }

@@ -785,3 +785,52 @@ fn unbounded_related_fresh_pull_includes_child_rows() {
     );
     assert_eq!(resp["gotQueries"]["version"], json!(1));
 }
+
+// two clients of one group with independent replicas (a browser preview reload
+// keeps the persisted clientGroupID but boots a fresh client, and the stale
+// instance keeps pulling): a membership departure must reach EVERY client of
+// the group, not only the pull that first observed it. before transitions were
+// versioned, the first pull consumed the diff durably and the second client's
+// cookie advanced past the delete with an empty patch, ghosting the row in its
+// replica forever.
+#[test]
+fn membership_departure_reaches_every_client_of_the_group() {
+    let mut h = QHost::new();
+    let q = json!({
+        "version": 1,
+        "patch": [{ "op": "put", "hash": "open", "ast": open_query() }],
+    });
+    let a0 = h.pull("a", json!(null), Some(q.clone()));
+    assert_eq!(put_ids(&a0), vec!["i1", "i3"]);
+    let b0 = h.pull("b", a0["cookie"].clone(), Some(q));
+    assert_eq!(b0["cookie"], a0["cookie"]);
+
+    // i1 leaves the query; client a's pull observes and consumes the diff
+    h.exec("DELETE FROM issue WHERE id = 'i1'");
+    let a1 = h.pull("a", a0["cookie"].clone(), None);
+    assert_eq!(del_ids(&a1), vec!["i1"]);
+
+    // client b pulls the same window afterward: it must also receive the del
+    let b1 = h.pull("b", b0["cookie"].clone(), None);
+    assert_eq!(
+        del_ids(&b1),
+        vec!["i1"],
+        "second client of the group must replay the departure"
+    );
+    assert_eq!(b1["cookie"], a1["cookie"]);
+
+    // caught up: no repeated transition on the next pull
+    let b2 = h.pull("b", b1["cookie"].clone(), None);
+    assert_eq!(b2["unchanged"], json!(true));
+
+    // membership entry (a row coming back) replays to the lagging client too
+    h.exec("INSERT INTO issue VALUES ('i1', 't-i1', 0)");
+    let a2 = h.pull("a", a1["cookie"].clone(), None);
+    assert_eq!(put_ids(&a2), vec!["i1"]);
+    let b3 = h.pull("b", b1["cookie"].clone(), None);
+    assert_eq!(
+        put_ids(&b3),
+        vec!["i1"],
+        "second client of the group must replay the entry"
+    );
+}
