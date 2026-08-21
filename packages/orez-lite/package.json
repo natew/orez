@@ -112,6 +112,7 @@
     "build:dependencies": "bun run --cwd ../sync-cf-host build:dist",
     "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime",
     "test": "cd ../.. && vitest run --config vitest.config.ts packages/orez-lite/src",
+    "test:application-push-workerd": "bun application-push-workerd-test.mjs",
     "test:migration-workerd": "bun migration-workerd-test.mjs",
     "test:package": "bun run build && node package-runtime-test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
