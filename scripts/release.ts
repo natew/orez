@@ -875,7 +875,7 @@ if (!canary) {
   run(`git add ${pathspec}`)
   run(`git commit -m "${gitTag}" -- ${pathspec}`)
   run(`git tag ${gitTag}`)
-  run('git push origin HEAD')
+  run('git push origin HEAD:refs/heads/main')
   run(`git push origin ${gitTag}`)
 }
 

@@ -47,11 +47,15 @@ runs:
           echo "$package_name@${{ inputs.version }} published but the registry has not served it in five minutes" >&2
           exit 1
         fi
+        # npm can retain the pre-publish 404 for an optional dependency even
+        # after npm view sees the new package. Installing the target explicitly
+        # still exercises the launcher while avoiding that negative-cache race.
         npm install \
           --prefer-online \
           --prefix .release/smoke \
           --ignore-scripts \
-          'orez-sync-native@${{ inputs.version }}'
+          'orez-sync-native@${{ inputs.version }}' \
+          "$package_name@${{ inputs.version }}"
         actual="$(.release/smoke/node_modules/.bin/sync-native --version)"
         case "$actual" in
           'sync-native ${{ inputs.version }} core'*) ;;
