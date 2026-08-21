@@ -1,9 +1,24 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 
 import { resolvePackage } from './package-resolve.js'
 
 const NATIVE_BINARY_RELATIVE_PATHS = ['build/Release/better_sqlite3.node']
+
+function resolvedPrebuildPath(packageRoot: string): string {
+  if (!packageRoot) return ''
+  try {
+    const requireFromPackage = createRequire(resolve(packageRoot, 'package.json'))
+    const loader = requireFromPackage('node-gyp-build') as {
+      path?(root: string): unknown
+    }
+    const filePath = loader.path?.(packageRoot)
+    return typeof filePath === 'string' ? filePath : ''
+  } catch {
+    return ''
+  }
+}
 
 export interface NativeBinaryCheckResult {
   packageEntryPath: string
@@ -42,9 +57,12 @@ export function inspectNativeSqliteBinary(): NativeBinaryCheckResult {
   const packageEntryPath = resolvePackage('@rocicorp/zero-sqlite3')
   const packageRoot = findPackageRoot(packageEntryPath)
   const expectedPaths = packageRoot
-    ? NATIVE_BINARY_RELATIVE_PATHS.map((relativePath) =>
-        resolve(packageRoot, relativePath)
-      )
+    ? [
+        ...NATIVE_BINARY_RELATIVE_PATHS.map((relativePath) =>
+          resolve(packageRoot, relativePath)
+        ),
+        resolvedPrebuildPath(packageRoot),
+      ].filter((filePath, index, paths) => filePath && paths.indexOf(filePath) === index)
     : []
   const existingPaths = expectedPaths.filter((filePath) => existsSync(filePath))
 
