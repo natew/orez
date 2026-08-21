@@ -132,11 +132,15 @@ bun scripts/normalize-sync-native-licenses.ts LICENSES.txt
 ## Release flow
 
 Native versions are allocated by CI, not checked into a dedicated version-bump
-commit. An explicitly dispatched stable release calls `Release sync-native` as
-a reusable workflow. The native plan compares the current durable contract to
-the complete platform release on npm. When they differ, it selects the next
-unused native patch version and injects that version while compiling and
-packaging the source commit.
+commit. An explicitly dispatched stable release starts `Release sync-native`
+as its top-level workflow so its GitHub OIDC identity matches the trusted
+publisher registered on npm. The native plan compares the current durable
+contract to the complete platform release on npm. When they differ, it selects
+the next unused native patch version and injects that version while compiling
+and packaging the source commit. After every native package succeeds, this
+workflow dispatches the top-level `Release` workflow, whose separate OIDC
+identity publishes the stable package family and creates the version commit and
+tag.
 
 The workflow can also be dispatched directly for an emergency native-only
 release. Either entry point requires current `main` and green CI for that exact

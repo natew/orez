@@ -43,11 +43,14 @@ one with:
 bun release --patch --ci
 ```
 
-The local command verifies the checkout, dispatches `release.yml`, prints the
-run URL, and exits. GitHub then owns the full release under OIDC: it publishes a
-new native package version first when the durable contract changed, publishes
-the public workspace family, and finally creates and pushes the stable version
-commit and tag. No local npm login or second release command is involved.
+The local command verifies the checkout, dispatches `release-sync-native.yml`,
+prints the run URL, and exits. GitHub then owns the full release under OIDC. The
+native workflow publishes a new native package version when the durable
+contract changed, then dispatches `release.yml` itself. That second top-level
+workflow publishes the public workspace family and finally creates and pushes
+the stable version commit and tag. Keeping both as top-level workflows matters:
+npm validates the workflow filename registered for each package's trusted
+publisher. No local npm login or second release command is involved.
 
 The workflow also accepts `minor` and `major` dispatch inputs. If npm stops
 after publishing only part of the package family, rerun the same dispatch. The

@@ -1,12 +1,18 @@
 name: Release sync-native
 
 on:
-  workflow_call:
-    outputs:
-      version:
-        description: Native npm version that carries this source contract
-        value: ${{ jobs.plan.outputs.version }}
   workflow_dispatch:
+    inputs:
+      stable_bump:
+        description: Stable release to dispatch after every native package succeeds
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - patch
+          - minor
+          - major
 
 permissions:
   actions: read
@@ -177,3 +183,39 @@ jobs:
       - uses: ./.github/actions/publish-sync-native
         with:
           version: ${{ needs.plan.outputs.version }}
+
+  dispatch-stable:
+    needs: [plan, launcher, mac-arm64, remaining-platforms]
+    if: >-
+      ${{
+        always() &&
+        inputs.stable_bump != 'none' &&
+        needs.plan.result == 'success' &&
+        (
+          needs.plan.outputs.publish != 'true' ||
+          (
+            needs.launcher.result == 'success' &&
+            needs['mac-arm64'].result == 'success' &&
+            needs['remaining-platforms'].result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch stable OIDC release
+        shell: bash
+        run: |
+          current_main="$(gh api "/repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [ "$current_main" != "$GITHUB_SHA" ]; then
+            echo "main moved from $GITHUB_SHA to $current_main during native publishing" >&2
+            exit 1
+          fi
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            --raw-field 'bump=${{ inputs.stable_bump }}'
+        env:
+          GH_TOKEN: ${{ github.token }}

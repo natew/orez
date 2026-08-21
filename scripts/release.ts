@@ -30,6 +30,7 @@ import {
   prepareLauncherPackage,
   preparePlatformPackage,
 } from './sync-native-package.js'
+import { planSyncNativeRelease } from './sync-native-release-plan.js'
 
 const args = process.argv.slice(2)
 const knownArgs = new Set([
@@ -142,15 +143,17 @@ if (!trustedPublishing && !dryRun && !packOnly && !into && !rePublish && !canary
     [
       'workflow',
       'run',
-      'release.yml',
+      'release-sync-native.yml',
       '--ref',
       'main',
       '--raw-field',
-      `bump=${releaseKind}`,
+      `stable_bump=${releaseKind}`,
     ],
     { cwd: root, encoding: 'utf8' }
   ).trim()
-  console.info('\nstable release dispatched; GitHub now owns the native and npm release')
+  console.info(
+    '\nnative release dispatched; GitHub now owns the native and stable release'
+  )
   if (workflowUrl) console.info(workflowUrl)
   process.exit(0)
 }
@@ -573,8 +576,29 @@ const versionMap = new Map(packages.map((p) => [p.pkg.name, p.next]))
 const nativeLauncherPkg = JSON.parse(
   readFileSync(resolve(root, 'packages', 'orez-sync-native', 'package.json'), 'utf8')
 )
-const nativeReleaseVersion =
-  process.env.OREZ_SYNC_NATIVE_VERSION || nativeLauncherPkg.version
+let nativeReleaseVersion = process.env.OREZ_SYNC_NATIVE_VERSION
+if (
+  !nativeReleaseVersion &&
+  trustedPublishing &&
+  !packOnly &&
+  !dryRun &&
+  !canary &&
+  !rePublish
+) {
+  const nativePlatform = currentSyncNativePlatform()
+  if (!nativePlatform) {
+    throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
+  }
+  const localBinary = resolve(root, 'target', 'release', nativePlatform.executable)
+  run('cargo build --locked --release -p sync-native --bin sync-native')
+  const nativePlan = planSyncNativeRelease(localBinary)
+  if (nativePlan.publish) {
+    throw new Error(`native OIDC release has not completed: ${nativePlan.reason}`)
+  }
+  nativeReleaseVersion = nativePlan.version
+  console.info(`Using complete native OIDC release ${nativeReleaseVersion}`)
+}
+nativeReleaseVersion ||= nativeLauncherPkg.version
 if (!/^\d+\.\d+\.\d+$/.test(nativeReleaseVersion)) {
   throw new Error(`invalid OREZ_SYNC_NATIVE_VERSION: ${nativeReleaseVersion}`)
 }

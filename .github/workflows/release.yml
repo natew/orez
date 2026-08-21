@@ -86,17 +86,8 @@ jobs:
         if: steps.candidate.outputs.release == 'true'
         run: bun scripts/release.ts --canary --ci --skip-test
 
-  native:
-    if: github.event_name == 'workflow_dispatch'
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/release-sync-native.yml
-
   stable:
     if: github.event_name == 'workflow_dispatch'
-    needs: native
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -169,5 +160,3 @@ jobs:
 
       - name: publish stable release with npm trusted publishing
         run: bun scripts/release.ts --${{ inputs.bump }} --ci --skip-test
-        env:
-          OREZ_SYNC_NATIVE_VERSION: ${{ needs.native.outputs.version }}
