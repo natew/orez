@@ -695,21 +695,37 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
             pendingFault.receipt.arm.point.startsWith('pull_')
               ? pendingFault
               : undefined
+          const throughPullKill = async <T>(request: () => Promise<T>, label: string) => {
+            try {
+              return await request()
+            } catch (error) {
+              if (!pullKill) throw error
+              const resolution = await withTimeout(
+                pullKill.resolution,
+                `${label} pull-kill receipt`,
+                5_000
+              ).catch(() => undefined)
+              if (resolution !== 'fired') throw error
+              await recoverKill(pullKill)
+              return request()
+            }
+          }
           for (let index = 0; index < 16; index++) {
             const id = `sm-prune-${seed}-${operation.epoch}-${index}`
-            await target.sql(
-              `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt") VALUES ('${id}', 'p0', '${id}', ${index}, 0, NULL, NULL)`
+            // A background pull can consume an armed kill while this admin
+            // request is in flight. The response is then ambiguous, so make
+            // the setup write idempotent before retrying it after recovery.
+            await throughPullKill(
+              () =>
+                target.sql(
+                  `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt") VALUES ('${id}', 'p0', '${id}', ${index}, 0, NULL, NULL) ON CONFLICT (id) DO NOTHING`
+                ),
+              `prune setup ${index}`
             )
           }
           // Make pruning self-contained so removing surrounding operations
           // during shrinking cannot create a dependency-only false failure.
-          try {
-            await target.pull()
-          } catch (error) {
-            await recoverObservedKill()
-            if (pullKill?.receipt.resolution?.status !== 'fired') throw error
-            await target.pull()
-          }
+          await throughPullKill(() => target.pull(), 'prune pull')
           break
         }
         case 'fullPruneRestart': {
