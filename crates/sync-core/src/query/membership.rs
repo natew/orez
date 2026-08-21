@@ -972,6 +972,10 @@ pub fn recompute_group(
     Ok(recompute_group_with_rehydrate(db, tables, group, changed, &BTreeSet::new(), false, 0)?.0)
 }
 
+// the rows patch plus the (table, pk) keys it already covers, so the pull's
+// transition replay never double-emits a row this recompute handled
+pub(crate) type MembershipDiff = (Vec<Value>, BTreeSet<(String, String)>);
+
 pub(crate) fn recompute_group_with_rehydrate(
     db: &mut dyn SyncDb,
     tables: &Tables,
@@ -980,7 +984,7 @@ pub(crate) fn recompute_group_with_rehydrate(
     rehydrate: &BTreeSet<String>,
     rehydrate_all: bool,
     version: i64,
-) -> Result<(Vec<Value>, BTreeSet<(String, String)>), EngineError> {
+) -> Result<MembershipDiff, EngineError> {
     let queries = active_queries(db, group)?;
     validate_queries(tables, &queries)?;
 
