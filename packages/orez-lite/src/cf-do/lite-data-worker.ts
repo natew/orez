@@ -14,6 +14,7 @@ import { ZeroDO as OrezZeroDO } from './worker.js'
 import type { NamespaceRoutingOptions } from '../worker/cf-do-shim.js'
 import type {
   ApplicationSqlClient,
+  ApplicationSqlClientOptions,
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlRpc,
 } from './application-sql.js'
@@ -53,6 +54,7 @@ export interface OrezDurableObjectId {
 
 export interface OrezDataWorkerStub extends ApplicationSqlRpc {
   fetch(request: Request): Promise<Response>
+  orezApplicationPush(input: unknown): Promise<OrezApplicationPushResponse>
   orezApplicationSchemaStatus(version: string): Promise<OrezSchemaStatus>
   orezRunApplicationSchema(
     version: string,
@@ -104,7 +106,26 @@ export interface OrezRequestContext<Env extends OrezDataWorkerEnv> {
   request: Request
   url: URL
   applicationSql(): ApplicationSqlClient
+  executeApplicationPush(input: unknown, namespace?: string): Promise<Response>
   ensureSchema(options?: { force?: boolean }): Promise<unknown>
+}
+
+export interface OrezApplicationPushContext<Env extends OrezDataWorkerEnv> {
+  env: Env
+  executionContext: OrezExecutionContext
+  instance: string
+  input: unknown
+  applicationSql(
+    namespace?: string,
+    options?: Pick<ApplicationSqlClientOptions, 'priority'>
+  ): ApplicationSqlClient
+}
+
+export interface OrezApplicationPushResponse {
+  body: ArrayBuffer
+  headers: [string, string][]
+  status: number
+  statusText: string
 }
 
 export interface OrezApplicationSqlCommitContext<Env extends OrezDataWorkerEnv> {
@@ -173,6 +194,12 @@ export interface OrezDataWorkerOptions<
   applicationSqlDidCommit?(
     context: OrezApplicationSqlCommitContext<Env>
   ): MaybePromise<void>
+  /**
+   * Run an application push inside the namespace's SQLite Durable Object.
+   * The supplied SQL client is local for that object and uses ordinary RPC for
+   * any explicitly selected cross-namespace database.
+   */
+  applicationPush?(context: OrezApplicationPushContext<Env>): MaybePromise<Response>
   setup?(context: OrezRequestContext<Env>): MaybePromise<void>
   routes?(context: OrezRequestContext<Env>): MaybePromise<Response | null | undefined>
   onError?(error: unknown, context: OrezErrorContext<Env>): MaybePromise<void>
@@ -208,6 +235,7 @@ export interface OrezResolvedDataRequest {
 }
 
 export type OrezDataWorkerDurableObject = OrezZeroDO & {
+  orezApplicationPush(input: unknown): Promise<OrezApplicationPushResponse>
   orezApplicationSchemaStatus(version: string): OrezSchemaStatus
   orezRunApplicationSchema(
     version: string,
@@ -607,9 +635,12 @@ export function createOrezDataWorker<
       this.orezEnv = env
       this.orezExecutionContext = ctx
       const instance = ctx.id.name
-      if (options.applicationSqlDidCommit && typeof instance !== 'string') {
+      if (
+        (options.applicationPush || options.applicationSqlDidCommit) &&
+        typeof instance !== 'string'
+      ) {
         throw new Error(
-          'application SQL commit notifications require a named Durable Object'
+          'application push execution and commit notifications require a named Durable Object'
         )
       }
       this.orezInstance = instance ?? ''
@@ -663,6 +694,34 @@ export function createOrezDataWorker<
             // The durable application write is already committed.
           }
         }
+      }
+    }
+
+    async orezApplicationPush(input: unknown): Promise<OrezApplicationPushResponse> {
+      if (!options.applicationPush) {
+        throw new Error('application push execution is not configured')
+      }
+      const response = await options.applicationPush({
+        env: this.orezEnv,
+        executionContext: this.orezExecutionContext,
+        instance: this.orezInstance,
+        input,
+        applicationSql: (namespace = this.orezInstance, clientOptions = {}) => {
+          const instance = canonical(namespace)
+          return instance === this.orezInstance
+            ? this.applicationSqlLocalClient(instance, clientOptions)
+            : createApplicationSqlClient(
+                this.orezEnv.ZERO_SQL_DO,
+                instance,
+                clientOptions
+              )
+        },
+      })
+      return {
+        body: await response.arrayBuffer(),
+        headers: [...response.headers],
+        status: response.status,
+        statusText: response.statusText,
       }
     }
 
@@ -1104,6 +1163,16 @@ export function createOrezDataWorker<
             url: resolved.url,
             applicationSql: () =>
               applicationSqlClient(env, resolved.instance, request.signal),
+            executeApplicationPush: async (input, namespace = resolved.instance) => {
+              const instance = canonical(namespace)
+              const id = env.ZERO_SQL_DO.idFromName(instance)
+              const result = await env.ZERO_SQL_DO.get(id).orezApplicationPush(input)
+              return new Response(result.body, {
+                headers: result.headers,
+                status: result.status,
+                statusText: result.statusText,
+              })
+            },
             ensureSchema: (runOptions) =>
               ensureNamespaceSchema(env, resolved.instance, runOptions),
           }

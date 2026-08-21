@@ -44,6 +44,7 @@ import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 
 import type {
   ApplicationSqlClient,
+  ApplicationSqlClientOptions,
   ApplicationSqlExecResult,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
@@ -1859,11 +1860,14 @@ export class ZeroDO extends DurableObject {
    * statements, their order and their transaction semantics are unchanged; only
    * the transport is.
    */
-  protected applicationSqlLocalClient(namespace: string): ApplicationSqlClient {
+  protected applicationSqlLocalClient(
+    namespace: string,
+    options: Pick<ApplicationSqlClientOptions, 'priority'> = {}
+  ): ApplicationSqlClient {
     const run = <Value>(
       readOnly: boolean,
       work: (session: ApplicationSqlSessionTarget) => Promise<Value>
-    ) => this.withLocalApplicationSqlSession(readOnly, work)
+    ) => this.withLocalApplicationSqlSession(readOnly, work, options.priority ?? 'normal')
     const transaction = <Value>(
       readOnly: boolean,
       compileQuery: ZeroDOQueryCompiler,

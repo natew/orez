@@ -276,6 +276,106 @@ describe('createOrezDataWorker', () => {
     ).toThrow(/tablePrefix/)
   })
 
+  it('routes one application push call to the owning durable object', async () => {
+    const responseHeaders: [string, string][] = [['content-type', 'application/json']]
+    const orezApplicationPush = vi.fn(async (input: unknown) => ({
+      body: new TextEncoder().encode(JSON.stringify({ input })).buffer,
+      headers: responseHeaders,
+      status: 202,
+      statusText: 'Accepted',
+    }))
+    const idFromName = vi.fn((name: string) => name)
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      routes: async (context) => {
+        if (context.url.pathname !== '/proj-a/api/push') return null
+        return context.executeApplicationPush({ mutation: 'widget.insert' }, 'proj-a')
+      },
+    })
+
+    const response = await runtime.fetch(
+      new Request('https://data.test/proj-a/api/push', {
+        method: 'POST',
+      }),
+      {
+        ZERO_SQL_DO: {
+          idFromName,
+          get: () => ({ orezApplicationPush }),
+        },
+      },
+      { waitUntil: vi.fn() }
+    )
+
+    expect(idFromName).toHaveBeenCalledWith('ns:proj-a')
+    expect(orezApplicationPush).toHaveBeenCalledOnce()
+    expect(orezApplicationPush).toHaveBeenCalledWith({
+      mutation: 'widget.insert',
+    })
+    expect(response.status).toBe(202)
+    expect(response.statusText).toBe('Accepted')
+    expect(response.headers.get('content-type')).toBe('application/json')
+    expect(await response.json()).toEqual({
+      input: { mutation: 'widget.insert' },
+    })
+  })
+
+  it('runs application push SQL locally for the owning namespace at zero wrapper row cost', async () => {
+    const localClient = { namespace: 'ns:proj-a' }
+    const remoteStub = {
+      applicationSqlSession: vi.fn(),
+      applicationSqlQuery: vi.fn(),
+    }
+    const idFromName = vi.fn((name: string) => name)
+    const get = vi.fn(() => remoteStub)
+    const applicationPush = vi.fn(async (context) => {
+      expect(context.instance).toBe('ns:proj-a')
+      expect(context.input).toEqual({ mutation: 'widget.insert' })
+      expect(context.applicationSql()).toBe(localClient)
+      expect(context.applicationSql('proj-a', { priority: 'latency-sensitive' })).toBe(
+        localClient
+      )
+      expect(
+        context.applicationSql('proj-b', { priority: 'latency-sensitive' }).namespace
+      ).toBe('ns:proj-b')
+      return new Response('committed', {
+        status: 201,
+        headers: { 'x-push-result': 'local' },
+      })
+    })
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      applicationPush,
+    })
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    const durableSql = vi.fn(() => {
+      throw new Error('push wrapper must not add durable SQL reads or writes')
+    })
+    zero.orezEnv = {
+      ZERO_SQL_DO: { idFromName, get },
+    }
+    zero.orezExecutionContext = { waitUntil: vi.fn() }
+    zero.orezInstance = 'ns:proj-a'
+    zero.orezStorage = { sql: { exec: durableSql } }
+    zero.applicationSqlLocalClient = vi.fn(() => localClient)
+
+    const result = await zero.orezApplicationPush({ mutation: 'widget.insert' })
+
+    expect(applicationPush).toHaveBeenCalledOnce()
+    expect(zero.applicationSqlLocalClient).toHaveBeenNthCalledWith(1, 'ns:proj-a', {})
+    expect(zero.applicationSqlLocalClient).toHaveBeenNthCalledWith(2, 'ns:proj-a', {
+      priority: 'latency-sensitive',
+    })
+    expect(idFromName).toHaveBeenCalledOnce()
+    expect(idFromName).toHaveBeenCalledWith('ns:proj-b')
+    expect(get).toHaveBeenCalledWith('ns:proj-b')
+    expect(durableSql).not.toHaveBeenCalled()
+    expect(result.status).toBe(201)
+    expect(result.headers).toContainEqual(['x-push-result', 'local'])
+    expect(new TextDecoder().decode(result.body)).toBe('committed')
+  })
+
   it('runs a namespace backup through one read-only application SQL session', async () => {
     const rowsFor = (sql: string) =>
       sql.includes('SELECT write_seq') ? [{ write_seq: 7 }] : []

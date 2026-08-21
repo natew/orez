@@ -51,6 +51,32 @@ Lite Sync owns namespace routing, schema readiness and coalescing, change-feed
 projection, write budgets, and optional streaming backups. Applications add
 only product routes, telemetry, cron work, and namespace inventory.
 
+Applications whose JavaScript mutation executor uses the application SQL
+client can move the whole push into the owning Durable Object with the
+`applicationPush` option. A custom route calls `executeApplicationPush` once;
+inside the callback, `applicationSql()` is a local client for that object, while
+an explicitly selected different namespace still uses ordinary Durable Object
+RPC:
+
+```ts
+const orez = createOrezDataWorker({
+  name: 'example',
+  schema: orezAppSchema,
+  applicationPush: ({ input, applicationSql }) => executePush(input, applicationSql()),
+  routes: async ({ request, executeApplicationPush }) => {
+    const match = new URL(request.url).pathname.match(
+      /^\/(proj-[A-Za-z0-9_-]+)\/api\/push$/
+    )
+    return match ? executeApplicationPush(await readPush(request), match[1]) : null
+  },
+})
+```
+
+The callback does not change transaction or response semantics and adds no
+Orez-owned SQLite rows. It removes the begin/query/exec/commit RPCs inside the
+push; application code is still responsible for keeping mutation transactions
+free of network and other long-running work.
+
 Node-side migration, bundling, Wrangler configuration, pruning, and readiness
 helpers live at `orez-lite/cloudflare/build`.
 
