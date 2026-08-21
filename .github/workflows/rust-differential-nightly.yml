@@ -89,6 +89,12 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # the sweep imports orez-sync-executor, whose exports live in its
+      # gitignored dist/ — without this build the import fails with
+      # "Cannot find package 'orez-sync-executor'".
+      - name: build sync runtime
+        run: bun run build:sync-runtime
+
       - name: harness install
         run: cd harness && bun install
 

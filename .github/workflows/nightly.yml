@@ -31,6 +31,11 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-
       - run: bun install --frozen-lockfile
+      # harness lanes import orez-sync-executor, whose exports live in its
+      # gitignored dist/ — without this build the import fails with
+      # "Cannot find package 'orez-sync-executor'".
+      - name: build sync runtime
+        run: bun run build:sync-runtime
       - name: harness install
         run: cd harness && bun install
       - name: build fixture host
@@ -79,6 +84,8 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-
       - run: bun install --frozen-lockfile
+      - name: build sync runtime
+        run: bun run build:sync-runtime
       - name: harness install
         run: cd harness && bun install
       - name: build fixture host
@@ -123,6 +130,8 @@ jobs:
             rust-${{ runner.os }}-
       - uses: ./.github/actions/setup-wasm-pack
       - run: bun install --frozen-lockfile
+      - name: build sync runtime
+        run: bun run build:sync-runtime
       - name: sync-cf-host install
         run: cd packages/sync-cf-host && bun install
       - name: harness install
@@ -168,6 +177,8 @@ jobs:
         with:
           bun-version: latest
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: actions/cache@v4
         with:
           path: |
@@ -177,13 +188,17 @@ jobs:
           key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
           restore-keys: |
             rust-${{ runner.os }}-
+      - uses: ./.github/actions/setup-wasm-pack
       - run: bun install --frozen-lockfile
       - name: harness install
         run: cd harness && bun install
 
+      # build:runtime copies wasm-pack output from the gitignored
+      # src/generated/, so build:wasm has to run first.
       - name: build TypeScript host dependencies
         run: |
           bun run build:sync-runtime
+          bun run --cwd packages/sync-cf-host build:wasm
           bun run --cwd packages/sync-cf-host build:runtime
 
       # the coverage ratchet: fails when a mutant the committed matrix lists
