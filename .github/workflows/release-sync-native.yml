@@ -1,6 +1,11 @@
 name: Release sync-native
 
 on:
+  workflow_call:
+    outputs:
+      version:
+        description: Native npm version that carries this source contract
+        value: ${{ jobs.plan.outputs.version }}
   workflow_dispatch:
 
 permissions:
@@ -17,6 +22,7 @@ jobs:
     outputs:
       version: ${{ steps.plan.outputs.version }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -25,6 +31,14 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.12
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - run: npm install --global npm@12.0.1
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
@@ -52,18 +66,25 @@ jobs:
             echo "CI has not passed for $GITHUB_SHA" >&2
             exit 1
           fi
-          version="$(bun scripts/sync-native-package.ts version)"
-          bun scripts/sync-native-package.ts check "$version"
+          bun scripts/sync-native-package.ts check
           bun test \
             scripts/sync-native-package.test.ts \
-            scripts/release-package-order.test.ts
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "matrix=$(bun scripts/sync-native-package.ts matrix darwin-arm64)" >> "$GITHUB_OUTPUT"
+            scripts/release-package-order.test.ts \
+            scripts/sync-native-release-plan.test.ts
+          cargo build --locked --release -p sync-native --bin sync-native
+          plan="$(bun scripts/sync-native-release-plan.ts target/release/sync-native)"
+          echo "$plan"
+          {
+            echo "version=$(jq -r .version <<< "$plan")"
+            echo "publish=$(jq -r .publish <<< "$plan")"
+            echo "matrix=$(bun scripts/sync-native-package.ts matrix darwin-arm64)"
+          } >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
 
   launcher:
     needs: plan
+    if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -113,6 +134,7 @@ jobs:
 
   mac-arm64:
     needs: [plan, launcher]
+    if: needs.plan.outputs.publish == 'true'
     runs-on: macos-15
     permissions:
       contents: read
@@ -133,6 +155,7 @@ jobs:
 
   remaining-platforms:
     needs: [plan, launcher]
+    if: needs.plan.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}

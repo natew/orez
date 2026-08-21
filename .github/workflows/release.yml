@@ -3,6 +3,17 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Stable version increment
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: read
@@ -12,7 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  canary:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -73,3 +85,89 @@ jobs:
       - name: publish canary with npm trusted publishing
         if: steps.candidate.outputs.release == 'true'
         run: bun scripts/release.ts --canary --ci --skip-test
+
+  native:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release-sync-native.yml
+
+  stable:
+    if: github.event_name == 'workflow_dispatch'
+    needs: native
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: verify current green main
+        shell: bash
+        run: |
+          git fetch origin main --no-tags
+          if [ '${{ github.ref }}' != 'refs/heads/main' ]; then
+            echo 'stable releases must run from main' >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            echo 'stable releases must use the current main commit' >&2
+            exit 1
+          fi
+          successful_ci_runs="$(
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" \
+              --jq '[.workflow_runs[] | select(.conclusion == "success")] | length'
+          )"
+          if [ "$successful_ci_runs" -eq 0 ]; then
+            echo "CI has not passed for $GITHUB_SHA" >&2
+            exit 1
+          fi
+          version="$(node -p "require('./package.json').version")"
+          if [ "$(git log -1 --pretty=%s)" = "v$version" ]; then
+            echo "main already ends at stable release commit v$version" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: install OIDC-capable npm
+        run: npm install --global npm@12.0.1
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-unknown-unknown
+
+      - uses: ./.github/actions/setup-wasm-pack
+
+      - name: install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: configure release commit identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: publish stable release with npm trusted publishing
+        run: bun scripts/release.ts --${{ inputs.bump }} --ci --skip-test
+        env:
+          OREZ_SYNC_NATIVE_VERSION: ${{ needs.native.outputs.version }}

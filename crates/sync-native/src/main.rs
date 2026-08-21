@@ -15,7 +15,7 @@ async fn main() {
         // while only one of them could see acks.
         Command::Version => println!(
             "sync-native {} {}",
-            env!("CARGO_PKG_VERSION"),
+            option_env!("OREZ_SYNC_NATIVE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
             sync_core::schema_revision()
         ),
         Command::Serve(config) => {

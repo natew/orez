@@ -9,9 +9,11 @@ The npm launcher has one optional dependency for each supported operating
 system, CPU, and Linux libc combination. npm installs only the matching binary
 package.
 
-The native package uses its Cargo version, independently from the `orez` npm
-version. Ordinary `orez` releases reuse the published native version and never
-wait for Rust builds.
+The native package is versioned independently from the `orez` npm version. CI
+allocates its immutable npm version from the registry; the checked-in Cargo and
+npm manifests are package-shape templates, not a release trigger. Ordinary
+`orez` releases reuse a complete native version when its durable contract still
+matches the source tree.
 
 ## Standalone contract
 
@@ -129,26 +131,27 @@ bun scripts/normalize-sync-native-licenses.ts LICENSES.txt
 
 ## Release flow
 
-Prepare a new native version and commit it with the Rust changes:
+Native versions are allocated by CI, not checked into a dedicated version-bump
+commit. An explicitly dispatched stable release calls `Release sync-native` as
+a reusable workflow. The native plan compares the current durable contract to
+the complete platform release on npm. When they differ, it selects the next
+unused native patch version and injects that version while compiling and
+packaging the source commit.
 
-```sh
-bun run release:native:prepare 0.1.2
-```
+The workflow can also be dispatched directly for an emergency native-only
+release. Either entry point requires current `main` and green CI for that exact
+commit.
 
-After that commit reaches `main` and CI is green for that exact commit, run the
-`Release sync-native` workflow manually. The workflow verifies both conditions
-before publishing.
-
-1. The small `orez-sync-native@0.1.2` launcher publishes first. Its optional
-   dependencies point at the exact platform package versions that are about to
-   be built. npm permits missing optional dependencies, so `orez` can already
-   reference this version without breaking installs.
+1. The small `orez-sync-native` launcher publishes first. Its optional
+   dependencies point at the exact dynamically allocated platform package
+   version. npm permits missing optional dependencies, so the launcher can
+   exist while the native matrix is still building.
 2. Every native target starts after the launcher. The macOS ARM64 target has
    its own job and publishes as soon as its build and smoke test pass. At that
    point it is immediately usable, while every other target keeps building:
 
    ```sh
-   npm install orez-sync-native@0.1.2
+   npm install orez-sync-native@<native-version>
    npx sync-native --version
    ```
 
@@ -158,13 +161,14 @@ before publishing.
 
 Every published package records its source commit. A retry may reuse a package
 only when it came from the same commit, so one native version cannot combine
-binaries from different source revisions. If a source change is needed after a
-partial release, prepare a new native version before dispatching again.
+binaries from different source revisions. A complete npm version with the
+current contract is reused without rebuilding; an incomplete or mixed-source
+version causes CI to allocate a fresh patch version.
 
 An `orez` install performed before its native packages exist succeeds because
 the dependency is optional. Reinstall after the relevant platform package has
-published to add the binary. There is no `postinstall` download and no release
-script blocks waiting for every Rust target.
+published to add the binary. There is no `postinstall` download, local npm
+authentication, or native-only source commit in the release path.
 
 ## First release bootstrap
 

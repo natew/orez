@@ -34,19 +34,25 @@ Configure all packages before `release.yml` reaches `main`. A package
 without the trusted publisher will reject its publish after earlier packages may
 already have been published.
 
-## Manual releases
+## Stable releases
 
-Stable `bun release --patch`, `bun release --minor`, and `bun release --major`
-remain explicit. They use the interactive npm credential on the local machine,
-then commit and tag the stable version.
-
-If npm stops after publishing only part of the package family, retry with:
+Stable releases remain explicit. From a clean, current `main` checkout, dispatch
+one with:
 
 ```sh
-bun release --republish
+bun release --patch --ci
 ```
 
-`--republish` keeps the versions already written to the manifests and checks npm
-before publishing, so packages that reached the registry are skipped. It reuses
-the build and checks from the failed release. The retry refuses to publish if a
-configured package artifact is missing.
+The local command verifies the checkout, dispatches `release.yml`, prints the
+run URL, and exits. GitHub then owns the full release under OIDC: it publishes a
+new native package version first when the durable contract changed, publishes
+the public workspace family, and finally creates and pushes the stable version
+commit and tag. No local npm login or second release command is involved.
+
+The workflow also accepts `minor` and `major` dispatch inputs. If npm stops
+after publishing only part of the package family, rerun the same dispatch. The
+release script checks npm before every publish and skips versions that already
+reached the registry.
+
+Stable publishing still requires an explicit dispatch; ordinary main pushes
+only publish canaries.

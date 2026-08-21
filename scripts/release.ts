@@ -5,7 +5,7 @@
  * uses workspace:* protocol — at publish time we copy to tmp and replace with real versions.
  */
 
-import { execSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import {
   chmodSync,
   cpSync,
@@ -99,6 +99,60 @@ function run(
 
 function cleanRootDist() {
   rmSync(resolve(root, 'dist'), { recursive: true, force: true })
+}
+
+// A local stable-release command is the explicit approval boundary. GitHub
+// owns the actual release so npm authentication, native matrix builds, and
+// retries all happen under trusted publishing without keeping a terminal open.
+if (!trustedPublishing && !dryRun && !packOnly && !into && !rePublish && !canary) {
+  if (!ci) {
+    throw new Error('stable releases run in GitHub Actions; rerun with --ci')
+  }
+  const releaseKind = patch ? 'patch' : minor ? 'minor' : major ? 'major' : undefined
+  if (!releaseKind) throw new Error('stable release kind is missing')
+  const branch = execFileSync('git', ['branch', '--show-current'], {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim()
+  if (branch !== 'main') throw new Error('stable releases must be dispatched from main')
+  const dirty = execFileSync('git', ['status', '--porcelain'], {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim()
+  if (dirty) {
+    throw new Error('commit or remove local changes before dispatching a stable release')
+  }
+  execFileSync('git', ['fetch', 'origin', 'main', '--no-tags'], {
+    cwd: root,
+    stdio: 'inherit',
+  })
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim()
+  const remoteMain = execFileSync('git', ['rev-parse', 'origin/main'], {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim()
+  if (head !== remoteMain) {
+    throw new Error(`local main ${head} is not current origin/main ${remoteMain}`)
+  }
+  const workflowUrl = execFileSync(
+    'gh',
+    [
+      'workflow',
+      'run',
+      'release.yml',
+      '--ref',
+      'main',
+      '--raw-field',
+      `bump=${releaseKind}`,
+    ],
+    { cwd: root, encoding: 'utf8' }
+  ).trim()
+  console.info('\nstable release dispatched; GitHub now owns the native and npm release')
+  if (workflowUrl) console.info(workflowUrl)
+  process.exit(0)
 }
 
 function bumpVersion(current: string): string {
@@ -519,7 +573,12 @@ const versionMap = new Map(packages.map((p) => [p.pkg.name, p.next]))
 const nativeLauncherPkg = JSON.parse(
   readFileSync(resolve(root, 'packages', 'orez-sync-native', 'package.json'), 'utf8')
 )
-versionMap.set(nativeLauncherPkg.name, nativeLauncherPkg.version)
+const nativeReleaseVersion =
+  process.env.OREZ_SYNC_NATIVE_VERSION || nativeLauncherPkg.version
+if (!/^\d+\.\d+\.\d+$/.test(nativeReleaseVersion)) {
+  throw new Error(`invalid OREZ_SYNC_NATIVE_VERSION: ${nativeReleaseVersion}`)
+}
+versionMap.set(nativeLauncherPkg.name, nativeReleaseVersion)
 
 for (const p of packages) {
   if (packOnly) {
@@ -573,8 +632,8 @@ if (!packOnly && !rePublish) {
 // ledger while a source build calling itself 0.1.2 shipped with it, and the
 // skew served lastMutationID 0 to every local client with nothing failing
 // (soot factory defect #49, 2026-08-06). compare the schema revision the two
-// binaries actually report, and hold the stable release until the dispatched
-// sync-native release catches npm up.
+// binaries actually report. the stable OIDC workflow publishes native first
+// and passes the exact version selected by its contract-aware release plan.
 if (!packOnly && !canary && !rePublish) {
   console.info('\nchecking npm sync-native contract...')
   const nativePlatform = currentSyncNativePlatform()
@@ -596,7 +655,9 @@ if (!packOnly && !canary && !rePublish) {
     execSync(`${localBinary} --version`, { encoding: 'utf8' })
   )
   const guardDir = mkdtempSync(join(tmpdir(), 'orez-sync-native-guard-'))
-  run(`npm pack ${nativePlatform.npmPackage}@latest --silent`, { cwd: guardDir })
+  run(`npm pack ${nativePlatform.npmPackage}@${nativeReleaseVersion} --silent`, {
+    cwd: guardDir,
+  })
   run('tar -xzf *.tgz', { cwd: guardDir })
   const publishedBinary = resolve(guardDir, 'package', 'bin', nativePlatform.executable)
   chmodSync(publishedBinary, 0o755)
@@ -607,7 +668,7 @@ if (!packOnly && !canary && !rePublish) {
   if (publishedRevision !== localRevision) {
     throw new Error(
       `npm ${nativePlatform.npmPackage} reads contract '${publishedRevision || 'none'}' but this tree needs '${localRevision}'. ` +
-        'Dispatch the release-sync-native workflow from this commit, wait for it to publish, then re-run the release.'
+        `The OIDC native release selected ${nativeReleaseVersion}, but it did not publish the required contract.`
     )
   }
 }

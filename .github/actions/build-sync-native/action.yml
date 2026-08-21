@@ -56,6 +56,7 @@ runs:
     - name: Build release binary
       shell: bash
       env:
+        OREZ_SYNC_NATIVE_VERSION: ${{ inputs.version }}
         RUSTUP_TOOLCHAIN: 1.94.0
       run: |
         if [ '${{ inputs.libc }}' = 'glibc' ]; then

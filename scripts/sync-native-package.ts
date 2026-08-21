@@ -85,7 +85,10 @@ export function preparePlatformPackage(
   version = syncNativeVersion(),
   sourceCommit?: string
 ): string {
-  validateSyncNativePackages(version)
+  // Source manifests remain a checked workspace template. Release workflows
+  // may allocate a newer immutable npm version without manufacturing a source
+  // commit whose only purpose is to edit version strings.
+  validateSyncNativePackages()
   const platform = SYNC_NATIVE_PLATFORMS.find((candidate) => candidate.id === id)
   if (!platform) throw new Error(`unknown sync-native platform ${id}`)
   if (!existsSync(binaryPath))
@@ -110,7 +113,7 @@ export function prepareLauncherPackage(
   version = syncNativeVersion(),
   sourceCommit?: string
 ): string {
-  validateSyncNativePackages(version)
+  validateSyncNativePackages()
   rmSync(outputDir, { recursive: true, force: true })
   mkdirSync(resolve(outputDir, 'bin'), { recursive: true })
   const manifest = readJson(resolve(root, 'packages/orez-sync-native/package.json'))

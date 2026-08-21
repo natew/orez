@@ -60,7 +60,7 @@ describe('sync-native npm packages', () => {
     const temporary = mkdtempSync(resolve(tmpdir(), 'orez-sync-native-version-'))
     const fakeBinary = resolve(temporary, 'fake-sync-native')
     cpSync(process.execPath, fakeBinary)
-    const version = syncNativeVersion()
+    const version = '9.8.7'
     const platformDir = resolve(temporary, 'platform')
     preparePlatformPackage(platform.id, fakeBinary, platformDir, version, 'abc123')
     const launcherDir = resolve(temporary, 'launcher')
@@ -76,6 +76,7 @@ describe('sync-native npm packages', () => {
     expect(launcherManifest.version).toBe(version)
     expect(platformManifest.orezSourceCommit).toBe('abc123')
     expect(launcherManifest.orezSourceCommit).toBe('abc123')
+    expect(syncNativeVersion()).not.toBe(version)
     expect(readFileSync(resolve(platformDir, 'LICENSES.txt'), 'utf8')).toBe(
       readFileSync('LICENSES.txt', 'utf8')
     )
