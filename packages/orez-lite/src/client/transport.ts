@@ -97,6 +97,12 @@ const COOKIE_WIDTH = 20
 // cap the number of mutations so one response cannot monopolize the HTTP
 // transport indefinitely under a sustained producer.
 const MAX_PUSH_BATCH_MUTATIONS = 64
+// Mutation count alone does not bound memory or service-binding pressure: one
+// mutation can carry a wide document. Bound both the pre-codec batch and the
+// final encoded HTTP request.
+const MAX_PUSH_BATCH_BYTES = 768 * 1024
+const MAX_HTTP_REQUEST_BYTES = 1024 * 1024
+const MAX_HTTP_RESPONSE_BYTES = 32 * 1024 * 1024
 const MAX_DELETED_CLIENTS_PER_PULL = 64
 // @rocicorp/zero 1.6 starts this deadline before its async createSocket work.
 // the connect URL's `ts` is captured at the same attempt boundary.
@@ -124,9 +130,9 @@ const MIN_PULL_SPACING_WHILE_PUSHING_MS = 5_000
 // a push or pull whose response headers never arrive would otherwise wait
 // forever: drainPushes serializes on the in-flight push, so one lost response
 // wedges the queue permanently with no failure logged anywhere (observed shape
-// of wave w165's unacked-for-minutes queue). the deadline covers headers only —
-// clearing on arrival keeps a legitimately slow LARGE body (initial hydration
-// pull) safe — and firing routes through the existing transient-failure path:
+// of wave w165's unacked-for-minutes queue). headers and body each get this
+// deadline; the body also has a byte ceiling. firing routes through the
+// existing transient-failure path:
 // clean close, reconnect, re-push, with already-applied mutations answered as
 // alreadyProcessed by protocol design.
 const REQUEST_HEADER_DEADLINE_MS = 60_000
@@ -975,7 +981,11 @@ class ZeroHttpSocket {
       if (
         !nextBody ||
         !areCompatiblePushBodies(firstBody, nextBody) ||
-        mutations.length + nextBody.mutations.length > MAX_PUSH_BATCH_MUTATIONS
+        mutations.length + nextBody.mutations.length > MAX_PUSH_BATCH_MUTATIONS ||
+        jsonByteLength({
+          ...firstBody,
+          mutations: [...mutations, ...nextBody.mutations],
+        }) > MAX_PUSH_BATCH_BYTES
       ) {
         break
       }
@@ -1116,6 +1126,13 @@ class ZeroHttpSocket {
       url.searchParams.set('schema', `${this.state.appID}_${this.state.shardNum}`)
       url.searchParams.set('appID', this.state.appID)
     }
+    const requestBody = JSON.stringify(body)
+    const requestBytes = new TextEncoder().encode(requestBody).byteLength
+    if (requestBytes > MAX_HTTP_REQUEST_BYTES) {
+      throw new Error(
+        `Orez HTTP ${path} request exceeded ${MAX_HTTP_REQUEST_BYTES} bytes (${requestBytes})`
+      )
+    }
     const response = await fetchWithHeaderDeadline(
       this.state.fetch,
       path,
@@ -1126,25 +1143,42 @@ class ZeroHttpSocket {
           authorization: this.authToken ? `Bearer ${this.authToken}` : '',
           'content-type': 'application/json',
         },
-        body: JSON.stringify(body),
+        body: requestBody,
       },
       REQUEST_HEADER_DEADLINE_MS
     )
+    let responseBody = ''
+    try {
+      responseBody = await readResponseTextWithDeadline(
+        response,
+        path,
+        REQUEST_HEADER_DEADLINE_MS,
+        MAX_HTTP_RESPONSE_BYTES
+      )
+    } catch (error) {
+      if (response.ok) throw error
+      // the status still owns an error response when its body is unreadable
+    }
     if (!response.ok) {
-      let body = ''
       try {
-        body = await response.text()
-      } catch {
-        // the status still owns the failure when the response body is unreadable
-      }
+        // Validate that a JSON error remains parseable for Retry-After hints;
+        // plain-text application errors are also supported.
+        JSON.parse(responseBody)
+      } catch {}
       throw new ZeroHttpResponseError(
         path,
         response.status,
-        body.length > 512 ? `${body.slice(0, 512)}...` : body || undefined,
-        retryAfterMsFromResponse(response, body)
+        responseBody.length > 512
+          ? `${responseBody.slice(0, 512)}...`
+          : responseBody || undefined,
+        retryAfterMsFromResponse(response, responseBody)
       )
     }
-    return response.json()
+    try {
+      return JSON.parse(responseBody)
+    } catch {
+      throw new Error(`Orez HTTP ${path} response body was not valid JSON`)
+    }
   }
 
   private run(promise: Promise<void>) {
@@ -1444,6 +1478,80 @@ export async function fetchWithHeaderDeadline(
   } finally {
     clearTimeout(timer)
   }
+}
+
+export async function readResponseTextWithDeadline(
+  response: Response,
+  path: '/pull' | '/push',
+  deadlineMs: number,
+  maxBytes: number
+): Promise<string> {
+  const declaredBytes = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+    await response.body?.cancel().catch(() => {})
+    throw new Error(`Orez HTTP ${path} response exceeded ${maxBytes} bytes`)
+  }
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(
+      new Error(`Orez HTTP ${path} response body missed ${deadlineMs}ms deadline`)
+    )
+    void reader.cancel().catch(() => {})
+  }, deadlineMs)
+  const chunks: Uint8Array[] = []
+  let bytes = 0
+  try {
+    for (;;) {
+      const result = await readBodyChunk(reader, controller.signal)
+      if (result.done) break
+      bytes += result.value.byteLength
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw new Error(`Orez HTTP ${path} response exceeded ${maxBytes} bytes`)
+      }
+      chunks.push(result.value)
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+  const body = new Uint8Array(bytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(body)
+}
+
+function readBodyChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup()
+      reject(signal.reason)
+    }
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    signal.addEventListener('abort', onAbort, { once: true })
+    void reader.read().then(
+      (result) => {
+        cleanup()
+        resolve(result)
+      },
+      (error) => {
+        cleanup()
+        reject(error)
+      }
+    )
+  })
+}
+
+function jsonByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength
 }
 
 function parsePushBody(value: unknown): PushBody | undefined {

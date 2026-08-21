@@ -1427,9 +1427,17 @@ export class ZeroDO extends DurableObject {
           { status: 410 }
         )
       }
+      const changes = this.readChangesSince(watermark, changeLimit)
       return Response.json({
         watermark: head,
-        changes: this.readChangesSince(watermark, changeLimit),
+        changes,
+        oldestCommitTimeMs:
+          changes.length === 0
+            ? undefined
+            : Math.min(...changes.map((change) => change.commitTimeMs)),
+        // Stamped after the single change-log read. The sync host brackets this
+        // request with its own clock and uses the midpoint to estimate skew.
+        sourceTimeMs: Date.now(),
       })
     } catch (err: any) {
       const budgetResponse = this.writeBudgetErrorResponse(err)
@@ -2742,7 +2750,7 @@ export class ZeroDO extends DurableObject {
   private readChangesSince(watermark: number, limit?: number) {
     this.watermarks.ensureTables()
     const statement =
-      'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes WHERE watermark > ? ORDER BY watermark' +
+      'SELECT watermark, table_name, op, row_data, old_data, created_at FROM _zero_changes WHERE watermark > ? ORDER BY watermark' +
       (limit === undefined ? '' : ' LIMIT ?')
     const params = limit === undefined ? [watermark] : [watermark, limit]
     return this.sql
@@ -2754,6 +2762,12 @@ export class ZeroDO extends DurableObject {
         const oldData = row.old_data ? JSON.parse(String(row.old_data)) : null
         return {
           watermark: Number(row.watermark),
+          // Existing databases store unixepoch() seconds. Accept millisecond
+          // values too so a future precision migration is wire-compatible.
+          commitTimeMs:
+            Number(row.created_at) < 10_000_000_000
+              ? Number(row.created_at) * 1_000
+              : Number(row.created_at),
           tableName,
           op: String(row.op),
           rowData: rowData ? this.normalizeRow(tableName, rowData) : null,

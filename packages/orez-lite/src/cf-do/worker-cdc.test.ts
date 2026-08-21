@@ -1293,7 +1293,6 @@ describe('ZeroDO legacy snapshot feed', () => {
         throw new Error('injected legacy snapshot read failure')
       return exec(statement, ...params)
     }
-
     const response = await zero.fetch(new Request('http://do/snapshot'))
 
     expect(response.status).toBe(500)
@@ -1319,24 +1318,31 @@ describe('ZeroDO changes feed', () => {
     sql.exec = (statement: string, ...params: unknown[]) => {
       if (
         statement.startsWith(
-          'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes'
+          'SELECT watermark, table_name, op, row_data, old_data, created_at FROM _zero_changes'
         )
       ) {
         changeReads.push({ statement, params })
       }
       return exec(statement, ...params)
     }
+    const changesBefore = Number(
+      exec('SELECT total_changes() AS value').one()?.value ?? 0
+    )
 
     const response = await zero.fetch(
       new Request('http://do/changes?watermark=0&limit=2')
     )
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({
+    const body = (await response.json()) as any
+    expect(body).toEqual({
       watermark: 3,
+      oldestCommitTimeMs: expect.any(Number),
+      sourceTimeMs: expect.any(Number),
       changes: [
         {
           watermark: 1,
+          commitTimeMs: expect.any(Number),
           tableName: 'item',
           op: 'INSERT',
           rowData: { id: 'a' },
@@ -1344,6 +1350,7 @@ describe('ZeroDO changes feed', () => {
         },
         {
           watermark: 2,
+          commitTimeMs: expect.any(Number),
           tableName: 'item',
           op: 'INSERT',
           rowData: { id: 'b' },
@@ -1354,10 +1361,13 @@ describe('ZeroDO changes feed', () => {
     expect(changeReads).toEqual([
       {
         statement:
-          'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes WHERE watermark > ? ORDER BY watermark LIMIT ?',
+          'SELECT watermark, table_name, op, row_data, old_data, created_at FROM _zero_changes WHERE watermark > ? ORDER BY watermark LIMIT ?',
         params: [0, 2],
       },
     ])
+    expect(Number(exec('SELECT total_changes() AS value').one()?.value ?? 0)).toBe(
+      changesBefore
+    )
   })
 })
 

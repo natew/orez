@@ -36,6 +36,12 @@ export type UpstreamConfig = {
   namespacePath: string | ((namespace: string) => string)
   /** Feed page size; the cursor loop continues until the reported head is reached. */
   changeLimit?: number
+  /** Whole-request deadline, including the successful response body. Defaults to 30s. */
+  requestTimeoutMs?: number
+  /** Maximum decoded JSON response size. Defaults to 8 MiB. */
+  maxResponseBytes?: number
+  /** Maximum forwarded pull or push request size. Defaults to 1 MiB. */
+  maxRequestBytes?: number
   /** Active wake-socket alarm safety net. Defaults to 15 seconds. */
   intervalMs?: number
   /** Billable SQLite rows written by ingest per rolling window. Defaults to 150,000. */

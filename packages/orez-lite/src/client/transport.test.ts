@@ -8,6 +8,7 @@ import {
   ensureHttpPullTransport,
   fetchWithHeaderDeadline,
   installHttpPullTransport,
+  readResponseTextWithDeadline,
 } from './transport.js'
 
 import type {
@@ -719,6 +720,45 @@ describe('Orez HTTP transport', () => {
     ])
   })
 
+  test('wide queued push frames are split by encoded byte size', async () => {
+    const firstPushStarted = defer<void>()
+    const releaseFirstPush = defer<void>()
+    const pushRequests: number[][] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      const ids = request.body.mutations.map((mutation: any) => mutation.id)
+      pushRequests.push(ids)
+      if (ids[0] === 1) {
+        firstPushStarted.resolve()
+        await releaseFirstPush.promise
+      }
+      return jsonResponse({
+        pushResponse: {
+          mutations: request.body.mutations.map((mutation: any) => ({
+            id: { clientID: mutation.clientID, id: mutation.id },
+            result: {},
+          })),
+        },
+      })
+    })
+    const transport = installHttpPullTransport({ origin: ORIGIN, fetch })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+    )
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+    await firstPushStarted.promise
+    const wide = 'x'.repeat(450 * 1024)
+    socket.send(JSON.stringify(['push', pushBody(2, wide)]))
+    socket.send(JSON.stringify(['push', pushBody(3, wide)]))
+    releaseFirstPush.resolve()
+    await eventually(() => expect(pushRequests).toEqual([[1], [2], [3]]), 5_000)
+  })
+
   test('encodes each push attempt inside the existing FIFO push chain', async () => {
     const firstEncodeStarted = defer<void>()
     const releaseFirstEncode = defer<void>()
@@ -793,6 +833,39 @@ describe('Orez HTTP transport', () => {
       id: 'test-fail-closed-codec',
       async encodePush() {
         throw new Error('no current encryption key is available')
+      },
+      async decodePull(response) {
+        return response
+      },
+    }
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      paths.push(request.path)
+      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      payloadCodec,
+    })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+    )
+
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+
+    await eventually(() => expect(transport.connections).toBe(0))
+    expect(paths).toEqual(['/pull'])
+  })
+
+  test('does not POST a push when its payload codec exceeds the request byte ceiling', async () => {
+    const paths: string[] = []
+    const payloadCodec: PayloadCodec = {
+      id: 'test-oversized-codec',
+      async encodePush(body) {
+        return { ...body, padding: 'x'.repeat(1_100_000) } as PushRequest
       },
       async decodePull(response) {
         return response
@@ -1746,6 +1819,28 @@ describe('fetchWithHeaderDeadline', () => {
     )
     await expect(response.json()).resolves.toEqual({ ok: true })
   })
+
+  test('a successful response body cannot stall forever', async () => {
+    const response = new Response(new ReadableStream({ start() {} }))
+    await expect(
+      readResponseTextWithDeadline(response, '/pull', 20, 1024)
+    ).rejects.toThrow('response body missed 20ms deadline')
+  })
+
+  test('a chunked successful response is bounded by bytes', async () => {
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('1234'))
+          controller.enqueue(new TextEncoder().encode('5678'))
+          controller.close()
+        },
+      })
+    )
+    await expect(readResponseTextWithDeadline(response, '/pull', 100, 7)).rejects.toThrow(
+      'response exceeded 7 bytes'
+    )
+  })
 })
 
 function install(fetch: typeof globalThis.fetch) {
@@ -1964,7 +2059,7 @@ function openRawSocketWithMessages(opts?: {
   return { messages, socket }
 }
 
-function pushBody(id: number) {
+function pushBody(id: number, wide = '') {
   return {
     clientGroupID: 'cg1',
     pushVersion: 1,
@@ -1976,7 +2071,7 @@ function pushBody(id: number) {
         name: 'project|create',
         id,
         clientID: 'c1',
-        args: [{ id: `p${id}`, ownerId: 'u1', name: `project ${id}` }],
+        args: [{ id: `p${id}`, ownerId: 'u1', name: `project ${id}${wide}` }],
       },
     ],
   }

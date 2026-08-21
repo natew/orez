@@ -71,6 +71,9 @@ Required for delegated push, forbidden with local mutators.
 | `upstream.namespacePath`        | `string \| (namespace) => string` | required | Path to this namespace on the bound service, for example `/data/<id>`. Must resolve to an absolute path. `/` is a valid root mount. |
 | `upstream.changeLimit`          | `number`                          | 1000     | Feed page size. The cursor loop continues until the reported head is reached. Valid range 1 to 10000.                               |
 | `upstream.intervalMs`           | `number`                          | 15000    | Durable Object alarm safety net between ingest passes. Minimum 1000.                                                                |
+| `upstream.requestTimeoutMs`     | `number`                          | 30000    | Whole internal request deadline, including a successful response body.                                                              |
+| `upstream.maxRequestBytes`      | `number`                          | 1048576  | Maximum forwarded pull or push request body.                                                                                        |
+| `upstream.maxResponseBytes`     | `number`                          | 8388608  | Maximum JSON body accepted from the upstream service binding.                                                                       |
 | `upstream.ingestBudgetRows`     | `number`                          | 150000   | Billable SQLite rows ingest may write per rolling window before the breaker trips.                                                  |
 | `upstream.ingestBudgetWindowMs` | `number`                          | 300000   | Rolling ingest budget window (five minutes).                                                                                        |
 | `upstream.ingestBackoffMs`      | `number`                          | 1000     | Initial breaker cooldown after a trip.                                                                                              |
@@ -82,6 +85,11 @@ the upstream path has not been configured or remembered yet.
 The ingest budget knobs are the sync host's half of the write safeguards. The
 data worker has its own independent budget, configured by environment variables
 (below). See the trade-offs page for why both exist.
+
+The request guards are also backpressure guards: limits cover chunked bodies,
+not only `Content-Length`, and the deadline remains armed until a successful
+body has been completely read. Oversized or stalled pages fail the pass without
+adding a probe, retry write, or other Durable Object SQL operation.
 
 ## Queries
 

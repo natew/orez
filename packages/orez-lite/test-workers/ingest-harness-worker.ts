@@ -1,3 +1,4 @@
+import { sha256 } from '@noble/hashes/sha2.js'
 import { createBuilder, defineQueries, defineQuery } from '@rocicorp/zero'
 import { WorkerEntrypoint } from 'cloudflare:workers'
 import { defineStreamingFields } from 'orez-sync-executor/realtime'
@@ -165,7 +166,8 @@ const dataWorker = createOrezDataWorker<Env>({
     migrate: async () => undefined,
   },
   backup: {
-    format: 'ingest-harness-backup-v1',
+    format: 'ingest-harness-backup-v2',
+    acceptedFormats: ['ingest-harness-backup-v1'],
     bucket: () => restoreBucket,
     inventory: async () => [],
     authorize(request, env) {
@@ -635,30 +637,33 @@ export default {
         .then(() => {
           commitNotificationAttempts.set(instance, 0)
           const key = `restore-fixtures/${instance}.ndjson`
+          const entries = [
+            {
+              kind: 'header',
+              format: 'ingest-harness-backup-v2',
+              integrity: 'sha256',
+              ns: 'source',
+              orderedTables: true,
+            },
+            {
+              kind: 'table',
+              name: 'item',
+              sql: 'CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT)',
+              indexes: [],
+            },
+            {
+              kind: 'rows',
+              table: 'item',
+              rows: [{ id: 'restored', label: 'after restore' }],
+            },
+          ]
+          const payload = `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`
+          const digest = Array.from(sha256(new TextEncoder().encode(payload)), (byte) =>
+            byte.toString(16).padStart(2, '0')
+          ).join('')
           restoreObjects.set(
             key,
-            [
-              {
-                kind: 'header',
-                format: 'ingest-harness-backup-v1',
-                ns: 'source',
-                orderedTables: true,
-              },
-              {
-                kind: 'table',
-                name: 'item',
-                sql: 'CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT)',
-                indexes: [],
-              },
-              {
-                kind: 'rows',
-                table: 'item',
-                rows: [{ id: 'restored', label: 'after restore' }],
-              },
-              { kind: 'footer', tables: 1, rows: 1 },
-            ]
-              .map((entry) => JSON.stringify(entry))
-              .join('\n') + '\n'
+            `${payload}${JSON.stringify({ kind: 'footer', tables: 1, rows: 1, sha256: digest })}\n`
           )
           return Response.json({ instance, key })
         })

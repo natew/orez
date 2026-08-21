@@ -44,7 +44,7 @@ tokens. Do not treat a failure in those paths as a release blocker.
    npm pack @rocicorp/zero@<v> && tar xzf rocicorp-zero-<v>.tgz
    cat package/out/zero-protocol/src/protocol-version.d.ts
    ```
-   (1.5 = 50, 1.6 = 51, 1.7 = 51, 1.8 = 51.) Release notes have said "no
+   (1.5 = 50, 1.6 = 51, 1.7 = 51, 1.8 = 51, 1.9 = 51.) Release notes have said "no
    protocol changes" while other compiled details moved, so read the file.
    **If it changed, the Rust host (`crates/sync-core`, `crates/sync-native`) and
    every `/sync/v<N>/connect` string in §3.A move with it.** If it did not
@@ -237,19 +237,28 @@ unit suite and report the bump as done: a green unit suite does not mean sync
 works end to end, and every real regression found in this doc's history was
 found by a consumer e2e suite or a browser probe, never by unit tests.
 
-Current pipeline (Rust runtimes):
+Current pipeline (Rust runtimes), in release order:
 
-1. **orez unit + Rust** — `bun run test` and `cargo test -p sync-native`, plus
+1. **Chat first.** Upgrade all three Chat Zero pins, install, run its version
+   guard, then run the complete gate from `~/chat`: `bun run test e2e`. The
+   equivalent Orez-owned command is `bun run test:chat`; it verifies the Zero
+   versions match and delegates to that same full Chat command. This baseline
+   proves the new Zero client before Orez itself changes.
+2. **orez unit + Rust** — `bun run test` and `cargo test -p sync-native`, plus
    `cargo clippy`, `bun run lint`, `bun run format:check` (lint and format are
    separate CI gates).
-2. **chat** — `bun run check`, `bun run test unit`, and the e2e integration lane
-   `bun tko test e2e`. This is the strongest single gate: it drives a real
-   browser against the Rust host over the full sync path. See §4.4 for the two
-   traps that make it look broken when it is not.
-3. **soot browser-host** — `bun run check`, then `test:orez:smoke` → `test:orez`
+3. **Push Orez `main` and wait for its canary.** Never cut stable as part of an
+   upgrade unless the owner separately authorizes the release. Upgrade Chat's
+   Orez npm family to that canary and its Rust crate git rev to the pushed SHA,
+   then run `bun run test e2e` again. This is the authoritative Chat/Orez gate.
+4. **soot browser-host** — in an isolated worktree, use its catalogs (`bun up
+zero`, then `bun up orez --canary`), run `bun check`, then
+   `test:orez:smoke` → `test:orez`
    → `test:orez:robust`, then `test:ultimate:quick`. See §4.4.
-4. **Manual smoke pass (§4.5).** Non-optional. Nothing above catches a console
-   error.
+5. **Team Machine** — align the GUI's Zero and canonical Orez package pins,
+   frozen-install check, then run the GUI's package checks and relevant tests.
+6. **Manual smoke pass (§4.5).** Non-optional. Nothing above catches a console
+   error. Smoke Chat, Soot, and Team Machine from freshly started processes.
 
 _Legacy stages, run only if deliberately keeping those paths alive:_ orez
 integration/native (`native:bootstrap && test:integration`), orez-web, orez-cf.
@@ -278,7 +287,7 @@ Three traps have each cost a full misdiagnosis:
   "does not time out while an already-started host mutation settles" is a known
   offender under load) kills playwright at ~7s and the summary reads as a total
   e2e failure with zero tests run. If the e2e lane dies suspiciously fast, run
-  `bun tko test e2e --skip-unit` to get a clean read, and run the unit lane
+  `bun run test e2e --skip-unit` to get a clean read, and run the unit lane
   separately.
 
 Also check the real exit code. `cmd > log 2>&1; echo "exit=$?"` reports the
@@ -306,19 +315,22 @@ confusing, meaningless result.
 Deeper correctness is already covered by the suites above, so keep this to one
 pass. Its whole job is the noise the assertions cannot see.
 
+> The numbered list below is the legacy pre-Rust pipeline retained for old
+> worked examples. Use the current pipeline above for new upgrades.
+
 1. **orez unit** — `bun run test` (excludes `src/integration/`, wasm). Fast.
 2. **orez integration (native)** — build the native binding then run the
    integration suite, which spawns real zero-cache 1.x and drives the sync
    protocol: `bun run native:bootstrap && bun run test:integration`
    (`test:integration:native` covers the native-startup guard). Also worth:
    `perf:correctness`, `perf:crash`.
-3. **chat e2e** — orez's `test:chat:e2e` runs ~/chat against orez. It requires:
+3. **chat e2e** — orez's `test:chat` runs ~/chat's complete gate. It requires:
    1. **Upgrade `~/chat`** to the same Zero version first.
    2. **Start OrbStack/Docker** (chat's reference stack runs real Zero +
       Postgres in Docker).
    3. Confirm **~/chat's own integration tests pass against real
       zero/docker** — i.e. chat is properly upgraded on its own terms.
-   4. _Only then_ run this repo's chat e2e: `bun run test:chat:e2e`.
+   4. _Only then_ run this repo's chat e2e: `bun run test:chat`.
       ➜ Passing this is **orez-node ready.** ✅ done for 1.6 (incl. the cf-do
       DO-backend e2e — see §6). Note: that e2e drives chat through orez's cf-do
       _translation layer_ against a local `wrangler dev`; it is a strong lower
@@ -356,6 +368,40 @@ Verify the binary exists for the resolved version:
 ---
 
 ## 6. Worked examples
+
+### 1.8.0 → 1.9.0 (August 2026)
+
+- **Versions:** `@rocicorp/zero` 1.8.0 → **1.9.0** and
+  `@rocicorp/zero-sqlite3` **^1.1.2 → ^1.1.4**. The packed stable tarball still
+  declares **protocol 51** and Node >=22, so no Rust protocol string moved.
+- **Chat-first gate:** all three Chat Zero pins were aligned before Orez, its
+  version guard passed, and the complete gate passed: check, 1,090 unit tests,
+  and 78 browser tests (one configured skip).
+- **Correctness learned from upstream:** generated mutator tables can legally
+  be named `__proto__`; assigning them onto `{}` invokes the legacy prototype
+  setter. Orez now defines those table properties explicitly and has a focused
+  regression test.
+- **Observability learned from upstream:** the data feed carries each existing
+  change row's commit time and the source clock stamp through the existing
+  bounded query. The host emits raw OTEL histograms for end-to-end serving lag
+  and upstream clock skew, plus a clamp counter. Empty client patches still
+  complete an advancement, so quiet client groups do not report “time since
+  last matching mutation” as serving lag.
+- **Replication resilience learned from upstream:** service-binding reads now
+  have whole-body deadlines and byte ceilings; delegated requests are bounded;
+  browser push batching is capped by bytes as well as mutation count; and a
+  successful HTTP body can no longer hang the client after its headers arrive.
+  These guards add no Durable Object SQL reads or writes.
+- **Backup safety learned from upstream:** the current streaming format is
+  `orez-backup-v2` with a SHA-256 footer (v1 remains explicitly readable), R2
+  object identity is checked between validation and restore, fresh-namespace
+  restore is the default, destructive replacement requires `replace: true`,
+  and structured phase/duration/row/byte events cover export and restore. New
+  custom-format exports advertise SHA-256 integrity in their header; existing
+  custom-format backups without that marker remain readable.
+- **Downstream rule:** Chat, Soot, and Team Machine all move to the Orez canary
+  produced from this commit before stable is cut. Chat's Rust crates must use
+  this pushed SHA, not merely the matching npm package family.
 
 ### 1.7.0 → 1.8.0 (August 2026)
 

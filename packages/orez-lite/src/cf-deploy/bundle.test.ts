@@ -11,9 +11,10 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { build } from 'esbuild'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { bundleCloudflareLiteAppWorker } from './bundle.js'
+import { bundleCloudflareLiteAppWorker, orezLiteAliasPlugin } from './bundle.js'
 import { defineCloudflareConfig } from './config.js'
 import { configureCloudflareWorker } from './wrangler.js'
 
@@ -24,6 +25,30 @@ afterEach(() => {
 })
 
 describe('Cloudflare app bundling', () => {
+  it('keeps the real OpenTelemetry API in the sync host bundle', async () => {
+    const result = await build({
+      entryPoints: [join(process.cwd(), 'packages/sync-cf-host/src/serving-lag.ts')],
+      bundle: true,
+      write: false,
+      format: 'esm',
+      platform: 'neutral',
+      target: 'es2022',
+      conditions: ['workerd', 'worker', 'import'],
+      plugins: [
+        orezLiteAliasPlugin(
+          defineCloudflareConfig('otelbundletest'),
+          {},
+          process.cwd(),
+          join(process.cwd(), 'node_modules')
+        ),
+      ],
+    })
+
+    const output = result.outputFiles[0].text
+    expect(output).toContain('@opentelemetry/api: Registered a global')
+    expect(output).not.toContain('const noopSpan')
+  })
+
   it('attaches root split chunks to a bare Wrangler upload', () => {
     const workerDir = mkdtempSync(join(tmpdir(), 'orez-wrangler-modules-'))
     workerDirs.push(workerDir)

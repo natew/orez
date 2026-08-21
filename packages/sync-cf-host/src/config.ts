@@ -76,6 +76,9 @@ export function validateSyncHostConfig<
       ingestBudgetWindowMs: config.upstream.ingestBudgetWindowMs ?? 300_000,
       ingestBackoffMs: config.upstream.ingestBackoffMs ?? 1_000,
       ingestMaxBackoffMs: config.upstream.ingestMaxBackoffMs ?? 60_000,
+      requestTimeoutMs: config.upstream.requestTimeoutMs ?? 30_000,
+      maxResponseBytes: config.upstream.maxResponseBytes ?? 8 * 1024 * 1024,
+      maxRequestBytes: config.upstream.maxRequestBytes ?? 1024 * 1024,
     })) {
       if (!Number.isSafeInteger(value) || value < 1)
         throw new TypeError(`upstream.${name} must be a positive safe integer`)

@@ -80,6 +80,7 @@ class FakeChangeSql {
     op: string
     row_data: string | null
     old_data: string | null
+    created_at: number
   }> = []
   changes: Array<{
     watermark: number
@@ -152,7 +153,7 @@ class FakeChangeSql {
       const watermarks: Array<{ watermark: number }> = []
       for (const change of pending) {
         const watermark = Math.max(0, ...this.changes.map((row) => row.watermark)) + 1
-        this.changes.push({ watermark, ...change })
+        this.changes.push({ watermark, ...change, created_at: 1_700_000_000 })
         watermarks.push({ watermark })
       }
       return new FakeResult(watermarks)
@@ -175,12 +176,13 @@ class FakeChangeSql {
         op: String(op),
         row_data: row_data === null ? null : String(row_data),
         old_data: old_data === null ? null : String(old_data),
+        created_at: 1_700_000_000,
       })
       return new FakeResult()
     }
     if (
       sql.startsWith(
-        'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes'
+        'SELECT watermark, table_name, op, row_data, old_data, created_at FROM _zero_changes'
       )
     ) {
       const watermark = Number(params[0])

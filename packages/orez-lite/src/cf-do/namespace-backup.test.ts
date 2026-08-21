@@ -1,6 +1,7 @@
+import { sha256 } from '@noble/hashes/sha2.js'
 // @ts-expect-error - CJS module
 import BedrockSqlite from 'bedrock-sqlite'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   createNamespaceBackupManager,
@@ -18,7 +19,7 @@ function stream(text: string): ReadableStream<Uint8Array> {
   })
 }
 
-function bucketWith(key: string, dump: string) {
+function bucketWith(key: string, dump: string, etags: readonly string[] = []) {
   let reads = 0
   const bucket: NamespaceBackupBucket = {
     async get(requestedKey) {
@@ -26,6 +27,7 @@ function bucketWith(key: string, dump: string) {
       reads++
       return {
         body: stream(dump),
+        etag: etags[reads - 1],
         async json() {
           return JSON.parse(dump)
         },
@@ -44,6 +46,25 @@ function bucketWith(key: string, dump: string) {
 }
 
 function dump(lines: unknown[]): string {
+  const copied = lines.map((line) => ({ ...(line as Record<string, unknown>) }))
+  const footerIndex = copied.findIndex((line) => line.kind === 'footer')
+  const format = copied.find((line) => line.kind === 'header')?.format
+  if (footerIndex !== -1 && format !== 'test-v2') {
+    const payload = `${copied
+      .slice(0, footerIndex)
+      .map((line) => JSON.stringify(line))
+      .join('\n')}\n`
+    copied[footerIndex] = {
+      ...copied[footerIndex],
+      sha256: Array.from(sha256(new TextEncoder().encode(payload)), (byte) =>
+        byte.toString(16).padStart(2, '0')
+      ).join(''),
+    }
+  }
+  return `${copied.map((line) => JSON.stringify(line)).join('\n')}\n`
+}
+
+function unsignedDump(lines: unknown[]): string {
   return `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`
 }
 
@@ -418,6 +439,110 @@ describe('namespace backup restore', () => {
     expect(batches).toEqual([])
   })
 
+  it('rejects a digest mismatch before reading or writing the target namespace', async () => {
+    const key = 'backups/singleton/tampered.ndjson'
+    const valid = dump([
+      { kind: 'header', format: 'test-v3', ns: 'source', orderedTables: true },
+      {
+        kind: 'table',
+        name: 'message',
+        sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)',
+        indexes: [],
+      },
+      { kind: 'rows', table: 'message', rows: [{ id: 'one' }] },
+      { kind: 'footer', tables: 1, rows: 1 },
+    ])
+    const stored = bucketWith(key, valid.replace('"one"', '"tampered"'))
+    const query = vi.fn(async () => [])
+    const batch = vi.fn(async () => {})
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query,
+      batch,
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await expect(manager.importNamespace({}, 'singleton', key)).rejects.toThrow(
+      'sha256 digest mismatch'
+    )
+    expect(query).not.toHaveBeenCalled()
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('requires an explicit override before replacing any live application table', async () => {
+    const key = 'backups/singleton/fresh-only.ndjson'
+    const stored = bucketWith(
+      key,
+      dump([
+        { kind: 'header', format: 'test-v3', ns: 'source', orderedTables: true },
+        {
+          kind: 'table',
+          name: 'message',
+          sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)',
+          indexes: [],
+        },
+        { kind: 'footer', tables: 1, rows: 0 },
+      ])
+    )
+    const beforeImport = vi.fn(async () => {})
+    const batch = vi.fn(async () => {})
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query: async (_env, _namespace, sql) =>
+        sql.startsWith('SELECT name, sql FROM sqlite_master')
+          ? [{ name: 'message', sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)' }]
+          : [],
+      beforeImport,
+      batch,
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await expect(manager.importNamespace({}, 'singleton', key)).rejects.toThrow(
+      'restore target is not empty'
+    )
+    expect(beforeImport).not.toHaveBeenCalled()
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('rejects an object replaced after validation before starting the restore', async () => {
+    const key = 'backups/singleton/replaced.ndjson'
+    const stored = bucketWith(
+      key,
+      dump([
+        { kind: 'header', format: 'test-v3', ns: 'source', orderedTables: true },
+        {
+          kind: 'table',
+          name: 'message',
+          sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)',
+          indexes: [],
+        },
+        { kind: 'footer', tables: 1, rows: 0 },
+      ]),
+      ['validated-etag', 'replacement-etag']
+    )
+    const beforeImport = vi.fn(async () => {})
+    const batch = vi.fn(async () => {})
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query: async () => [],
+      beforeImport,
+      batch,
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await expect(manager.importNamespace({}, 'singleton', key)).rejects.toThrow(
+      'backup object changed between validation and restore'
+    )
+    expect(beforeImport).not.toHaveBeenCalled()
+    expect(batch).not.toHaveBeenCalled()
+  })
+
   it('streams ordered rows in bounded batches and caches insert SQL by shape', async () => {
     const key = 'backups/singleton/1.ndjson'
     const rows = Array.from({ length: 401 }, (_, index) => ({
@@ -531,7 +656,7 @@ describe('namespace backup restore', () => {
       listNamespaces: async () => ['singleton'],
     })
 
-    await manager.importNamespace({}, 'singleton', key)
+    await manager.importNamespace({}, 'singleton', key, { allowNonEmpty: true })
 
     const drops = batches
       .flat()
@@ -586,7 +711,7 @@ describe('namespace backup restore', () => {
       stored.bucket,
       batchSizes,
       metrics
-    ).importNamespace({}, 'singleton', key)
+    ).importNamespace({}, 'singleton', key, { allowNonEmpty: true })
     const restoreChanges = totalChanges() - changesBeforeRestore
 
     expect(summary).toMatchObject({ rows: 1, counts: { message: 1 } })
@@ -640,5 +765,69 @@ describe('namespace backup restore', () => {
       sourceNs: 'source',
       rows: 1,
     })
+  })
+
+  it('accepts pre-integrity backups that use the current custom format', async () => {
+    const key = 'backups/singleton/custom-current-legacy.ndjson'
+    const stored = bucketWith(
+      key,
+      unsignedDump([
+        { kind: 'header', format: 'test-v3', ns: 'source' },
+        {
+          kind: 'table',
+          name: 'message',
+          sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)',
+          indexes: [],
+        },
+        { kind: 'rows', table: 'message', rows: [{ id: 'one' }] },
+        { kind: 'footer', tables: 1, rows: 1 },
+      ])
+    )
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query: async (_env, _namespace, sql) => {
+        if (sql.startsWith('SELECT COUNT(*)')) return [{ n: 1 }]
+        return []
+      },
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await expect(manager.importNamespace({}, 'singleton', key)).resolves.toMatchObject({
+      sourceNs: 'source',
+      rows: 1,
+    })
+  })
+
+  it('requires a digest when the header advertises sha256 integrity', async () => {
+    const key = 'backups/singleton/missing-advertised-digest.ndjson'
+    const stored = bucketWith(
+      key,
+      unsignedDump([
+        {
+          kind: 'header',
+          format: 'test-v3',
+          integrity: 'sha256',
+          ns: 'source',
+        },
+        { kind: 'footer', tables: 0, rows: 0 },
+      ])
+    )
+    const query = vi.fn(async () => [])
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query,
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await expect(manager.importNamespace({}, 'singleton', key)).rejects.toThrow(
+      'backup footer is missing its sha256 digest'
+    )
+    expect(query).not.toHaveBeenCalled()
   })
 })

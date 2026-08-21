@@ -5,12 +5,22 @@ import { createSocketHost } from 'orez-sync-executor/realtime'
 import { validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'
 import { resolveQueryPatch } from './query-patch.js'
+import { ServingLagTracker } from './serving-lag.js'
 import {
   decodeSqlParams,
   SqlStorageDirect,
   SqlStorageMutatorTransaction,
   SqlStorageSyncDb,
 } from './sql-storage-adapter.js'
+import {
+  DEFAULT_UPSTREAM_MAX_RESPONSE_BYTES,
+  DEFAULT_UPSTREAM_MAX_REQUEST_BYTES,
+  DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS,
+  fetchBoundedUpstreamJson,
+  readBoundedJsonResponse,
+  readBoundedStream,
+  UpstreamResponseLimitError,
+} from './upstream-response.js'
 import {
   engine_authorize_realtime_subscription,
   engine_apply_snapshot_changes,
@@ -96,6 +106,8 @@ type EngineState = {
 }
 type UpstreamBatch = {
   watermark: number
+  oldestCommitTimeMs?: number
+  sourceTimeMs?: number
   changes: Array<{
     watermark: number
     tableName: string
@@ -293,6 +305,31 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
   return value as Record<string, unknown>
 }
 
+async function boundedRequestObject(
+  request: Request,
+  maxBytes: number,
+  timeoutMs: number
+): Promise<Record<string, unknown>> {
+  try {
+    const bytes = await readBoundedStream(
+      request.body,
+      maxBytes,
+      AbortSignal.timeout(timeoutMs)
+    )
+    const value = JSON.parse(new TextDecoder().decode(bytes)) as unknown
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw requestError('request body must be a JSON object')
+    }
+    return value as Record<string, unknown>
+  } catch (error) {
+    if (error instanceof UpstreamResponseLimitError) {
+      throw requestError(`request body exceeded ${maxBytes} bytes`, 413)
+    }
+    if (error instanceof SyntaxError) throw requestError('invalid JSON request body')
+    throw error
+  }
+}
+
 function routeAfterNamespace(pathname: string): string {
   const [, , ...parts] = pathname.split('/')
   return `/${parts.join('/')}`
@@ -309,9 +346,11 @@ function jsonBodyRequest(request: Request, headers: Headers, body: unknown): Req
   })
 }
 
-async function forwardedSyncRequest(
+async function forwardedSyncRequest(request: Request): Promise<{
+  claims: NormalizedClaims
+  body: Record<string, unknown>
   request: Request
-): Promise<{ claims: NormalizedClaims; request: Request }> {
+}> {
   const value = await requestObject(request)
   const claims = value.claims
   const body = value.body
@@ -335,6 +374,7 @@ async function forwardedSyncRequest(
   const headers = new Headers(request.headers)
   return {
     claims: claims as NormalizedClaims,
+    body: body as Record<string, unknown>,
     request: jsonBodyRequest(request, headers, body),
   }
 }
@@ -421,6 +461,10 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
   notify(env: Env, namespace: string): Promise<Response>
 } {
   validateSyncHostConfig(config)
+  const requestTimeoutMs =
+    config.upstream?.requestTimeoutMs ?? DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS
+  const maxRequestBytes =
+    config.upstream?.maxRequestBytes ?? DEFAULT_UPSTREAM_MAX_REQUEST_BYTES
   const allowedOrigins = new Set(config.allowedOrigins ?? [])
   const upstreamPath = (namespace: string): string | null => {
     if (!config.upstream) return null
@@ -583,7 +627,11 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           }
           if ((route === '/pull' || route === '/push') && request.method === 'POST') {
             try {
-              const body = await requestObject(request)
+              const body = await boundedRequestObject(
+                request,
+                maxRequestBytes,
+                requestTimeoutMs
+              )
               forwardedBody = { claims, body }
             } catch (error) {
               return errorResponse(error)
@@ -658,6 +706,12 @@ export function createSyncDurableObject<
   const wakeCoalesceMs = config.wakeCoalesceMs ?? 25
   const upstreamIntervalMs = config.upstream?.intervalMs ?? 15_000
   const upstreamLimit = config.upstream?.changeLimit ?? 1_000
+  const upstreamRequestTimeoutMs =
+    config.upstream?.requestTimeoutMs ?? DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS
+  const upstreamMaxResponseBytes =
+    config.upstream?.maxResponseBytes ?? DEFAULT_UPSTREAM_MAX_RESPONSE_BYTES
+  const upstreamMaxRequestBytes =
+    config.upstream?.maxRequestBytes ?? DEFAULT_UPSTREAM_MAX_REQUEST_BYTES
   const ingestBudgetRows = config.upstream?.ingestBudgetRows ?? 150_000
   const ingestBudgetWindowMs = config.upstream?.ingestBudgetWindowMs ?? 5 * 60_000
   const ingestBackoffMs = config.upstream?.ingestBackoffMs ?? 1_000
@@ -687,6 +741,8 @@ export function createSyncDurableObject<
     #counters = freshCounters()
     #sqlBilling = { rowsRead: 0, rowsWritten: 0 }
     #pulling = new Set<string>()
+    #activePullGroups = new Map<string, number>()
+    #servingLag = new ServingLagTracker()
     #wakeOrigins = new Set<string>()
     #wakeRecipients = new Set<WebSocket>()
     #wakeTables = new Set<string>()
@@ -987,14 +1043,61 @@ export function createSyncDurableObject<
       }
     }
 
+    #activeClientGroupIDs(): Set<string> {
+      const groups = new Set(this.#activePullGroups.keys())
+      for (const socket of this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)) {
+        const clientGroupID = socketAttachment(socket)?.identity?.clientGroupID
+        if (clientGroupID) groups.add(clientGroupID)
+      }
+      return groups
+    }
+
+    #beginActivePull(clientGroupID: string): void {
+      this.#activePullGroups.set(
+        clientGroupID,
+        (this.#activePullGroups.get(clientGroupID) ?? 0) + 1
+      )
+    }
+
+    #endActivePull(clientGroupID: string): void {
+      const count = this.#activePullGroups.get(clientGroupID) ?? 0
+      if (count <= 1) this.#activePullGroups.delete(clientGroupID)
+      else this.#activePullGroups.set(clientGroupID, count - 1)
+    }
+
+    async #fetchUpstreamJson(endpoint: URL) {
+      const result = await fetchBoundedUpstreamJson(
+        this.#serviceBinding(),
+        endpoint.toString(),
+        { headers: { host: endpoint.host } },
+        {
+          timeoutMs: upstreamRequestTimeoutMs,
+          maxBytes: upstreamMaxResponseBytes,
+        }
+      )
+      const sourceTimeMs =
+        result.body &&
+        typeof result.body === 'object' &&
+        !Array.isArray(result.body) &&
+        typeof (result.body as { sourceTimeMs?: unknown }).sourceTimeMs === 'number'
+          ? (result.body as { sourceTimeMs: number }).sourceTimeMs
+          : null
+      if (sourceTimeMs !== null) {
+        this.#servingLag.recordClockSkew(
+          sourceTimeMs,
+          result.sendTimeMs,
+          result.receiveTimeMs
+        )
+      }
+      return result
+    }
+
     async #upstreamWriteBudgetStatus(): Promise<Response> {
       if (!config.upstream) return json({ error: 'upstream is not configured' }, 404)
       const path = this.#controlGet('upstreamPath')
       if (path === null) return json({ error: 'upstream path is not known yet' }, 409)
       const endpoint = new URL(`${path}/_orez/write-budget`, 'https://upstream.invalid')
-      const response = await this.#serviceBinding().fetch(endpoint.toString(), {
-        headers: { host: endpoint.host },
-      })
+      const { response, body } = await this.#fetchUpstreamJson(endpoint)
       if (!response.ok) {
         return json(
           {
@@ -1004,7 +1107,7 @@ export function createSyncDurableObject<
           502
         )
       }
-      return json(await response.json())
+      return json(body)
     }
 
     #rememberUpstreamPath(request: Request): string | null {
@@ -1128,16 +1231,14 @@ export function createSyncDurableObject<
       endpoint.searchParams.set('table', table)
       endpoint.searchParams.set('limit', String(limit))
       if (cursor !== null) endpoint.searchParams.set('cursor', cursor)
-      const response = await this.#serviceBinding().fetch(endpoint.toString(), {
-        headers: { host: endpoint.host },
-      })
+      const { response, body } = await this.#fetchUpstreamJson(endpoint)
       if (!response.ok) {
         throw requestError(
           `upstream snapshot page returned ${response.status}`,
           response.status >= 500 ? 502 : response.status
         )
       }
-      const page = (await response.json()) as Partial<SnapshotPage>
+      const page = body as Partial<SnapshotPage>
       if (
         !Number.isSafeInteger(page.watermark) ||
         Number(page.watermark) < 0 ||
@@ -1216,6 +1317,7 @@ export function createSyncDurableObject<
         let pendingPage: SnapshotPage | null = null
         let snapshotPageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS
         let snapshotCompleted = false
+        let oldestLiveCommitTimeMs: number | undefined
         const changedTables = new Set<string>()
         for (;;) {
           if (progress?.state === 'paging') {
@@ -1282,9 +1384,7 @@ export function createSyncDurableObject<
             const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
             endpoint.searchParams.set('since', cursor)
             endpoint.searchParams.set('limit', String(upstreamLimit))
-            const response = await this.#serviceBinding().fetch(endpoint.toString(), {
-              headers: { host: endpoint.host },
-            })
+            const { response, body } = await this.#fetchUpstreamJson(endpoint)
             if (response.status === 410) {
               const begun = await this.#beginSnapshotGeneration(path)
               progress = begun.progress
@@ -1295,7 +1395,7 @@ export function createSyncDurableObject<
             if (!response.ok) {
               throw new Error(`upstream snapshot catch-up returned ${response.status}`)
             }
-            const batch = (await response.json()) as UpstreamBatch
+            const batch = body as UpstreamBatch
             if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
               throw new Error('invalid upstream changes response')
             }
@@ -1376,9 +1476,7 @@ export function createSyncDurableObject<
           const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
           endpoint.searchParams.set('watermark', cursor)
           endpoint.searchParams.set('limit', String(upstreamLimit))
-          const response = await this.#serviceBinding().fetch(endpoint.toString(), {
-            headers: { host: endpoint.host },
-          })
+          const { response, body } = await this.#fetchUpstreamJson(endpoint)
           if (response.status === 410) {
             const begun = await this.#beginSnapshotGeneration(path)
             progress = begun.progress
@@ -1389,9 +1487,19 @@ export function createSyncDurableObject<
           if (!response.ok) {
             throw new Error(`upstream changes returned ${response.status}`)
           }
-          const batch = (await response.json()) as UpstreamBatch
+          const batch = body as UpstreamBatch
           if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
             throw new Error('invalid upstream changes response')
+          }
+          const batchCommitTimeMs = batch.oldestCommitTimeMs
+          if (
+            typeof batchCommitTimeMs === 'number' &&
+            Number.isFinite(batchCommitTimeMs)
+          ) {
+            oldestLiveCommitTimeMs =
+              oldestLiveCommitTimeMs === undefined
+                ? batchCommitTimeMs
+                : Math.min(oldestLiveCommitTimeMs, batchCommitTimeMs)
           }
           for (const table of upstreamBatchTables(batch)) changedTables.add(table)
           const result = this.#withIngestBilling(
@@ -1437,6 +1545,21 @@ export function createSyncDurableObject<
         }
         this.#recoverIngestBreaker()
         const endingWatermark = this.#engineState().watermark
+        if (oldestLiveCommitTimeMs !== undefined) {
+          const activeGroups = this.#activeClientGroupIDs()
+          if (endingWatermark !== startingWatermark || total > 0) {
+            this.#servingLag.onVersionReady(
+              endingWatermark,
+              oldestLiveCommitTimeMs,
+              activeGroups
+            )
+          } else {
+            const servedAt = Date.now()
+            for (const _clientGroupID of activeGroups) {
+              this.#servingLag.recordNoChange(oldestLiveCommitTimeMs, servedAt)
+            }
+          }
+        }
         if (snapshotCompleted || total > 0 || endingWatermark !== startingWatermark) {
           await this.#enqueueWake('__upstream__', changedTables)
         }
@@ -1701,7 +1824,11 @@ export function createSyncDurableObject<
           wasmBoundaryCalls: this.#counters.wasmBoundaryCalls,
           sql: this.#engineDb.stats,
         })
-        return json(response)
+        const result = json(response)
+        const clientGroupID =
+          typeof body.clientGroupID === 'string' ? body.clientGroupID : ''
+        this.#servingLag.onVersionServed(clientGroupID, response.cookie)
+        return result
       } catch (error) {
         const status = statusOf(error)
         if (status === 409) this.#counters.resets++
@@ -1744,7 +1871,11 @@ export function createSyncDurableObject<
       if (!this.#writerEnabled()) {
         // Workerd requires the request stream to be consumed before the DO
         // returns a response. Discard it without parsing or logging payloads.
-        await request.arrayBuffer()
+        await readBoundedStream(
+          request.body,
+          upstreamMaxRequestBytes,
+          AbortSignal.timeout(upstreamRequestTimeoutMs)
+        )
         const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
@@ -1770,7 +1901,15 @@ export function createSyncDurableObject<
       }
       if (config.mutateUrl) {
         try {
-          const bytes = await request.arrayBuffer()
+          const boundedBytes = await readBoundedStream(
+            request.body,
+            upstreamMaxRequestBytes,
+            AbortSignal.timeout(upstreamRequestTimeoutMs)
+          )
+          const bytes = boundedBytes.buffer.slice(
+            boundedBytes.byteOffset,
+            boundedBytes.byteOffset + boundedBytes.byteLength
+          ) as ArrayBuffer
           const body = JSON.parse(new TextDecoder().decode(bytes)) as Record<
             string,
             unknown
@@ -1793,9 +1932,22 @@ export function createSyncDurableObject<
             this.#engineState().upstreamWatermark === '0'
           )
           if (!upstreamResponse.ok) {
-            return new Response(upstreamResponse.body, upstreamResponse)
+            const upstreamErrorBody = await readBoundedStream(
+              upstreamResponse.body,
+              upstreamMaxResponseBytes,
+              AbortSignal.timeout(upstreamRequestTimeoutMs)
+            )
+            const errorBytes = upstreamErrorBody.buffer.slice(
+              upstreamErrorBody.byteOffset,
+              upstreamErrorBody.byteOffset + upstreamErrorBody.byteLength
+            ) as ArrayBuffer
+            return new Response(errorBytes, upstreamResponse)
           }
-          const upstreamBody = (await upstreamResponse.json()) as DelegatedPushBody
+          const upstreamBody = (await readBoundedJsonResponse(
+            upstreamResponse,
+            upstreamMaxResponseBytes,
+            AbortSignal.timeout(upstreamRequestTimeoutMs)
+          )) as DelegatedPushBody
           const delegatedResponse = upstreamBody.pushResponse ?? upstreamBody
           if (isStructuredPushFailed(delegatedResponse)) {
             // PushFailed is a successful protocol response describing an
@@ -2328,16 +2480,30 @@ export function createSyncDurableObject<
         } catch (error) {
           return errorResponse(error)
         }
-        // pull and push both establish the upstream schema and snapshot barrier.
+        const clientGroupID =
+          route === '/pull' && typeof forwarded.body.clientGroupID === 'string'
+            ? forwarded.body.clientGroupID
+            : null
+        if (clientGroupID) this.#beginActivePull(clientGroupID)
         try {
-          await this.#ingest(upstreamPath)
-        } catch (error) {
-          return errorResponse(error)
+          // pull and push both establish the upstream schema and snapshot barrier.
+          try {
+            await this.#ingest(upstreamPath)
+          } catch (error) {
+            return errorResponse(error)
+          }
+          if (route === '/pull') {
+            return await this.#pull(forwarded.request, forwarded.claims, namespace)
+          }
+          return await this.#push(
+            forwarded.request,
+            forwarded.claims,
+            namespace,
+            upstreamPath
+          )
+        } finally {
+          if (clientGroupID) this.#endActivePull(clientGroupID)
         }
-        if (route === '/pull') {
-          return this.#pull(forwarded.request, forwarded.claims, namespace)
-        }
-        return this.#push(forwarded.request, forwarded.claims, namespace, upstreamPath)
       }
       return json({ error: 'not found' }, 404)
     }

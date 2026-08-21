@@ -147,6 +147,13 @@ describe('mutation mode', () => {
         delegatedPushRetry: { maxAttempts: 0 },
       })
     ).toThrow('delegatedPushRetry.maxAttempts')
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutateUrl: '/push',
+        upstream: { binding: 'DATA', namespacePath: '/', maxResponseBytes: 0 },
+      })
+    ).toThrow('upstream.maxResponseBytes')
   })
 
   test('forbids local mutators plus upstream ingest', () => {

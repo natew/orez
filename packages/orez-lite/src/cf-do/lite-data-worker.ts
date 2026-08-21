@@ -454,24 +454,25 @@ function projectFeedBody(
 
   if (Array.isArray(value.changes)) {
     const changes: unknown[] = []
-    let trailingUnpublishedWatermark: unknown
+    let trailingUnpublishedChange: JsonRecord | undefined
     for (const rawChange of value.changes) {
       if (!isRecord(rawChange)) continue
       const rawName = stripPublicPrefix(String(rawChange.tableName ?? ''))
       if (isInternalCursorTable(rawName)) {
         changes.push({
+          ...rawChange,
           watermark: rawChange.watermark,
           tableName: 'syncCursor',
           op: 'INSERT',
           rowData: { id: 'zero-http', watermark: rawChange.watermark },
           oldData: null,
         })
-        trailingUnpublishedWatermark = undefined
+        trailingUnpublishedChange = undefined
         continue
       }
       const table = feedTables.get(rawName)
       if (!table) {
-        trailingUnpublishedWatermark = rawChange.watermark
+        trailingUnpublishedChange = rawChange
         continue
       }
       changes.push({
@@ -480,17 +481,18 @@ function projectFeedBody(
         rowData: projectedRow(table, rawChange.rowData),
         oldData: projectedRow(table, rawChange.oldData),
       })
-      trailingUnpublishedWatermark = undefined
+      trailingUnpublishedChange = undefined
     }
     // The upstream watermark is the feed head, not the last row in this page.
     // If the page ends with private rows, filtering them all would leave the
     // replica at its old cursor and make it replay the same page forever.
-    if (trailingUnpublishedWatermark !== undefined) {
+    if (trailingUnpublishedChange !== undefined) {
       changes.push({
-        watermark: trailingUnpublishedWatermark,
+        ...trailingUnpublishedChange,
+        watermark: trailingUnpublishedChange.watermark,
         tableName: 'syncCursor',
         op: 'INSERT',
-        rowData: { id: 'zero-http', watermark: trailingUnpublishedWatermark },
+        rowData: { id: 'zero-http', watermark: trailingUnpublishedChange.watermark },
         oldData: null,
       })
     }
@@ -901,7 +903,10 @@ export function createOrezDataWorker<
 
   const backupManager = options.backup
     ? createNamespaceBackupManager<Env>({
-        format: options.backup.format ?? 'orez-backup-v1',
+        format: options.backup.format ?? 'orez-backup-v2',
+        acceptedFormats:
+          options.backup.acceptedFormats ??
+          (options.backup.format === undefined ? ['orez-backup-v1'] : undefined),
         markerTable: backupMarkerTable,
         files: options.backup.bucket,
         query: queryNamespace,
@@ -916,6 +921,11 @@ export function createOrezDataWorker<
           const instance = canonical(namespace)
           const id = env.ZERO_SQL_DO.idFromName(instance)
           await env.ZERO_SQL_DO.get(id).orezImportBatch(statements)
+        },
+        beforeImport: async (env, namespace) => {
+          const instance = canonical(namespace)
+          const id = env.ZERO_SQL_DO.idFromName(instance)
+          await env.ZERO_SQL_DO.get(id).orezBeginRestore()
         },
         listNamespaces: async (env) => {
           const listed = await options.backup!.inventory(
@@ -1169,11 +1179,11 @@ export function createOrezDataWorker<
                 return new Response('restore requires a backup key', { status: 400 })
               const id = env.ZERO_SQL_DO.idFromName(resolved.instance)
               const stub = env.ZERO_SQL_DO.get(id)
-              await stub.orezBeginRestore()
               const summary = await backupManager.importNamespace(
                 env,
                 resolved.instance,
-                key
+                key,
+                { allowNonEmpty: isRecord(body) && body.replace === true }
               )
               await stub.orezRunApplicationSchema(
                 options.schema.version,

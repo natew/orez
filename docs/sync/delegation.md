@@ -95,6 +95,20 @@ The feed carries full row images: `rowData` is the complete row after an
 Ingest binds those images directly and uses `oldData` only to remove a changed
 primary key or a deleted row.
 
+Each page also carries `oldestCommitTimeMs` from the already-selected change
+rows and `sourceTimeMs` from the data worker clock. The host brackets that
+request on its own clock to record `orez.replication.upstream_clock_skew`, then
+records `orez.sync.e2e_serving_lag` when active client groups have been served
+through the corresponding local version. A no-row advancement is a completion,
+not an omission; otherwise the metric degenerates into time since that group's
+last matching row. Negative lag is clamped to zero and counted by
+`orez.sync.e2e_serving_lag_clamps`.
+
+These instruments use the process-wide `@opentelemetry/api` meter provider.
+Register the Worker application's provider/exporter before constructing the sync
+host; when no provider is registered, the OpenTelemetry API intentionally uses
+its standard no-op provider.
+
 Ingest runs on four triggers:
 
 - a `POST /<namespace>/notify` from the data worker's fan-out (the immediate

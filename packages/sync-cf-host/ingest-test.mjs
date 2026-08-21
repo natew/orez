@@ -106,11 +106,12 @@ try {
         'content-type': 'application/json',
         'x-admin-key': 'ingest-harness-admin',
       },
-      body: JSON.stringify({ key: restoreFixture.key }),
+      body: JSON.stringify({ key: restoreFixture.key, replace: true }),
     }
   )
-  assert.equal(restoreResponse.status, 200)
-  assert.deepEqual(await restoreResponse.json(), {
+  const restoreText = await restoreResponse.text()
+  assert.equal(restoreResponse.status, 200, restoreText)
+  assert.deepEqual(JSON.parse(restoreText), {
     ok: true,
     ns: `ns:${restoreNamespace}`,
     key: restoreFixture.key,

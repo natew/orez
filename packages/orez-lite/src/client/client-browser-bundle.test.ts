@@ -16,5 +16,8 @@ test('orez-lite/client stays a browser-only leaf package', async () => {
     'packages/orez-lite/src/client/payload-codec.ts',
     'packages/orez-lite/src/client/transport.ts',
   ])
-  expect(bundle.outputFiles[0]?.contents.byteLength).toBeLessThan(40_000)
+  // Byte-bounded request/response streaming costs ~1.4 KiB in the browser
+  // leaf. Keep that resilience budget explicit while still catching a server
+  // dependency graph accidentally entering this package.
+  expect(bundle.outputFiles[0]?.contents.byteLength).toBeLessThan(42_000)
 })

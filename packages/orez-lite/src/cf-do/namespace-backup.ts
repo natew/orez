@@ -1,3 +1,5 @@
+import { sha256 } from '@noble/hashes/sha2.js'
+
 export interface NamespaceBackupStatement {
   sql: string
   params?: readonly unknown[]
@@ -5,6 +7,8 @@ export interface NamespaceBackupStatement {
 
 export interface NamespaceBackupObject {
   body?: ReadableStream<Uint8Array>
+  /** Immutable object identity supplied by R2. */
+  etag?: string
   json(): Promise<unknown>
 }
 
@@ -79,6 +83,8 @@ export interface NamespaceBackupOptions<Env> {
     statements: readonly NamespaceBackupStatement[]
   ): Promise<void>
   listNamespaces(env: Env): Promise<readonly string[]>
+  /** Runs only after validation and the fresh-namespace guard pass. */
+  beforeImport?(env: Env, namespace: string): Promise<void>
   afterImport?(env: Env, namespace: string): Promise<void>
   excludedTables?: readonly string[]
   prefix?(namespace: string): string
@@ -98,7 +104,8 @@ export interface NamespaceBackupManager<Env> {
   importNamespace(
     env: Env,
     namespace: string,
-    key: string
+    key: string,
+    options?: { allowNonEmpty?: boolean }
   ): Promise<NamespaceRestoreSummary>
   pruneBackups(env: Env, namespace: string): Promise<void>
   runScheduledBackups(env: Env): Promise<{
@@ -261,6 +268,10 @@ async function* ndjsonLines(stream: ReadableStream<Uint8Array>) {
   if (carry.trim()) yield carry
 }
 
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 /**
  * Streaming, bounded-memory SQLite namespace backups for Orez Lite.
  *
@@ -277,7 +288,6 @@ export function createNamespaceBackupManager<Env>(
   const keepControlPlane = options.keepControlPlane ?? 30
   const controlPlaneNamespace = options.controlPlaneNamespace ?? 'singleton'
   const runBudgetMs = options.runBudgetMs ?? 10 * 60 * 1000
-  const logPrefix = options.logPrefix ?? '[orez]'
   const excludedTables = new Set(options.excludedTables ?? [])
   const acceptedFormats = new Set([options.format, ...(options.acceptedFormats ?? [])])
   const backupPrefix =
@@ -292,6 +302,12 @@ export function createNamespaceBackupManager<Env>(
       /^[A-Za-z0-9_]+_0\.(?:clients|mutations)$/.test(table) ||
       excludedTables.has(table) ||
       REPLICATION_BOOKKEEPING_TABLES.has(table)
+    )
+  }
+
+  const log = (fields: Record<string, unknown>) => {
+    console.log(
+      JSON.stringify({ event: 'orez_backup', format: options.format, ...fields })
     )
   }
 
@@ -320,6 +336,7 @@ export function createNamespaceBackupManager<Env>(
     env: Env,
     namespace: string
   ): Promise<NamespaceBackupSummary> => {
+    const startedAt = Date.now()
     const files = options.files(env)
     const exportedAt = new Date().toISOString()
     const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
@@ -365,6 +382,7 @@ export function createNamespaceBackupManager<Env>(
       let chunks: Uint8Array[] = []
       let bufferedBytes = 0
       let totalBytes = 0
+      const digest = sha256.create()
 
       const flushParts = async (final: boolean) => {
         if (!final && bufferedBytes < partBytes) return
@@ -388,8 +406,9 @@ export function createNamespaceBackupManager<Env>(
         bufferedBytes = merged.byteLength
       }
 
-      const writeLine = async (value: unknown) => {
+      const writeLine = async (value: unknown, includeInDigest = true) => {
         const bytes = encoder.encode(`${JSON.stringify(value)}\n`)
+        if (includeInDigest) digest.update(bytes)
         chunks.push(bytes)
         bufferedBytes += bytes.byteLength
         totalBytes += bytes.byteLength
@@ -403,6 +422,7 @@ export function createNamespaceBackupManager<Env>(
         await writeLine({
           kind: 'header',
           format: options.format,
+          integrity: 'sha256',
           ns: namespace,
           exportedAt,
           marker,
@@ -465,7 +485,15 @@ export function createNamespaceBackupManager<Env>(
           }
           tableRows[name] = tableRowTotal
         }
-        await writeLine({ kind: 'footer', tables: tables.length, rows: rowTotal })
+        await writeLine(
+          {
+            kind: 'footer',
+            tables: tables.length,
+            rows: rowTotal,
+            sha256: hex(digest.digest()),
+          },
+          false
+        )
         await flushParts(true)
         await upload.complete(uploadedParts)
       } catch (error) {
@@ -474,6 +502,13 @@ export function createNamespaceBackupManager<Env>(
         } catch {
           // Preserve the original export failure.
         }
+        log({
+          phase: 'export_upload',
+          outcome: 'error',
+          namespace,
+          durationMs: Date.now() - startedAt,
+          error: errorMessage(error),
+        })
         throw error
       }
 
@@ -508,14 +543,25 @@ export function createNamespaceBackupManager<Env>(
     if (!keepPreviousLatest) {
       await files.put(`${backupPrefix(namespace)}latest.json`, JSON.stringify(summary))
     }
+    log({
+      phase: 'export',
+      outcome: 'success',
+      namespace,
+      durationMs: Date.now() - startedAt,
+      rows: summary.rows,
+      bytes: summary.bytes,
+      parts: summary.parts,
+    })
     return summary
   }
 
   const importNamespace = async (
     env: Env,
     namespace: string,
-    key: string
+    key: string,
+    importOptions: { allowNonEmpty?: boolean } = {}
   ): Promise<NamespaceRestoreSummary> => {
+    const startedAt = Date.now()
     const files = options.files(env)
     const validationObject = await files.get(key)
     if (!validationObject?.body) throw new Error(`backup object not found: ${key}`)
@@ -526,10 +572,17 @@ export function createNamespaceBackupManager<Env>(
       indexes: string[]
     }
     let validatedHeader:
-      | { ns?: unknown; format?: unknown; orderedTables?: unknown }
+      | {
+          ns?: unknown
+          format?: unknown
+          integrity?: unknown
+          orderedTables?: unknown
+        }
       | undefined
-    let validatedFooter: { rows?: unknown } | undefined
+    let validatedFooter: { rows?: unknown; sha256?: unknown } | undefined
     let validatedRows = 0
+    const validationDigest = sha256.create()
+    const encoder = new TextEncoder()
     const tableEntries: TableEntry[] = []
     const seenTables = new Set<string>()
     for await (const line of ndjsonLines(validationObject.body)) {
@@ -559,10 +612,12 @@ export function createNamespaceBackupManager<Env>(
         }
         validatedRows += entry.rows.length
       } else if (entry.kind === 'footer') {
+        if (validatedFooter) throw new Error('backup contains multiple footers')
         validatedFooter = entry
       } else {
         throw new Error(`unsupported backup entry kind: ${String(entry.kind)}`)
       }
+      if (entry.kind !== 'footer') validationDigest.update(encoder.encode(`${line}\n`))
     }
     if (!validatedHeader || !validatedFooter) {
       throw new Error(`backup is truncated or not a supported dump`)
@@ -573,8 +628,61 @@ export function createNamespaceBackupManager<Env>(
       )
     }
 
+    if (
+      validatedHeader.integrity !== undefined &&
+      validatedHeader.integrity !== 'sha256'
+    ) {
+      throw new Error(
+        `unsupported backup integrity: ${String(validatedHeader.integrity)}`
+      )
+    }
+
+    const statedDigest =
+      typeof validatedFooter.sha256 === 'string' ? validatedFooter.sha256 : null
+    const actualDigest = hex(validationDigest.digest())
+    const requiresDigest =
+      validatedHeader.integrity === 'sha256' ||
+      String(validatedHeader.format) === 'orez-backup-v2'
+    if (requiresDigest && statedDigest === null) {
+      throw new Error('backup footer is missing its sha256 digest')
+    }
+    if (statedDigest !== null && statedDigest !== actualDigest) {
+      throw new Error('backup sha256 digest mismatch')
+    }
+    log({
+      phase: 'restore_validation',
+      outcome: 'success',
+      namespace,
+      durationMs: Date.now() - startedAt,
+      rows: validatedRows,
+      digest: statedDigest === null ? 'legacy_absent' : 'verified',
+    })
+
+    // This is the same schema query restore already needed for dependency-safe
+    // drops, moved before the first mutation. Default restores are fresh-only;
+    // destructive replacement requires an explicit operator override.
+    const liveTableRows = await options.query(
+      env,
+      namespace,
+      "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY name",
+      []
+    )
+    const liveTableNames = liveTableRows
+      .map((row) => String(row.name ?? ''))
+      .filter((name) => name && !isExcluded(name))
+    if (liveTableNames.length > 0 && importOptions.allowNonEmpty !== true) {
+      throw new Error(
+        `restore target is not empty (${liveTableNames.length} application tables); pass the explicit replacement override`
+      )
+    }
+
     const object = await files.get(key)
     if (!object?.body) throw new Error(`backup object disappeared during restore: ${key}`)
+    if (validationObject.etag && object.etag && validationObject.etag !== object.etag) {
+      throw new Error('backup object changed between validation and restore')
+    }
+
+    await options.beforeImport?.(env, namespace)
 
     for (const name of REPLICATION_BOOKKEEPING_TABLES) {
       try {
@@ -626,15 +734,6 @@ export function createNamespaceBackupManager<Env>(
       rowTotal += rows.length
     }
 
-    const liveTableRows = await options.query(
-      env,
-      namespace,
-      "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY name",
-      []
-    )
-    const liveTableNames = liveTableRows
-      .map((row) => String(row.name ?? ''))
-      .filter((name) => name && !isExcluded(name))
     const dropNames = [...new Set([...tableNames, ...liveTableNames])]
     const dropNamesBySqlIdentity = tableIdentities(dropNames)
     const dropDependencies = new Map(
@@ -729,7 +828,7 @@ export function createNamespaceBackupManager<Env>(
       counts[name] = Number(rows[0]?.n) || 0
     }
     await options.afterImport?.(env, namespace)
-    return {
+    const summary = {
       ok: true,
       ns: namespace,
       key,
@@ -737,7 +836,17 @@ export function createNamespaceBackupManager<Env>(
       tables: tableNames.length,
       rows: rowTotal,
       counts,
-    }
+    } as const
+    log({
+      phase: 'restore',
+      outcome: 'success',
+      namespace,
+      durationMs: Date.now() - startedAt,
+      rows: rowTotal,
+      tables: tableNames.length,
+      replacement: importOptions.allowNonEmpty === true,
+    })
+    return summary
   }
 
   const pruneBackups = async (env: Env, namespace: string) => {
@@ -766,7 +875,11 @@ export function createNamespaceBackupManager<Env>(
     let failed = 0
     for (const namespace of namespaces) {
       if (Date.now() - started > runBudgetMs) {
-        console.log(`${logPrefix} backup run: wall budget reached`)
+        log({
+          phase: 'scheduled',
+          outcome: 'budget_exhausted',
+          durationMs: Date.now() - started,
+        })
         break
       }
       try {
@@ -784,17 +897,31 @@ export function createNamespaceBackupManager<Env>(
         const summary = await exportNamespace(env, namespace)
         await pruneBackups(env, namespace)
         exported++
-        console.log(
-          `${logPrefix} backup: ${namespace} -> ${summary.key} (${summary.rows} rows, ${summary.bytes} bytes)`
-        )
+        log({
+          phase: 'scheduled_namespace',
+          outcome: 'success',
+          namespace,
+          rows: summary.rows,
+          bytes: summary.bytes,
+        })
       } catch (error) {
         failed++
-        console.log(`${logPrefix} backup failed for ${namespace}: ${errorMessage(error)}`)
+        log({
+          phase: 'scheduled_namespace',
+          outcome: 'error',
+          namespace,
+          error: errorMessage(error),
+        })
       }
     }
-    console.log(
-      `${logPrefix} backup run: exported ${exported} skipped ${skipped} failed ${failed} in ${Date.now() - started}ms`
-    )
+    log({
+      phase: 'scheduled',
+      outcome: failed > 0 ? 'partial' : 'success',
+      exported,
+      skipped,
+      failed,
+      durationMs: Date.now() - started,
+    })
     return { exported, skipped, failed }
   }
 

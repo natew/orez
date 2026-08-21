@@ -19,12 +19,21 @@ export function createServerTransaction<S extends Schema>(
 ): ServerTransaction<S> {
   const mutate: Record<string, Record<string, (value: unknown) => Promise<void>>> = {}
   for (const tableName of Object.keys(schema.tables)) {
-    mutate[tableName] = {
-      insert: (value) => executeCrud(applicationTx, schema, tableName, 'insert', value),
-      upsert: (value) => executeCrud(applicationTx, schema, tableName, 'upsert', value),
-      update: (value) => executeCrud(applicationTx, schema, tableName, 'update', value),
-      delete: (value) => executeCrud(applicationTx, schema, tableName, 'delete', value),
-    }
+    Object.defineProperty(mutate, tableName, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: {
+        insert: (value: unknown) =>
+          executeCrud(applicationTx, schema, tableName, 'insert', value),
+        upsert: (value: unknown) =>
+          executeCrud(applicationTx, schema, tableName, 'upsert', value),
+        update: (value: unknown) =>
+          executeCrud(applicationTx, schema, tableName, 'update', value),
+        delete: (value: unknown) =>
+          executeCrud(applicationTx, schema, tableName, 'delete', value),
+      },
+    })
   }
 
   const dbTransaction = {

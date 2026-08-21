@@ -138,7 +138,7 @@
     "orez-sync-native": "workspace:*"
   },
   "devDependencies": {
-    "@rocicorp/zero": "1.8.0",
+    "@rocicorp/zero": "1.9.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
