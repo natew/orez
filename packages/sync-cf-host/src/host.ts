@@ -1780,7 +1780,8 @@ export function createSyncDurableObject<
               config.queries,
               claims,
               transformVersion,
-              requestError
+              requestError,
+              config.tolerateUnknownQueries === true
             )
             body = { ...body, queries: { ...queries, patch } }
           }

@@ -48,7 +48,7 @@
     "bundle": "bun run build:dist && wrangler deploy --dry-run --outdir .wrangler/bundle",
     "measure": "bun run build:dist && bun measure.mjs",
     "test": "bun run test:config && bun run test:query-compiler && bun run test:package && bun run test:platform && bun run test:integration && bun run test:large-data && bun run test:ingest && bun run test:restart",
-    "test:config": "bun test config.test.mjs write-safeguards.test.mjs transaction-query.test.mjs upstream-response.test.mjs serving-lag.test.mjs",
+    "test:config": "bun test config.test.mjs query-patch.test.mjs write-safeguards.test.mjs transaction-query.test.mjs upstream-response.test.mjs serving-lag.test.mjs",
     "test:integration": "bun run build:dist && bun integration-test.mjs",
     "test:ingest": "bun run build:dist && bun ingest-test.mjs",
     "test:package": "bun run build:dist && node package-runtime-test.mjs",

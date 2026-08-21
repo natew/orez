@@ -135,6 +135,19 @@ export type SyncHostConfig<
    */
   queries: AnyQueryRegistry
   /**
+   * Drop a desired query whose name is not in `queries` instead of refusing the
+   * whole pull. Off by default, because where the client ships with the server
+   * an unknown name means the registry was not regenerated and the request
+   * error is how that gets noticed.
+   *
+   * Set it when the host serves clients that ship on their own schedule, such
+   * as a native app in an app store. Those clients are routinely older than the
+   * server and will ask for queries that have since been renamed or removed;
+   * without this the pull is refused as one unit and an app one feature out of
+   * date cannot sync anything at all.
+   */
+  tolerateUnknownQueries?: boolean
+  /**
    * Streaming fields for this namespace: which columns may carry a live,
    * uncommitted value, and their publish mode and rate bounds.
    *

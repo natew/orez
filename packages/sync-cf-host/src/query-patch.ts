@@ -19,23 +19,30 @@ const NAME_SEPARATOR = /[.|]/
  * `asQueryInternals`, whose instance-tag check fails whenever the app's
  * registry and this host resolve different copies of the zero module.
  *
- * A query the registry does not contain at all is version skew, not a bug: a
- * shipped native client is always older than the server it talks to, so it can
- * ask for a query that has since been renamed or removed. That put is dropped
- * and the rest of the patch resolves, leaving the client without rows for that
- * one query. Refusing the whole pull instead would take an app that is one
- * feature out of date and stop it syncing anything at all, which is what
- * happened to Contrast mobile on 2026-08-20.
+ * By default a name the registry does not contain fails the whole patch (the
+ * pull is refused as one unit) and the refusal names the query it came from, so
+ * a client that registers one unknown query alongside nine good ones is told
+ * which one is unknown. Where client and server ship together that is the right
+ * answer: an unknown name means the registry was not regenerated, and a loud
+ * failure is how the developer finds out.
+ *
+ * A host that serves independently shipped clients sets
+ * `tolerateUnknownQueries`. A native binary is always older than the server it
+ * talks to, so it can ask for a query since renamed or removed; that is version
+ * skew rather than a fault. Under the flag the unknown put is dropped and the
+ * rest of the patch resolves, leaving the client without rows for that one
+ * query instead of unable to sync anything at all.
  *
  * A query that IS registered but fails to build is a real fault in the app's
- * own code, so it still fails the whole patch and names the query it came from.
+ * own code either way, so it always fails the whole patch and names the query.
  */
 export function resolveQueryPatch(
   patch: readonly unknown[],
   queries: AnyQueryRegistry,
   context: unknown,
   transformVersion: number,
-  fail: (message: string) => Error
+  fail: (message: string) => Error,
+  tolerateUnknownQueries = false
 ): unknown[] {
   const result: unknown[] = []
   for (const operation of patch) {
@@ -63,6 +70,7 @@ export function resolveQueryPatch(
       | { fn?: (options: { args: unknown; ctx: unknown }) => unknown }
       | undefined
     if (!custom || typeof custom.fn !== 'function') {
+      if (!tolerateUnknownQueries) throw fail(`unknown or unsupported named query: ${op.name}`)
       // version skew: drop this query and keep syncing the rest.
       console.warn(`orez: dropping unknown named query from pull: ${op.name}`)
       continue
