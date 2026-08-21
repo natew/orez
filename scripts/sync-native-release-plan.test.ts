@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test'
 
-import { nextSyncNativeVersion, syncNativeRevision } from './sync-native-release-plan.js'
+import {
+  nextSyncNativeVersion,
+  parseNpmMetadata,
+  syncNativeRevision,
+} from './sync-native-release-plan.js'
 
 describe('sync-native release planning', () => {
   it('allocates the next immutable patch without editing source manifests', () => {
@@ -16,6 +20,15 @@ describe('sync-native release planning', () => {
     expect(syncNativeRevision('sync-native 0.1.7 core0.1.6:s2:q4:t3:l2\n')).toBe(
       'core0.1.6:s2:q4:t3:l2'
     )
+  })
+
+  it('normalizes npm 11 and npm 12 metadata output', () => {
+    const metadata = {
+      version: '0.1.6',
+      orezSourceCommit: 'abc123',
+    }
+    expect(parseNpmMetadata(JSON.stringify(metadata))).toEqual(metadata)
+    expect(parseNpmMetadata(JSON.stringify([metadata]))).toEqual(metadata)
   })
 
   it('rejects malformed versions and binary output', () => {

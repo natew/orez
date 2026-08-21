@@ -62,6 +62,16 @@ export function syncNativeRevision(versionOutput: string): string {
   return fields.slice(2).join(' ')
 }
 
+export function parseNpmMetadata(output: string): PackageMetadata {
+  const raw = JSON.parse(output) as
+    | PackageMetadata
+    | string
+    | Array<PackageMetadata | string>
+  const metadata = Array.isArray(raw) ? raw.at(-1) : raw
+  if (!metadata) return {}
+  return typeof metadata === 'string' ? { version: metadata } : metadata
+}
+
 function npmMetadata(spec: string): PackageMetadata | undefined {
   const result = spawnSync(
     'npm',
@@ -69,10 +79,7 @@ function npmMetadata(spec: string): PackageMetadata | undefined {
     { encoding: 'utf8' }
   )
   if (result.error) throw result.error
-  if (result.status === 0) {
-    const metadata = JSON.parse(result.stdout) as PackageMetadata | string
-    return typeof metadata === 'string' ? { version: metadata } : metadata
-  }
+  if (result.status === 0) return parseNpmMetadata(result.stdout)
   if (/E404|404 Not Found|is not in this registry/i.test(result.stderr)) return undefined
   throw new Error(`could not read npm metadata for ${spec}: ${result.stderr.trim()}`)
 }
