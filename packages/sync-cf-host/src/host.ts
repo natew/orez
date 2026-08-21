@@ -688,8 +688,14 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
   }
 }
 
+export interface SyncDurableObjectInstance<
+  Env extends SyncHostEnv,
+> extends DurableObject<Env> {
+  fetch(request: Request): Promise<Response>
+}
+
 export interface SyncDurableObjectConstructor<Env extends SyncHostEnv> {
-  new (ctx: DurableObjectState, env: Env): DurableObject<Env>
+  new (ctx: DurableObjectState, env: Env): SyncDurableObjectInstance<Env>
 }
 
 /** Create the namespace Durable Object class for one bundled consumer config. */
@@ -852,6 +858,15 @@ export function createSyncDurableObject<
             schema: config.schema,
           })
         : null
+      // Upstream-backed namespaces are initialized lazily so a notify for a
+      // namespace with no wake subscribers remains a true zero-read/write
+      // fast path. Local-execution namespaces have no such notify path, and
+      // preserving eager initialization there matters for consumers that
+      // subclass this Durable Object and handle an application route before
+      // delegating to super.fetch().
+      if (!config.upstream) {
+        ctx.blockConcurrencyWhile(async () => this.#initialize())
+      }
     }
 
     #initialize(): void {

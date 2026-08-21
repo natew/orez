@@ -120,6 +120,17 @@ async function eventually(check, timeoutMs, label) {
 }
 
 try {
+  // A local-execution consumer may add an application route by subclassing
+  // the generated DO. Its first request must see the initialized application
+  // schema even though it never delegates to the base fetch handler.
+  const extensionSchema = await fetch(`${origin}/extension-schema`)
+  equal(extensionSchema.status, 200, 'subclass route sees initialized local schema')
+  assert.ok(
+    Number.isSafeInteger((await extensionSchema.json()).count),
+    'subclass route can query an initialized application table'
+  )
+  assertions++
+
   // cross-origin browser consumers (a hosted simulator driving the app's real
   // backend): an allowed origin's preflight is answered before the auth wall,
   // real responses carry allow-origin, and unknown origins get neither.

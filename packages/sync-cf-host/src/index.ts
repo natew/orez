@@ -15,7 +15,7 @@ export type {
   SyncSql,
   UpstreamConfig,
 } from './types.js'
-export type { SyncDurableObjectConstructor } from './host.js'
+export type { SyncDurableObjectConstructor, SyncDurableObjectInstance } from './host.js'
 export type {
   CompiledTransactionQueryNode,
   CompiledTransactionQueryPlan,
