@@ -22,6 +22,14 @@ export type CloudflareNativeTableShape = {
   name: string
 }
 
+export type CloudflareNativeIndexShape = {
+  columns: string[]
+  name: string
+  predicate: string | null
+  table: string
+  unique: boolean
+}
+
 export type CloudflareMigrationModuleSourceParts =
   | {
       mode: 'noop'
@@ -35,6 +43,7 @@ export type CloudflareMigrationModuleSourceParts =
       nativeSqlStatements: unknown
       publicTables?: Array<{ table: string; publicTable: string }>
       expectedTables?: CloudflareNativeTableShape[]
+      expectedIndexes?: CloudflareNativeIndexShape[]
     }
 
 export function buildMigrationModuleSource(
@@ -66,6 +75,7 @@ export const SCHEMA_VERSION = ${JSON.stringify(parts.schemaVersion)}
 const nativeSqlStatements = ${JSON.stringify(parts.nativeSqlStatements)}
 const configuredPublicTables = ${JSON.stringify(parts.publicTables ?? [])}
 const expectedTables = ${JSON.stringify(parts.expectedTables ?? [])}
+const expectedIndexes = ${JSON.stringify(parts.expectedIndexes ?? [])}
 const migrationTable = ${JSON.stringify(migrationTableName)}
 
 function quoteIdentifier(value) {
@@ -118,6 +128,14 @@ async function shouldSkipStatement(tx, statement) {
     )
     if (tempRows.length === 0) return true
   }
+  if (statement.migrateIfColumnType) {
+    const condition = statement.migrateIfColumnType
+    const rows = await tx.query(
+      'SELECT type FROM pragma_table_info(?) WHERE name = ? LIMIT 1',
+      [condition.table, condition.column],
+    )
+    if (rows.length === 0 || !columnTypeMatches(rows[0].type, condition)) return true
+  }
   const condition = statement.skipIfColumnExists || statement.skipIfColumnMissing
   if (!condition) return false
   const rows = await tx.query('PRAGMA table_info(' + quoteIdentifier(condition.table) + ')')
@@ -146,6 +164,58 @@ function sqliteTypeAffinity(value) {
     return 'real'
   }
   return 'numeric'
+}
+
+function columnTypeMatches(actualType, condition) {
+  if (typeof condition.declaredType === 'string') {
+    return normalizeSqlType(actualType) === normalizeSqlType(condition.declaredType)
+  }
+  if (
+    condition.affinity === 'blob' ||
+    condition.affinity === 'integer' ||
+    condition.affinity === 'numeric' ||
+    condition.affinity === 'real' ||
+    condition.affinity === 'text'
+  ) {
+    return sqliteTypeAffinity(actualType) === condition.affinity
+  }
+  throw new TypeError('migrateIfColumnType requires declaredType or a SQLite affinity')
+}
+
+function normalizePredicate(value) {
+  if (value === null) return null
+  // fold identifier quoting and whitespace, but never the contents of
+  // single-quoted string literals
+  return value
+    .split(/('(?:[^']|'')*')/)
+    .map((part, position) =>
+      position % 2 === 1
+        ? part
+        : part
+            .toLowerCase()
+            .replaceAll('"', '')
+            .replaceAll(String.fromCharCode(96), '')
+            .replaceAll('[', '')
+            .replaceAll(']', '')
+            .replaceAll(/\\s+/g, ' '),
+    )
+    .join('')
+    .trim()
+}
+
+function indexPredicate(indexSql) {
+  if (!indexSql) return null
+  // partial-index predicates cannot contain subqueries, so the first WHERE
+  // after the column list closes is the predicate
+  const match = /^[^)]*\\)\\s*WHERE\\s+([\\s\\S]+)$/i.exec(indexSql)
+  return match ? match[1].trim() : null
+}
+
+function normalizeIndexDdl(value) {
+  if (!value) return null
+  return normalizePredicate(value)
+    .replace(/^create (unique )?index if not exists /, 'create $1index ')
+    .replace(/;$/, '')
 }
 
 // every table's columns in ONE round trip. this used to be a PRAGMA
@@ -194,6 +264,44 @@ async function readLiveColumns(tx) {
     })
   }
   return tables
+}
+
+async function readLiveIndexes(tx) {
+  const indexes = new Map()
+  if (expectedIndexes.length === 0) return indexes
+  // read only the expected names. sqlite_master supplies the predicate-bearing
+  // DDL while the table-valued pragmas supply uniqueness and ordered columns
+  // in the same application-SQL call. pack names below workerd's bind limit;
+  // soot's current 37 indexes fit in one query.
+  const indexesPerQuery = 64
+  for (let offset = 0; offset < expectedIndexes.length; offset += indexesPerQuery) {
+    const expected = expectedIndexes.slice(offset, offset + indexesPerQuery)
+    const rows = await tx.query(
+      'SELECT m.name AS indexName, m.tbl_name AS tableName, m.sql AS indexSql,' +
+        ' l."unique" AS indexUnique, i.seqno AS columnOrder, i.name AS columnName' +
+        ' FROM sqlite_master m JOIN pragma_index_list(m.tbl_name) l ON l.name = m.name' +
+        ' LEFT JOIN pragma_index_info(m.name) i' +
+        " WHERE m.type = 'index' AND m.name IN (" +
+        expected.map(() => '?').join(', ') + ')',
+      expected.map((index) => index.name),
+    )
+    for (const row of rows) {
+      let index = indexes.get(row.indexName)
+      if (!index) {
+        index = {
+          columns: [],
+          sql: row.indexSql,
+          table: row.tableName,
+          unique: Number(row.indexUnique) !== 0,
+        }
+        indexes.set(row.indexName, index)
+      }
+      if (typeof row.columnName === 'string') {
+        index.columns[Number(row.columnOrder)] = row.columnName
+      }
+    }
+  }
+  return indexes
 }
 
 async function assertExpectedSchema(tx) {
@@ -307,6 +415,48 @@ async function assertExpectedSchema(tx) {
             ', found ' + actual.pk,
         )
       }
+    }
+  }
+
+  const liveIndexes = await readLiveIndexes(tx)
+  for (const expected of expectedIndexes) {
+    const actual = liveIndexes.get(expected.name)
+    if (!actual) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table +
+          ': missing ' + (expected.unique ? 'unique ' : '') + 'index ' + expected.name,
+      )
+    }
+    if (actual.table !== expected.table) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected table ' + expected.table + ', found ' + actual.table,
+      )
+    }
+    if (actual.unique !== expected.unique) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected ' + (expected.unique ? 'unique' : 'non-unique') +
+          ', found ' + (actual.unique ? 'unique' : 'non-unique'),
+      )
+    }
+    if (
+      actual.columns.length !== expected.columns.length ||
+      actual.columns.some((column, position) => column !== expected.columns[position])
+    ) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected columns (' + expected.columns.join(', ') + '), found (' +
+          actual.columns.join(', ') + ')',
+      )
+    }
+    const actualPredicate = indexPredicate(actual.sql)
+    if (normalizePredicate(actualPredicate) !== expected.predicate) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected predicate ' + (expected.predicate ?? '(none)') +
+          ', found ' + (actualPredicate ?? '(none)'),
+      )
     }
   }
 }
@@ -459,6 +609,11 @@ const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigratio
 //     column, a type change and a NOT NULL change, but not a surplus one, so a
 //     ledgered ALTER TABLE ... DROP COLUMN whose effect rolled back is neither
 //     resurrected nor flagged.
+//   - a standalone DROP INDEX. its intended effect is absence, so an index
+//     still present after rollback is not evidence this pass can distinguish
+//     from a deliberately retained surplus index. required CREATE INDEX DDL is
+//     checked and repaired; removal of an index that is no longer expected is
+//     not.
 //   - a column a later statement in the SAME file renames away. the
 //     x__rebuild scratch columns in 20260723140000_declare_epoch_ms_integer
 //     are added, copied, then renamed over the original, so the ADD COLUMN rule
@@ -466,20 +621,22 @@ const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigratio
 //     namespace. surplus columns, so assertExpectedSchema stays quiet. this
 //     predates the block work and is not fixed here.
 //   - a rebuild block that changes only nullability, defaults or foreign keys
-//     without changing the column SET. its rollback leaves a table this pass
-//     reads as landed. it does not silently pass: assertExpectedSchema fails
-//     the run on the nullability difference, so the namespace reports loudly
-//     instead of self-repairing.
+//     or declared types without changing the column SET. its rollback leaves a
+//     table this pass reads as landed. migrateIfColumnType controls whether the
+//     block runs initially, but it does not make that rollback observable here.
+//     it does not silently pass: assertExpectedSchema fails the run on the
+//     shape difference, so the namespace reports loudly instead of
+//     self-repairing.
 async function reconcilePhantomLedger(tx, applied) {
   if (applied.size === 0) return
   const schemaRows = await tx.query(
-    "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'index')",
+    "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index')",
   )
   const tables = new Set()
-  const indexes = new Set()
+  const indexes = new Map()
   for (const row of schemaRows) {
     if (row.type === 'table') tables.add(row.name)
-    else indexes.add(row.name)
+    else indexes.set(row.name, row.sql)
   }
   const liveColumns = await readLiveColumns(tx)
   // a drizzle rebuild block (CREATE __new_<t> / INSERT..SELECT / DROP <t> /
@@ -517,6 +674,7 @@ async function reconcilePhantomLedger(tx, applied) {
     }
   }
   const resurrect = new Set()
+  const replayWholeFiles = new Set()
   for (const [index, statement] of nativeSqlStatements.entries()) {
     const item = typeof statement === 'string'
       ? { id: 'statement-' + index, sql: statement }
@@ -545,6 +703,13 @@ async function reconcilePhantomLedger(tx, applied) {
     // example, an index guarded by a column that the live schema does not
     // have). Apply the exact execution predicate before effect inference.
     if (item.skipIfTableMissing && !tables.has(item.skipIfTableMissing)) continue
+    if (item.migrateIfColumnType) {
+      const condition = item.migrateIfColumnType
+      const column = (liveColumns.get(condition.table) || []).find(
+        (candidate) => candidate.name === condition.column,
+      )
+      if (!column || !columnTypeMatches(column.type, condition)) continue
+    }
     const condition = item.skipIfColumnExists || item.skipIfColumnMissing
     if (condition) {
       const columns = liveColumns.get(condition.table) || []
@@ -562,7 +727,12 @@ async function reconcilePhantomLedger(tx, applied) {
       // trailing CREATE INDEXes stay ledgered, leaving the rebuilt table
       // bare. that silently removed the UNIQUE index invite redemption's
       // ON CONFLICT target needs.
-      missing = !indexes.has(match[1]) || rebuiltTables.has(match[2])
+      const actualDdl = indexes.get(match[1])
+      const ddlMismatch =
+        actualDdl !== undefined &&
+        normalizeIndexDdl(actualDdl) !== normalizeIndexDdl(sql)
+      missing = actualDdl === undefined || rebuiltTables.has(match[2]) || ddlMismatch
+      if (ddlMismatch) replayWholeFiles.add(file)
     } else if ((match = /^ALTER TABLE\\s+[\`"]?(\\w+)[\`"]?\\s+RENAME TO\\s+[\`"]?(\\w+)/i.exec(sql))) {
       missing = !tables.has(match[2])
     } else if ((match = /^ALTER TABLE\\s+[\`"]?(\\w+)[\`"]?\\s+ADD\\s+(?:COLUMN\\s+)?[\`"]?(\\w+)/i.exec(sql))) {
@@ -571,7 +741,35 @@ async function reconcilePhantomLedger(tx, applied) {
     } else if ((match = /^(?:INSERT INTO|UPDATE|DELETE FROM|ALTER TABLE)\\s+[\`"]?(\\w+)/i.exec(sql))) {
       missing = !tables.has(match[1])
     }
-    if (missing) resurrect.add(baseId)
+    if (missing) {
+      resurrect.add(baseId)
+      // A source-type guard commonly gates the first ADD scratch column of a
+      // repair file. Its later siblings then guard on that scratch column. A
+      // rolled-back transaction leaves the ADD detectably absent while those
+      // sibling predicates read false against this pass's initial schema
+      // snapshot. Replay the whole file so they re-evaluate after the ADD.
+      if (item.migrateIfColumnType) replayWholeFiles.add(file)
+    }
+  }
+  // Some repair effects are meaningful only as a whole migration file. An
+  // index repair needs its DROP before CREATE ... IF NOT EXISTS, and a guarded
+  // scratch-column repair needs its later statements to observe the ADD. Once
+  // one of those effects is verifiably absent, the file transaction rolled
+  // back, so clear every applied sibling and replay it in order.
+  if (replayWholeFiles.size > 0) {
+    for (const [index, statement] of nativeSqlStatements.entries()) {
+      const item = typeof statement === 'string'
+        ? { id: 'statement-' + index, sql: statement }
+        : statement
+      if (!item || typeof item.sql !== 'string') continue
+      const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+      if (
+        replayWholeFiles.has(baseId.split(':')[0]) &&
+        appliedHasStatement(applied, baseId)
+      ) {
+        resurrect.add(baseId)
+      }
+    }
   }
   if (resurrect.size === 0) return
   // a resurrected rebuild block must re-run with its sibling PRAGMA

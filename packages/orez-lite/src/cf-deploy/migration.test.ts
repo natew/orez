@@ -353,6 +353,144 @@ describe('buildMigrationModuleSource', () => {
     )
   })
 
+  it('validates a unique index from its live DDL and pragma shape', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = { tables: {}, relationships: {} }
+    `)
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-index-predicate',
+        schemaImportSpecifier: schemaModuleUrl,
+        nativeSqlStatements: [],
+        expectedTables: [
+          {
+            name: 'widget',
+            columns: [
+              {
+                name: 'slug',
+                notNull: true,
+                primaryKeyOrder: 1,
+                sqlType: 'text',
+              },
+              {
+                name: 'status',
+                notNull: true,
+                primaryKeyOrder: 0,
+                sqlType: 'text',
+              },
+            ],
+          },
+        ],
+        expectedIndexes: [
+          {
+            columns: ['slug'],
+            name: 'widget_active_slug_idx',
+            predicate: "widget.status <> 'canceled'",
+            table: 'widget',
+            unique: true,
+          },
+        ],
+      })
+    )
+    const liveIndexRows = {
+      current: [
+        {
+          columnName: 'slug',
+          columnOrder: 0,
+          indexName: 'widget_active_slug_idx',
+          indexSql: 'CREATE UNIQUE INDEX widget_active_slug_idx ON widget (slug)',
+          indexUnique: 1,
+          tableName: 'widget',
+        },
+      ],
+    }
+    const tx = {
+      async query(sql: string) {
+        if (sql.startsWith('WITH expected(baseId, lowerId, upperId)')) return []
+        if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) {
+          return [
+            {
+              tableName: 'widget',
+              columnName: 'slug',
+              columnType: 'text',
+              columnNotNull: 1,
+              columnPk: 1,
+            },
+            {
+              tableName: 'widget',
+              columnName: 'status',
+              columnType: 'text',
+              columnNotNull: 1,
+              columnPk: 0,
+            },
+          ]
+        }
+        if (sql.includes('FROM sqlite_master m JOIN pragma_index_list')) {
+          return liveIndexRows.current
+        }
+        if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables')) return []
+        throw new Error(`unexpected query: ${sql}`)
+      },
+      async exec(sql: string) {
+        if (
+          sql.startsWith('CREATE TABLE IF NOT EXISTS "__contrast_cf_migrations"') ||
+          sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')
+        ) {
+          return
+        }
+        throw new Error(`unexpected exec: ${sql}`)
+      },
+      async registerTables() {},
+    }
+    const client = {
+      async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
+        await run(tx)
+      },
+    }
+
+    await expect(migrationModule.orezAppSchema.migrate({ client })).rejects.toThrow(
+      `index widget_active_slug_idx expected predicate widget.status <> 'canceled', found (none)`
+    )
+
+    liveIndexRows.current = []
+    await expect(migrationModule.orezAppSchema.migrate({ client })).rejects.toThrow(
+      'missing unique index widget_active_slug_idx'
+    )
+
+    liveIndexRows.current = [
+      {
+        columnName: 'slug',
+        columnOrder: 0,
+        indexName: 'widget_active_slug_idx',
+        indexSql: `CREATE INDEX widget_active_slug_idx ON widget (slug) WHERE status <> 'canceled'`,
+        indexUnique: 0,
+        tableName: 'widget',
+      },
+    ]
+    await expect(migrationModule.orezAppSchema.migrate({ client })).rejects.toThrow(
+      'index widget_active_slug_idx expected unique, found non-unique'
+    )
+
+    liveIndexRows.current[0]!.indexUnique = 1
+    liveIndexRows.current[0]!.tableName = 'otherWidget'
+    await expect(migrationModule.orezAppSchema.migrate({ client })).rejects.toThrow(
+      'index widget_active_slug_idx expected table widget, found otherWidget'
+    )
+
+    liveIndexRows.current[0]!.tableName = 'widget'
+    liveIndexRows.current[0]!.columnName = 'status'
+    await expect(migrationModule.orezAppSchema.migrate({ client })).rejects.toThrow(
+      'index widget_active_slug_idx expected columns (slug), found (status)'
+    )
+
+    liveIndexRows.current[0]!.columnName = 'slug'
+    liveIndexRows.current[0]!.indexSql = `CREATE UNIQUE INDEX widget_active_slug_idx ON widget (slug) WHERE "widget"."status" <> 'canceled'`
+    await expect(migrationModule.orezAppSchema.migrate({ client })).resolves.toEqual({
+      tables: [],
+    })
+  })
+
   it('leaves ledgered conditional statements unchanged when their predicate skips', async () => {
     const schemaModuleUrl = javascriptModuleUrl(`
       export const schema = { tables: {}, relationships: {} }
@@ -433,6 +571,98 @@ describe('buildMigrationModuleSource', () => {
     await migrationModule.orezAppSchema.migrate({ client })
     expect(ledgerWrites).toEqual([])
     expect(ledger.size).toBe(1)
+  })
+
+  it('runs a guarded migration statement only for the matching column type', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = { tables: {}, relationships: {} }
+    `)
+    const runWithGuard = async (
+      columnType: string,
+      migrateIfColumnType: Record<string, unknown>
+    ) => {
+      const migrationModule = await importJavascriptModule(
+        buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+          mode: 'native',
+          schemaVersion: 'schema-column-type-guard',
+          schemaImportSpecifier: schemaModuleUrl,
+          nativeSqlStatements: [
+            {
+              id: '0001_guard/migration.sql:0',
+              sql: 'CREATE TABLE repaired (id TEXT PRIMARY KEY)',
+              migrateIfColumnType,
+            },
+          ],
+        })
+      )
+      const ledger = new Set<string>()
+      const executed: string[] = []
+      const tx = {
+        async query(sql: string, params: readonly unknown[] = []) {
+          const applied = migrationLedgerRows(sql, params, ledger)
+          if (applied) return applied
+          if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
+          if (sql.startsWith('SELECT type FROM pragma_table_info')) {
+            return [{ type: columnType }]
+          }
+          if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables'))
+            return []
+          throw new Error(`unexpected query: ${sql}`)
+        },
+        async exec(sql: string, params: readonly unknown[] = []) {
+          if (
+            sql.startsWith('CREATE TABLE IF NOT EXISTS "__contrast_cf_migrations"') ||
+            sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')
+          ) {
+            return
+          }
+          if (sql === 'CREATE TABLE repaired (id TEXT PRIMARY KEY)') {
+            executed.push(sql)
+            return
+          }
+          if (sql.startsWith('INSERT INTO "__contrast_cf_migrations"')) {
+            ledger.add(String(params[0]))
+            return
+          }
+          throw new Error(`unexpected exec: ${sql}`)
+        },
+        async registerTables() {},
+      }
+      const client = {
+        async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
+          await run(tx)
+        },
+      }
+
+      await migrationModule.orezAppSchema.migrate({ client })
+      return { executed, ledger }
+    }
+
+    await expect(
+      runWithGuard('timestamp', {
+        table: 'widget',
+        column: 'createdAt',
+        declaredType: ' TIMESTAMP ',
+      })
+    ).resolves.toMatchObject({
+      executed: ['CREATE TABLE repaired (id TEXT PRIMARY KEY)'],
+    })
+    await expect(
+      runWithGuard('timestamp', {
+        table: 'widget',
+        column: 'createdAt',
+        affinity: 'integer',
+      })
+    ).resolves.toMatchObject({ executed: [] })
+    await expect(
+      runWithGuard('decimal(10, 2)', {
+        table: 'widget',
+        column: 'createdAt',
+        affinity: 'numeric',
+      })
+    ).resolves.toMatchObject({
+      executed: ['CREATE TABLE repaired (id TEXT PRIMARY KEY)'],
+    })
   })
 
   it('does not partially replay a completed staging-table lifecycle', async () => {

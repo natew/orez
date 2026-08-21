@@ -1,9 +1,24 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
+export type NativeSqlColumnTypeGuard = {
+  column: string
+  table: string
+} & (
+  | {
+      affinity: 'blob' | 'integer' | 'numeric' | 'real' | 'text'
+      declaredType?: never
+    }
+  | {
+      affinity?: never
+      declaredType: string
+    }
+)
+
 export type NativeSqlMigrationStatement = {
   id: string
   sql: string
+  migrateIfColumnType?: NativeSqlColumnTypeGuard
   declaredColumns?: Array<{ definition: string; name: string }>
   rebuildColumns?: string[]
   rebuildTarget?: string

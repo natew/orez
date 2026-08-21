@@ -641,6 +641,47 @@ describe('ZeroDO transactional CDC integration', () => {
 })
 
 describe('ZeroDO cache state across an aborted storage transaction', () => {
+  it('guards batch statements by declared column type or SQLite affinity', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE widget (createdAt timestamp)')
+
+    const response = await zero.handleBatch(
+      batchRequest([
+        {
+          sql: 'CREATE TABLE declared_match (id TEXT)',
+          migrateIfColumnType: {
+            table: 'widget',
+            column: 'createdAt',
+            declaredType: ' TIMESTAMP ',
+          },
+        },
+        {
+          sql: 'CREATE TABLE affinity_match (id TEXT)',
+          migrateIfColumnType: {
+            table: 'widget',
+            column: 'createdAt',
+            affinity: 'numeric',
+          },
+        },
+        {
+          sql: 'CREATE TABLE affinity_mismatch (id TEXT)',
+          migrateIfColumnType: {
+            table: 'widget',
+            column: 'createdAt',
+            affinity: 'integer',
+          },
+        },
+      ])
+    )
+
+    expect(response.status).toBe(200)
+    expect(
+      sql
+        .exec("SELECT name FROM sqlite_master WHERE name LIKE '%_match' ORDER BY name")
+        .toArray()
+    ).toEqual([{ name: 'affinity_match' }, { name: 'declared_match' }])
+  })
+
   it('still captures a table whose registration a failed batch rolled back', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT UNIQUE)')

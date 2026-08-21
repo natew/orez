@@ -308,6 +308,206 @@ function decompose(written: Array<{ sql: string; rows: number }>) {
 }
 
 describe('stale namespace migration replay cost', () => {
+  it('replays every sibling after a guarded scratch-column repair rolls back', async () => {
+    const core = await createWorkerCore()
+    core.sql.exec('CREATE TABLE widget (id TEXT PRIMARY KEY, createdAt timestamp)')
+    core.sql.exec("INSERT INTO widget VALUES ('w1', '2026-08-21')")
+    core.sql.exec(TX_MANIFEST_DDL)
+    core.sql.exec(
+      'CREATE TABLE __contrast_cf_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)'
+    )
+    const statements = [
+      {
+        id: '0001_type_repair/migration.sql:0',
+        sql: 'ALTER TABLE widget ADD COLUMN createdAt_integer INTEGER',
+        migrateIfColumnType: {
+          table: 'widget',
+          column: 'createdAt',
+          declaredType: 'timestamp',
+        },
+      },
+      {
+        id: '0001_type_repair/migration.sql:1',
+        sql: 'UPDATE widget SET createdAt_integer = 7',
+        skipIfColumnMissing: { table: 'widget', column: 'createdAt_integer' },
+      },
+      {
+        id: '0001_type_repair/migration.sql:2',
+        sql: 'CREATE INDEX IF NOT EXISTS widget_createdAt_integer_idx ON widget (createdAt_integer)',
+        skipIfColumnMissing: { table: 'widget', column: 'createdAt_integer' },
+      },
+    ]
+    for (const statement of statements) {
+      core.sql.exec(
+        'INSERT INTO __contrast_cf_migrations (id, applied_at) VALUES (?, ?)',
+        `${statement.id}:seeded`,
+        1
+      )
+    }
+    const schemaSource = `
+      export const schema = {
+        tables: {
+          widget: {
+            name: 'widget',
+            columns: {
+              id: { type: 'string' },
+              createdAt: { type: 'string' },
+              createdAt_integer: { type: 'number' },
+            },
+            primaryKey: ['id'],
+          },
+        },
+        relationships: {},
+      }
+    `
+    const schemaUrl = `data:text/javascript;base64,${Buffer.from(schemaSource).toString('base64')}`
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'type-repair-v2',
+        schemaImportSpecifier: schemaUrl,
+        nativeSqlStatements: statements,
+        expectedTables: [
+          {
+            name: 'widget',
+            columns: [
+              { name: 'id', notNull: true, primaryKeyOrder: 1, sqlType: 'text' },
+              {
+                name: 'createdAt',
+                notNull: false,
+                primaryKeyOrder: 0,
+                sqlType: 'timestamp',
+              },
+              {
+                name: 'createdAt_integer',
+                notNull: false,
+                primaryKeyOrder: 0,
+                sqlType: 'integer',
+              },
+            ],
+          },
+        ],
+      })
+    )
+
+    await migrationModule.orezAppSchema.migrate({
+      client: migrationClient(core),
+      instance: 'ns:type-repair',
+    })
+
+    expect(core.sql.exec('SELECT createdAt_integer FROM widget').one()).toEqual({
+      createdAt_integer: 7,
+    })
+    expect(
+      core.sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE name = 'widget_createdAt_integer_idx'"
+        )
+        .toArray()
+    ).toHaveLength(1)
+  })
+
+  it('replays a ledgered index repair when the live DDL still has the old predicate', async () => {
+    const core = await createWorkerCore()
+    core.sql.exec('CREATE TABLE widget (slug TEXT PRIMARY KEY, status TEXT NOT NULL)')
+    core.sql.exec('CREATE UNIQUE INDEX widget_active_slug_idx ON widget (slug)')
+    core.sql.exec(TX_MANIFEST_DDL)
+    core.sql.exec(
+      'CREATE TABLE __contrast_cf_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)'
+    )
+    const statements = [
+      {
+        id: '0001_repair/migration.sql:0',
+        sql: 'DROP INDEX IF EXISTS widget_active_slug_idx',
+      },
+      {
+        id: '0001_repair/migration.sql:1',
+        sql: `CREATE UNIQUE INDEX IF NOT EXISTS widget_active_slug_idx ON widget (slug) WHERE status <> 'canceled'`,
+      },
+    ]
+    for (const statement of statements) {
+      core.sql.exec(
+        'INSERT INTO __contrast_cf_migrations (id, applied_at) VALUES (?, ?)',
+        `${statement.id}:seeded`,
+        1
+      )
+    }
+    const schemaSource = `
+      export const schema = {
+        tables: {
+          widget: {
+            name: 'widget',
+            columns: { slug: { type: 'string' }, status: { type: 'string' } },
+            primaryKey: ['slug'],
+          },
+        },
+        relationships: {},
+      }
+    `
+    const schemaUrl = `data:text/javascript;base64,${Buffer.from(schemaSource).toString('base64')}`
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'index-repair-v2',
+        schemaImportSpecifier: schemaUrl,
+        nativeSqlStatements: statements,
+        expectedTables: [
+          {
+            name: 'widget',
+            columns: [
+              {
+                name: 'slug',
+                notNull: true,
+                primaryKeyOrder: 1,
+                sqlType: 'text',
+              },
+              {
+                name: 'status',
+                notNull: true,
+                primaryKeyOrder: 0,
+                sqlType: 'text',
+              },
+            ],
+          },
+        ],
+        expectedIndexes: [
+          {
+            columns: ['slug'],
+            name: 'widget_active_slug_idx',
+            predicate: "status <> 'canceled'",
+            table: 'widget',
+            unique: true,
+          },
+        ],
+      })
+    )
+
+    core.start()
+    await migrationModule.orezAppSchema.migrate({
+      client: migrationClient(core),
+      instance: 'ns:index-repair',
+    })
+    core.stop()
+
+    expect(
+      core.sql
+        .exec("SELECT sql FROM sqlite_master WHERE name = 'widget_active_slug_idx'")
+        .one()!.sql
+    ).toContain("WHERE status <> 'canceled'")
+    expect(
+      core.sql.exec('SELECT id FROM __contrast_cf_migrations ORDER BY id').toArray()
+    ).toHaveLength(2)
+    expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(11)
+
+    core.start()
+    await migrationModule.orezAppSchema.migrate({
+      client: migrationClient(core),
+      instance: 'ns:index-repair',
+    })
+    core.stop()
+    expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(0)
+  })
+
   it('measures where the billable rows of one replay go', async () => {
     const core = await createWorkerCore()
     buildStaleNamespace(core)

@@ -143,6 +143,12 @@ interface SqlExecStatement {
   // client-side handling for the embedded path).
   skipIfColumnExists?: { table: string; column: string }
   skipIfColumnMissing?: { table: string; column: string }
+  migrateIfColumnType?: {
+    table: string
+    column: string
+    affinity?: 'blob' | 'integer' | 'numeric' | 'real' | 'text'
+    declaredType?: string
+  }
 }
 interface SqlWriteMeasurement {
   sql: string
@@ -277,6 +283,23 @@ function sqliteTypeForSchemaColumn(type: string): string {
     bigint: 'TEXT',
   }
   return types[type] || 'TEXT'
+}
+
+function normalizeDeclaredSqlType(value: unknown): string {
+  return String(value).trim().toLowerCase().replaceAll(/\s+/g, ' ')
+}
+
+function declaredSqlTypeAffinity(value: unknown): string {
+  const type = normalizeDeclaredSqlType(value)
+  if (type.includes('int')) return 'integer'
+  if (type.includes('char') || type.includes('clob') || type.includes('text')) {
+    return 'text'
+  }
+  if (!type || type.includes('blob')) return 'blob'
+  if (type.includes('real') || type.includes('floa') || type.includes('doub')) {
+    return 'real'
+  }
+  return 'numeric'
 }
 
 function sqliteErrorOffset(message: string): number | null {
@@ -1223,6 +1246,12 @@ export class ZeroDO extends DurableObject {
                 item.skipIfColumnMissing.table,
                 item.skipIfColumnMissing.column
               )
+            ) {
+              continue
+            }
+            if (
+              item.migrateIfColumnType &&
+              !this.columnTypeGuardMatches(item.migrateIfColumnType)
             ) {
               continue
             }
@@ -2255,6 +2284,42 @@ export class ZeroDO extends DurableObject {
     } catch {
       return false
     }
+  }
+
+  private columnTypeGuardMatches(condition: {
+    table: string
+    column: string
+    affinity?: string
+    declaredType?: string
+  }): boolean {
+    let actualType: unknown
+    try {
+      const cursor = this.sql.exec(
+        'SELECT type FROM pragma_table_info(?) WHERE name = ? LIMIT 1',
+        condition.table,
+        condition.column
+      )
+      actualType = this.cursorRows(cursor)[0]?.type
+    } catch {
+      return false
+    }
+    if (actualType === undefined) return false
+    if (typeof condition.declaredType === 'string') {
+      return (
+        normalizeDeclaredSqlType(actualType) ===
+        normalizeDeclaredSqlType(condition.declaredType)
+      )
+    }
+    if (
+      condition.affinity === 'blob' ||
+      condition.affinity === 'integer' ||
+      condition.affinity === 'numeric' ||
+      condition.affinity === 'real' ||
+      condition.affinity === 'text'
+    ) {
+      return declaredSqlTypeAffinity(actualType) === condition.affinity
+    }
+    throw new TypeError('migrateIfColumnType requires declaredType or a SQLite affinity')
   }
 
   private executeSQL(
