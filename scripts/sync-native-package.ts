@@ -43,7 +43,7 @@ export function syncNativeVersion(): string {
   return pkg.version
 }
 
-export function validateSyncNativePackages(version = syncNativeVersion()): void {
+function validateSyncNativePackageManifests(version: string): void {
   const launcherPath = resolve(root, 'packages/orez-sync-native/package.json')
   const launcher = readJson(launcherPath)
   if (launcher.version !== version) {
@@ -78,6 +78,10 @@ export function validateSyncNativePackages(version = syncNativeVersion()): void 
   }
 }
 
+export function validateSyncNativePackages(version = syncNativeVersion()): void {
+  validateSyncNativePackageManifests(version)
+}
+
 export function preparePlatformPackage(
   id: string,
   binaryPath: string,
@@ -85,10 +89,13 @@ export function preparePlatformPackage(
   version = syncNativeVersion(),
   sourceCommit?: string
 ): string {
-  // Source manifests remain a checked workspace template. Release workflows
-  // may allocate a newer immutable npm version without manufacturing a source
-  // commit whose only purpose is to edit version strings.
-  validateSyncNativePackages()
+  // Source manifests remain a checked workspace template. The release plan
+  // already validates their Cargo version once; cross-platform packaging only
+  // revalidates the npm shapes so it does not invoke rustup on every runner.
+  const sourceVersion = readJson(
+    resolve(root, 'packages/orez-sync-native/package.json')
+  ).version
+  validateSyncNativePackageManifests(sourceVersion)
   const platform = SYNC_NATIVE_PLATFORMS.find((candidate) => candidate.id === id)
   if (!platform) throw new Error(`unknown sync-native platform ${id}`)
   if (!existsSync(binaryPath))
@@ -113,7 +120,10 @@ export function prepareLauncherPackage(
   version = syncNativeVersion(),
   sourceCommit?: string
 ): string {
-  validateSyncNativePackages()
+  const sourceVersion = readJson(
+    resolve(root, 'packages/orez-sync-native/package.json')
+  ).version
+  validateSyncNativePackageManifests(sourceVersion)
   rmSync(outputDir, { recursive: true, force: true })
   mkdirSync(resolve(outputDir, 'bin'), { recursive: true })
   const manifest = readJson(resolve(root, 'packages/orez-sync-native/package.json'))
