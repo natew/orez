@@ -95,14 +95,13 @@ function diffCorpus(
 // deterministic write script: mutations through each target's own client +
 // upstream sql behind zero's back, same order on both targets
 async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
-  const acks: Promise<void>[] = []
-  const mutate = (
+  const mutate = async (
     label: string,
     req: { client: Promise<unknown>; server: Promise<unknown> },
     expected: ExpectedServerOutcome = 'success'
   ) => {
-    acks.push(assertServerOutcome(req.server, expected, `${target.name} ${label}`))
-    return req.client
+    await req.client
+    await assertServerOutcome(req.server, expected, `${target.name} ${label}`)
   }
 
   await mutate(
@@ -160,16 +159,20 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
     'task.setRank t20',
     zero.mutate(mutators.task.setRank({ id: 't20', rank: -99 }))
   )
-  // app-error path: duplicate create must fail server-side + roll back
+  // Zero insert is skip-if-primary-key-exists on both client and server. The
+  // duplicate must succeed as a no-op and leave the original row unchanged.
   await mutate(
     'project.create duplicate pw1',
-    zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' })),
+    zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' }))
+  )
+  // Independent app-error path: optimistic execution succeeds, then the
+  // authoritative mutator rejects and rolls its row effect back.
+  await mutate(
+    'exactlyOnce.incrementThenReject t1',
+    zero.mutate(mutators.exactlyOnce.incrementThenReject({ id: 't1' })),
     {
       type: 'app-error',
-      message:
-        target.name === 'stock-zero'
-          ? /duplicate key value violates unique constraint/
-          : 'exists',
+      message: 'intentional-reject',
     }
   )
 
@@ -187,8 +190,6 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   // null-semantics churn: rows must cross tasksDueNull/tasksDueBefore
   await target.sql(`UPDATE task SET "dueAt" = NULL WHERE id = 't2'`)
   await target.sql(`UPDATE task SET "dueAt" = 1750000005000 WHERE id = 't6'`)
-
-  await Promise.all(acks) // exact outcomes: only the duplicate create rejects
 }
 
 async function startAgainst(name: string): Promise<SyncTarget> {

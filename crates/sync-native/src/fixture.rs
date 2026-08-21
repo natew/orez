@@ -255,15 +255,9 @@ pub fn run_mutator(
             let id = text(args, "id")?;
             let owner = text(args, "ownerId")?;
             let name = text(args, "name")?;
-            let exists = db.query(
-                "SELECT 1 FROM project WHERE id = ?",
-                &[SqlValue::Text(id.clone())],
-            )?;
-            if !exists.is_empty() {
-                return Err(MutateError::App("exists".into()));
-            }
             db.exec(
-                r#"INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)"#,
+                r#"INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)
+                   ON CONFLICT (id) DO NOTHING"#,
                 &[
                     SqlValue::Text(id),
                     SqlValue::Text(owner),

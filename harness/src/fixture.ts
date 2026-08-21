@@ -28,7 +28,10 @@ import {
 } from '@rocicorp/zero'
 
 import { validateAtomicAppendArgs } from './consistency/atomic-visibility-workload.js'
-import { validateIncrementProbeArgs } from './consistency/exactly-once-workload.js'
+import {
+  EXACTLY_ONCE_REJECTION,
+  validateIncrementProbeArgs,
+} from './consistency/exactly-once-workload.js'
 
 const user = table('user')
   .columns({
@@ -382,6 +385,10 @@ export const mutators = defineMutators({
       async ({ tx, args }: { tx: Tx; args: unknown }) => {
         const { id } = validateIncrementProbeArgs(args)
         await tx.mutate.task.update({ id, rank: 2 })
+        // Optimistic execution succeeds so the mutation reaches the server;
+        // both authoritative fixture implementations then reject and roll
+        // the write back. This keeps the app-error lane target-independent.
+        if (tx.location === 'server') throw new Error(EXACTLY_ONCE_REJECTION)
       }
     ),
   },

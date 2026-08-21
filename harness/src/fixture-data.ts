@@ -217,13 +217,14 @@ export function executeMutator(
     }
     case 'project.create': {
       const a = args as { id: string; ownerId: string; name: string }
-      const exists = tx.all(`SELECT 1 FROM project WHERE id = ?`, [a.id])
-      if (exists.length > 0) throw new MutationApplicationError('exists')
-      tx.exec(`INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)`, [
-        a.id,
-        a.ownerId,
-        a.name,
-      ])
+      // Zero's insert contract is skip-if-the-primary-key-exists. Match the
+      // optimistic client and Zero 1.9's authoritative implementation while
+      // still allowing other unique-constraint violations to surface.
+      tx.exec(
+        `INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)
+         ON CONFLICT (id) DO NOTHING`,
+        [a.id, a.ownerId, a.name]
+      )
       return
     }
     case 'project.rename': {
