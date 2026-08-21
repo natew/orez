@@ -1,4 +1,4 @@
-import { createBuilder, mustGetQuery } from '@rocicorp/zero'
+import { createBuilder, getQuery, mustGetQuery } from '@rocicorp/zero'
 import { asQueryInternals } from '@rocicorp/zero/bindings'
 
 import { createPermissions } from './createPermissions'
@@ -234,10 +234,14 @@ export function createSyncQueries<Schema extends ZeroSchema>(
     schema: options.schema,
     adminRoleMode: options.defaultAllowAdminRole ?? 'all',
   })
-  // every `namespace.name` lookup yields a standard CustomQuery-shaped entry.
-  // a Proxy covers permission.<table> and unknown names uniformly — an
-  // unknown name throws inside fn and the host reports it as a 400 naming
-  // the query. resolution is synchronous by contract: the host applies a
+  // a `namespace.name` lookup yields a standard CustomQuery-shaped entry when
+  // the name resolves, and `undefined` when it does not. answering every
+  // lookup with an entry would make the registry claim it serves names it has
+  // never heard of, and a host cannot then tell a query it does not have from
+  // one that failed while building: the host's structural
+  // `typeof entry.fn === 'function'` test is how it decides between refusing
+  // the pull and dropping one stale query, and a lying proxy takes that
+  // decision away. resolution is synchronous by contract: the host applies a
   // whole desired-query patch in one synchronous call.
   const entry = (name: string) => ({
     queryName: name,
@@ -263,7 +267,20 @@ export function createSyncQueries<Schema extends ZeroSchema>(
       }
       return new Proxy({} as Record<string, unknown>, {
         get(_inner, name) {
-          return typeof name === 'string' ? entry(`${namespace}.${name}`) : undefined
+          if (typeof name !== 'string') return undefined
+          const qualified = `${namespace}.${name}`
+          // permission.<table> is served from the model registry rather than
+          // the query registry, so it is resolvable exactly when the table has
+          // a permission defined.
+          if (namespace === 'permission') {
+            return getMutationsPermissions(name) ? entry(qualified) : undefined
+          }
+          // `as any` for the same reason as the mustGetQuery call below: these
+          // helpers are typed against a concrete QueryRegistry and this
+          // registry is the erased AnyQueryRegistry the host hands us.
+          return (getQuery as any)(options.queries, qualified) === undefined
+            ? undefined
+            : entry(qualified)
         },
       })
     },

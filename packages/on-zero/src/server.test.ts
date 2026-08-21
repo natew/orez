@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { getScopedAuthData } from './helpers/mutatorContext'
 import {
+  createSyncQueries,
   createZeroServerBindings,
   type ZeroServerExecutor,
   type ZeroServerMutatorRegistry,
@@ -214,5 +215,25 @@ describe('createZeroServerBindings', () => {
     ).rejects.toThrow('remote unavailable')
     expect(dispatchRemote).toHaveBeenCalledOnce()
     expect(execute).not.toHaveBeenCalled()
+  })
+})
+
+describe('createSyncQueries', () => {
+  // a sync host decides between refusing a whole pull and dropping one stale
+  // query by testing `typeof entry.fn === 'function'`, so a name this registry
+  // cannot serve has to read as absent rather than as an entry that throws.
+  const hostQueries = createSyncQueries({ schema, queries })
+
+  test('serves a registered query', () => {
+    const entry = (hostQueries as Record<string, Record<string, { fn?: unknown }>>)
+      .project.byOwner
+    expect(typeof entry.fn).toBe('function')
+  })
+
+  test('reports an unregistered name as absent', () => {
+    const registry = hostQueries as Record<string, Record<string, unknown>>
+    expect(registry.project.byOwnerRenamed).toBeUndefined()
+    expect(registry.noSuchNamespace.anything).toBeUndefined()
+    expect(registry.permission.project).toBeUndefined()
   })
 })
