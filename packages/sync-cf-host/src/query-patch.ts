@@ -70,7 +70,8 @@ export function resolveQueryPatch(
       | { fn?: (options: { args: unknown; ctx: unknown }) => unknown }
       | undefined
     if (!custom || typeof custom.fn !== 'function') {
-      if (!tolerateUnknownQueries) throw fail(`unknown or unsupported named query: ${op.name}`)
+      if (!tolerateUnknownQueries)
+        throw fail(`unknown or unsupported named query: ${op.name}`)
       // version skew: drop this query and keep syncing the rest.
       console.warn(`orez: dropping unknown named query from pull: ${op.name}`)
       continue
