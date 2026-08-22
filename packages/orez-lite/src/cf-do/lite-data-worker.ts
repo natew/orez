@@ -970,7 +970,9 @@ export function createOrezDataWorker<
         files: options.backup.bucket,
         query: queryNamespace,
         readSession: (env, namespace, work) =>
-          applicationSqlClient(env, namespace).readTransaction(
+          createApplicationSqlClient(env.ZERO_SQL_DO, canonical(namespace), {
+            priority: 'background',
+          }).readTransaction(
             () => {
               throw new Error('backup export does not compile ZQL')
             },

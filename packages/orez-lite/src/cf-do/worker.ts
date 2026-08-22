@@ -1780,14 +1780,25 @@ export class ZeroDO extends DurableObject {
           reject(new Error('timed out acquiring the application SQLite session'))
         }, APPLICATION_SQL_TURN_WAIT_MS),
       }
-      if (session.priority === 'latency-sensitive') {
-        const firstNormal = this.applicationSqlQueue.findIndex(
-          (queued) => queued.session.priority === 'normal'
-        )
-        if (firstNormal === -1) this.applicationSqlQueue.push(waiter)
-        else this.applicationSqlQueue.splice(firstNormal, 0, waiter)
-      } else {
-        this.applicationSqlQueue.push(waiter)
+      const firstLowerPriority = this.applicationSqlQueue.findIndex((queued) => {
+        if (session.priority === 'latency-sensitive') {
+          return queued.session.priority !== 'latency-sensitive'
+        }
+        return session.priority === 'normal' && queued.session.priority === 'background'
+      })
+      if (firstLowerPriority === -1) this.applicationSqlQueue.push(waiter)
+      else this.applicationSqlQueue.splice(firstLowerPriority, 0, waiter)
+
+      // a consistent backup owns a read session across its R2 uploads. it is
+      // allowed to lose that work, but request writes cannot wait behind the
+      // network. closing the background reader makes its next query or commit
+      // fail, so it cannot publish a partial backup.
+      if (!session.readOnly) {
+        for (const reader of [...this.applicationSqlReaders]) {
+          if (reader.priority === 'background') {
+            this.releaseApplicationSqlTurn(reader)
+          }
+        }
       }
       this.pumpApplicationSqlQueue()
     })
@@ -1952,8 +1963,15 @@ export class ZeroDO extends DurableObject {
   ): Promise<ApplicationSqlSessionTarget> {
     if (!sessionID) throw new TypeError('application SQLite session id is required')
     const priority = options.priority ?? 'normal'
-    if (priority !== 'normal' && priority !== 'latency-sensitive') {
+    if (
+      priority !== 'background' &&
+      priority !== 'normal' &&
+      priority !== 'latency-sensitive'
+    ) {
       throw new TypeError('invalid application SQLite session priority')
+    }
+    if (priority === 'background' && options.readOnly !== true) {
+      throw new TypeError('background application SQLite sessions must be read-only')
     }
     this.requestsSinceBoot.applicationSqlSessions++
     if (options.readOnly === true) this.requestsSinceBoot.applicationSqlReadSessions++

@@ -50,16 +50,21 @@ export type ApplicationSqlTransactionWork<Value> = (
  * its whole life, which is what the row-undo journal needs to be able to roll
  * one transaction back without stepping on another's images.
  */
-export type ApplicationSqlSessionPriority = 'normal' | 'latency-sensitive'
+export type ApplicationSqlSessionPriority = 'background' | 'normal' | 'latency-sensitive'
 
 export type ApplicationSqlSessionOptions = {
   readOnly?: boolean
   /**
    * latency-sensitive sessions enter ahead of queued normal work while keeping
    * FIFO order within their own class. use only for short control transactions
-   * whose deadline protects correctness; an active transaction is never
-   * preempted. callers must bound this traffic because sustained priority work
-   * can delay normal sessions.
+   * whose deadline protects correctness; active normal and latency-sensitive
+   * transactions are never preempted. callers must bound this traffic because
+   * sustained priority work can delay normal sessions.
+   *
+   * background is for consistent maintenance reads that may span network I/O.
+   * they enter behind request work and a writer preempts an active background
+   * reader, causing its next statement or commit to fail. the reader must treat
+   * that failure as an abandoned operation rather than publish partial output.
    */
   priority?: ApplicationSqlSessionPriority
 }

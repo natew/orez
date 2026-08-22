@@ -208,6 +208,38 @@ describe('namespace backup export', () => {
     ).toEqual({ empty: 0, message: 1 })
   })
 
+  it('does not publish a backup after its background read session is preempted', async () => {
+    const stored = writableBucket()
+    const query = async (_env: unknown, _namespace: string, sql: string) => {
+      if (sql.includes('SELECT write_seq')) return [{ write_seq: 9 }]
+      if (sql.includes('sqlite_master')) {
+        return [{ name: 'message', sql: 'CREATE TABLE message (id TEXT)', type: 'table' }]
+      }
+      if (sql.includes('FROM "message"')) return []
+      throw new Error(`unexpected export query: ${sql}`)
+    }
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      excludedTables: ['_test_backup_meta'],
+      files: () => stored.bucket,
+      query,
+      readSession: async (env: unknown, namespace: string, work: any) => {
+        await work((sql: string, params: readonly unknown[] = []) =>
+          query(env, namespace, sql, params)
+        )
+        throw new Error('application SQLite session is not active')
+      },
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await expect(manager.exportNamespace({}, 'singleton')).rejects.toThrow(
+      'application SQLite session is not active'
+    )
+    expect(stored.pointers.has('backups/singleton/latest.json')).toBe(false)
+  })
+
   it('pages a WITHOUT ROWID table by its composite primary key', async () => {
     const stored = writableBucket()
     const rows = Array.from({ length: 201 }, (_, index) => ({

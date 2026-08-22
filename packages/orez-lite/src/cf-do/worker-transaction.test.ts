@@ -533,6 +533,30 @@ describe('ZeroDO trusted application transaction', () => {
     zero.releaseApplicationSqlTurn(laterWriter)
   })
 
+  it('preempts a background read session when a writer arrives', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const background = await zero.applicationSqlSession('background', {
+      readOnly: true,
+      priority: 'background',
+    })
+    await background.begin()
+
+    const writer = await zero.applicationSqlSession('writer')
+    void writer.begin().catch(() => {})
+    await Promise.resolve()
+
+    try {
+      expect(background.state).toBe('closed')
+      expect(writer.state).toBe('active')
+      await expect(background.query('SELECT id FROM item')).rejects.toThrow(
+        'application SQLite session is not active'
+      )
+    } finally {
+      zero.releaseApplicationSqlTurn(background)
+      zero.releaseApplicationSqlTurn(writer)
+    }
+  })
+
   it('refuses a mutation from a read session instead of escalating it', async () => {
     const { zero } = await createTestZero(async (work) => await work())
     const reader = await zero.applicationSqlSession('reader', { readOnly: true })

@@ -390,8 +390,8 @@ describe('createOrezDataWorker', () => {
       rollback: vi.fn(async () => undefined),
     }
     const applicationSqlSession = vi.fn(
-      async (_sessionID: string, options?: { readOnly?: boolean }) => {
-        expect(options).toEqual({ readOnly: true })
+      async (_sessionID: string, options?: { readOnly?: boolean; priority?: string }) => {
+        expect(options).toEqual({ readOnly: true, priority: 'background' })
         return session
       }
     )
