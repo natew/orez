@@ -505,6 +505,40 @@ describe('Orez HTTP transport', () => {
     expect(fetch).toHaveBeenCalledTimes(3)
   })
 
+  test('a wake socket opening catches up after the initial pull', async () => {
+    const wakeSockets = useFakeNativeWebSocket()
+    const requests: RequestRecord[] = []
+    let serverCookie = 1
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      return jsonResponse({
+        cookie: serverCookie,
+        lastMutationIDChanges: {},
+        rowsPatch: [],
+      })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      wake: true,
+    })
+    transports.push(transport)
+    openRawSocketWithMessages()
+
+    await eventually(() => expect(requests).toHaveLength(1))
+    await eventually(() => expect(wakeSockets).toHaveLength(1))
+    expect(requests[0].body.cookie).toBeNull()
+
+    // the commit lands after the initial pull's snapshot but before the wake
+    // subscription is accepted, so no historical wake frame can announce it.
+    serverCookie = 2
+    wakeSockets[0].onopen?.()
+
+    await eventually(() => expect(requests).toHaveLength(2))
+    expect(requests[1].body.cookie).toBe(1)
+  })
+
   test('a data-changed pull that lands during an in-flight pull runs again after it', async () => {
     // hosts that know the server advanced call transport.pull() as their
     // data-changed nudge (pullHttpPullTransports, and sootsim's render worker
@@ -1942,6 +1976,7 @@ function useFakeNativeWebSocket() {
   const sockets: Array<{
     url: string
     protocols: string | string[] | undefined
+    onopen: (() => void) | null
     onmessage: (() => void) | null
     onclose: (() => void) | null
     onerror: (() => void) | null
@@ -1954,6 +1989,7 @@ function useFakeNativeWebSocket() {
     static CLOSED = 3
 
     readonly url: string
+    onopen: (() => void) | null = null
     onmessage: (() => void) | null = null
     onclose: (() => void) | null = null
     onerror: (() => void) | null = null

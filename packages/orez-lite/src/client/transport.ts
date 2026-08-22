@@ -796,6 +796,7 @@ class ZeroHttpSocket {
     void (async () => {
       let wakeToken: string | undefined
       let socket: {
+        onopen: (() => void) | null
         onmessage: (() => void) | null
         onclose: (() => void) | null
         onerror: (() => void) | null
@@ -831,6 +832,14 @@ class ZeroHttpSocket {
       // only this path applies the spacing window that gets that. pull() no
       // longer drops a request that lands mid-flight, but it also ignores the
       // spacing, so a storm of five wakes would issue five pulls.
+      //
+      // connecting is also a nudge. a commit can land after the initial pull
+      // reads its snapshot but before the server accepts this subscription. no
+      // historical frame exists for that interval, so catch up once the socket
+      // is actually open.
+      socket.onopen = () => {
+        if (this.wakeSocket === socket) this.requestPullAfterCurrent()
+      }
       socket.onmessage = () => this.requestPullAfterCurrent()
       socket.onclose = reconnect
       socket.onerror = reconnect
