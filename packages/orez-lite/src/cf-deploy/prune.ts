@@ -7,7 +7,57 @@ import {
   statSync,
   writeFileSync,
 } from 'fs'
-import { dirname, join, relative } from 'path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
+
+const WORKER_MODULE_EXTENSION = /\.(?:cjs|js|mjs|wasm)$/
+const WORKER_SOURCE_MODULE_EXTENSION = /\.(?:cjs|js|mjs)$/
+
+function listWorkerModuleFiles(dir: string, files: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue
+    const file = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      listWorkerModuleFiles(file, files)
+    } else if (WORKER_MODULE_EXTENSION.test(entry.name)) {
+      files.push(resolve(file))
+    }
+  }
+  return files
+}
+
+function staticWorkerModuleReferences(source: string): string[] {
+  const references: string[] = []
+  const staticRefRe =
+    /\b(?:import\s+(?:[^;]*?\s+from\s+)?|export\s+[^;]*?\s+from\s+)["'](\.\.?\/[^"']+\.(?:cjs|js|mjs|wasm))["']/g
+  let match: RegExpExecArray | null
+  while ((match = staticRefRe.exec(source))) references.push(match[1])
+  return references
+}
+
+export function assertWorkerStaticModuleImportsResolve(workerDir: string): void {
+  const moduleFiles = listWorkerModuleFiles(workerDir)
+  const moduleSet = new Set(moduleFiles)
+  const missing: Array<{ importer: string; specifier: string }> = []
+  for (const importer of moduleFiles) {
+    if (!WORKER_SOURCE_MODULE_EXTENSION.test(importer)) continue
+    let source: string
+    try {
+      source = readFileSync(importer, 'utf-8')
+    } catch {
+      continue
+    }
+    for (const specifier of staticWorkerModuleReferences(source)) {
+      if (moduleSet.has(resolve(dirname(importer), specifier))) continue
+      missing.push({ importer: relative(workerDir, importer), specifier })
+    }
+  }
+  if (missing.length === 0) return
+  throw new Error(
+    `worker modules contain unresolved static imports:\n${missing
+      .map(({ importer, specifier }) => `  ${importer} imports ${specifier}`)
+      .join('\n')}`
+  )
+}
 
 // remove asset chunks not reachable (static OR dynamic) from the worker entry.
 export function pruneUnreachableWorkerModules(
@@ -88,10 +138,12 @@ export function pruneWorkerChunksBySignature(
   bytes: number
 } {
   const assetsDir = join(workerDir, 'assets')
-  if (!existsSync(assetsDir)) return { removed: 0, bytes: 0 }
+  if (!existsSync(assetsDir)) {
+    assertWorkerStaticModuleImportsResolve(workerDir)
+    return { removed: 0, bytes: 0 }
+  }
   const candidates: Array<{
     file: string
-    bytes: number
     reason: string
   }> = []
   for (const name of readdirSync(assetsDir)) {
@@ -114,54 +166,71 @@ export function pruneWorkerChunksBySignature(
     if (!browserOnly && !serverNodeOnly) continue
     candidates.push({
       file,
-      bytes: Buffer.byteLength(head),
       reason: browserOnly
         ? `browser-only signature ${signatures.browserOnlyChunkSignature}`
         : `server-only signature ${JSON.stringify(serverNodeOnly)}`,
     })
   }
 
-  // signatures classify whole chunks from content. bundlers may co-locate an
-  // otherwise shared module with a matching string, so never let that heuristic
-  // sever a static import from a root worker module. asset-to-asset imports are
-  // deliberately outside this check: callers prune dormant dynamic route graphs
-  // whose wrapper chunks can still statically reference the removed implementation.
-  // validate the full deletion set before removing any file so a rejected prune
-  // leaves the build artifact intact for diagnosis.
-  const candidateByFile = new Map(
-    candidates.map((candidate) => [candidate.file, candidate])
+  // signatures classify whole chunks from content. bundlers may co-locate a
+  // shared module with a matching string, so remove asset-level static
+  // dependents with the candidate rather than retaining modules that can never
+  // evaluate. a dependency chain that reaches a worker root rejects the whole
+  // prune before any file changes, because that code is part of the worker's
+  // eager module graph.
+  const deletion = new Map<
+    string,
+    { candidate: (typeof candidates)[number]; chain: string[] }
+  >(
+    candidates.map((candidate) => [
+      resolve(candidate.file),
+      { candidate, chain: [relative(workerDir, candidate.file)] },
+    ])
   )
-  const importerFiles = [
-    ...readdirSync(workerDir)
-      .filter((name) => name.endsWith('.js') || name.endsWith('.mjs'))
-      .map((name) => join(workerDir, name)),
-  ]
-  for (const importer of importerFiles) {
-    if (candidateByFile.has(importer)) continue
-    let source: string
+  const staticImporters = new Map<string, string[]>()
+  for (const file of listWorkerModuleFiles(workerDir)) {
+    if (!WORKER_SOURCE_MODULE_EXTENSION.test(file)) continue
     try {
-      source = readFileSync(importer, 'utf-8')
-    } catch {
-      continue
-    }
-    const staticRefRe =
-      /\b(?:import\s+(?:[^;]*?\s+from\s+)?|export\s+[^;]*?\s+from\s+)["'](\.\.?\/[^"']+\.(?:js|mjs|wasm))["']/g
-    let match: RegExpExecArray | null
-    while ((match = staticRefRe.exec(source))) {
-      const candidate = candidateByFile.get(join(dirname(importer), match[1]))
-      if (!candidate) continue
-      throw new Error(
-        `refusing to prune ${relative(workerDir, candidate.file)} (${candidate.reason}): statically imported by ${relative(workerDir, importer)}`
-      )
+      const source = readFileSync(file, 'utf-8')
+      for (const specifier of staticWorkerModuleReferences(source)) {
+        const dependency = resolve(dirname(file), specifier)
+        const importers = staticImporters.get(dependency)
+        if (importers) importers.push(file)
+        else staticImporters.set(dependency, [file])
+      }
+    } catch {}
+  }
+  const deletionQueue = [...deletion.keys()]
+  for (let index = 0; index < deletionQueue.length; index++) {
+    const dependencyFile = deletionQueue[index]
+    const dependency = deletion.get(dependencyFile)!
+    for (const importer of staticImporters.get(dependencyFile) ?? []) {
+      if (deletion.has(importer)) continue
+      const importerRelative = relative(workerDir, importer)
+      const assetRelative = relative(resolve(assetsDir), importer)
+      const isAsset =
+        !isAbsolute(assetRelative) &&
+        assetRelative !== '..' &&
+        !assetRelative.startsWith(`..${sep}`)
+      if (!isAsset) {
+        throw new Error(
+          `refusing to prune ${relative(workerDir, dependency.candidate.file)} (${dependency.candidate.reason}): static dependency chain ${[...dependency.chain, importerRelative].join(' <- ')}`
+        )
+      }
+      deletion.set(importer, {
+        candidate: dependency.candidate,
+        chain: [...dependency.chain, importerRelative],
+      })
+      deletionQueue.push(importer)
     }
   }
 
   let bytes = 0
-  for (const candidate of candidates) {
-    bytes += candidate.bytes
-    rmSync(candidate.file, { force: true })
+  for (const file of deletion.keys()) {
+    bytes += statSync(file).size
+    rmSync(file, { force: true })
   }
-  const removed = candidates.length
+  const removed = deletion.size
   // removing the browser-only chunks orphans every chunk that was reachable
   // ONLY through them (e.g. the ~466 shiki/textmate-grammar/wasm chunks
   // pulled in solely by the codemirror+lsp editor surface — 2.6 MiB gz).
@@ -170,6 +239,7 @@ export function pruneWorkerChunksBySignature(
   // newly-unreachable set. without this the worker ships dead grammar chunks
   // and trips CF's 10 MiB code limit.
   if (removed > 0) pruneUnreachableWorkerModules(workerDir, 'index.js')
+  assertWorkerStaticModuleImportsResolve(workerDir)
   return { removed, bytes }
 }
 
