@@ -91,6 +91,10 @@ export type ZeroProviderTransport = {
   }
 }
 
+export type ZeroProviderGeneration = {
+  isCurrent: () => boolean
+}
+
 export type WaitForZeroOptions = {
   signal?: AbortSignal
 }
@@ -298,6 +302,22 @@ export function createZeroClientInternal<
   setCustomQueries(customQueries)
 
   const DisabledContext = createContext<QueryControlMode>(false)
+  const ZeroProviderGenerationContext = createContext<ZeroProviderGeneration | null>(null)
+  const zeroProviderGenerations = new WeakMap<object, ZeroProviderGeneration>()
+
+  function useZeroProviderGeneration(): ZeroProviderGeneration | null {
+    return useContext(ZeroProviderGenerationContext)
+  }
+
+  function getZeroProviderGeneration(zeroInstance: ZeroInstance): ZeroProviderGeneration {
+    const existing = zeroProviderGenerations.get(zeroInstance)
+    if (existing) return existing
+    const generation = {
+      isCurrent: () => zeroRuntime.zero === zeroInstance,
+    }
+    zeroProviderGenerations.set(zeroInstance, generation)
+    return generation
+  }
 
   // mutators never vary per mount: auth is read dynamically through
   // getAuthData() at mutation time. built once, lazily, so the provider and
@@ -843,16 +863,18 @@ export function createZeroClientInternal<
       <AuthDataContext.Provider value={(authDataIn ?? {}) as AuthData}>
         <DisabledContext.Provider value="empty">
           <ZeroContext.Provider value={DISABLED_ZERO_STUB as any}>
-            {/* match the active path's 3-child layout exactly so descendant
-                useId() lands at the same fiber index in both branches. the
-                two leading nulls reserve the SetZeroInstance + ConnectionMonitor
-                slots; the active path puts those components there only once
-                an instance exists. without these placeholder slots, children
-                would sit at child index 0 here but index 2 in the active
-                path, shifting every descendant useId. */}
-            {null}
-            {null}
-            {children}
+            <ZeroProviderGenerationContext.Provider value={null}>
+              {/* match the active path's 3-child layout exactly so descendant
+                  useId() lands at the same fiber index in both branches. the
+                  two leading nulls reserve the SetZeroInstance + ConnectionMonitor
+                  slots; the active path puts those components there only once
+                  an instance exists. without these placeholder slots, children
+                  would sit at child index 0 here but index 2 in the active
+                  path, shifting every descendant useId. */}
+              {null}
+              {null}
+              {children}
+            </ZeroProviderGenerationContext.Provider>
           </ZeroContext.Provider>
         </DisabledContext.Provider>
       </AuthDataContext.Provider>
@@ -1047,21 +1069,25 @@ export function createZeroClientInternal<
       <AuthDataContext.Provider value={authData}>
         <DisabledContext.Provider value={liveInstance ? false : 'empty'}>
           <ZeroContext.Provider value={liveInstance ?? (DISABLED_ZERO_STUB as any)}>
-            {liveInstance ? <SetZeroInstance /> : null}
-            {liveInstance ? (
-              <ConnectionMonitor
-                zeroEvents={zeroEvents}
-                refreshAuth={refreshAuth}
-                exposeDataset={connectionDataset}
-                datasetCacheUrl={
-                  connectionDataset
-                    ? ((props as { cacheURL?: string; server?: string }).cacheURL ??
-                      (props as { cacheURL?: string; server?: string }).server)
-                    : undefined
-                }
-              />
-            ) : null}
-            {children}
+            <ZeroProviderGenerationContext.Provider
+              value={liveInstance ? getZeroProviderGeneration(liveInstance) : null}
+            >
+              {liveInstance ? <SetZeroInstance /> : null}
+              {liveInstance ? (
+                <ConnectionMonitor
+                  zeroEvents={zeroEvents}
+                  refreshAuth={refreshAuth}
+                  exposeDataset={connectionDataset}
+                  datasetCacheUrl={
+                    connectionDataset
+                      ? ((props as { cacheURL?: string; server?: string }).cacheURL ??
+                        (props as { cacheURL?: string; server?: string }).server)
+                      : undefined
+                  }
+                />
+              ) : null}
+              {children}
+            </ZeroProviderGenerationContext.Provider>
           </ZeroContext.Provider>
         </DisabledContext.Provider>
       </AuthDataContext.Provider>
@@ -1075,6 +1101,17 @@ export function createZeroClientInternal<
 
     // publish before descendant effects perform imperative work.
     publishZeroInstance(zeroInstance)
+
+    useLayoutEffect(() => {
+      // strict-effects replays cleanup without another render. republish in
+      // setup so the provider remains current after that replay, and unpublish
+      // the exact instance synchronously when its provider actually leaves.
+      publishZeroInstance(zeroInstance)
+      return () => {
+        if (!unpublishZeroInstance(zeroInstance)) return
+        mutationLifecycle.fence()
+      }
+    }, [zeroInstance])
 
     useEffect(() => {
       zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
@@ -1367,6 +1404,7 @@ export function createZeroClientInternal<
     useQueryDirect,
     usePermission,
     usePermissionDirect,
+    useZeroProviderGeneration,
     zero,
     preload,
     getQuery,
