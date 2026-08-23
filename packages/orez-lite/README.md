@@ -111,3 +111,10 @@ protects the broader status route as well as write-budget controls.
 Cloudflare namespace backup summaries also include `tableRows`, the row count
 observed for every exported table during the existing streaming scan. Consumers
 can persist fleet profiles without issuing a second set of table reads.
+
+`backupManager.exportNamespace(env, namespace)` uses a background application
+SQL read session by default, so an arriving writer preempts the export and the
+result reports `outcome: 'preempted'`. A caller that owns a bounded freshness
+policy can pass `{ priority: 'normal' }`; that scan waits behind already-admitted
+and earlier queued writers, then retains its queue position ahead of later
+writers. Both modes use the same single transaction-consistent scan.
