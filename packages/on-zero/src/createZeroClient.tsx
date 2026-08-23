@@ -503,6 +503,7 @@ export function createZeroClientInternal<
       // API, so answer them without needing an instance; real API access below
       // still throws loudly.
       if (typeof key === 'symbol' || key === 'prototype') return undefined
+      if (key === 'close') return retire
       if (zeroRuntime.zero === null) {
         throw new Error(
           `Zero instance not initialized. Ensure ZeroProvider is mounted before accessing 'zero'.`
@@ -680,7 +681,32 @@ export function createZeroClientInternal<
     if (cachedZero?.instance === instanceToInvalidate) {
       cachedZero = null
     }
+    for (const [key, retired] of retiredZero) {
+      if (retired.instance === instanceToInvalidate) retiredZero.delete(key)
+    }
     return unpublishZeroInstance(instanceToInvalidate)
+  }
+
+  function retire(): void {
+    const instancesToClose = new Set<ZeroInstance>()
+    if (cachedZero) instancesToClose.add(cachedZero.instance)
+    for (const retired of retiredZero.values()) instancesToClose.add(retired.instance)
+    if (zeroRuntime.zero) instancesToClose.add(zeroRuntime.zero)
+    cachedZero = null
+    retiredZero.clear()
+
+    mutationLifecycle.fence()
+    const activeInstance = zeroRuntime.zero
+    if (activeInstance && unpublishZeroInstance(activeInstance)) {
+      zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
+    }
+    for (const zeroInstance of instancesToClose) {
+      try {
+        void zeroInstance.close().catch(() => {})
+      } catch {
+        // an already-closed client has still been retired from every cache.
+      }
+    }
   }
 
   function invalidateZeroInstance(instanceToInvalidate: ZeroInstance | null): void {
@@ -981,7 +1007,7 @@ export function createZeroClientInternal<
       retiredZero.set(cachedZero.key, cachedZero)
       cachedZero = null
     }
-    let refreshCachedAuth = false
+    let liveCacheEntry: typeof cachedZero = null
     if (!disable) {
       if (cachedZero?.key !== instanceKey) {
         if (cachedZero) retiredZero.set(cachedZero.key, cachedZero)
@@ -1006,8 +1032,7 @@ export function createZeroClientInternal<
       }
       const activeZero = cachedZero
       liveInstance = activeZero.instance
-      refreshCachedAuth = activeZero.auth !== auth
-      activeZero.auth = auth
+      liveCacheEntry = activeZero
     }
 
     // a disabled provider stops being ready before descendant passive effects
@@ -1041,11 +1066,13 @@ export function createZeroClientInternal<
     // sends an auth update over the live connection instead of reconnecting
     // (upstream ZeroProvider does exactly this). string <-> undefined flips
     // rotate the instance via hasAuth in the identity key instead.
-    useEffect(() => {
-      if (liveInstance && typeof auth === 'string' && refreshCachedAuth) {
-        liveInstance.connection.connect({ auth })
+    useLayoutEffect(() => {
+      if (!liveCacheEntry || liveCacheEntry.auth === auth) return
+      liveCacheEntry.auth = auth
+      if (typeof auth === 'string') {
+        liveCacheEntry.instance.connection.connect({ auth })
       }
-    }, [liveInstance, auth, refreshCachedAuth])
+    }, [liveCacheEntry, auth])
 
     // Always render the same shell shape, with or without an instance, and
     // whether disable is true or false. While disable=true we hand descendants
@@ -1382,6 +1409,7 @@ export function createZeroClientInternal<
     getQuery,
     waitForZero,
     remint,
+    retire,
     // combineZeroClients dispatches acknowledgement through this
     mutationLifecycle,
     drainBackgroundMutations: mutationLifecycle.drainBackgroundMutations,

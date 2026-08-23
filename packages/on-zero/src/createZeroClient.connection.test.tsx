@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { act } from 'react'
+import { act, startTransition, StrictMode, Suspense } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
@@ -179,6 +179,8 @@ test('a disabled logout cannot revive its closed authenticated instance', async 
     await Promise.resolve()
   })
 
+  expect(first.close).toHaveBeenCalledTimes(1)
+
   await act(async () => {
     root?.render(
       <client.ProvideZero
@@ -193,6 +195,7 @@ test('a disabled logout cannot revive its closed authenticated instance', async 
   })
 
   expect(fakeZero.instances).toHaveLength(2)
+  expect(first.close).toHaveBeenCalledTimes(1)
   expect(fakeZero.instances[1]).not.toBe(first)
   expect(fakeZero.instances[1]?.options?.auth).toBe('fresh-token')
 })
@@ -222,6 +225,110 @@ test('a remounted provider reconnects its cached instance when auth changed', as
 
   expect(fakeZero.instances).toHaveLength(1)
   expect(instance.connection.connect).toHaveBeenCalledWith({ auth: 'fresh-token' })
+})
+
+test('a discarded auth render cannot consume the committed reconnect', async () => {
+  const authClient = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'discarded-auth-test',
+  })
+  const renderedTokens: string[] = []
+  const suspended = new Promise<void>(() => {})
+
+  function RenderProbe({ auth, suspend }: { auth: string; suspend?: boolean }) {
+    renderedTokens.push(auth)
+    if (suspend) throw suspended
+    return <span>{auth}</span>
+  }
+
+  const render = (auth: string, suspend = false) => (
+    <StrictMode>
+      <Suspense fallback={<span>waiting</span>}>
+        <authClient.ProvideZero
+          cacheURL="http://127.0.0.1:7788/zero"
+          userID="discarded-auth-user"
+          auth={auth}
+        >
+          <RenderProbe auth={auth} suspend={suspend} />
+        </authClient.ProvideZero>
+      </Suspense>
+    </StrictMode>
+  )
+
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(render('token-1'))
+    await Promise.resolve()
+  })
+  const instance = fakeZero.instances.at(-1)!
+
+  await act(async () => {
+    startTransition(() => root?.render(render('token-2', true)))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
+  expect(renderedTokens).toContain('token-2')
+  expect(fakeZero.instances).toHaveLength(1)
+  expect(instance.connection.connect).not.toHaveBeenCalled()
+
+  await act(async () => {
+    root?.render(render('token-2'))
+    await Promise.resolve()
+  })
+
+  expect(fakeZero.instances).toHaveLength(1)
+  expect(instance.connection.connect).toHaveBeenCalledTimes(1)
+  expect(instance.connection.connect).toHaveBeenCalledWith({ auth: 'token-2' })
+})
+
+test('closing an unmounted provider retires its cached authenticated instance', async () => {
+  const retiringClient = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'retire-auth-test',
+  })
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <retiringClient.ProvideZero
+        cacheURL="http://127.0.0.1:7788/zero"
+        userID="retire-auth-user"
+        auth="token-1"
+      >
+        <span>first</span>
+      </retiringClient.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+  const first = fakeZero.instances.at(-1)!
+
+  await act(async () => {
+    root?.unmount()
+    root = null
+    await Promise.resolve()
+  })
+  retiringClient.zero.close()
+
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <retiringClient.ProvideZero
+        cacheURL="http://127.0.0.1:7788/zero"
+        userID="retire-auth-user"
+        auth="token-1"
+      >
+        <span>second</span>
+      </retiringClient.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+
+  expect(first.close).toHaveBeenCalledTimes(1)
+  expect(fakeZero.instances).toHaveLength(2)
+  expect(fakeZero.instances[1]).not.toBe(first)
 })
 
 test('stale-poke error reconnects instead of surfacing a fatal error', async () => {

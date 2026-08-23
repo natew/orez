@@ -1245,6 +1245,39 @@ describe('Orez HTTP transport', () => {
     view.destroy()
   })
 
+  test('403 pull failure reports access denial without entering needs-auth or retrying', async () => {
+    const lifecycle: HttpPullLifecycleEvent[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      expect(request.path).toBe('/pull')
+      return jsonResponse({ error: 'project access required' }, { status: 403 })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      lifecycle: (event) => lifecycle.push(event),
+    })
+    transports.push(transport)
+    const zero = createZero()
+
+    await eventually(() => expect(zero.connection.state.current.name).toBe('error'))
+    await sleep(100)
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(transport.connections).toBe(0)
+    expect(zero.connection.state.current).toMatchObject({
+      name: 'error',
+      reason: expect.stringContaining('project access required'),
+    })
+    expect(lifecycle).toContainEqual(
+      expect.objectContaining({
+        type: 'failure',
+        httpStatus: 403,
+        requestPath: '/pull',
+      })
+    )
+  })
+
   test('400 pull failure is terminal and does not reconnect a stock Zero client', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

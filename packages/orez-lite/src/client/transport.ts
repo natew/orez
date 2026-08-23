@@ -248,6 +248,8 @@ export type HttpPullLifecycleEvent = {
   listener?: SocketEventType
   code?: number
   reason?: string
+  httpStatus?: number
+  requestPath?: '/pull' | '/push'
   pushFrameCount?: number
   mutationCount?: number
 }
@@ -1196,7 +1198,12 @@ class ZeroHttpSocket {
 
   private fail(error: unknown) {
     if (this.readyState === this.CLOSED) return
-    this.emitLifecycle('failure', { reason: errorMessage(error) })
+    this.emitLifecycle('failure', {
+      reason: errorMessage(error),
+      ...(error instanceof ZeroHttpResponseError
+        ? { httpStatus: error.status, requestPath: error.path }
+        : {}),
+    })
     if (isAuthHTTPError(error)) {
       this.emitMessage([
         'error',
@@ -1434,7 +1441,13 @@ class ZeroHttpSocket {
     type: HttpPullLifecycleEvent['type'],
     detail: Pick<
       HttpPullLifecycleEvent,
-      'listener' | 'code' | 'reason' | 'pushFrameCount' | 'mutationCount'
+      | 'listener'
+      | 'code'
+      | 'reason'
+      | 'httpStatus'
+      | 'requestPath'
+      | 'pushFrameCount'
+      | 'mutationCount'
     > = {}
   ) {
     this.state.lifecycle?.({
@@ -1714,10 +1727,7 @@ function retryAfterMsFromResponse(response: Response, body: string) {
 }
 
 function isAuthHTTPError(error: unknown): error is ZeroHttpResponseError {
-  return (
-    error instanceof ZeroHttpResponseError &&
-    (error.status === 401 || error.status === 403)
-  )
+  return error instanceof ZeroHttpResponseError && error.status === 401
 }
 
 // keep only this client's own mutation results — zero-cache's pusher does the

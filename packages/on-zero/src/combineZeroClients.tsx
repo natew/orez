@@ -50,6 +50,7 @@ type CombinableZeroClient = {
   mutationLifecycle: MutationLifecycle
   zeroEvents: ZeroEventsEmitter
   reloadPage: () => boolean
+  retire: () => void
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 }
 
@@ -83,6 +84,7 @@ export type CombinedZeroClients<Clients extends readonly CombinableZeroClient[]>
   run: typeof run
   zeroEvents: ZeroEventsEmitter
   reloadPage: () => boolean
+  retire: () => void
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 } & CombinedMutationLifecycle
 
@@ -211,6 +213,10 @@ export function combineZeroClients<
       children
     )
 
+  function retire(): void {
+    for (const client of clients) client.retire()
+  }
+
   // one queue across every instance, fenced per instance: a mutation is only
   // ever cancelled by the recovery of the client that issued it.
   const mutations = combineMutationLifecycles([
@@ -227,6 +233,7 @@ export function combineZeroClients<
     run,
     zeroEvents,
     reloadPage: primary.reloadPage,
+    retire,
     ControlQueries,
     ...mutations,
   }
