@@ -87,6 +87,13 @@ CLI:
 orez-lite dev -- node server.js
 ```
 
+The client transport reports HTTP failures through its `lifecycle` callback.
+Failure events include `httpStatus` and `requestPath` when the server answered.
+A 401 uses Zero's `Unauthorized` lifecycle and enters `needs-auth`. A 403 is a
+terminal authorization failure, stays outside the auth lifecycle, and does not
+retry. Applications can use the structured 403 event to show their access-denied
+surface without expiring the account session.
+
 ## Cloudflare data-object status
 
 The Cloudflare data worker forwards `GET /<namespace>/_orez/status` to the

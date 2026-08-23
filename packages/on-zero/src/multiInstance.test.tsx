@@ -74,6 +74,7 @@ function fakeClient(name: string, namespaces: string[], zeroStub: unknown) {
     getQuery: vi.fn(() => `${name}-getQuery`),
     zeroEvents: createEmitter<ZeroEvent | null>(`zero:test-${name}`, null),
     reloadPage: vi.fn(() => true),
+    retire: vi.fn(),
     ControlQueries: ({ children }: { children: ReactNode }) => children,
   }
 }
@@ -294,6 +295,10 @@ describe('combineZeroClients facade', () => {
     expect(combined.reloadPage()).toBe(true)
     expect(control.reloadPage).toHaveBeenCalledOnce()
     expect(project.reloadPage).not.toHaveBeenCalled()
+
+    combined.retire()
+    expect(control.retire).toHaveBeenCalledOnce()
+    expect(project.retire).toHaveBeenCalledOnce()
   })
 
   test('useQuery/preload/getQuery/usePermission dispatch by namespace', () => {
