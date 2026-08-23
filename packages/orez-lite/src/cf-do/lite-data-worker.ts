@@ -1228,12 +1228,19 @@ export function createOrezDataWorker<
             }
             try {
               if (action === 'export') {
-                const summary = await backupManager.exportNamespace(
-                  env,
-                  resolved.instance
-                )
+                const result = await backupManager.exportNamespace(env, resolved.instance)
+                if (result.outcome === 'preempted') {
+                  return Response.json(
+                    { ok: false, outcome: 'preempted', ns: resolved.instance },
+                    { status: 409 }
+                  )
+                }
                 await backupManager.pruneBackups(env, resolved.instance)
-                return Response.json({ ok: true, ...summary })
+                return Response.json({
+                  ok: true,
+                  outcome: 'exported',
+                  ...result.summary,
+                })
               }
               if (request.method !== 'POST') {
                 return new Response('restore requires POST', { status: 405 })

@@ -17,6 +17,7 @@ import {
   WriteBudgetExceededError,
   type RowWriteBudgetTrip,
 } from '../do-sql-tracking.js'
+import { applicationSqlPreemptibleValue } from './application-sql.js'
 import {
   TransactionalCdc,
   schemaChangeTargets,
@@ -46,6 +47,7 @@ import type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,
   ApplicationSqlExecResult,
+  ApplicationSqlPreemptibleResult,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
   ApplicationSqlTable,
@@ -53,12 +55,16 @@ import type {
 } from './application-sql.js'
 import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-executor'
 
-export { createApplicationSqlClient } from './application-sql.js'
+export {
+  ApplicationSqlSessionPreemptedError,
+  createApplicationSqlClient,
+} from './application-sql.js'
 export type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlExecResult,
+  ApplicationSqlPreemptibleResult,
   ApplicationSqlQueryCompiler,
   ApplicationSqlRpc,
   ApplicationSqlSessionPriority,
@@ -353,7 +359,12 @@ function applicationSqlTrack(
   }
 }
 
-type ApplicationSqlSessionState = 'created' | 'waiting' | 'active' | 'closed'
+type ApplicationSqlSessionState =
+  | 'created'
+  | 'waiting'
+  | 'active'
+  | 'preempted'
+  | 'closed'
 
 type ApplicationSqlWaiter = {
   session: ApplicationSqlSessionTarget
@@ -365,10 +376,15 @@ type ApplicationSqlWaiter = {
 
 const APPLICATION_SQL_ACQUIRE = Symbol('applicationSqlAcquire')
 const APPLICATION_SQL_QUERY = Symbol('applicationSqlQuery')
+const APPLICATION_SQL_QUERY_PREEMPTIBLE = Symbol('applicationSqlQueryPreemptible')
 const APPLICATION_SQL_EXEC = Symbol('applicationSqlExec')
 const APPLICATION_SQL_QUERY_PLAN = Symbol('applicationSqlQueryPlan')
+const APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE = Symbol(
+  'applicationSqlQueryPlanPreemptible'
+)
 const APPLICATION_SQL_REGISTER_TABLES = Symbol('applicationSqlRegisterTables')
 const APPLICATION_SQL_COMMIT = Symbol('applicationSqlCommit')
+const APPLICATION_SQL_COMMIT_PREEMPTIBLE = Symbol('applicationSqlCommitPreemptible')
 const APPLICATION_SQL_ROLLBACK = Symbol('applicationSqlRollback')
 const APPLICATION_SQL_DISPOSE = Symbol('applicationSqlDispose')
 
@@ -398,6 +414,13 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     return this.owner[APPLICATION_SQL_QUERY](this, sql, params)
   }
 
+  queryPreemptible<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<ApplicationSqlPreemptibleResult<Row[]>> {
+    return this.owner[APPLICATION_SQL_QUERY_PREEMPTIBLE](this, sql, params)
+  }
+
   exec(
     sql: string,
     params: readonly unknown[] = [],
@@ -414,12 +437,29 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     return this.owner[APPLICATION_SQL_QUERY_PLAN](this, plan, queryName, queryBudget)
   }
 
+  queryPlanPreemptible<Result = unknown>(
+    plan: CompiledTransactionQueryPlan,
+    queryName?: string,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ): Promise<ApplicationSqlPreemptibleResult<Result>> {
+    return this.owner[APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE](
+      this,
+      plan,
+      queryName,
+      queryBudget
+    )
+  }
+
   registerTables(tables: readonly ApplicationSqlTable[]): Promise<void> {
     return this.owner[APPLICATION_SQL_REGISTER_TABLES](this, tables)
   }
 
   commit(): Promise<void> {
     return this.owner[APPLICATION_SQL_COMMIT](this)
+  }
+
+  commitPreemptible(): Promise<ApplicationSqlPreemptibleResult<void>> {
+    return this.owner[APPLICATION_SQL_COMMIT_PREEMPTIBLE](this)
   }
 
   rollback(): Promise<void> {
@@ -1796,7 +1836,8 @@ export class ZeroDO extends DurableObject {
       if (!session.readOnly) {
         for (const reader of [...this.applicationSqlReaders]) {
           if (reader.priority === 'background') {
-            this.releaseApplicationSqlTurn(reader)
+            reader.state = 'preempted'
+            this.applicationSqlReaders.delete(reader)
           }
         }
       }
@@ -1813,6 +1854,10 @@ export class ZeroDO extends DurableObject {
    */
   private releaseApplicationSqlTurn(session: ApplicationSqlSessionTarget): void {
     if (session.state === 'closed') return
+    if (session.state === 'preempted') {
+      session.state = 'closed'
+      return
+    }
     if (session.state === 'created') {
       session.state = 'closed'
       return
@@ -1879,7 +1924,11 @@ export class ZeroDO extends DurableObject {
     try {
       await session.begin()
       const value = await work(session)
-      await session.commit()
+      if (priority === 'background') {
+        applicationSqlPreemptibleValue(await session.commitPreemptible())
+      } else {
+        await session.commit()
+      }
       return value
     } catch (error) {
       await session.rollback().catch(() => {})
@@ -1917,14 +1966,21 @@ export class ZeroDO extends DurableObject {
       run(readOnly, async (session) =>
         work({
           exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
-          query: (sql, params = []) => session.query(sql, params),
+          query: async (sql, params = []) =>
+            options.priority === 'background'
+              ? applicationSqlPreemptibleValue(
+                  await session.queryPreemptible(sql, params)
+                )
+              : session.query(sql, params),
           registerTables: (tables) => session.registerTables(tables),
           async queryAst(ast, format, queryName) {
-            return session.queryPlan(
-              await compileQuery(ast, format),
-              queryName,
-              queryBudget
-            )
+            const plan = await compileQuery(ast, format)
+            if (options.priority === 'background') {
+              return applicationSqlPreemptibleValue(
+                await session.queryPlanPreemptible(plan, queryName, queryBudget)
+              )
+            }
+            return session.queryPlan(plan, queryName, queryBudget)
           },
         })
       )
@@ -2075,6 +2131,20 @@ export class ZeroDO extends DurableObject {
     })
   }
 
+  async [APPLICATION_SQL_QUERY_PREEMPTIBLE]<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(
+    session: ApplicationSqlSessionTarget,
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<ApplicationSqlPreemptibleResult<Row[]>> {
+    if (session.state === 'preempted') return { outcome: 'preempted' }
+    return {
+      outcome: 'completed',
+      value: await this[APPLICATION_SQL_QUERY]<Row>(session, sql, params),
+    }
+  }
+
   async [APPLICATION_SQL_EXEC](
     session: ApplicationSqlSessionTarget,
     sql: string,
@@ -2132,6 +2202,24 @@ export class ZeroDO extends DurableObject {
     }
   }
 
+  async [APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE]<Result = unknown>(
+    session: ApplicationSqlSessionTarget,
+    plan: CompiledTransactionQueryPlan,
+    queryName?: string,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ): Promise<ApplicationSqlPreemptibleResult<Result>> {
+    if (session.state === 'preempted') return { outcome: 'preempted' }
+    return {
+      outcome: 'completed',
+      value: await this[APPLICATION_SQL_QUERY_PLAN](
+        session,
+        plan,
+        queryName,
+        queryBudget
+      ),
+    }
+  }
+
   async [APPLICATION_SQL_REGISTER_TABLES](
     session: ApplicationSqlSessionTarget,
     tables: readonly ApplicationSqlTable[]
@@ -2167,6 +2255,18 @@ export class ZeroDO extends DurableObject {
       this.finishApplicationSqlTelemetry(session, 'error', error)
       throw error
     }
+  }
+
+  async [APPLICATION_SQL_COMMIT_PREEMPTIBLE](
+    session: ApplicationSqlSessionTarget
+  ): Promise<ApplicationSqlPreemptibleResult<void>> {
+    if (session.state === 'preempted') {
+      this.releaseApplicationSqlTurn(session)
+      this.finishApplicationSqlTelemetry(session, 'rolled_back')
+      return { outcome: 'preempted' }
+    }
+    await this[APPLICATION_SQL_COMMIT](session)
+    return { outcome: 'completed', value: undefined }
   }
 
   /**

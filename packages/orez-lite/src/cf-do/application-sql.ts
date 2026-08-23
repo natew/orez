@@ -69,6 +69,26 @@ export type ApplicationSqlSessionOptions = {
   priority?: ApplicationSqlSessionPriority
 }
 
+export type ApplicationSqlPreemptibleResult<Value> =
+  | { outcome: 'completed'; value: Value }
+  | { outcome: 'preempted' }
+
+export class ApplicationSqlSessionPreemptedError extends Error {
+  constructor() {
+    super('background application SQLite session was preempted')
+    this.name = 'ApplicationSqlSessionPreemptedError'
+  }
+}
+
+export function applicationSqlPreemptibleValue<Value>(
+  result: ApplicationSqlPreemptibleResult<Value>
+): Value {
+  if (result.outcome === 'preempted') {
+    throw new ApplicationSqlSessionPreemptedError()
+  }
+  return result.value
+}
+
 /**
  * private durable object RPC protocol. the session capability is returned
  * before it asks for ownership, and `begin()` resolves when the durable object
@@ -82,6 +102,10 @@ export type ApplicationSqlSessionRpc = Disposable & {
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
+  queryPreemptible<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: readonly unknown[]
+  ): Promise<ApplicationSqlPreemptibleResult<Row[]>>
   exec(
     sql: string,
     params?: readonly unknown[],
@@ -92,8 +116,14 @@ export type ApplicationSqlSessionRpc = Disposable & {
     queryName?: string,
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<Result>
+  queryPlanPreemptible<Result = unknown>(
+    plan: CompiledTransactionQueryPlan,
+    queryName?: string,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ): Promise<ApplicationSqlPreemptibleResult<Result>>
   registerTables(tables: readonly ApplicationSqlTable[]): Promise<void>
   commit(): Promise<void>
+  commitPreemptible(): Promise<ApplicationSqlPreemptibleResult<void>>
   rollback(): Promise<void>
 }
 
@@ -200,7 +230,11 @@ async function withApplicationSqlSession<Value>(
     await raceAbort(signal, session.begin())
     const value = await raceAbort(signal, Promise.resolve(work(session)))
     signal?.throwIfAborted()
-    await session.commit()
+    if (sessionOptions.priority === 'background') {
+      applicationSqlPreemptibleValue(await session.commitPreemptible())
+    } else {
+      await session.commit()
+    }
     return value
   } catch (error) {
     await session.rollback().catch(() => {})
@@ -236,9 +270,20 @@ export function createApplicationSqlClient(
     session(sessionOptions, (active) =>
       work({
         exec: (sql, params = [], metadata) => active.exec(sql, params, metadata),
-        query: (sql, params = []) => active.query(sql, params),
+        query: async (sql, params = []) =>
+          sessionOptions.priority === 'background' || options.priority === 'background'
+            ? applicationSqlPreemptibleValue(await active.queryPreemptible(sql, params))
+            : active.query(sql, params),
         async queryAst(ast, format, queryName) {
           const plan = await compileQuery(ast, format)
+          if (
+            sessionOptions.priority === 'background' ||
+            options.priority === 'background'
+          ) {
+            return applicationSqlPreemptibleValue(
+              await active.queryPlanPreemptible(plan, queryName, queryBudget)
+            )
+          }
           return active.queryPlan(plan, queryName, queryBudget)
         },
         registerTables: (tables) => active.registerTables(tables),

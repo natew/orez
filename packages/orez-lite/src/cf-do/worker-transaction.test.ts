@@ -320,6 +320,46 @@ describe('ZeroDO trusted application transaction', () => {
     expect(events).toEqual(['transaction', 'work', 'commit'])
   })
 
+  it('turns the structured background RPC outcome into a local preemption error', async () => {
+    const { ApplicationSqlSessionPreemptedError, createApplicationSqlClient } =
+      await import('./application-sql.js')
+    const rollback = vi.fn(async () => undefined)
+    const client = createApplicationSqlClient(
+      {
+        idFromName: () => 'id',
+        get: () => ({
+          applicationSqlQuery: async () => [],
+          applicationSqlSession: async () => ({
+            [Symbol.dispose]() {},
+            begin: async () => undefined,
+            query: async () => [],
+            queryPreemptible: async () => ({ outcome: 'preempted' as const }),
+            exec: async () => ({ changes: 0 }),
+            queryPlan: async () => undefined,
+            queryPlanPreemptible: async () => ({ outcome: 'preempted' as const }),
+            registerTables: async () => undefined,
+            commit: async () => undefined,
+            commitPreemptible: async () => ({
+              outcome: 'completed' as const,
+              value: undefined,
+            }),
+            rollback,
+          }),
+        }),
+      },
+      'proj-123',
+      { priority: 'background' }
+    )
+
+    await expect(
+      client.readTransaction(
+        () => flatPlan(),
+        (tx) => tx.query('SELECT id FROM item')
+      )
+    ).rejects.toBeInstanceOf(ApplicationSqlSessionPreemptedError)
+    expect(rollback).toHaveBeenCalledOnce()
+  })
+
   it('serializes application transactions without passing a callback to the Durable Object', async () => {
     const events: string[] = []
     const { createApplicationSqlClient } = await import('./application-sql.js')
@@ -546,11 +586,11 @@ describe('ZeroDO trusted application transaction', () => {
     await Promise.resolve()
 
     try {
-      expect(background.state).toBe('closed')
+      expect(background.state).toBe('preempted')
       expect(writer.state).toBe('active')
-      await expect(background.query('SELECT id FROM item')).rejects.toThrow(
-        'application SQLite session is not active'
-      )
+      await expect(background.queryPreemptible('SELECT id FROM item')).resolves.toEqual({
+        outcome: 'preempted',
+      })
     } finally {
       zero.releaseApplicationSqlTurn(background)
       zero.releaseApplicationSqlTurn(writer)

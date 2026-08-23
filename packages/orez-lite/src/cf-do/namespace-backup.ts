@@ -1,5 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 
+import { ApplicationSqlSessionPreemptedError } from './application-sql.js'
+
 export interface NamespaceBackupStatement {
   sql: string
   params?: readonly unknown[]
@@ -37,6 +39,10 @@ export interface NamespaceBackupSummary {
   bytes: number
   parts: number
 }
+
+export type NamespaceBackupExportResult =
+  | { outcome: 'exported'; summary: NamespaceBackupSummary }
+  | { outcome: 'preempted'; namespace: string }
 
 export interface NamespaceRestoreSummary {
   ok: true
@@ -100,7 +106,7 @@ export interface NamespaceBackupOptions<Env> {
 export interface NamespaceBackupManager<Env> {
   backupPrefix(namespace: string): string
   readMarker(env: Env, namespace: string): Promise<number>
-  exportNamespace(env: Env, namespace: string): Promise<NamespaceBackupSummary>
+  exportNamespace(env: Env, namespace: string): Promise<NamespaceBackupExportResult>
   importNamespace(
     env: Env,
     namespace: string,
@@ -110,6 +116,7 @@ export interface NamespaceBackupManager<Env> {
   pruneBackups(env: Env, namespace: string): Promise<void>
   runScheduledBackups(env: Env): Promise<{
     exported: number
+    preempted: number
     skipped: number
     failed: number
   }>
@@ -335,192 +342,218 @@ export function createNamespaceBackupManager<Env>(
   const exportNamespace = async (
     env: Env,
     namespace: string
-  ): Promise<NamespaceBackupSummary> => {
+  ): Promise<NamespaceBackupExportResult> => {
     const startedAt = Date.now()
     const files = options.files(env)
     const exportedAt = new Date().toISOString()
     const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
     // One read session for the whole scan. Every page below reads the same
     // committed state, so the dump is a database that actually existed.
-    const scan = await options.readSession(env, namespace, async (read) => {
-      // Read before scanning. A concurrent write then leaves the live marker
-      // ahead of latest.json and guarantees another backup.
-      const marker = await readMarkerWith(read)
-      const master = await read(
-        "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name",
-        []
-      )
-      const unorderedTables = master.filter(
-        (row) => row.type === 'table' && !isExcluded(row.name)
-      )
-      const tableNames = unorderedTables.map((row) => String(row.name))
-      const tableNamesBySqlIdentity = tableIdentities(tableNames)
-      // sqlite_master already carries every CREATE statement in this bounded
-      // schema read. Derive FK edges from those statements instead of asking
-      // pragma_foreign_key_list to re-walk the complete schema once per table.
-      const dependencies = new Map(
-        unorderedTables.map((table) => [
-          String(table.name),
-          tableDependencies(table.sql, String(table.name), tableNamesBySqlIdentity),
-        ])
-      )
-      const orderedNames = dependencyOrder(
-        unorderedTables.map((table) => String(table.name)),
-        dependencies
-      )
-      const tableByName = new Map(
-        unorderedTables.map((table) => [String(table.name), table])
-      )
-      const tables = orderedNames.map((name) => tableByName.get(name)!)
-      const indexes = master.filter(
-        (row) =>
-          row.type === 'index' && !isExcluded(row.name) && !isExcluded(row.tbl_name)
-      )
-      const upload = await files.createMultipartUpload(key)
-      const uploadedParts: unknown[] = []
-      const encoder = new TextEncoder()
-      let chunks: Uint8Array[] = []
-      let bufferedBytes = 0
-      let totalBytes = 0
-      const digest = sha256.create()
-
-      const flushParts = async (final: boolean) => {
-        if (!final && bufferedBytes < partBytes) return
-        let merged = new Uint8Array(bufferedBytes)
-        let offset = 0
-        for (const chunk of chunks) {
-          merged.set(chunk, offset)
-          offset += chunk.byteLength
-        }
-        while (merged.byteLength >= partBytes) {
-          uploadedParts.push(
-            await upload.uploadPart(uploadedParts.length + 1, merged.slice(0, partBytes))
-          )
-          merged = merged.slice(partBytes)
-        }
-        if (final && (merged.byteLength > 0 || uploadedParts.length === 0)) {
-          uploadedParts.push(await upload.uploadPart(uploadedParts.length + 1, merged))
-          merged = new Uint8Array(0)
-        }
-        chunks = merged.byteLength ? [merged] : []
-        bufferedBytes = merged.byteLength
-      }
-
-      const writeLine = async (value: unknown, includeInDigest = true) => {
-        const bytes = encoder.encode(`${JSON.stringify(value)}\n`)
-        if (includeInDigest) digest.update(bytes)
-        chunks.push(bytes)
-        bufferedBytes += bytes.byteLength
-        totalBytes += bytes.byteLength
-        await flushParts(false)
-        return bytes.byteLength
-      }
-
-      let rowTotal = 0
-      const tableRows: Record<string, number> = {}
-      try {
-        await writeLine({
-          kind: 'header',
-          format: options.format,
-          integrity: 'sha256',
-          ns: namespace,
-          exportedAt,
-          marker,
-          orderedTables: true,
-        })
-        for (const table of tables) {
-          const name = String(table.name)
-          const withoutRowid = /\bWITHOUT\s+ROWID\b/i.test(String(table.sql))
-          const primaryKeyColumns = withoutRowid
-            ? (await read(`PRAGMA table_info("${quoteIdentifier(name)}")`, []))
-                .filter((column) => Number(column.pk) > 0)
-                .sort((left, right) => Number(left.pk) - Number(right.pk))
-                .map((column) => String(column.name))
-            : []
-          if (withoutRowid && primaryKeyColumns.length === 0) {
-            throw new Error(`WITHOUT ROWID table ${name} has no primary key`)
-          }
-          const quotedPrimaryKey = primaryKeyColumns
-            .map((column) => `"${quoteIdentifier(column)}"`)
-            .join(', ')
-          let tableRowTotal = 0
-          await writeLine({
-            kind: 'table',
-            name,
-            sql: table.sql,
-            indexes: indexes
-              .filter((index) => index.tbl_name === name)
-              .map((index) => index.sql),
-          })
-          let rowidCursor: unknown = 0
-          let primaryKeyCursor: unknown[] | null = null
-          let limit = 200
-          while (true) {
-            const usedLimit = limit
-            const rows: Record<string, unknown>[] = withoutRowid
-              ? await read(
-                  primaryKeyCursor
-                    ? `SELECT * FROM "${quoteIdentifier(name)}" WHERE (${quotedPrimaryKey}) > (${primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
-                    : `SELECT * FROM "${quoteIdentifier(name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
-                  primaryKeyCursor ? [...primaryKeyCursor, usedLimit] : [usedLimit]
-                )
-              : await read(
-                  `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
-                  [rowidCursor, usedLimit]
-                )
-            if (rows.length === 0) break
-            if (withoutRowid) {
-              const last = rows.at(-1)!
-              primaryKeyCursor = primaryKeyColumns.map((column) => last[column])
-            } else {
-              rowidCursor = rows.at(-1)?.__orez_backup_rowid
-              for (const row of rows) delete row.__orez_backup_rowid
-            }
-            const lineBytes = await writeLine({ kind: 'rows', table: name, rows })
-            rowTotal += rows.length
-            tableRowTotal += rows.length
-            const perRow = Math.max(1, Math.ceil(lineBytes / rows.length))
-            limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
-            if (rows.length < usedLimit) break
-          }
-          tableRows[name] = tableRowTotal
-        }
-        await writeLine(
-          {
-            kind: 'footer',
-            tables: tables.length,
-            rows: rowTotal,
-            sha256: hex(digest.digest()),
-          },
-          false
+    const scan = await options
+      .readSession(env, namespace, async (read) => {
+        // Read before scanning. A concurrent write then leaves the live marker
+        // ahead of latest.json and guarantees another backup.
+        const marker = await readMarkerWith(read)
+        const master = await read(
+          "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name",
+          []
         )
-        await flushParts(true)
-        await upload.complete(uploadedParts)
-      } catch (error) {
-        try {
-          await upload.abort()
-        } catch {
-          // Preserve the original export failure.
-        }
-        log({
-          phase: 'export_upload',
-          outcome: 'error',
-          namespace,
-          durationMs: Date.now() - startedAt,
-          error: errorMessage(error),
-        })
-        throw error
-      }
+        const unorderedTables = master.filter(
+          (row) => row.type === 'table' && !isExcluded(row.name)
+        )
+        const tableNames = unorderedTables.map((row) => String(row.name))
+        const tableNamesBySqlIdentity = tableIdentities(tableNames)
+        // sqlite_master already carries every CREATE statement in this bounded
+        // schema read. Derive FK edges from those statements instead of asking
+        // pragma_foreign_key_list to re-walk the complete schema once per table.
+        const dependencies = new Map(
+          unorderedTables.map((table) => [
+            String(table.name),
+            tableDependencies(table.sql, String(table.name), tableNamesBySqlIdentity),
+          ])
+        )
+        const orderedNames = dependencyOrder(
+          unorderedTables.map((table) => String(table.name)),
+          dependencies
+        )
+        const tableByName = new Map(
+          unorderedTables.map((table) => [String(table.name), table])
+        )
+        const tables = orderedNames.map((name) => tableByName.get(name)!)
+        const indexes = master.filter(
+          (row) =>
+            row.type === 'index' && !isExcluded(row.name) && !isExcluded(row.tbl_name)
+        )
+        const upload = await files.createMultipartUpload(key)
+        const uploadedParts: unknown[] = []
+        const encoder = new TextEncoder()
+        let chunks: Uint8Array[] = []
+        let bufferedBytes = 0
+        let totalBytes = 0
+        const digest = sha256.create()
 
-      return {
-        marker,
-        tables: tables.length,
-        rows: rowTotal,
-        tableRows,
-        bytes: totalBytes,
-        parts: uploadedParts.length,
-      }
-    })
+        const flushParts = async (final: boolean) => {
+          if (!final && bufferedBytes < partBytes) return
+          let merged = new Uint8Array(bufferedBytes)
+          let offset = 0
+          for (const chunk of chunks) {
+            merged.set(chunk, offset)
+            offset += chunk.byteLength
+          }
+          while (merged.byteLength >= partBytes) {
+            uploadedParts.push(
+              await upload.uploadPart(
+                uploadedParts.length + 1,
+                merged.slice(0, partBytes)
+              )
+            )
+            merged = merged.slice(partBytes)
+          }
+          if (final && (merged.byteLength > 0 || uploadedParts.length === 0)) {
+            uploadedParts.push(await upload.uploadPart(uploadedParts.length + 1, merged))
+            merged = new Uint8Array(0)
+          }
+          chunks = merged.byteLength ? [merged] : []
+          bufferedBytes = merged.byteLength
+        }
+
+        const writeLine = async (value: unknown, includeInDigest = true) => {
+          const bytes = encoder.encode(`${JSON.stringify(value)}\n`)
+          if (includeInDigest) digest.update(bytes)
+          chunks.push(bytes)
+          bufferedBytes += bytes.byteLength
+          totalBytes += bytes.byteLength
+          await flushParts(false)
+          return bytes.byteLength
+        }
+
+        let rowTotal = 0
+        const tableRows: Record<string, number> = {}
+        try {
+          await writeLine({
+            kind: 'header',
+            format: options.format,
+            integrity: 'sha256',
+            ns: namespace,
+            exportedAt,
+            marker,
+            orderedTables: true,
+          })
+          for (const table of tables) {
+            const name = String(table.name)
+            const withoutRowid = /\bWITHOUT\s+ROWID\b/i.test(String(table.sql))
+            const primaryKeyColumns = withoutRowid
+              ? (await read(`PRAGMA table_info("${quoteIdentifier(name)}")`, []))
+                  .filter((column) => Number(column.pk) > 0)
+                  .sort((left, right) => Number(left.pk) - Number(right.pk))
+                  .map((column) => String(column.name))
+              : []
+            if (withoutRowid && primaryKeyColumns.length === 0) {
+              throw new Error(`WITHOUT ROWID table ${name} has no primary key`)
+            }
+            const quotedPrimaryKey = primaryKeyColumns
+              .map((column) => `"${quoteIdentifier(column)}"`)
+              .join(', ')
+            let tableRowTotal = 0
+            await writeLine({
+              kind: 'table',
+              name,
+              sql: table.sql,
+              indexes: indexes
+                .filter((index) => index.tbl_name === name)
+                .map((index) => index.sql),
+            })
+            let rowidCursor: unknown = 0
+            let primaryKeyCursor: unknown[] | null = null
+            let limit = 200
+            while (true) {
+              const usedLimit = limit
+              const rows: Record<string, unknown>[] = withoutRowid
+                ? await read(
+                    primaryKeyCursor
+                      ? `SELECT * FROM "${quoteIdentifier(name)}" WHERE (${quotedPrimaryKey}) > (${primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
+                      : `SELECT * FROM "${quoteIdentifier(name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
+                    primaryKeyCursor ? [...primaryKeyCursor, usedLimit] : [usedLimit]
+                  )
+                : await read(
+                    `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+                    [rowidCursor, usedLimit]
+                  )
+              if (rows.length === 0) break
+              if (withoutRowid) {
+                const last = rows.at(-1)!
+                primaryKeyCursor = primaryKeyColumns.map((column) => last[column])
+              } else {
+                rowidCursor = rows.at(-1)?.__orez_backup_rowid
+                for (const row of rows) delete row.__orez_backup_rowid
+              }
+              const lineBytes = await writeLine({ kind: 'rows', table: name, rows })
+              rowTotal += rows.length
+              tableRowTotal += rows.length
+              const perRow = Math.max(1, Math.ceil(lineBytes / rows.length))
+              limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
+              if (rows.length < usedLimit) break
+            }
+            tableRows[name] = tableRowTotal
+          }
+          await writeLine(
+            {
+              kind: 'footer',
+              tables: tables.length,
+              rows: rowTotal,
+              sha256: hex(digest.digest()),
+            },
+            false
+          )
+          await flushParts(true)
+          await upload.complete(uploadedParts)
+        } catch (error) {
+          try {
+            await upload.abort()
+          } catch {
+            // Preserve the original export failure.
+          }
+          if (error instanceof ApplicationSqlSessionPreemptedError) {
+            log({
+              phase: 'export_upload',
+              outcome: 'preempted',
+              namespace,
+              durationMs: Date.now() - startedAt,
+            })
+          } else {
+            log({
+              phase: 'export_upload',
+              outcome: 'error',
+              namespace,
+              durationMs: Date.now() - startedAt,
+              error: errorMessage(error),
+            })
+          }
+          throw error
+        }
+
+        return {
+          marker,
+          tables: tables.length,
+          rows: rowTotal,
+          tableRows,
+          bytes: totalBytes,
+          parts: uploadedParts.length,
+        }
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApplicationSqlSessionPreemptedError) return null
+        throw error
+      })
+    if (scan === null) {
+      log({
+        phase: 'export',
+        outcome: 'preempted',
+        namespace,
+        durationMs: Date.now() - startedAt,
+      })
+      return { outcome: 'preempted', namespace }
+    }
 
     const summary = {
       ns: namespace,
@@ -552,7 +585,7 @@ export function createNamespaceBackupManager<Env>(
       bytes: summary.bytes,
       parts: summary.parts,
     })
-    return summary
+    return { outcome: 'exported', summary }
   }
 
   const importNamespace = async (
@@ -871,6 +904,7 @@ export function createNamespaceBackupManager<Env>(
       ;[namespaces[index], namespaces[other]] = [namespaces[other], namespaces[index]]
     }
     let exported = 0
+    let preempted = 0
     let skipped = 0
     let failed = 0
     for (const namespace of namespaces) {
@@ -894,15 +928,24 @@ export function createNamespaceBackupManager<Env>(
             continue
           }
         }
-        const summary = await exportNamespace(env, namespace)
+        const result = await exportNamespace(env, namespace)
+        if (result.outcome === 'preempted') {
+          preempted++
+          log({
+            phase: 'scheduled_namespace',
+            outcome: 'preempted',
+            namespace,
+          })
+          continue
+        }
         await pruneBackups(env, namespace)
         exported++
         log({
           phase: 'scheduled_namespace',
           outcome: 'success',
           namespace,
-          rows: summary.rows,
-          bytes: summary.bytes,
+          rows: result.summary.rows,
+          bytes: result.summary.bytes,
         })
       } catch (error) {
         failed++
@@ -918,11 +961,12 @@ export function createNamespaceBackupManager<Env>(
       phase: 'scheduled',
       outcome: failed > 0 ? 'partial' : 'success',
       exported,
+      preempted,
       skipped,
       failed,
       durationMs: Date.now() - started,
     })
-    return { exported, skipped, failed }
+    return { exported, preempted, skipped, failed }
   }
 
   return {

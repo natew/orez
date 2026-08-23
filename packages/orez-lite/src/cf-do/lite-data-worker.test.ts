@@ -383,10 +383,19 @@ describe('createOrezDataWorker', () => {
       [Symbol.dispose]: vi.fn(),
       begin: vi.fn(async () => undefined),
       query: vi.fn(async (sql: string) => rowsFor(sql)),
+      queryPreemptible: vi.fn(async (sql: string) => ({
+        outcome: 'completed' as const,
+        value: rowsFor(sql),
+      })),
       exec: vi.fn(),
       queryPlan: vi.fn(),
+      queryPlanPreemptible: vi.fn(),
       registerTables: vi.fn(),
       commit: vi.fn(async () => undefined),
+      commitPreemptible: vi.fn(async () => ({
+        outcome: 'completed' as const,
+        value: undefined,
+      })),
       rollback: vi.fn(async () => undefined),
     }
     const applicationSqlSession = vi.fn(
@@ -441,8 +450,10 @@ describe('createOrezDataWorker', () => {
     expect(applicationSqlSession).toHaveBeenCalledOnce()
     expect(applicationSqlQuery).not.toHaveBeenCalled()
     expect(session.begin).toHaveBeenCalledOnce()
-    expect(session.query).toHaveBeenCalledTimes(2)
-    expect(session.commit).toHaveBeenCalledOnce()
+    expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
+    expect(session.query).not.toHaveBeenCalled()
+    expect(session.commitPreemptible).toHaveBeenCalledOnce()
+    expect(session.commit).not.toHaveBeenCalled()
     expect(session.rollback).not.toHaveBeenCalled()
   })
 

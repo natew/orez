@@ -3,11 +3,21 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
+import { ApplicationSqlSessionPreemptedError } from './application-sql.js'
 import {
   createNamespaceBackupManager,
   type NamespaceBackupBucket,
   type NamespaceBackupStatement,
 } from './namespace-backup.js'
+
+async function exportedSummary(
+  result: ReturnType<ReturnType<typeof createNamespaceBackupManager>['exportNamespace']>
+) {
+  const value = await result
+  expect(value.outcome).toBe('exported')
+  if (value.outcome !== 'exported') throw new Error('expected an exported backup')
+  return value.summary
+}
 
 function stream(text: string): ReadableStream<Uint8Array> {
   const bytes = new TextEncoder().encode(text)
@@ -195,7 +205,7 @@ describe('namespace backup export', () => {
       listNamespaces: async () => ['singleton'],
     })
 
-    const summary = await manager.exportNamespace({}, 'singleton')
+    const summary = await exportedSummary(manager.exportNamespace({}, 'singleton'))
 
     expect(summary).toMatchObject({
       marker: 9,
@@ -228,16 +238,36 @@ describe('namespace backup export', () => {
         await work((sql: string, params: readonly unknown[] = []) =>
           query(env, namespace, sql, params)
         )
-        throw new Error('application SQLite session is not active')
+        throw new ApplicationSqlSessionPreemptedError()
+      },
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await expect(manager.exportNamespace({}, 'singleton')).resolves.toEqual({
+      outcome: 'preempted',
+      namespace: 'singleton',
+    })
+    expect(stored.pointers.has('backups/singleton/latest.json')).toBe(false)
+  })
+
+  it('still rejects a genuine export failure', async () => {
+    const stored = writableBucket()
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      files: () => stored.bucket,
+      query: async () => [],
+      readSession: async () => {
+        throw new Error('R2 unavailable')
       },
       batch: async () => {},
       listNamespaces: async () => ['singleton'],
     })
 
     await expect(manager.exportNamespace({}, 'singleton')).rejects.toThrow(
-      'application SQLite session is not active'
+      'R2 unavailable'
     )
-    expect(stored.pointers.has('backups/singleton/latest.json')).toBe(false)
   })
 
   it('pages a WITHOUT ROWID table by its composite primary key', async () => {
@@ -280,7 +310,7 @@ describe('namespace backup export', () => {
       listNamespaces: async () => ['singleton'],
     })
 
-    const summary = await manager.exportNamespace({}, 'singleton')
+    const summary = await exportedSummary(manager.exportNamespace({}, 'singleton'))
 
     expect(summary).toMatchObject({
       marker: 4,
@@ -322,9 +352,8 @@ describe('namespace backup export', () => {
     for (const row of expected) insert.run(row.tenant, row.id, row.body)
     db.exec('COMMIT')
 
-    const summary = await realSqliteManager(db, stored.bucket).exportNamespace(
-      {},
-      'singleton'
+    const summary = await exportedSummary(
+      realSqliteManager(db, stored.bucket).exportNamespace({}, 'singleton')
     )
     const exported = (stored.pointers.get(summary.key) ?? '')
       .trim()

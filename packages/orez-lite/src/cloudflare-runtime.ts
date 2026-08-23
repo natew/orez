@@ -4,12 +4,17 @@
  * Deploy tooling lives at `orez-lite/cloudflare/build` so Node-based build scripts
  * never evaluate `cloudflare:workers`.
  */
-export { createApplicationSqlClient, ZeroDO } from './cf-do/worker.js'
+export {
+  ApplicationSqlSessionPreemptedError,
+  createApplicationSqlClient,
+  ZeroDO,
+} from './cf-do/worker.js'
 export type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlExecResult,
+  ApplicationSqlPreemptibleResult,
   ApplicationSqlQueryCompiler,
   ApplicationSqlRpc,
   ApplicationSqlSessionPriority,
@@ -50,6 +55,7 @@ export type {
 export { createNamespaceBackupManager } from './cf-do/namespace-backup.js'
 export type {
   NamespaceBackupBucket,
+  NamespaceBackupExportResult,
   NamespaceBackupManager,
   NamespaceBackupObject,
   NamespaceBackupOptions,
