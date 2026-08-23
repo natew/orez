@@ -500,6 +500,54 @@ pub(crate) fn client_query_version(
     }
 }
 
+// Drop the cached membership of every client group that can no longer be served
+// a diff.
+//
+// The floor is the retained-ledger boundary: a cookie at or above it can be
+// served as a diff, one below it falls back to a full snapshot. So a group last
+// seen below the floor has already lost the only thing its membership cache is
+// for — its next pull rebuilds the whole set regardless. That makes this exact
+// rather than a heuristic, and it is the same judgement `reset_group` makes on a
+// group that is still connected.
+//
+// What is dropped is exactly what `reset_group` drops, plus the group's query
+// registrations, which `prepare_transform_version` already deletes for a LIVE
+// group. What is kept is deliberate:
+//
+// - `_zsync_clients` holds lastMutationID, which is mutation dedup and must
+//   outlive the cache. It is four short columns per client and does not grow
+//   with history.
+// - `_zsync_desires` is per-client and the transform path keeps it "until each
+//   client checks in so qpull can acknowledge targeted dels". That reasoning is
+//   about a live group, but the row is small and the cost of being wrong is a
+//   silently empty result set, so it stays.
+pub(crate) fn collect_abandoned_client_groups(db: &mut dyn SyncDb) -> Result<(), EngineError> {
+    let floor = crate::store::floor(db)?;
+    // one predicate, applied to each table: a group is live iff it was seen at
+    // or above the floor. A group with no seen row at all is caught by the same
+    // test, which is what collects membership orphaned by an older engine.
+    for table in [
+        "_zsync_query_rows",
+        "_zsync_row_refs",
+        "_zsync_query_state",
+        "_zsync_queries",
+    ] {
+        db.exec(
+            &format!(
+                "DELETE FROM {table} WHERE clientGroupID NOT IN (
+                   SELECT clientGroupID FROM _zsync_client_group_seen WHERE watermark >= ?
+                 )"
+            ),
+            &[crate::store::counter(floor)],
+        )?;
+    }
+    db.exec(
+        "DELETE FROM _zsync_client_group_seen WHERE watermark < ?",
+        &[crate::store::counter(floor)],
+    )?;
+    Ok(())
+}
+
 // drop a group's entire durable membership + reference counts after a server
 // transform invalidates its authorization state.
 pub(crate) fn reset_group(db: &mut dyn SyncDb, group: &str) -> Result<(), EngineError> {

@@ -19,7 +19,7 @@ use crate::error::EngineError;
 use crate::value::ZeroColumnType;
 
 // bump whenever init_schema changes a durable DDL or migration surface.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct TableSpec {
@@ -677,6 +677,42 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
         &[],
     )?;
     crate::ledger::init(db)?;
+    // When a client group was last served, as a watermark rather than a clock.
+    //
+    // Nothing here could collect an abandoned client group before this table
+    // existed, because nothing recorded when a group was last seen. The only
+    // path that removes clients, `store::delete_clients`, runs when a live
+    // client TELLS the server which of its clients it deleted, so a client that
+    // simply never comes back — a browser with its storage cleared, a device
+    // that died, an app whose key-value store is in memory and forgets its
+    // group on every launch — leaves its whole membership behind forever. One
+    // real store reached 607 groups and 640k membership rows serving three
+    // clients.
+    //
+    // A watermark, not a timestamp: the recorded value is directly comparable
+    // to the retained-ledger floor, so "can this group still be collected" is
+    // the same question as "can this group still be served a diff", which the
+    // engine already answers. That makes collection exact instead of a
+    // wall-clock guess, and it self-tunes with `retain_changes` rather than
+    // adding a second retention knob.
+    //
+    // Nothing seeds this table for a store that predates it, deliberately. A
+    // group with no row reads as collectable, so a group that has not pulled
+    // since the upgrade loses its cached membership once and rebuilds it on its
+    // next pull — the same one-time full snapshot `invalidate` already forces
+    // for a permission change, and the only thing that reaches membership
+    // orphaned by an engine that never recorded anything. A group that HAS
+    // pulled is safe: the pull records it before that same pull's prune.
+    // Seeding instead would cost one write per existing group on every schema
+    // pass that found the table missing, and a durable object re-runs that pass
+    // on every hibernation wake.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_client_group_seen (
+            clientGroupID TEXT PRIMARY KEY,
+            watermark INTEGER NOT NULL
+        )",
+        &[],
+    )?;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_snapshot_generation (
             lock INTEGER PRIMARY KEY CHECK (lock = 1),

@@ -164,6 +164,8 @@ pub fn handle_query_pull(
     };
 
     store::claim_client(db, group, client_id, user_id)?;
+    // after the ownership check, so a rejected claim never marks a group live.
+    store::touch_client_group(db, group, retain_changes)?;
     delete_clients(db, group, &deleted_client_ids)?;
 
     let transform_client_reset = match body.get("_serverQueryTransformVersion") {
@@ -207,7 +209,14 @@ pub fn handle_query_pull(
         Some(queries) => Some(apply_desired_patch(db, tables, group, client_id, queries)?),
     };
 
-    store::prune(db, retain_changes)?;
+    // Pruning raises the floor, which is the moment a client group that stopped
+    // pulling loses the ability to be served a diff. Its membership cache is
+    // then dead weight nothing else would ever remove, so collect it here — the
+    // query layer is where those tables exist, and this is the only path that
+    // creates them.
+    if store::prune(db, retain_changes)? {
+        super::membership::collect_abandoned_client_groups(db)?;
+    }
     let current = store::watermark(db)?;
     if let Some(c) = cookie
         && c > current

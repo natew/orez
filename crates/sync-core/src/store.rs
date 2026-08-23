@@ -56,16 +56,23 @@ pub(crate) fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
 
 // size-bounded retention: prune packed segments at or below the retained
 // cutoff, then raise the floor.
-pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), EngineError> {
+// Reports whether the floor actually advanced. Raising the floor is what
+// strands an absent client group's membership, so it is also the only moment
+// new groups become collectable; the query layer uses this to decide when to
+// run `query::membership::collect_abandoned_client_groups`. Keeping that one
+// signal means retention stays one decision, `retain_changes`, instead of a
+// second knob that can disagree with it.
+pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<bool, EngineError> {
     let cutoff = watermark(db)? - retain_changes;
-    if cutoff > floor(db)? {
-        ledger::prune(db, cutoff)?;
-        db.exec(
-            "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
-            &[counter(cutoff)],
-        )?;
+    if cutoff <= floor(db)? {
+        return Ok(false);
     }
-    Ok(())
+    ledger::prune(db, cutoff)?;
+    db.exec(
+        "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
+        &[counter(cutoff)],
+    )?;
+    Ok(true)
 }
 
 // epoch bump: append a marker (advances the watermark past every cookie) and
@@ -121,6 +128,53 @@ pub(crate) fn claim_client(
             ));
         }
     }
+    Ok(())
+}
+
+// Record that a group is still here, as a watermark rather than a clock. See
+// `query::membership::collect_abandoned_client_groups` for why.
+//
+// Called from the query pull only. That is the whole population at risk: only a
+// query pull builds membership, and only membership is collected. A group that
+// pushes without ever pulling has nothing to protect, so touching it there
+// would be a write with no reader — and `push::preflight` is public API that
+// would have had to grow a retention parameter to do it.
+//
+// This must not write on a pull that is already caught up: a caught-up pull
+// writes nothing, so a client retrying against a refusing server costs nothing
+// per retry however long it keeps retrying (`pull_write_cost.rs`). A blind
+// upsert here put one row on every pull and turned every retrying client into a
+// billing timer.
+//
+// It does not need to. A group is safe from collection while its recorded
+// watermark is at or above the floor, so the only refresh that changes anything
+// is one for a group that has already fallen below. The `DO UPDATE … WHERE`
+// makes that the database's decision in one statement: a group still above the
+// floor modifies no row. A busy client therefore writes once per retention
+// window instead of once per pull, and it refreshes before the same pull's
+// prune, so it is never collected out from under itself.
+pub(crate) fn touch_client_group(
+    db: &mut dyn SyncDb,
+    client_group_id: &str,
+    retain_changes: i64,
+) -> Result<(), EngineError> {
+    let watermark = watermark(db)?;
+    // The bound to clear is the floor this request is ABOUT to set, not the one
+    // it found. A claim runs before the prune that raises the floor, so testing
+    // against the current floor left a window exactly `retain_changes` wide in
+    // which a group that had just pulled was still collected by that same
+    // pull's prune.
+    let floor_after = floor(db)?.max(watermark - retain_changes);
+    db.exec(
+        "INSERT INTO _zsync_client_group_seen (clientGroupID, watermark) VALUES (?, ?)
+         ON CONFLICT (clientGroupID) DO UPDATE SET watermark = excluded.watermark
+           WHERE _zsync_client_group_seen.watermark < ?",
+        &[
+            text(client_group_id),
+            counter(watermark),
+            counter(floor_after),
+        ],
+    )?;
     Ok(())
 }
 

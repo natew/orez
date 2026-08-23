@@ -21,7 +21,11 @@ pub fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
 // size-bounded retention: prune completed segments below (watermark - retain)
 // and raise the floor.
 pub fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), EngineError> {
-    store::prune(db, retain_changes)
+    // the bool says whether the floor advanced, which only the query layer acts
+    // on (to collect membership its own tables hold). a host pruning without
+    // the query layer has no membership, so there is nothing here to report.
+    store::prune(db, retain_changes)?;
+    Ok(())
 }
 
 // epoch invalidation: force every client's next pull to a full snapshot (for
