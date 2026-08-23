@@ -339,10 +339,7 @@ test('retire tears down on every sign-out, including inside remint guard window'
   root = createRoot(container)
   await act(async () => {
     root?.render(
-      <isolated.ProvideZero
-        cacheURL="http://127.0.0.1:7777/zero"
-        userID="retire-signout"
-      >
+      <isolated.ProvideZero cacheURL="http://127.0.0.1:7777/zero" userID="retire-signout">
         <span>ok</span>
       </isolated.ProvideZero>
     )

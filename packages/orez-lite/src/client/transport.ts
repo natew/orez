@@ -1441,12 +1441,7 @@ class ZeroHttpSocket {
     type: HttpPullLifecycleEvent['type'],
     detail: Pick<
       HttpPullLifecycleEvent,
-      | 'listener'
-      | 'code'
-      | 'reason'
-      | 'httpStatus'
-      | 'pushFrameCount'
-      | 'mutationCount'
+      'listener' | 'code' | 'reason' | 'httpStatus' | 'pushFrameCount' | 'mutationCount'
     > = {}
   ) {
     this.state.lifecycle?.({
