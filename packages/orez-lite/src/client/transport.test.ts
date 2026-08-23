@@ -754,6 +754,31 @@ describe('Orez HTTP transport', () => {
     ])
   })
 
+  test('a failure lifecycle event carries the HTTP status of a rejected pull', async () => {
+    const lifecycle: HttpPullLifecycleEvent[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      recordRequest(input, init)
+      return new Response(JSON.stringify({ error: 'forbidden' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      lifecycle: (event) => lifecycle.push(event),
+    })
+    transports.push(transport)
+    openRawSocketWithMessages()
+
+    // a consumer routing project access denial to its own surface needs the
+    // status. the formatted reason string is not a contract it can branch on.
+    await eventually(() => {
+      const failure = lifecycle.find((event) => event.type === 'failure')
+      expect(failure?.httpStatus).toBe(403)
+    })
+  })
+
   test('wide queued push frames are split by encoded byte size', async () => {
     const firstPushStarted = defer<void>()
     const releaseFirstPush = defer<void>()

@@ -248,6 +248,10 @@ export type HttpPullLifecycleEvent = {
   listener?: SocketEventType
   code?: number
   reason?: string
+  // HTTP status when the failure came from a pull/push response rather than a
+  // socket or transport-level error. a consumer routing 401/403 to its own auth
+  // or access-denied surface needs the status, not the formatted message.
+  httpStatus?: number
   pushFrameCount?: number
   mutationCount?: number
 }
@@ -1196,7 +1200,10 @@ class ZeroHttpSocket {
 
   private fail(error: unknown) {
     if (this.readyState === this.CLOSED) return
-    this.emitLifecycle('failure', { reason: errorMessage(error) })
+    this.emitLifecycle('failure', {
+      reason: errorMessage(error),
+      httpStatus: error instanceof ZeroHttpResponseError ? error.status : undefined,
+    })
     if (isAuthHTTPError(error)) {
       this.emitMessage([
         'error',
@@ -1434,7 +1441,12 @@ class ZeroHttpSocket {
     type: HttpPullLifecycleEvent['type'],
     detail: Pick<
       HttpPullLifecycleEvent,
-      'listener' | 'code' | 'reason' | 'pushFrameCount' | 'mutationCount'
+      | 'listener'
+      | 'code'
+      | 'reason'
+      | 'httpStatus'
+      | 'pushFrameCount'
+      | 'mutationCount'
     > = {}
   ) {
     this.state.lifecycle?.({
