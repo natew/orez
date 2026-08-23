@@ -403,9 +403,7 @@ export function createNamespaceBackupManager<Env>(
       try {
         return {
           outcome: 'read',
-          value: await options.readSession(env, namespace, (read) =>
-            work((sql, params = []) => read(sql, params))
-          ),
+          value: await options.readSession(env, namespace, work),
         }
       } catch (error) {
         if (!(error instanceof ApplicationSqlSessionPreemptedError)) throw error
