@@ -37,7 +37,7 @@ const fakeZero = vi.hoisted(() => {
     readonly run = vi.fn(async () => [])
     readonly preload = vi.fn(() => ({ cleanup: () => {}, complete: Promise.resolve() }))
 
-    constructor() {
+    constructor(readonly options?: { auth?: string }) {
       instances.push(this)
     }
   }
@@ -160,6 +160,68 @@ test('refreshAuth reconnects in place on needs-auth, once per transition', async
     message: 'token expired',
   })
   off()
+})
+
+test('a disabled logout cannot revive its closed authenticated instance', async () => {
+  const first = await mount({ auth: 'old-token' }, 'conn-auth-cycle')
+
+  await act(async () => {
+    root?.render(
+      <client.ProvideZero
+        cacheURL="http://127.0.0.1:7788/zero"
+        userID="conn-auth-cycle"
+        auth={undefined}
+        disable
+      >
+        <span>ok</span>
+      </client.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+
+  await act(async () => {
+    root?.render(
+      <client.ProvideZero
+        cacheURL="http://127.0.0.1:7788/zero"
+        userID="conn-auth-cycle"
+        auth="fresh-token"
+      >
+        <span>ok</span>
+      </client.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+
+  expect(fakeZero.instances).toHaveLength(2)
+  expect(fakeZero.instances[1]).not.toBe(first)
+  expect(fakeZero.instances[1]?.options?.auth).toBe('fresh-token')
+})
+
+test('a remounted provider reconnects its cached instance when auth changed', async () => {
+  const instance = await mount({ auth: 'old-token' }, 'conn-auth-remount')
+
+  await act(async () => {
+    root?.unmount()
+    root = null
+    await Promise.resolve()
+  })
+
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <client.ProvideZero
+        cacheURL="http://127.0.0.1:7788/zero"
+        userID="conn-auth-remount"
+        auth="fresh-token"
+      >
+        <span>ok</span>
+      </client.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+
+  expect(fakeZero.instances).toHaveLength(1)
+  expect(instance.connection.connect).toHaveBeenCalledWith({ auth: 'fresh-token' })
 })
 
 test('stale-poke error reconnects instead of surfacing a fatal error', async () => {

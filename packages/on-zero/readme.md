@@ -528,6 +528,13 @@ where passive effects are delayed or never flush. the exception is a server
 runtime, where `ProvideZero` creates nothing and descendants get the inert stub
 with every `useQuery` returning its empty shape.
 
+the client remains cached across provider unmounts so route transitions do not
+close a live connection. the cache also remembers the bearer token used by that
+instance. when a provider remounts with a different token but the same client
+identity, `ProvideZero` reconnects that cached instance with the new token. a
+logout that disables the provider and removes auth retires the authenticated
+instance instead of allowing a later sign-in to revive its closed connection.
+
 ### multiple client instances
 
 one page can run several zero clients (e.g. a global control-plane instance
