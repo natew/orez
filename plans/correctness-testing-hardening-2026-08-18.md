@@ -83,6 +83,16 @@ thing directly (equal markers on a monotonic counter means no transaction
 committed in between) without holding the database across R2. The consistency
 test below now models preemption as well as admission.
 
+The other option was to give the export `priority: 'normal'` so it outranks
+writers instead of yielding to them. That exists, implemented and working, as
+`de253b91` on `fix/backup-export-bounded-progress-m8645`. It is unmerged
+**because the owner considered it and chose the restructure**, not because
+nobody looked at it: it makes the export hold the busiest object in the system
+across its R2 uploads and delays request writes behind the network, which is
+the cost background priority was introduced to avoid. Do not merge it and do
+not rebase the chunked scan onto it. Full incident writeup lives in soot at
+`plans/contrast/incidents/incident-2026-08-23-control-plane-backup-preemption.md`.
+
 ## Why no lane caught it
 
 This is the part worth acting on. Three structural reasons, each a gap that
