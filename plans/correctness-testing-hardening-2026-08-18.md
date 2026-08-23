@@ -73,6 +73,16 @@ a read session is writer exclusion and not snapshot isolation; and the scan now
 blocks application writes for its duration, which a queued writer surfaces as a
 30-second admission timeout rather than as a backup failure.
 
+**Superseded 2026-08-23.** The second residual was the whole problem. Writers
+were later allowed to preempt the background reader instead of waiting for it
+(`c7f7753e`), which moved the cost from the writer to the export: on the
+production control plane every attempt for six hours lost its session and no
+dump was written. The scan no longer owns one session. It runs in short
+sessions and fences them with the `write_seq` marker, which proves the same
+thing directly (equal markers on a monotonic counter means no transaction
+committed in between) without holding the database across R2. The consistency
+test below now models preemption as well as admission.
+
 ## Why no lane caught it
 
 This is the part worth acting on. Three structural reasons, each a gap that

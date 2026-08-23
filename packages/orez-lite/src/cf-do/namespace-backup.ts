@@ -101,6 +101,24 @@ export interface NamespaceBackupOptions<Env> {
   runBudgetMs?: number
   partBytes?: number
   chunkTargetBytes?: number
+  /**
+   * Output one read session of the export scan produces before it closes and
+   * lets the marker be re-checked. Larger chunks cost fewer marker reads;
+   * smaller ones hold the database for less time per session.
+   */
+  scanChunkBytes?: number
+  /**
+   * Multipart uploads allowed to be outstanding while the scan continues. The
+   * scan never awaits one below this count, which is what keeps R2 out of the
+   * window the marker fences; past it, an upload blocks the next chunk. Raising
+   * it trades worker memory (`partBytes` per outstanding part) for a shorter
+   * fenced window.
+   */
+  maxInflightParts?: number
+  /** Scans attempted before the export gives up and waits for a quieter run. */
+  scanAttempts?: number
+  /** Times one chunk is re-read after a writer preempts its session. */
+  chunkAttempts?: number
 }
 
 export interface NamespaceBackupManager<Env> {
@@ -295,6 +313,10 @@ export function createNamespaceBackupManager<Env>(
   const keepControlPlane = options.keepControlPlane ?? 30
   const controlPlaneNamespace = options.controlPlaneNamespace ?? 'singleton'
   const runBudgetMs = options.runBudgetMs ?? 10 * 60 * 1000
+  const scanChunkBytes = options.scanChunkBytes ?? partBytes
+  const maxInflightParts = Math.max(1, options.maxInflightParts ?? 4)
+  const scanAttempts = Math.max(1, options.scanAttempts ?? 3)
+  const chunkAttempts = Math.max(1, options.chunkAttempts ?? 3)
   const excludedTables = new Set(options.excludedTables ?? [])
   const acceptedFormats = new Set([options.format, ...(options.acceptedFormats ?? [])])
   const backupPrefix =
@@ -339,253 +361,460 @@ export function createNamespaceBackupManager<Env>(
   const readMarker = (env: Env, namespace: string) =>
     readMarkerWith((sql, params = []) => options.query(env, namespace, sql, params))
 
+  type ExportTable = {
+    name: string
+    sql: string
+    indexes: string[]
+    withoutRowid: boolean
+    primaryKeyColumns: string[]
+  }
+
+  /** Where the scan stands, so a chunk that has to be re-read can resume. */
+  type ScanCursor = {
+    tableIndex: number
+    tableOpened: boolean
+    rowidCursor: unknown
+    primaryKeyCursor: unknown[] | null
+    limit: number
+  }
+
+  type ScanLine = { bytes: Uint8Array; digested: boolean }
+
+  const encoder = new TextEncoder()
+
+  const encodeLine = (value: unknown, digested = true): ScanLine => ({
+    bytes: encoder.encode(`${JSON.stringify(value)}\n`),
+    digested,
+  })
+
+  /**
+   * Run one bounded piece of the scan in its own read session, retrying it when
+   * a writer preempts the session.
+   *
+   * `work` re-runs from the start on a retry, so it must return everything it
+   * produced rather than publish it, and the caller commits that only once.
+   */
+  const readChunk = async <Value>(
+    env: Env,
+    namespace: string,
+    work: (read: SessionQuery) => Promise<Value>
+  ): Promise<{ outcome: 'read'; value: Value } | { outcome: 'preempted' }> => {
+    for (let attempt = 0; attempt < chunkAttempts; attempt++) {
+      try {
+        return {
+          outcome: 'read',
+          value: await options.readSession(env, namespace, (read) =>
+            work((sql, params = []) => read(sql, params))
+          ),
+        }
+      } catch (error) {
+        if (!(error instanceof ApplicationSqlSessionPreemptedError)) throw error
+      }
+    }
+    return { outcome: 'preempted' }
+  }
+
+  /**
+   * Read the schema, the write marker, and the primary key of every WITHOUT
+   * ROWID table in one session, so the scan below knows what to page and what
+   * marker every one of its chunks has to agree with.
+   */
+  const readScanSchema = async (read: SessionQuery) => {
+    // Read before scanning. A concurrent write then leaves the live marker
+    // ahead of latest.json and guarantees another backup.
+    const marker = await readMarkerWith(read)
+    const master = await read(
+      "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name",
+      []
+    )
+    const unorderedTables = master.filter(
+      (row) => row.type === 'table' && !isExcluded(row.name)
+    )
+    const tableNames = unorderedTables.map((row) => String(row.name))
+    const tableNamesBySqlIdentity = tableIdentities(tableNames)
+    // sqlite_master already carries every CREATE statement in this bounded
+    // schema read. Derive FK edges from those statements instead of asking
+    // pragma_foreign_key_list to re-walk the complete schema once per table.
+    const dependencies = new Map(
+      unorderedTables.map((table) => [
+        String(table.name),
+        tableDependencies(table.sql, String(table.name), tableNamesBySqlIdentity),
+      ])
+    )
+    const orderedNames = dependencyOrder(tableNames, dependencies)
+    const tableByName = new Map(
+      unorderedTables.map((table) => [String(table.name), table])
+    )
+    const indexes = master.filter(
+      (row) => row.type === 'index' && !isExcluded(row.name) && !isExcluded(row.tbl_name)
+    )
+    const tables: ExportTable[] = []
+    for (const name of orderedNames) {
+      const row = tableByName.get(name)!
+      const sql = String(row.sql)
+      const withoutRowid = /\bWITHOUT\s+ROWID\b/i.test(sql)
+      const primaryKeyColumns = withoutRowid
+        ? (await read(`PRAGMA table_info("${quoteIdentifier(name)}")`, []))
+            .filter((column) => Number(column.pk) > 0)
+            .sort((left, right) => Number(left.pk) - Number(right.pk))
+            .map((column) => String(column.name))
+        : []
+      if (withoutRowid && primaryKeyColumns.length === 0) {
+        throw new Error(`WITHOUT ROWID table ${name} has no primary key`)
+      }
+      tables.push({
+        name,
+        sql,
+        indexes: indexes
+          .filter((index) => index.tbl_name === name)
+          .map((index) => String(index.sql)),
+        withoutRowid,
+        primaryKeyColumns,
+      })
+    }
+    return { marker, tables }
+  }
+
+  /**
+   * Page rows until this chunk has produced `scanChunkBytes`, inside one
+   * session that also reads the marker.
+   *
+   * No writer is admitted while the session is open, so the marker and the rows
+   * describe the same committed state. A marker that no longer matches the one
+   * the schema read observed means a transaction landed since the scan started
+   * and the pages already collected are from a state that no longer exists.
+   */
+  const readScanChunk =
+    (fenceMarker: number, tables: readonly ExportTable[], cursor: ScanCursor) =>
+    async (read: SessionQuery) => {
+      const marker = await readMarkerWith(read)
+      if (marker !== fenceMarker) return { torn: true, marker } as const
+      const lines: ScanLine[] = []
+      const tableRows: Record<string, number> = {}
+      const next: ScanCursor = { ...cursor }
+      let produced = 0
+      const openNextTable = () => {
+        next.tableIndex++
+        next.tableOpened = false
+        next.rowidCursor = 0
+        next.primaryKeyCursor = null
+        next.limit = 200
+      }
+      while (next.tableIndex < tables.length && produced < scanChunkBytes) {
+        const table = tables[next.tableIndex]!
+        if (!next.tableOpened) {
+          const line = encodeLine({
+            kind: 'table',
+            name: table.name,
+            sql: table.sql,
+            indexes: table.indexes,
+          })
+          lines.push(line)
+          produced += line.bytes.byteLength
+          next.tableOpened = true
+          tableRows[table.name] = tableRows[table.name] ?? 0
+        }
+        const quotedPrimaryKey = table.primaryKeyColumns
+          .map((column) => `"${quoteIdentifier(column)}"`)
+          .join(', ')
+        const usedLimit = next.limit
+        const rows: Record<string, unknown>[] = table.withoutRowid
+          ? await read(
+              next.primaryKeyCursor
+                ? `SELECT * FROM "${quoteIdentifier(table.name)}" WHERE (${quotedPrimaryKey}) > (${table.primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
+                : `SELECT * FROM "${quoteIdentifier(table.name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
+              next.primaryKeyCursor ? [...next.primaryKeyCursor, usedLimit] : [usedLimit]
+            )
+          : await read(
+              `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+              [next.rowidCursor, usedLimit]
+            )
+        if (rows.length === 0) {
+          openNextTable()
+          continue
+        }
+        if (table.withoutRowid) {
+          const last = rows.at(-1)!
+          next.primaryKeyCursor = table.primaryKeyColumns.map((column) => last[column])
+        } else {
+          next.rowidCursor = rows.at(-1)?.__orez_backup_rowid
+          for (const row of rows) delete row.__orez_backup_rowid
+        }
+        const line = encodeLine({ kind: 'rows', table: table.name, rows })
+        lines.push(line)
+        produced += line.bytes.byteLength
+        tableRows[table.name] = (tableRows[table.name] ?? 0) + rows.length
+        const perRow = Math.max(1, Math.ceil(line.bytes.byteLength / rows.length))
+        next.limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
+        if (rows.length < usedLimit) openNextTable()
+      }
+      return { torn: false, lines, tableRows, next } as const
+    }
+
+  /**
+   * Scan a namespace in short read sessions fenced by the write marker.
+   *
+   * A single session covering the whole scan has to stay open across every R2
+   * upload, and an arriving writer preempts it, so on a busy namespace the
+   * export cannot finish: production's control plane lost roughly twenty
+   * consecutive attempts that way while every quiet project namespace exported
+   * normally.
+   *
+   * The dump only has to be one state the database actually had, and
+   * `write_seq` answers that directly: it advances on every committed
+   * application-SQL mutation, which is the same invariant `runScheduledBackups`
+   * already trusts when it skips a namespace whose marker has not moved. So
+   * each chunk reads the marker and its pages inside one short session, and
+   * every chunk has to observe the marker the schema read did. Equal markers at
+   * both ends of a monotonic counter means no transaction committed in between,
+   * which is the same guarantee the single session bought, without holding the
+   * database across the network.
+   *
+   * Uploads happen between chunks with no session open, and are not awaited
+   * until the scan finishes or `maxInflightParts` are outstanding, so R2 stays
+   * off the fenced window entirely for a dump that fits in the in-flight bound.
+   */
+  const runScanAttempt = async (
+    env: Env,
+    namespace: string,
+    key: string,
+    exportedAt: string
+  ): Promise<
+    | {
+        outcome: 'scanned'
+        marker: number
+        tables: number
+        rows: number
+        tableRows: Record<string, number>
+        bytes: number
+        parts: number
+      }
+    | { outcome: 'torn'; marker: number; observed: number }
+    | { outcome: 'preempted' }
+  > => {
+    const files = options.files(env)
+    const schemaChunk = await readChunk(env, namespace, readScanSchema)
+    if (schemaChunk.outcome === 'preempted') return { outcome: 'preempted' }
+    const { marker, tables } = schemaChunk.value
+
+    const upload = await files.createMultipartUpload(key)
+    const partUploads: Promise<unknown>[] = []
+    let chunks: Uint8Array[] = []
+    let bufferedBytes = 0
+    let totalBytes = 0
+    let rowTotal = 0
+    const tableRows: Record<string, number> = {}
+    const digest = sha256.create()
+
+    // an abort that races an in-flight uploadPart can leave the part behind, and
+    // this bucket already carries thousands of orphans. settle first, always.
+    const abortUpload = async () => {
+      await Promise.allSettled(partUploads)
+      await upload.abort().catch(() => {})
+    }
+
+    const sendPart = async (value: Uint8Array) => {
+      const pending = upload.uploadPart(partUploads.length + 1, value)
+      // Nothing awaits this until the scan is done, so keep workerd from
+      // reporting a rejection that the final Promise.all will surface anyway.
+      void pending.catch(() => {})
+      partUploads.push(pending)
+      const bound = partUploads.length - maxInflightParts
+      if (bound >= 0) await partUploads[bound]
+    }
+
+    const flushParts = async (final: boolean) => {
+      if (!final && bufferedBytes < partBytes) return
+      let merged = new Uint8Array(bufferedBytes)
+      let offset = 0
+      for (const chunk of chunks) {
+        merged.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+      while (merged.byteLength >= partBytes) {
+        await sendPart(merged.slice(0, partBytes))
+        merged = merged.slice(partBytes)
+      }
+      if (final && (merged.byteLength > 0 || partUploads.length === 0)) {
+        await sendPart(merged)
+        merged = new Uint8Array(0)
+      }
+      chunks = merged.byteLength ? [merged] : []
+      bufferedBytes = merged.byteLength
+    }
+
+    const appendLine = (line: ScanLine) => {
+      if (line.digested) digest.update(line.bytes)
+      chunks.push(line.bytes)
+      bufferedBytes += line.bytes.byteLength
+      totalBytes += line.bytes.byteLength
+    }
+
+    try {
+      appendLine(
+        encodeLine({
+          kind: 'header',
+          format: options.format,
+          integrity: 'sha256',
+          ns: namespace,
+          exportedAt,
+          marker,
+          orderedTables: true,
+        })
+      )
+      let cursor: ScanCursor = {
+        tableIndex: 0,
+        tableOpened: false,
+        rowidCursor: 0,
+        primaryKeyCursor: null,
+        limit: 200,
+      }
+      while (cursor.tableIndex < tables.length) {
+        const chunk = await readChunk(
+          env,
+          namespace,
+          readScanChunk(marker, tables, cursor)
+        )
+        if (chunk.outcome === 'preempted') {
+          await abortUpload()
+          return { outcome: 'preempted' }
+        }
+        if (chunk.value.torn) {
+          await abortUpload()
+          return { outcome: 'torn', marker, observed: chunk.value.marker }
+        }
+        for (const line of chunk.value.lines) appendLine(line)
+        for (const [table, count] of Object.entries(chunk.value.tableRows)) {
+          tableRows[table] = (tableRows[table] ?? 0) + count
+          rowTotal += count
+        }
+        cursor = chunk.value.next
+        await flushParts(false)
+      }
+      appendLine(
+        encodeLine(
+          {
+            kind: 'footer',
+            tables: tables.length,
+            rows: rowTotal,
+            sha256: hex(digest.digest()),
+          },
+          false
+        )
+      )
+      await flushParts(true)
+      await upload.complete(await Promise.all(partUploads))
+    } catch (error) {
+      await abortUpload()
+      throw error
+    }
+
+    return {
+      outcome: 'scanned',
+      marker,
+      tables: tables.length,
+      rows: rowTotal,
+      tableRows,
+      bytes: totalBytes,
+      parts: partUploads.length,
+    }
+  }
+
   const exportNamespace = async (
     env: Env,
     namespace: string
   ): Promise<NamespaceBackupExportResult> => {
     const startedAt = Date.now()
     const files = options.files(env)
-    const exportedAt = new Date().toISOString()
-    const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
-    // One read session for the whole scan. Every page below reads the same
-    // committed state, so the dump is a database that actually existed.
-    const scan = await options
-      .readSession(env, namespace, async (read) => {
-        // Read before scanning. A concurrent write then leaves the live marker
-        // ahead of latest.json and guarantees another backup.
-        const marker = await readMarkerWith(read)
-        const master = await read(
-          "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name",
-          []
-        )
-        const unorderedTables = master.filter(
-          (row) => row.type === 'table' && !isExcluded(row.name)
-        )
-        const tableNames = unorderedTables.map((row) => String(row.name))
-        const tableNamesBySqlIdentity = tableIdentities(tableNames)
-        // sqlite_master already carries every CREATE statement in this bounded
-        // schema read. Derive FK edges from those statements instead of asking
-        // pragma_foreign_key_list to re-walk the complete schema once per table.
-        const dependencies = new Map(
-          unorderedTables.map((table) => [
-            String(table.name),
-            tableDependencies(table.sql, String(table.name), tableNamesBySqlIdentity),
-          ])
-        )
-        const orderedNames = dependencyOrder(
-          unorderedTables.map((table) => String(table.name)),
-          dependencies
-        )
-        const tableByName = new Map(
-          unorderedTables.map((table) => [String(table.name), table])
-        )
-        const tables = orderedNames.map((name) => tableByName.get(name)!)
-        const indexes = master.filter(
-          (row) =>
-            row.type === 'index' && !isExcluded(row.name) && !isExcluded(row.tbl_name)
-        )
-        const upload = await files.createMultipartUpload(key)
-        const uploadedParts: unknown[] = []
-        const encoder = new TextEncoder()
-        let chunks: Uint8Array[] = []
-        let bufferedBytes = 0
-        let totalBytes = 0
-        const digest = sha256.create()
-
-        const flushParts = async (final: boolean) => {
-          if (!final && bufferedBytes < partBytes) return
-          let merged = new Uint8Array(bufferedBytes)
-          let offset = 0
-          for (const chunk of chunks) {
-            merged.set(chunk, offset)
-            offset += chunk.byteLength
-          }
-          while (merged.byteLength >= partBytes) {
-            uploadedParts.push(
-              await upload.uploadPart(
-                uploadedParts.length + 1,
-                merged.slice(0, partBytes)
-              )
-            )
-            merged = merged.slice(partBytes)
-          }
-          if (final && (merged.byteLength > 0 || uploadedParts.length === 0)) {
-            uploadedParts.push(await upload.uploadPart(uploadedParts.length + 1, merged))
-            merged = new Uint8Array(0)
-          }
-          chunks = merged.byteLength ? [merged] : []
-          bufferedBytes = merged.byteLength
-        }
-
-        const writeLine = async (value: unknown, includeInDigest = true) => {
-          const bytes = encoder.encode(`${JSON.stringify(value)}\n`)
-          if (includeInDigest) digest.update(bytes)
-          chunks.push(bytes)
-          bufferedBytes += bytes.byteLength
-          totalBytes += bytes.byteLength
-          await flushParts(false)
-          return bytes.byteLength
-        }
-
-        let rowTotal = 0
-        const tableRows: Record<string, number> = {}
-        try {
-          await writeLine({
-            kind: 'header',
-            format: options.format,
-            integrity: 'sha256',
-            ns: namespace,
-            exportedAt,
-            marker,
-            orderedTables: true,
-          })
-          for (const table of tables) {
-            const name = String(table.name)
-            const withoutRowid = /\bWITHOUT\s+ROWID\b/i.test(String(table.sql))
-            const primaryKeyColumns = withoutRowid
-              ? (await read(`PRAGMA table_info("${quoteIdentifier(name)}")`, []))
-                  .filter((column) => Number(column.pk) > 0)
-                  .sort((left, right) => Number(left.pk) - Number(right.pk))
-                  .map((column) => String(column.name))
-              : []
-            if (withoutRowid && primaryKeyColumns.length === 0) {
-              throw new Error(`WITHOUT ROWID table ${name} has no primary key`)
-            }
-            const quotedPrimaryKey = primaryKeyColumns
-              .map((column) => `"${quoteIdentifier(column)}"`)
-              .join(', ')
-            let tableRowTotal = 0
-            await writeLine({
-              kind: 'table',
-              name,
-              sql: table.sql,
-              indexes: indexes
-                .filter((index) => index.tbl_name === name)
-                .map((index) => index.sql),
-            })
-            let rowidCursor: unknown = 0
-            let primaryKeyCursor: unknown[] | null = null
-            let limit = 200
-            while (true) {
-              const usedLimit = limit
-              const rows: Record<string, unknown>[] = withoutRowid
-                ? await read(
-                    primaryKeyCursor
-                      ? `SELECT * FROM "${quoteIdentifier(name)}" WHERE (${quotedPrimaryKey}) > (${primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
-                      : `SELECT * FROM "${quoteIdentifier(name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
-                    primaryKeyCursor ? [...primaryKeyCursor, usedLimit] : [usedLimit]
-                  )
-                : await read(
-                    `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
-                    [rowidCursor, usedLimit]
-                  )
-              if (rows.length === 0) break
-              if (withoutRowid) {
-                const last = rows.at(-1)!
-                primaryKeyCursor = primaryKeyColumns.map((column) => last[column])
-              } else {
-                rowidCursor = rows.at(-1)?.__orez_backup_rowid
-                for (const row of rows) delete row.__orez_backup_rowid
-              }
-              const lineBytes = await writeLine({ kind: 'rows', table: name, rows })
-              rowTotal += rows.length
-              tableRowTotal += rows.length
-              const perRow = Math.max(1, Math.ceil(lineBytes / rows.length))
-              limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
-              if (rows.length < usedLimit) break
-            }
-            tableRows[name] = tableRowTotal
-          }
-          await writeLine(
-            {
-              kind: 'footer',
-              tables: tables.length,
-              rows: rowTotal,
-              sha256: hex(digest.digest()),
-            },
-            false
-          )
-          await flushParts(true)
-          await upload.complete(uploadedParts)
-        } catch (error) {
-          try {
-            await upload.abort()
-          } catch {
-            // Preserve the original export failure.
-          }
-          if (error instanceof ApplicationSqlSessionPreemptedError) {
-            log({
-              phase: 'export_upload',
-              outcome: 'preempted',
-              namespace,
-              durationMs: Date.now() - startedAt,
-            })
-          } else {
-            log({
-              phase: 'export_upload',
-              outcome: 'error',
-              namespace,
-              durationMs: Date.now() - startedAt,
-              error: errorMessage(error),
-            })
-          }
-          throw error
-        }
-
-        return {
-          marker,
-          tables: tables.length,
-          rows: rowTotal,
-          tableRows,
-          bytes: totalBytes,
-          parts: uploadedParts.length,
-        }
-      })
-      .catch((error: unknown) => {
-        if (error instanceof ApplicationSqlSessionPreemptedError) return null
+    let torn = 0
+    for (let attempt = 0; attempt < scanAttempts; attempt++) {
+      const exportedAt = new Date().toISOString()
+      const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
+      let scan: Awaited<ReturnType<typeof runScanAttempt>>
+      try {
+        scan = await runScanAttempt(env, namespace, key, exportedAt)
+      } catch (error) {
+        log({
+          phase: 'export_upload',
+          outcome: 'error',
+          namespace,
+          durationMs: Date.now() - startedAt,
+          error: errorMessage(error),
+        })
         throw error
-      })
-    if (scan === null) {
+      }
+      if (scan.outcome === 'preempted') {
+        log({
+          phase: 'export',
+          outcome: 'preempted',
+          namespace,
+          reason: 'session_preempted',
+          torn,
+          durationMs: Date.now() - startedAt,
+        })
+        return { outcome: 'preempted', namespace }
+      }
+      if (scan.outcome === 'torn') {
+        torn++
+        log({
+          phase: 'export_scan',
+          outcome: 'torn',
+          namespace,
+          marker: scan.marker,
+          observedMarker: scan.observed,
+          attempt: attempt + 1,
+          durationMs: Date.now() - startedAt,
+        })
+        continue
+      }
+
+      const summary = {
+        ns: namespace,
+        key,
+        exportedAt,
+        marker: scan.marker,
+        tables: scan.tables,
+        rows: scan.rows,
+        tableRows: scan.tableRows,
+        bytes: scan.bytes,
+        parts: scan.parts,
+      }
+      let keepPreviousLatest = false
+      if (scan.rows === 0) {
+        try {
+          const previous = await files.get(`${backupPrefix(namespace)}latest.json`)
+          if (previous) {
+            const previousSummary = (await previous.json()) as { rows?: unknown }
+            keepPreviousLatest = Number(previousSummary.rows) > 0
+          }
+        } catch {
+          // A missing/corrupt pointer must not prevent a new valid backup.
+        }
+      }
+      if (!keepPreviousLatest) {
+        await files.put(`${backupPrefix(namespace)}latest.json`, JSON.stringify(summary))
+      }
       log({
         phase: 'export',
-        outcome: 'preempted',
+        outcome: 'success',
         namespace,
         durationMs: Date.now() - startedAt,
+        rows: summary.rows,
+        bytes: summary.bytes,
+        parts: summary.parts,
+        torn,
       })
-      return { outcome: 'preempted', namespace }
-    }
-
-    const summary = {
-      ns: namespace,
-      key,
-      exportedAt,
-      ...scan,
-    }
-    let keepPreviousLatest = false
-    if (scan.rows === 0) {
-      try {
-        const previous = await files.get(`${backupPrefix(namespace)}latest.json`)
-        if (previous) {
-          const previousSummary = (await previous.json()) as { rows?: unknown }
-          keepPreviousLatest = Number(previousSummary.rows) > 0
-        }
-      } catch {
-        // A missing/corrupt pointer must not prevent a new valid backup.
-      }
-    }
-    if (!keepPreviousLatest) {
-      await files.put(`${backupPrefix(namespace)}latest.json`, JSON.stringify(summary))
+      return { outcome: 'exported', summary }
     }
     log({
       phase: 'export',
-      outcome: 'success',
+      outcome: 'preempted',
       namespace,
+      reason: 'torn',
+      torn,
       durationMs: Date.now() - startedAt,
-      rows: summary.rows,
-      bytes: summary.bytes,
-      parts: summary.parts,
     })
-    return { outcome: 'exported', summary }
+    return { outcome: 'preempted', namespace }
   }
 
   const importNamespace = async (
@@ -615,7 +844,6 @@ export function createNamespaceBackupManager<Env>(
     let validatedFooter: { rows?: unknown; sha256?: unknown } | undefined
     let validatedRows = 0
     const validationDigest = sha256.create()
-    const encoder = new TextEncoder()
     const tableEntries: TableEntry[] = []
     const seenTables = new Set<string>()
     for await (const line of ndjsonLines(validationObject.body)) {

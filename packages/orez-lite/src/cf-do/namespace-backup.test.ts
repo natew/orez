@@ -373,14 +373,17 @@ describe('namespace backup export consistency', () => {
     const db = new BetterSqlite3(':memory:')
     db.exec(
       'CREATE TABLE account (id TEXT PRIMARY KEY, balance INTEGER NOT NULL);' +
-        'CREATE TABLE ledger (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id), amount INTEGER NOT NULL)'
+        'CREATE TABLE ledger (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id), amount INTEGER NOT NULL);' +
+        'CREATE TABLE _test_backup_meta (id INTEGER PRIMARY KEY, write_seq INTEGER)'
     )
+    db.exec('INSERT INTO _test_backup_meta VALUES (1, 1)')
     db.exec("INSERT INTO account VALUES ('a1', 0)")
 
-    // The durable object admits no write session while a read session is open
-    // (worker.ts canAdmitApplicationSqlSession). A scan that owns one session
-    // for its whole length therefore cannot observe half of a deposit; a scan
-    // that opens a session per statement can.
+    // The same scan at its default chunk size, where the whole namespace fits
+    // in one chunk. A deposit that arrives during it is admitted the moment
+    // that chunk's session closes, so the dump has to hold either both halves
+    // of the transaction or neither; a scan that opens a session per statement
+    // holds one of them.
     let readersOpen = 0
     const queuedWrites: Array<() => void> = []
     const admitWrites = () => {
@@ -396,6 +399,7 @@ describe('namespace backup export consistency', () => {
         db.exec("UPDATE account SET balance = balance + 100 WHERE id = 'a1'")
         db.exec("INSERT INTO ledger VALUES ('l1', 'a1', 100)")
         db.exec('COMMIT')
+        db.exec('UPDATE _test_backup_meta SET write_seq = write_seq + 1 WHERE id = 1')
       })
       admitWrites()
     }
@@ -453,6 +457,446 @@ describe('namespace backup export consistency', () => {
     expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
       balance: 100,
     })
+  })
+})
+
+/**
+ * The durable object's application-SQL admission rules, as worker.ts implements
+ * them, over a real SQLite database.
+ *
+ * A read session keeps its turn until it closes, and an arriving writer does
+ * not queue behind it: `[APPLICATION_SQL_ACQUIRE]` drops every active
+ * background reader out of the reader set before admitting the write, so that
+ * reader's next statement or its commit reports the session preempted. A
+ * session that actually mutated bumps `write_seq` on commit, the way
+ * `applicationSqlDidCommit` does.
+ */
+function durableObject(
+  db: InstanceType<typeof BetterSqlite3>,
+  onRead: (sql: string) => void = () => {}
+) {
+  const readers = new Set<{ preempted: boolean }>()
+  const queuedWrites: Array<() => void> = []
+  let sessions = 0
+  let openReaders = 0
+  let uploadsWithSessionOpen = 0
+
+  const run = (sql: string, params: readonly unknown[] = []) => {
+    const statement = db.prepare(sql)
+    return statement.reader
+      ? (statement.all(...params) as Record<string, any>[])
+      : (statement.run(...params), [] as Record<string, any>[])
+  }
+
+  const commitWrite = (mutate: () => void, mutates: boolean) => {
+    for (const reader of readers) reader.preempted = true
+    readers.clear()
+    db.exec('BEGIN')
+    try {
+      mutate()
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+    if (mutates) {
+      db.exec('UPDATE _test_backup_meta SET write_seq = write_seq + 1 WHERE id = 1')
+    }
+  }
+
+  const admitQueued = () => {
+    while (openReaders === 0 && queuedWrites.length > 0) queuedWrites.shift()!()
+  }
+
+  return {
+    sessions: () => sessions,
+    uploadsWithSessionOpen: () => uploadsWithSessionOpen,
+    /** admitted immediately, preempting whatever background reader is open */
+    writeNow(mutate: () => void, mutates = true) {
+      commitWrite(mutate, mutates)
+    },
+    /** admitted the moment the open session closes, so it lands between chunks */
+    writeBetweenChunks(mutate: () => void) {
+      queuedWrites.push(() => commitWrite(mutate, true))
+    },
+    files(bucket: NamespaceBackupBucket): NamespaceBackupBucket {
+      return {
+        ...bucket,
+        createMultipartUpload: async (key: string) => {
+          const upload = await bucket.createMultipartUpload(key)
+          return {
+            ...upload,
+            uploadPart: (partNumber: number, value: Uint8Array) => {
+              if (openReaders > 0) uploadsWithSessionOpen++
+              return upload.uploadPart(partNumber, value)
+            },
+          }
+        },
+      }
+    },
+    async readSession<Value>(
+      _env: unknown,
+      _namespace: string,
+      work: (
+        query: (
+          sql: string,
+          params?: readonly unknown[]
+        ) => Promise<Record<string, any>[]>
+      ) => Promise<Value>
+    ): Promise<Value> {
+      const session = { preempted: false }
+      sessions++
+      readers.add(session)
+      openReaders++
+      try {
+        const value = await work(async (sql, params = []) => {
+          if (session.preempted) throw new ApplicationSqlSessionPreemptedError()
+          onRead(sql)
+          if (session.preempted) throw new ApplicationSqlSessionPreemptedError()
+          return run(sql, params)
+        })
+        // a session preempted after its last read still fails at commit
+        if (session.preempted) throw new ApplicationSqlSessionPreemptedError()
+        return value
+      } finally {
+        readers.delete(session)
+        openReaders--
+        admitQueued()
+      }
+    },
+    query: async (
+      _env: unknown,
+      _namespace: string,
+      sql: string,
+      params: readonly unknown[]
+    ) => run(sql, params),
+  }
+}
+
+/** account/ledger joined by a foreign key, so a torn dump is visibly torn. */
+function ledgerDatabase(ledgerRows: number) {
+  const db = new BetterSqlite3(':memory:')
+  db.exec(
+    'CREATE TABLE account (id TEXT PRIMARY KEY, balance INTEGER NOT NULL);' +
+      'CREATE TABLE ledger (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id), amount INTEGER NOT NULL);' +
+      'CREATE TABLE _test_backup_meta (id INTEGER PRIMARY KEY, write_seq INTEGER)'
+  )
+  db.exec('INSERT INTO _test_backup_meta VALUES (1, 1)')
+  db.exec("INSERT INTO account VALUES ('a1', 0)")
+  const insert = db.prepare('INSERT INTO ledger VALUES (?, ?, ?)')
+  db.exec('BEGIN')
+  for (let index = 0; index < ledgerRows; index++) {
+    insert.run(`seed-${String(index).padStart(4, '0')}`, 'a1', 0)
+  }
+  db.exec('COMMIT')
+  return db
+}
+
+/** one transaction, so sum(ledger.amount) always equals account.balance */
+const deposit =
+  (db: InstanceType<typeof BetterSqlite3>, id: string, amount: number) => () => {
+    db.exec(`UPDATE account SET balance = balance + ${amount} WHERE id = 'a1'`)
+    db.exec(`INSERT INTO ledger VALUES ('${id}', 'a1', ${amount})`)
+  }
+
+function dumped(stored: ReturnType<typeof writableBucket>) {
+  const pointer = JSON.parse(stored.pointers.get('backups/singleton/latest.json') ?? '{}')
+  const lines = (stored.pointers.get(String(pointer.key)) ?? '')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+  const rowsOf = (table: string) =>
+    lines
+      .filter((line) => line.kind === 'rows' && line.table === table)
+      .flatMap((line) => line.rows as Record<string, any>[])
+  return {
+    pointer,
+    published: lines.length > 0,
+    rowsOf,
+    balance: () => Number(rowsOf('account').find((row) => row.id === 'a1')?.balance),
+    ledgerTotal: () =>
+      rowsOf('ledger').reduce((total, row) => total + Number(row.amount), 0),
+  }
+}
+
+/** every `orez_backup` event the manager emitted while `work` ran. */
+async function backupEvents<Value>(work: () => Promise<Value>) {
+  const events: Record<string, any>[] = []
+  const log = vi.spyOn(console, 'log').mockImplementation((line: unknown) => {
+    try {
+      const parsed = JSON.parse(String(line))
+      if (parsed?.event === 'orez_backup') events.push(parsed)
+    } catch {
+      // not one of ours
+    }
+  })
+  let value: Value
+  try {
+    value = await work()
+  } finally {
+    log.mockRestore()
+  }
+  return { value, events }
+}
+
+describe('namespace backup export under a live writer', () => {
+  const scenario = (
+    db: InstanceType<typeof BetterSqlite3>,
+    onRead: (object: ReturnType<typeof durableObject>, sql: string) => void,
+    managerOptions: Record<string, unknown> = {}
+  ) => {
+    const stored = writableBucket()
+    let multipartUploads = 0
+    let object!: ReturnType<typeof durableObject>
+    object = durableObject(db, (sql) => onRead(object, sql))
+    const files = object.files({
+      ...stored.bucket,
+      createMultipartUpload: (key: string) => {
+        multipartUploads++
+        return stored.bucket.createMultipartUpload(key)
+      },
+    })
+    const manager = createNamespaceBackupManager<unknown>({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      excludedTables: ['_test_backup_meta'],
+      // one chunk per page, so a passing scan cannot be one session by accident
+      scanChunkBytes: 1,
+      files: () => files,
+      query: object.query,
+      readSession: (env, namespace, work) => object.readSession(env, namespace, work),
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+      ...managerOptions,
+    })
+    return { manager, object, stored, multipartUploads: () => multipartUploads }
+  }
+
+  /**
+   * The failure this replaces: the export owned one read session for its whole
+   * length, so any writer admitted during it killed the export outright. On the
+   * production control plane that was every attempt for six hours. A run in
+   * which no writer ever arrives proves nothing, so this one admits a real
+   * interactive transaction in the middle of the scan.
+   */
+  it('completes while an interactive writer is admitted mid-scan', async () => {
+    const db = ledgerDatabase(600)
+    let deposits = 0
+    const { manager, object, stored } = scenario(db, (self, sql) => {
+      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+      deposits++
+      self.writeNow(deposit(db, 'l1', 100))
+    })
+
+    const { value, events } = await backupEvents(() =>
+      manager.exportNamespace({}, 'singleton')
+    )
+
+    expect(deposits).toBe(1)
+    expect(value.outcome).toBe('exported')
+    const dump = dumped(stored)
+    expect(dump.published).toBe(true)
+    // the dump is one state the database actually had
+    expect(dump.ledgerTotal()).toBe(dump.balance())
+    expect(dump.rowsOf('ledger')).toHaveLength(601)
+    // and the scan never held the database across an upload
+    expect(object.sessions()).toBeGreaterThan(1)
+    expect(object.uploadsWithSessionOpen()).toBe(0)
+    expect(events.filter((event) => event.outcome === 'torn')).not.toHaveLength(0)
+    // the writer was never made to wait: its deposit is live before the export
+    // returns, not replayed after it
+    expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
+      balance: 100,
+    })
+    db.close()
+  })
+
+  /**
+   * The shape this replaces, reproduced: one session over the whole scan, no
+   * chunk to re-read and no scan to retry. One writer ends the export, which is
+   * what the production control plane did roughly twenty times in a row while
+   * every quiet project namespace exported normally.
+   */
+  it('loses the whole export to one writer when the scan is a single session', async () => {
+    const db = ledgerDatabase(600)
+    let deposits = 0
+    const { manager, object, stored } = scenario(
+      db,
+      (self, sql) => {
+        if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+        deposits++
+        self.writeNow(deposit(db, 'l1', 100))
+      },
+      { scanChunkBytes: Number.MAX_SAFE_INTEGER, chunkAttempts: 1, scanAttempts: 1 }
+    )
+
+    const value = await manager.exportNamespace({}, 'singleton')
+
+    expect(deposits).toBe(1)
+    expect(value).toEqual({ outcome: 'preempted', namespace: 'singleton' })
+    expect(stored.pointers.get('backups/singleton/latest.json')).toBeUndefined()
+    // the schema read plus the one session that was supposed to carry the scan
+    expect(object.sessions()).toBe(2)
+    db.close()
+  })
+
+  it('restarts rather than publishing a dump torn by a write between chunks', async () => {
+    const db = ledgerDatabase(600)
+    let deposits = 0
+    const { manager, object, stored, multipartUploads } = scenario(db, (self, sql) => {
+      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+      deposits++
+      // queued behind the open session, so it lands after the chunk closes and
+      // preempts nothing. only the marker can catch it.
+      self.writeBetweenChunks(deposit(db, 'l1', 100))
+    })
+
+    const { value, events } = await backupEvents(() =>
+      manager.exportNamespace({}, 'singleton')
+    )
+
+    expect(value.outcome).toBe('exported')
+    const torn = events.filter((event) => event.outcome === 'torn')
+    expect(torn).toHaveLength(1)
+    expect(torn[0]).toMatchObject({ marker: 1, observedMarker: 2 })
+    expect(multipartUploads()).toBe(2)
+    const dump = dumped(stored)
+    expect(dump.ledgerTotal()).toBe(dump.balance())
+    expect(dump.balance()).toBe(100)
+    expect(dump.pointer.marker).toBe(2)
+    expect(object.uploadsWithSessionOpen()).toBe(0)
+    db.close()
+  })
+
+  /**
+   * The control that shows the marker fence is doing the work: the same write,
+   * with no scan left to retry with, abandons the export instead of publishing
+   * the half-old dump the pages already collected would have made.
+   */
+  it('publishes nothing when the only scan it is allowed is torn', async () => {
+    const db = ledgerDatabase(600)
+    let deposits = 0
+    const { manager, stored } = scenario(
+      db,
+      (self, sql) => {
+        if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+        deposits++
+        self.writeBetweenChunks(deposit(db, 'l1', 100))
+      },
+      { scanAttempts: 1 }
+    )
+
+    const value = await manager.exportNamespace({}, 'singleton')
+
+    expect(value).toEqual({ outcome: 'preempted', namespace: 'singleton' })
+    expect(stored.pointers.get('backups/singleton/latest.json')).toBeUndefined()
+    db.close()
+  })
+
+  it('re-reads only the interrupted chunk when the writer commits no change', async () => {
+    const db = ledgerDatabase(600)
+    let interruptions = 0
+    const { manager, object, stored, multipartUploads } = scenario(db, (self, sql) => {
+      if (interruptions > 0 || !sql.includes('FROM "ledger"')) return
+      interruptions++
+      // admitted, took the turn, changed nothing: `applicationSqlDidCommit`
+      // does not bump the marker for a session that never mutated
+      self.writeNow(() => {}, false)
+    })
+
+    const { value, events } = await backupEvents(() =>
+      manager.exportNamespace({}, 'singleton')
+    )
+
+    expect(interruptions).toBe(1)
+    expect(value.outcome).toBe('exported')
+    expect(events.filter((event) => event.outcome === 'torn')).toHaveLength(0)
+    // one scan, one multipart upload: the interruption cost a page, not a dump
+    expect(multipartUploads()).toBe(1)
+    expect(dumped(stored).rowsOf('ledger')).toHaveLength(600)
+    expect(object.uploadsWithSessionOpen()).toBe(0)
+    db.close()
+  })
+
+  /**
+   * The reason a writer used to win every race: the scan awaited each multipart
+   * upload with the database still held, so the window an arriving writer could
+   * land in was the whole export rather than its reads. Uploads are started
+   * between chunks and only awaited at the end, so pages keep being read while
+   * R2 is still working.
+   */
+  it('keeps reading while its uploads are still outstanding', async () => {
+    const db = ledgerDatabase(600)
+    let outstanding = 0
+    let readsWhileUploading = 0
+    let uploads = 0
+    const stored = writableBucket()
+    const object = durableObject(db, () => {
+      if (outstanding > 0) readsWhileUploading++
+    })
+    const manager = createNamespaceBackupManager<unknown>({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      excludedTables: ['_test_backup_meta'],
+      scanChunkBytes: 1,
+      // small parts so the scan produces many uploads before it finishes
+      partBytes: 2048,
+      maxInflightParts: 64,
+      files: () => ({
+        ...stored.bucket,
+        createMultipartUpload: async (key: string) => {
+          const upload = await stored.bucket.createMultipartUpload(key)
+          return {
+            ...upload,
+            uploadPart: async (partNumber: number, value: Uint8Array) => {
+              uploads++
+              outstanding++
+              await new Promise((resolve) => setTimeout(resolve, 20))
+              outstanding--
+              return upload.uploadPart(partNumber, value)
+            },
+          }
+        },
+      }),
+      query: object.query,
+      readSession: (env, namespace, work) => object.readSession(env, namespace, work),
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    const value = await manager.exportNamespace({}, 'singleton')
+
+    expect(value.outcome).toBe('exported')
+    expect(uploads).toBeGreaterThan(1)
+    // a scan that awaited each upload with the database held reads nothing here
+    expect(readsWhileUploading).toBeGreaterThan(0)
+    expect(dumped(stored).rowsOf('ledger')).toHaveLength(600)
+    db.close()
+  })
+
+  it('gives up after a bounded number of scans instead of spinning', async () => {
+    const db = ledgerDatabase(600)
+    let deposits = 0
+    const { manager, stored, multipartUploads } = scenario(db, (self, sql) => {
+      if (!sql.includes('FROM "ledger"')) return
+      deposits++
+      self.writeBetweenChunks(deposit(db, `l${deposits}`, 1))
+    })
+
+    const { value, events } = await backupEvents(() =>
+      manager.exportNamespace({}, 'singleton')
+    )
+
+    expect(value).toEqual({ outcome: 'preempted', namespace: 'singleton' })
+    expect(multipartUploads()).toBe(3)
+    expect(events.filter((event) => event.outcome === 'torn')).toHaveLength(3)
+    expect(events.at(-1)).toMatchObject({
+      phase: 'export',
+      outcome: 'preempted',
+      torn: 3,
+    })
+    expect(stored.pointers.get('backups/singleton/latest.json')).toBeUndefined()
+    db.close()
   })
 })
 

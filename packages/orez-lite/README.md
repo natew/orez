@@ -104,3 +104,14 @@ protects the broader status route as well as write-budget controls.
 Cloudflare namespace backup summaries also include `tableRows`, the row count
 observed for every exported table during the existing streaming scan. Consumers
 can persist fleet profiles without issuing a second set of table reads.
+
+`backupManager.exportNamespace(env, namespace)` scans in short read sessions
+rather than one session over the whole database. Each chunk reads the backup
+marker (`write_seq`) and its pages inside the same session, and every chunk has
+to observe the marker the schema read did, so the dump is still one state the
+database actually had. Multipart uploads happen between chunks with no session
+open, and are only awaited once `maxInflightParts` are outstanding, so a writer
+never waits behind R2 and no single writer can end the export. A writer that
+preempts one chunk costs that chunk; a transaction that commits mid-scan costs
+one scan, retried up to `scanAttempts` times before the export reports
+`outcome: 'preempted'` and leaves the work for the next run.

@@ -138,14 +138,18 @@ export interface OrezBackupConfig<Env extends OrezDataWorkerEnv> extends Partial
   Pick<
     NamespaceBackupOptions<Env>,
     | 'acceptedFormats'
+    | 'chunkAttempts'
     | 'chunkTargetBytes'
     | 'controlPlaneNamespace'
     | 'excludedTables'
     | 'keep'
     | 'keepControlPlane'
+    | 'maxInflightParts'
     | 'partBytes'
     | 'prefix'
     | 'runBudgetMs'
+    | 'scanAttempts'
+    | 'scanChunkBytes'
   >
 > {
   bucket(env: Env): NamespaceBackupBucket
@@ -1008,14 +1012,18 @@ export function createOrezDataWorker<
         ...Object.fromEntries(
           Object.entries(options.backup).filter(([key]) =>
             [
-              'chunkTargetBytes',
               'acceptedFormats',
+              'chunkAttempts',
+              'chunkTargetBytes',
               'controlPlaneNamespace',
               'keep',
               'keepControlPlane',
+              'maxInflightParts',
               'partBytes',
               'prefix',
               'runBudgetMs',
+              'scanAttempts',
+              'scanChunkBytes',
             ].includes(key)
           )
         ),
