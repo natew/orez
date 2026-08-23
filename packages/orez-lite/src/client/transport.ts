@@ -36,11 +36,6 @@ type WebSocketConstructor = {
   CLOSED?: number
 }
 
-type PageLifecycleTarget = {
-  addEventListener(type: 'pagehide', listener: () => void): void
-  removeEventListener(type: 'pagehide', listener: () => void): void
-}
-
 type DesiredQueryPatchOp =
   | { op: 'clear' }
   | { op: 'put' | 'del'; hash: string; [key: string]: unknown }
@@ -346,23 +341,6 @@ function logHttpPullLifecycle(event: HttpPullLifecycleEvent) {
   console.error(`[orez:client] ${JSON.stringify(event)}`)
 }
 
-function getPageLifecycleTarget(): PageLifecycleTarget | undefined {
-  const addEventListener = Reflect.get(globalThis, 'addEventListener')
-  const removeEventListener = Reflect.get(globalThis, 'removeEventListener')
-  if (
-    typeof addEventListener !== 'function' ||
-    typeof removeEventListener !== 'function'
-  ) {
-    return undefined
-  }
-  return {
-    addEventListener: (type, listener) =>
-      Reflect.apply(addEventListener, globalThis, [type, listener]),
-    removeEventListener: (type, listener) =>
-      Reflect.apply(removeEventListener, globalThis, [type, listener]),
-  }
-}
-
 export function installHttpPullTransport(
   opts: HttpPullTransportOptions
 ): HttpPullTransport {
@@ -427,11 +405,9 @@ export function installHttpPullTransport(
   // navigation rejects the outgoing document's pending fetches after pagehide.
   // settle its sockets synchronously first so those expected rejections cannot
   // become ServerOverloaded frames or lifecycle failures during the next page.
-  const pageLifecycleTarget = getPageLifecycleTarget()
-  const handlePageHide = () => {
-    for (const socket of [...state.sockets]) socket.close(1000, 'pagehide')
-  }
-  pageLifecycleTarget?.addEventListener('pagehide', handlePageHide)
+  const handlePageHide = () =>
+    state.sockets.forEach((socket) => socket.close(1000, 'pagehide'))
+  globalThis.addEventListener?.('pagehide', handlePageHide)
 
   const transport: HttpPullTransport = {
     pull: async () => {
@@ -455,7 +431,7 @@ export function installHttpPullTransport(
     pageID: state.pageID,
     transportID: state.transportID,
     uninstall: () => {
-      pageLifecycleTarget?.removeEventListener('pagehide', handlePageHide)
+      globalThis.removeEventListener?.('pagehide', handlePageHide)
       if (globalThis.WebSocket === (Shim as unknown as typeof WebSocket)) {
         globalThis.WebSocket = previousWebSocket as typeof WebSocket
       }
