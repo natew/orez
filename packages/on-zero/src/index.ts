@@ -14,6 +14,7 @@ export {
   type GroupedQueries,
   type PermissionStrategy,
   type WaitForZeroOptions,
+  type ZeroProviderGeneration,
   type ZeroProviderTransport,
 } from './createZeroClient'
 export * from './createUseQuery'

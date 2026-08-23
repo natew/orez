@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { act } from 'react'
+import { act, useLayoutEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
@@ -135,6 +135,57 @@ test('remint drops local state and reconstructs a fresh instance in place', asyn
   expect(first?.delete).toHaveBeenCalledTimes(1)
   expect(fakeZero.instances.length).toBe(countBefore + 1)
   expect(fakeZero.instances.at(-1)).not.toBe(first)
+})
+
+test('provider generation changes with the actual instance during remint', async () => {
+  const generationClient = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'provider-generation-test',
+  })
+  const generations: Array<
+    NonNullable<ReturnType<typeof generationClient.useZeroProviderGeneration>>
+  > = []
+
+  function GenerationProbe() {
+    const generation = generationClient.useZeroProviderGeneration()
+    useLayoutEffect(() => {
+      if (generation) generations.push(generation)
+    }, [generation])
+    return null
+  }
+
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <generationClient.ProvideZero
+        cacheURL="http://127.0.0.1:7777/zero"
+        userID="generation-test"
+      >
+        <GenerationProbe />
+      </generationClient.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+
+  expect(generations).toHaveLength(1)
+  const firstGeneration = generations[0]
+  expect(firstGeneration?.isCurrent()).toBe(true)
+
+  await act(async () => {
+    expect(await generationClient.remint({ dropLocalState: false })).toBe(true)
+    await Promise.resolve()
+  })
+
+  expect(generations).toHaveLength(2)
+  expect(generations[1]).not.toBe(firstGeneration)
+  expect(firstGeneration?.isCurrent()).toBe(false)
+  expect(generations[1]?.isCurrent()).toBe(true)
+
+  act(() => root?.unmount())
+  root = null
+  expect(generations[1]?.isCurrent()).toBe(false)
 })
 
 test('remint with no provider mounted returns false without burning the guard budget', async () => {

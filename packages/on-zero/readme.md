@@ -533,12 +533,20 @@ close a live connection. the cache also remembers the bearer token used by that
 instance. when a provider remounts with a different token but the same client
 identity, `ProvideZero` reconnects that cached instance with the new token after
 the render commits. discarded and Strict Mode replayed renders cannot consume
-that transition. a
-logout that disables the provider and removes auth retires the authenticated
+that transition. a logout that disables the provider and removes auth retires the authenticated
 instance instead of allowing a later sign-in to revive its closed connection.
 Call the returned `retire()` when logout unmounts the provider before it can
 commit the disabled identity. It fences mutations, clears every cached identity,
 and closes the cached clients. Ordinary route unmounts keep using the warm cache.
+
+`useZeroProviderGeneration()` returns an opaque generation for the exact live
+Zero instance and `null` while the provider is disabled or rendering on the
+server. It changes in the same render that replaces the instance, including an
+in-place `remint()`. `generation.isCurrent()` stays tied to that instance after
+a late callback resumes, and becomes false when the instance is replaced,
+disabled, or its provider unmounts. Descendants can use the identity and current
+check to fence provider-bound work before resolving the module-level mutation
+facade.
 
 ### multiple client instances
 
