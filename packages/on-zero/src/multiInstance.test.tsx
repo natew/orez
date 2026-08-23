@@ -74,6 +74,7 @@ function fakeClient(name: string, namespaces: string[], zeroStub: unknown) {
     getQuery: vi.fn(() => `${name}-getQuery`),
     zeroEvents: createEmitter<ZeroEvent | null>(`zero:test-${name}`, null),
     reloadPage: vi.fn(() => true),
+    retire: vi.fn(async () => {}),
     ControlQueries: ({ children }: { children: ReactNode }) => children,
   }
 }
@@ -294,6 +295,30 @@ describe('combineZeroClients facade', () => {
     expect(combined.reloadPage()).toBe(true)
     expect(control.reloadPage).toHaveBeenCalledOnce()
     expect(project.reloadPage).not.toHaveBeenCalled()
+  })
+
+  test('retire tears down every instance, not just the primary', async () => {
+    const control = fakeClient('retire-control', ['retireUser'], { mutate: {} })
+    const project = fakeClient('retire-project', ['retireTask'], { mutate: {} })
+    const combined = combineZeroClients(control, project)
+
+    await combined.retire()
+
+    // sign-out is account-wide: a client left holding the signed-out account's
+    // local store is exactly how data survives into the next account.
+    expect(control.retire).toHaveBeenCalledOnce()
+    expect(project.retire).toHaveBeenCalledOnce()
+  })
+
+  test('retire runs every instance even when one rejects', async () => {
+    const control = fakeClient('retire-fail-control', ['retireFailUser'], { mutate: {} })
+    const project = fakeClient('retire-fail-project', ['retireFailTask'], { mutate: {} })
+    control.retire.mockRejectedValueOnce(new Error('control teardown failed'))
+    const combined = combineZeroClients(control, project)
+
+    await expect(combined.retire()).rejects.toThrow('control teardown failed')
+    // the healthy client still tore down rather than being skipped by the throw
+    expect(project.retire).toHaveBeenCalledOnce()
   })
 
   test('useQuery/preload/getQuery/usePermission dispatch by namespace', () => {

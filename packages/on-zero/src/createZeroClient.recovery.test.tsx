@@ -326,3 +326,51 @@ test('transport and app benign log patterns suppress classified recovery', async
   expect(install).toHaveBeenCalledOnce()
   expect(scheduleReload).not.toHaveBeenCalled()
 })
+
+test('retire tears down on every sign-out, including inside remint guard window', async () => {
+  // own client so remint's shared guard state cannot mask the assertion.
+  const isolated = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'retire-signout-test',
+  })
+
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <isolated.ProvideZero
+        cacheURL="http://127.0.0.1:7777/zero"
+        userID="retire-signout"
+      >
+        <span>ok</span>
+      </isolated.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+
+  const first = fakeZero.instances.at(-1)
+  expect(first).toBeDefined()
+
+  await act(async () => {
+    await isolated.retire()
+    await Promise.resolve()
+  })
+
+  // dropped the signed-out account's local store and minted a clean client
+  expect(first?.delete).toHaveBeenCalledTimes(1)
+  expect(first?.close).toHaveBeenCalledTimes(1)
+  const second = fakeZero.instances.at(-1)
+  expect(second).not.toBe(first)
+
+  // a second sign-out immediately after is well inside remint's 12s cooldown.
+  // it must still drop the store — remint() refuses here and would leave the
+  // previous account's local state cached for the next sign-in to revive.
+  await act(async () => {
+    await isolated.retire()
+    await Promise.resolve()
+  })
+
+  expect(second?.delete).toHaveBeenCalledTimes(1)
+  expect(fakeZero.instances.at(-1)).not.toBe(second)
+})

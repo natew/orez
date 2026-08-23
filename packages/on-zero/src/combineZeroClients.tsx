@@ -50,6 +50,7 @@ type CombinableZeroClient = {
   mutationLifecycle: MutationLifecycle
   zeroEvents: ZeroEventsEmitter
   reloadPage: () => boolean
+  retire: () => Promise<void>
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 }
 
@@ -83,6 +84,7 @@ export type CombinedZeroClients<Clients extends readonly CombinableZeroClient[]>
   run: typeof run
   zeroEvents: ZeroEventsEmitter
   reloadPage: () => boolean
+  retire: () => Promise<void>
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 } & CombinedMutationLifecycle
 
@@ -203,6 +205,15 @@ export function combineZeroClients<
     })
   }
 
+  // sign-out teardown across every instance at once. one client refusing to
+  // tear down must not leave the others holding the signed-out account's local
+  // store, so every retire runs and the first rejection surfaces after.
+  async function retire(): Promise<void> {
+    const outcomes = await Promise.allSettled(clients.map((client) => client.retire()))
+    const failed = outcomes.find((outcome) => outcome.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
+  }
+
   const ControlQueries = ({ children, ...props }: ControlQueriesProps) =>
     clients.reduceRight(
       (inner: ReactNode, client) => (
@@ -227,6 +238,7 @@ export function combineZeroClients<
     run,
     zeroEvents,
     reloadPage: primary.reloadPage,
+    retire,
     ControlQueries,
     ...mutations,
   }

@@ -756,6 +756,40 @@ export function createZeroClientInternal<
     return true
   }
 
+  // sign-out teardown: drop every instance this client holds — live, cached, and
+  // render-parked — then mint a clean one through the mounted provider.
+  // deliberately NOT rate-guarded the way remint() is: remint recovers a
+  // desynced client and must not storm, while a sign-out has to land every
+  // time. two sign-outs inside remint's guard window would otherwise leave the
+  // previous account's local store cached for the next sign-in to revive, and
+  // account data must never survive into the wrong account. the recovery budget
+  // resets too, so a new session does not inherit the old one's attempts.
+  async function retire(): Promise<void> {
+    const parked = [...retiredZero.values()]
+    retiredZero.clear()
+    const live = zeroRuntime.zero ?? cachedZero?.instance ?? null
+    cachedZero = null
+    lastRemintAt = 0
+    remintAttempts = 0
+    await deleteZeroInstance(live).catch(() => {})
+    // parked instances were never published, so they only need their local
+    // store dropped and their socket closed.
+    for (const { instance: parkedInstance } of parked) {
+      if (parkedInstance === live) continue
+      try {
+        await parkedInstance.delete()
+      } catch {
+        // a deleted client is already unusable; this is best-effort cleanup.
+      }
+      try {
+        parkedInstance.close()
+      } catch {
+        // same — close cannot fail a sign-out.
+      }
+    }
+    remintControl.bump?.()
+  }
+
   function emitReconnectStatus(event: Extract<ZeroEvent, { type: 'reconnect' }>): void {
     const current = zeroEvents.value
     if (
@@ -1423,6 +1457,7 @@ export function createZeroClientInternal<
     getQuery,
     waitForZero,
     remint,
+    retire,
     // combineZeroClients dispatches acknowledgement through this
     mutationLifecycle,
     drainBackgroundMutations: mutationLifecycle.drainBackgroundMutations,
