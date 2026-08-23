@@ -1218,6 +1218,45 @@ describe('Orez HTTP transport', () => {
     expect(transport.connections).toBe(1)
   })
 
+  test('pagehide closes a pending pull before its fetch rejection can report a failure', async () => {
+    const pageLifecycle = new EventTarget()
+    vi.stubGlobal('addEventListener', pageLifecycle.addEventListener.bind(pageLifecycle))
+    vi.stubGlobal(
+      'removeEventListener',
+      pageLifecycle.removeEventListener.bind(pageLifecycle)
+    )
+
+    try {
+      const pendingPull = defer<Response>()
+      void pendingPull.promise.catch(() => {})
+      const lifecycle: HttpPullLifecycleEvent[] = []
+      const transport = installHttpPullTransport({
+        origin: ORIGIN,
+        fetch: vi.fn(async () => pendingPull.promise),
+        lifecycle: (event) => lifecycle.push(event),
+      })
+      transports.push(transport)
+      const { messages, socket } = openRawSocketWithMessages()
+      const closes: Array<{ code: number; reason: string; wasClean: boolean }> = []
+      socket.addEventListener('close', (event: any) => closes.push(event))
+
+      await eventually(() => expect(transport.connections).toBe(1))
+      const pendingResult = transport.pull().catch(() => {})
+      pageLifecycle.dispatchEvent(new Event('pagehide'))
+
+      expect(transport.connections).toBe(0)
+      expect(closes).toEqual([{ code: 1000, reason: 'pagehide', wasClean: true }])
+
+      pendingPull.reject(new TypeError('Failed to fetch'))
+      await pendingResult
+
+      expect(lifecycle.filter((event) => event.type === 'failure')).toEqual([])
+      expect(messages.filter((message) => message[0] === 'error')).toEqual([])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('401 pull failure closes the fake socket without materializing data', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
