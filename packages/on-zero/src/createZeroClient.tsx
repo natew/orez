@@ -658,21 +658,21 @@ export function createZeroClientInternal<
   // lifecycle artifact. single-provider assumption: one mounted ProvideZero
   // per client (true of every consumer); two simultaneously mounted providers
   // with different identities would thrash this slot.
-  let cachedZero: {
+  // `auth` is the token the instance last connected with, so a provider that
+  // unmounted and remounted around a sign-in can still tell the token changed.
+  type CachedZeroEntry = {
     key: string
     instance: ZeroInstance
     auth?: string | null
-  } | null = null
+  }
+  let cachedZero: CachedZeroEntry | null = null
 
   // instances the render phase displaced, waiting for a commit to close them.
   // react can throw a render away, so a rotation is only PROVISIONAL until
   // something commits: closing there would kill an instance the committed tree
   // still holds. keyed so a render that swings back to a retired identity
   // revives that instance instead of constructing a twin beside it.
-  const retiredZero = new Map<
-    string,
-    { key: string; instance: ZeroInstance; auth?: string | null }
-  >()
+  const retiredZero = new Map<string, CachedZeroEntry>()
 
   // in-place re-mint: drop the current instance's local state then reconstruct a
   // fresh client WITHOUT a page reload — the native-safe recovery path (a reload
@@ -1003,7 +1003,7 @@ export function createZeroClientInternal<
       retiredZero.set(cachedZero.key, cachedZero)
       cachedZero = null
     }
-    let refreshCachedAuth = false
+    let activeZero: CachedZeroEntry | null = null
     if (!disable) {
       if (cachedZero?.key !== instanceKey) {
         if (cachedZero) retiredZero.set(cachedZero.key, cachedZero)
@@ -1026,10 +1026,8 @@ export function createZeroClientInternal<
         }
         cachedZero = nextCachedZero
       }
-      const activeZero = cachedZero
+      activeZero = cachedZero
       liveInstance = activeZero.instance
-      refreshCachedAuth = activeZero.auth !== auth
-      activeZero.auth = auth
     }
 
     // a disabled provider stops being ready before descendant passive effects
@@ -1062,12 +1060,17 @@ export function createZeroClientInternal<
     // a changed token on the same identity refreshes auth in place — zero
     // sends an auth update over the live connection instead of reconnecting
     // (upstream ZeroProvider does exactly this). string <-> undefined flips
-    // rotate the instance via hasAuth in the identity key instead.
+    // rotate the instance via hasAuth in the identity key instead. the compare
+    // reads the CACHE rather than a ref, so a provider that unmounted during
+    // sign-out and remounted after sign-in still sees the new token; and it
+    // happens HERE rather than during render, because render runs twice under
+    // strictmode and a render-phase write makes the second pass read its own
+    // update and skip the reconnect entirely.
     useEffect(() => {
-      if (liveInstance && typeof auth === 'string' && refreshCachedAuth) {
-        liveInstance.connection.connect({ auth })
-      }
-    }, [liveInstance, auth, refreshCachedAuth])
+      if (!activeZero || typeof auth !== 'string' || activeZero.auth === auth) return
+      activeZero.auth = auth
+      activeZero.instance.connection.connect({ auth })
+    }, [activeZero, auth])
 
     // Always render the same shell shape, with or without an instance, and
     // whether disable is true or false. While disable=true we hand descendants

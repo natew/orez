@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { act } from 'react'
+import { act, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
@@ -221,6 +221,42 @@ test('a remounted provider reconnects its cached instance when auth changed', as
   })
 
   expect(fakeZero.instances).toHaveLength(1)
+  expect(instance.connection.connect).toHaveBeenCalledWith({ auth: 'fresh-token' })
+})
+
+test('a double-invoked render still reconnects on a changed token', async () => {
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <StrictMode>
+        <client.ProvideZero
+          cacheURL="http://127.0.0.1:7788/zero"
+          userID="conn-auth-strict"
+          auth="old-token"
+        >
+          <span>ok</span>
+        </client.ProvideZero>
+      </StrictMode>
+    )
+    await Promise.resolve()
+  })
+  const instance = fakeZero.instances.at(-1)!
+
+  await act(async () => {
+    root?.render(
+      <StrictMode>
+        <client.ProvideZero
+          cacheURL="http://127.0.0.1:7788/zero"
+          userID="conn-auth-strict"
+          auth="fresh-token"
+        >
+          <span>ok</span>
+        </client.ProvideZero>
+      </StrictMode>
+    )
+    await Promise.resolve()
+  })
+
   expect(instance.connection.connect).toHaveBeenCalledWith({ auth: 'fresh-token' })
 })
 
