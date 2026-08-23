@@ -363,7 +363,9 @@ actually produced` pins it (red proof: with per-statement reads the dump
    stated rather than closed: the durable object's own maintenance writes
    (transaction rollback, recovery) run outside the admission queue, so a read
    session is writer exclusion and not snapshot isolation
-   (`application-sql.ts`, `readTransaction`); and holding one session for the
-   whole scan blocks application writes for the export's duration, which a
-   queued writer surfaces as a 30-second admission timeout
-   (`APPLICATION_SQL_TURN_WAIT_MS`) rather than as a backup failure.
+   (`application-sql.ts`, `readTransaction`); and a normal-priority export holds
+   one session for the whole scan, so later application writes wait for its
+   duration and can surface the 30-second admission timeout
+   (`APPLICATION_SQL_TURN_WAIT_MS`). Background exports remain the default and
+   are preempted by an arriving writer. The admission controls pin both modes,
+   FIFO ordering around a normal reader, and cancellation cleanup.

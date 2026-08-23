@@ -234,7 +234,13 @@ describe('namespace backup export', () => {
       excludedTables: ['_test_backup_meta'],
       files: () => stored.bucket,
       query,
-      readSession: async (env: unknown, namespace: string, work: any) => {
+      readSession: async (
+        env: unknown,
+        namespace: string,
+        work: any,
+        readOptions: unknown
+      ) => {
+        expect(readOptions).toEqual({ priority: 'background' })
         await work((sql: string, params: readonly unknown[] = []) =>
           query(env, namespace, sql, params)
         )
@@ -416,7 +422,8 @@ describe('namespace backup export consistency', () => {
       excludedTables: ['_test_backup_meta'],
       files: () => stored.bucket,
       query: async (_env, _namespace, sql, params) => run(sql, params),
-      readSession: async (_env, _namespace, work) => {
+      readSession: async (_env, _namespace, work, readOptions) => {
+        expect(readOptions).toEqual({ priority: 'normal' })
         readersOpen++
         try {
           return await work(async (sql, params = []) => run(sql, params))
@@ -429,7 +436,7 @@ describe('namespace backup export consistency', () => {
       listNamespaces: async () => ['singleton'],
     })
 
-    await manager.exportNamespace({}, 'singleton')
+    await manager.exportNamespace({}, 'singleton', { priority: 'normal' })
 
     const pointer = JSON.parse(
       stored.pointers.get('backups/singleton/latest.json') ?? '{}'

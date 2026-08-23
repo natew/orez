@@ -573,6 +573,80 @@ describe('ZeroDO trusted application transaction', () => {
     zero.releaseApplicationSqlTurn(laterWriter)
   })
 
+  it('admits a normal read behind earlier writers and ahead of later writers', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const owner = await zero.applicationSqlSession('owner')
+    const earlierWriter = await zero.applicationSqlSession('earlier-writer')
+    const reader = await zero.applicationSqlSession('bounded-reader', {
+      readOnly: true,
+      priority: 'normal',
+    })
+    const laterWriters = await Promise.all(
+      ['later-writer-a', 'later-writer-b'].map((id) => zero.applicationSqlSession(id))
+    )
+    await owner.begin()
+
+    const admitted: string[] = []
+    const earlierAdmission = earlierWriter.begin().then(() => {
+      admitted.push('earlier-writer')
+    })
+    const readerAdmission = reader.begin().then(() => {
+      admitted.push('bounded-reader')
+    })
+    const laterAdmissions = laterWriters.map((writer, index) =>
+      writer.begin().then(() => {
+        admitted.push(`later-writer-${index}`)
+        zero.releaseApplicationSqlTurn(writer)
+      })
+    )
+
+    zero.releaseApplicationSqlTurn(owner)
+    await earlierAdmission
+    expect(admitted).toEqual(['earlier-writer'])
+
+    zero.releaseApplicationSqlTurn(earlierWriter)
+    await readerAdmission
+    expect(admitted).toEqual(['earlier-writer', 'bounded-reader'])
+    await expect(reader.query('SELECT id FROM item')).resolves.toEqual([
+      { id: 'row-1', enabled: 1 },
+    ])
+    expect(admitted).toEqual(['earlier-writer', 'bounded-reader'])
+
+    zero.releaseApplicationSqlTurn(reader)
+    await Promise.all(laterAdmissions)
+    expect(admitted).toEqual([
+      'earlier-writer',
+      'bounded-reader',
+      'later-writer-0',
+      'later-writer-1',
+    ])
+    expect(zero.applicationSqlQueue).toEqual([])
+  })
+
+  it('removes a canceled normal read without blocking its later writer', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const owner = await zero.applicationSqlSession('owner')
+    const reader = await zero.applicationSqlSession('canceled-reader', {
+      readOnly: true,
+      priority: 'normal',
+    })
+    const laterWriter = await zero.applicationSqlSession('later-writer')
+    await owner.begin()
+
+    let readerAdmitted = false
+    void reader.begin().then(() => {
+      readerAdmitted = true
+    })
+    const writerAdmission = laterWriter.begin()
+    reader[Symbol.dispose]()
+    zero.releaseApplicationSqlTurn(owner)
+
+    await writerAdmission
+    expect(readerAdmitted).toBe(false)
+    expect(zero.applicationSqlQueue).toEqual([])
+    zero.releaseApplicationSqlTurn(laterWriter)
+  })
+
   it('preempts a background read session when a writer arrives', async () => {
     const { zero } = await createTestZero(async (work) => await work())
     const background = await zero.applicationSqlSession('background', {

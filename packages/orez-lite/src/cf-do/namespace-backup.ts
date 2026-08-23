@@ -44,6 +44,21 @@ export type NamespaceBackupExportResult =
   | { outcome: 'exported'; summary: NamespaceBackupSummary }
   | { outcome: 'preempted'; namespace: string }
 
+/** Admission priority for the consistent read session that owns an export. */
+export type NamespaceBackupReadPriority = 'background' | 'normal'
+
+export interface NamespaceBackupExportOptions {
+  /**
+   * Background exports yield to writers. Normal exports keep their queue
+   * position and exclude later writers until the consistent scan completes.
+   */
+  priority?: NamespaceBackupReadPriority
+}
+
+export interface NamespaceBackupReadOptions {
+  priority: NamespaceBackupReadPriority
+}
+
 export interface NamespaceRestoreSummary {
   ok: true
   ns: string
@@ -81,7 +96,8 @@ export interface NamespaceBackupOptions<Env> {
     namespace: string,
     work: (
       query: (sql: string, params?: readonly unknown[]) => Promise<Record<string, any>[]>
-    ) => Promise<Value>
+    ) => Promise<Value>,
+    options: NamespaceBackupReadOptions
   ): Promise<Value>
   batch(
     env: Env,
@@ -106,7 +122,11 @@ export interface NamespaceBackupOptions<Env> {
 export interface NamespaceBackupManager<Env> {
   backupPrefix(namespace: string): string
   readMarker(env: Env, namespace: string): Promise<number>
-  exportNamespace(env: Env, namespace: string): Promise<NamespaceBackupExportResult>
+  exportNamespace(
+    env: Env,
+    namespace: string,
+    options?: NamespaceBackupExportOptions
+  ): Promise<NamespaceBackupExportResult>
   importNamespace(
     env: Env,
     namespace: string,
@@ -341,14 +361,17 @@ export function createNamespaceBackupManager<Env>(
 
   const exportNamespace = async (
     env: Env,
-    namespace: string
+    namespace: string,
+    exportOptions: NamespaceBackupExportOptions = {}
   ): Promise<NamespaceBackupExportResult> => {
     const startedAt = Date.now()
+    const priority = exportOptions.priority ?? 'background'
     const files = options.files(env)
     const exportedAt = new Date().toISOString()
     const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
     // One read session for the whole scan. Every page below reads the same
     // committed state, so the dump is a database that actually existed.
+    // prettier-ignore
     const scan = await options
       .readSession(env, namespace, async (read) => {
         // Read before scanning. A concurrent write then leaves the live marker
@@ -518,6 +541,7 @@ export function createNamespaceBackupManager<Env>(
               phase: 'export_upload',
               outcome: 'preempted',
               namespace,
+              priority,
               durationMs: Date.now() - startedAt,
             })
           } else {
@@ -525,6 +549,7 @@ export function createNamespaceBackupManager<Env>(
               phase: 'export_upload',
               outcome: 'error',
               namespace,
+              priority,
               durationMs: Date.now() - startedAt,
               error: errorMessage(error),
             })
@@ -540,7 +565,7 @@ export function createNamespaceBackupManager<Env>(
           bytes: totalBytes,
           parts: uploadedParts.length,
         }
-      })
+      }, { priority })
       .catch((error: unknown) => {
         if (error instanceof ApplicationSqlSessionPreemptedError) return null
         throw error
@@ -550,6 +575,7 @@ export function createNamespaceBackupManager<Env>(
         phase: 'export',
         outcome: 'preempted',
         namespace,
+        priority,
         durationMs: Date.now() - startedAt,
       })
       return { outcome: 'preempted', namespace }
@@ -580,6 +606,7 @@ export function createNamespaceBackupManager<Env>(
       phase: 'export',
       outcome: 'success',
       namespace,
+      priority,
       durationMs: Date.now() - startedAt,
       rows: summary.rows,
       bytes: summary.bytes,
