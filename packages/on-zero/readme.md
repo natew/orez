@@ -535,6 +535,15 @@ identity, `ProvideZero` reconnects that cached instance with the new token. a
 logout that disables the provider and removes auth retires the authenticated
 instance instead of allowing a later sign-in to revive its closed connection.
 
+`useZeroProviderGeneration()` returns an opaque generation for the exact live
+Zero instance and `null` while the provider is disabled or rendering on the
+server. It changes in the same render that replaces the instance, including an
+in-place `remint()`. `generation.isCurrent()` stays tied to that instance after
+a late callback resumes, and becomes false when the instance is replaced,
+disabled, or its provider unmounts. Descendants can use the identity and current
+check to fence provider-bound work before resolving the module-level mutation
+facade.
+
 ### multiple client instances
 
 one page can run several zero clients (e.g. a global control-plane instance
