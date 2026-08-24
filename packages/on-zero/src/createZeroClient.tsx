@@ -15,6 +15,7 @@ import {
   memo,
   useContext,
   useEffect,
+  useInsertionEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -1149,10 +1150,11 @@ export function createZeroClientInternal<
     // publish before descendant effects perform imperative work.
     publishZeroInstance(zeroInstance)
 
-    useLayoutEffect(() => {
-      // strict-effects replays cleanup without another render. republish in
-      // setup so the provider remains current after that replay, and unpublish
-      // the exact instance synchronously when its provider actually leaves.
+    useInsertionEffect(() => {
+      // suspense disconnects layout and passive effects while hiding an
+      // already-mounted tree. insertion effects stay attached until the
+      // provider actually unmounts, which is the lifecycle boundary that
+      // invalidates this generation.
       publishZeroInstance(zeroInstance)
       return () => {
         if (!unpublishZeroInstance(zeroInstance)) return
