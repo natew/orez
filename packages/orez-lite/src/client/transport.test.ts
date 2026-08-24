@@ -1243,7 +1243,7 @@ describe('Orez HTTP transport', () => {
     expect(transport.connections).toBe(1)
   })
 
-  test('401 pull failure is terminal and does not reconnect a stock Zero client', async () => {
+  test('401 pull failure parks a stock Zero client in needs-auth without reconnecting', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
@@ -1259,15 +1259,12 @@ describe('Orez HTTP transport', () => {
       emissions.push({ data: JSON.parse(JSON.stringify(data)), resultType })
     })
 
-    await eventually(() => expect(zero.connection.state.current.name).toBe('error'))
+    await eventually(() => expect(zero.connection.state.current.name).toBe('needs-auth'))
     await sleep(100)
 
     expect(requests).toHaveLength(1)
     expect(transport.connections).toBe(0)
-    expect(zero.connection.state.current).toMatchObject({
-      name: 'error',
-      reason: expect.stringContaining('unauthorized'),
-    })
+    expect(zero.connection.state.current.name).toBe('needs-auth')
     expect(emissions.flatMap((emission) => emission.data)).toEqual([])
     expect(view.data).toEqual([])
     cleanup()

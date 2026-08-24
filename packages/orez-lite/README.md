@@ -18,9 +18,9 @@ The package derives its database projection from the application’s Zero schema
 Applications do not maintain separate table or column maps.
 
 The HTTP client reports rejected pull and push status codes through its lifecycle
-callback, then makes non-retryable 4xx responses terminal. In particular, a 401
-or 403 cannot enter Zero's reconnect loop. Applications can use the reported
-status to enter their authentication or access-denied surface.
+callback. A 401 or 403 emits Zero's `Unauthorized` frame and parks the client in
+`needs-auth`; other non-retryable 4xx responses are terminal. Applications own
+the bounded token refresh policy and access-denied surface.
 
 ## Native host
 

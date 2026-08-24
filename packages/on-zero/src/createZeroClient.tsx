@@ -74,8 +74,11 @@ import type {
   Schema as ZeroSchema,
 } from '@rocicorp/zero'
 import type { AggregateSet } from 'orez-lite/aggregate'
+import type { HttpPullLifecycleEvent, HttpPullTransport } from 'orez-lite/client'
 
 type PreloadOptions = { ttl?: 'always' | 'never' | number | undefined }
+
+const MAX_AUTH_REFRESH_ATTEMPTS = 3
 
 export type GroupedQueries = Record<string, Record<string, (...args: any[]) => any>>
 
@@ -86,7 +89,7 @@ export type GroupedQueries = Record<string, Record<string, (...args: any[]) => a
 export type PermissionStrategy = 'optimistic' | 'optimistic-deny' | 'optimistic-allow'
 
 export type ZeroProviderTransport = {
-  install(serverURL: string): unknown
+  install(serverURL: string): Pick<HttpPullTransport, 'subscribeLifecycle'> | undefined
   logClassifications?: {
     benign?: readonly ZeroLogPattern[]
   }
@@ -325,6 +328,10 @@ export function createZeroClientInternal<
   // connectHeadless construct identical instances without either one forcing
   // the work at createZeroClient() time.
   let clientMutators: ReturnType<typeof createMutators> | null = null
+  const installedTransports = new WeakMap<
+    ZeroInstance,
+    Pick<HttpPullTransport, 'subscribeLifecycle'>
+  >()
   function getClientMutators() {
     clientMutators ??= createMutators({
       models,
@@ -357,6 +364,7 @@ export function createZeroClientInternal<
     guardStorage,
     benignLogPatterns,
   }: ConstructZeroInstanceArgs): ZeroInstance {
+    let installedTransport: Pick<HttpPullTransport, 'subscribeLifecycle'> | undefined
     // install before construction so the instance's first connect goes through
     // HTTP. ensureHttpPullTransport is per-origin idempotent by design (a
     // rotation would otherwise chain shims), so repeat calls reuse.
@@ -367,7 +375,7 @@ export function createZeroClientInternal<
       if (typeof serverURL !== 'string') {
         throw new Error(`client transport requires a server URL`)
       }
-      transport.install(serverURL)
+      installedTransport = transport.install(serverURL)
     }
     // recovery closures reach the instance through this ref so they always
     // delete the CURRENT instance's own store (set right after construction;
@@ -407,6 +415,7 @@ export function createZeroClientInternal<
         options.onClientStateNotFound ?? recovery.onClientStateNotFound,
     })
     instanceRef.current = createdInstance
+    if (installedTransport) installedTransports.set(createdInstance, installedTransport)
     return createdInstance
   }
 
@@ -1124,6 +1133,7 @@ export function createZeroClientInternal<
               {liveInstance ? (
                 <ConnectionMonitor
                   zeroEvents={zeroEvents}
+                  auth={auth}
                   refreshAuth={refreshAuth}
                   exposeDataset={connectionDataset}
                   datasetCacheUrl={
@@ -1215,7 +1225,11 @@ export function createZeroClientInternal<
     })
     publishZeroInstance(zeroInstance)
     zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
-    const unwatch = watchZeroConnection({ zeroInstance, refreshAuth })
+    const unwatch = watchZeroConnection({
+      zeroInstance,
+      auth: options.auth,
+      refreshAuth,
+    })
     return {
       zero: zeroInstance,
       close: async () => {
@@ -1234,13 +1248,16 @@ export function createZeroClientInternal<
   // ended as a permanent 401 with no way back.
   function watchZeroConnection(args: {
     zeroInstance: ZeroInstance
+    auth?: string | null
     refreshAuth?: () => Promise<string | undefined>
     exposeDataset?: boolean
     datasetCacheUrl?: string
   }): () => void {
-    const { zeroInstance, refreshAuth, exposeDataset, datasetCacheUrl } = args
+    const { zeroInstance, auth, refreshAuth, exposeDataset, datasetCacheUrl } = args
     let prevState = zeroInstance.connection.state.current.name
     let hasConnected = false
+    let active = true
+    let activeAuth = auth
     const currentReconnect =
       zeroEvents.value?.type === 'reconnect' && zeroEvents.value.status !== 'connected'
         ? zeroEvents.value
@@ -1253,6 +1270,15 @@ export function createZeroClientInternal<
     // transition, so a stuck state doesn't retry-storm.
     let recoverableError: string | null = null
     let needsAuth = false
+    let authRefreshAttempts = 0
+    const installedTransport = installedTransports.get(zeroInstance)
+    const unsubscribeTransport = installedTransport
+      ? installedTransport.subscribeLifecycle((event: HttpPullLifecycleEvent) => {
+          if (event.type === 'pull' && event.clientID === zeroInstance.clientID) {
+            authRefreshAttempts = 0
+          }
+        })
+      : undefined
 
     const handle = () => {
       const state = zeroInstance.connection.state.current
@@ -1274,6 +1300,7 @@ export function createZeroClientInternal<
       if (name === 'connected') {
         hasConnected = true
         recoverableError = null
+        if (!installedTransport) authRefreshAttempts = 0
         if (reconnect) {
           reconnect = null
           emitReconnectStatus({ type: 'reconnect', status: 'connected' })
@@ -1326,14 +1353,22 @@ export function createZeroClientInternal<
         emitReconnectStatus({ type: 'reconnect', status: 'waiting', ...reconnect })
       }
 
-      // needs-auth: the token expired and zero won't auto-resume unless the
-      // auth string changes. refresh it and reconnect in place, once.
+      // needs-auth: zero is already parked, so resume only for a changed token.
+      // repeated distinct rejected tokens get a finite budget; a successful
+      // pull proves the replacement and resets it.
       if (name === 'needs-auth') {
-        if (refreshAuth && !needsAuth) {
+        if (
+          refreshAuth &&
+          !needsAuth &&
+          authRefreshAttempts < MAX_AUTH_REFRESH_ATTEMPTS
+        ) {
           needsAuth = true
           void refreshAuth()
             .then((token) => {
-              if (token) zeroInstance.connection?.connect?.({ auth: token })
+              if (!active || !token || token === activeAuth) return
+              activeAuth = token
+              authRefreshAttempts++
+              return zeroInstance.connection?.connect?.({ auth: token })
             })
             .catch(() => {})
         }
@@ -1356,7 +1391,11 @@ export function createZeroClientInternal<
 
     const unsubscribe = zeroInstance.connection.state.subscribe(handle)
     handle()
-    return unsubscribe
+    return () => {
+      active = false
+      unsubscribeTransport?.()
+      unsubscribe()
+    }
   }
 
   // monitors connection state and emits events (replaces onError callback removed
@@ -1366,11 +1405,13 @@ export function createZeroClientInternal<
   const ConnectionMonitor = memo(
     ({
       zeroEvents: _zeroEvents,
+      auth,
       refreshAuth,
       exposeDataset,
       datasetCacheUrl,
     }: {
       zeroEvents: ZeroEventsEmitter
+      auth?: string | null
       refreshAuth?: () => Promise<string | undefined>
       exposeDataset?: boolean
       datasetCacheUrl?: string
@@ -1383,11 +1424,12 @@ export function createZeroClientInternal<
         () =>
           watchZeroConnection({
             zeroInstance,
+            auth,
             refreshAuth,
             exposeDataset,
             datasetCacheUrl,
           }),
-        [zeroInstance, refreshAuth, exposeDataset, datasetCacheUrl]
+        [zeroInstance, auth, refreshAuth, exposeDataset, datasetCacheUrl]
       )
       return null
     }

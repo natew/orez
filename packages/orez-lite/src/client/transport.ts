@@ -3,7 +3,7 @@
 // pull responses into v51 pokes. this browser-only module implements the Orez
 // HTTP transport protocol. the
 // wire contract (lexicographic string cookies, gotQueriesPatch poke-part
-// ordering, bounded FIFO push batching, updateAuth, terminal 4xx frames,
+// ordering, bounded FIFO push batching, updateAuth, 401→Unauthorized frame,
 // teardown drain) is pinned by the tests in this directory. do not "simplify"
 // any of it without re-running those tests against a stock zero client.
 
@@ -89,6 +89,7 @@ type TransportState = {
   readonly activeSocketGenerationByClient: Map<string, number>
   readonly activeSocketByClient: Map<string, ZeroHttpSocket>
   readonly lifecycle: ((event: HttpPullLifecycleEvent) => void) | undefined
+  readonly lifecycleListeners: Set<(event: HttpPullLifecycleEvent) => void>
 }
 
 const COOKIE_WIDTH = 20
@@ -143,6 +144,7 @@ const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
 export type HttpPullTransport = {
   pull(): Promise<void>
   flush(): Promise<void>
+  subscribeLifecycle(listener: (event: HttpPullLifecycleEvent) => void): () => void
   readonly connections: number
   readonly pageID: string
   readonly transportID: string
@@ -227,6 +229,7 @@ export type HttpPullLifecycleEvent = {
     | 'created'
     | 'listener'
     | 'open'
+    | 'pull'
     | 'close'
     | 'failure'
     | 'superseded'
@@ -383,6 +386,7 @@ export function installHttpPullTransport(
     activeSocketGenerationByClient: new Map(),
     activeSocketByClient: new Map(),
     lifecycle: opts.lifecycle ?? logHttpPullLifecycle,
+    lifecycleListeners: new Set(),
   }
 
   const Shim = class {
@@ -419,6 +423,10 @@ export function installHttpPullTransport(
       ) {
         throw new Error('transport changed during flush')
       }
+    },
+    subscribeLifecycle: (listener) => {
+      state.lifecycleListeners.add(listener)
+      return () => state.lifecycleListeners.delete(listener)
     },
     get connections() {
       return state.sockets.size
@@ -718,9 +726,10 @@ class ZeroHttpSocket {
         this.applyServerGotQueries(response)
         if (response.unchanged) {
           this.emitGotQueriesPatch(response.cookie)
-          return
+        } else {
+          this.emitPoke(response)
         }
-        this.emitPoke(response)
+        this.emitLifecycle('pull')
       })
       .catch((error) => {
         this.fail(error)
@@ -1204,6 +1213,18 @@ class ZeroHttpSocket {
       reason: errorMessage(error),
       httpStatus: error instanceof ZeroHttpResponseError ? error.status : undefined,
     })
+    if (isAuthHTTPError(error)) {
+      this.emitMessage([
+        'error',
+        {
+          kind: 'Unauthorized',
+          message: error.message,
+          origin: 'server',
+        },
+      ])
+      if (this.readyState !== this.CLOSED) this.close(1000, error.message)
+      return
+    }
     if (isStaleClientCookieError(error)) {
       // the client's cookie is AHEAD of the server watermark — the server
       // lost or reset its change-tracking state (replica reset / restore).
@@ -1432,7 +1453,7 @@ class ZeroHttpSocket {
       'listener' | 'code' | 'reason' | 'httpStatus' | 'pushFrameCount' | 'mutationCount'
     > = {}
   ) {
-    this.state.lifecycle?.({
+    const event: HttpPullLifecycleEvent = {
       type,
       pageID: this.state.pageID,
       transportID: this.state.transportID,
@@ -1449,7 +1470,9 @@ class ZeroHttpSocket {
       attemptStartedAt: this.attemptStartedAt,
       attemptAgeMs: this.getAttemptAgeMs(),
       ...detail,
-    })
+    }
+    this.state.lifecycle?.(event)
+    for (const listener of this.state.lifecycleListeners) listener(event)
   }
 }
 
@@ -1706,6 +1729,13 @@ function retryAfterMsFromResponse(response: Response, body: string) {
     }
   }
   return headerMs
+}
+
+function isAuthHTTPError(error: unknown): error is ZeroHttpResponseError {
+  return (
+    error instanceof ZeroHttpResponseError &&
+    (error.status === 401 || error.status === 403)
+  )
 }
 
 // keep only this client's own mutation results — zero-cache's pusher does the

@@ -951,7 +951,10 @@ slow-server failure. configure the threshold with
 
 - **`refreshAuth?: () => Promise<string | undefined>`** — called when the
   connection enters `needs-auth` (an expired token). return a fresh token and
-  on-zero reconnects in place — no reload. fires once per needs-auth transition.
+  on-zero reconnects in place — no reload. the token must differ from the active
+  token; an unchanged or absent token leaves the client parked. after three
+  consecutively rejected replacement tokens, on-zero leaves the client parked.
+  a successful HTTP pull resets the refresh budget.
 
 - **`guardStorage?: { getItem, setItem }`** — the loop-guard's cross-reload
   backing store. defaults to `sessionStorage` on web; inject a native KV

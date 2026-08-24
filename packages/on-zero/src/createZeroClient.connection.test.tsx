@@ -142,7 +142,7 @@ test('refreshAuth reconnects in place on needs-auth, once per transition', async
   const off = client.zeroEvents.listen((event) => {
     if (event) events.push(event)
   })
-  const instance = await mount({ refreshAuth }, 'conn-auth')
+  const instance = await mount({ auth: 'expired-token', refreshAuth }, 'conn-auth')
 
   await act(async () => {
     instance.connection.state.set({ name: 'needs-auth', reason: 'token expired' })
@@ -160,6 +160,55 @@ test('refreshAuth reconnects in place on needs-auth, once per transition', async
     message: 'token expired',
   })
   off()
+})
+
+test('refreshAuth leaves needs-auth parked when refresh returns the active token', async () => {
+  const refreshAuth = vi.fn(async () => 'expired-token')
+  const instance = await mount(
+    { auth: 'expired-token', refreshAuth },
+    'conn-auth-unchanged'
+  )
+
+  await act(async () => {
+    instance.connection.state.set({ name: 'needs-auth', reason: 'token expired' })
+    await Promise.resolve()
+  })
+  await act(async () => {
+    await Promise.resolve()
+  })
+
+  expect(refreshAuth).toHaveBeenCalledTimes(1)
+  expect(instance.connection.connect).not.toHaveBeenCalled()
+  expect(instance.connection.state.current.name).toBe('needs-auth')
+})
+
+test('refreshAuth stops after three consecutively rejected replacement tokens', async () => {
+  let nextToken = 0
+  const refreshAuth = vi.fn(async () => `replacement-token-${++nextToken}`)
+  const instance = await mount(
+    { auth: 'expired-token', refreshAuth },
+    'conn-auth-bounded'
+  )
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await act(async () => {
+      instance.connection.state.set({ name: 'needs-auth', reason: 'token rejected' })
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    if (attempt < 3) {
+      await act(async () => {
+        instance.connection.state.set({ name: 'connecting' })
+        await Promise.resolve()
+      })
+    }
+  }
+
+  expect(refreshAuth).toHaveBeenCalledTimes(3)
+  expect(instance.connection.connect).toHaveBeenCalledTimes(3)
+  expect(instance.connection.state.current.name).toBe('needs-auth')
 })
 
 test('a disabled logout cannot revive its closed authenticated instance', async () => {
