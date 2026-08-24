@@ -698,6 +698,13 @@ export class TransactionalCdc {
     return this.#registrations.get(table) ?? null
   }
 
+  /** Private vs synced for an already-registered physical table. */
+  tableVisibility(physicalTable: string): 'private' | 'synced' | null {
+    const registration = this.registered(physicalTable)
+    if (!registration) return null
+    return registration.publish ? 'synced' : 'private'
+  }
+
   /**
    * True when a verified registration can undo this PHYSICAL table row by row,
    * whether or not it publishes. Deliberately a pure query: the transaction

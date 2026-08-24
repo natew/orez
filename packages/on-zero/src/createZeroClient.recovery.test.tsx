@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { act, useLayoutEffect } from 'react'
+import { act, Suspense, useLayoutEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
@@ -186,6 +186,66 @@ test('provider generation changes with the actual instance during remint', async
   act(() => root?.unmount())
   root = null
   expect(generations[1]?.isCurrent()).toBe(false)
+})
+
+test('suspense hiding keeps the mounted provider generation writable', async () => {
+  const isolated = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'suspense-hidden-provider-test',
+  })
+  let hidden = false
+  const hiddenUntil = new Promise<void>(() => {})
+
+  function MaybeHidden() {
+    if (hidden) throw hiddenUntil
+    return <span>ready</span>
+  }
+
+  function App() {
+    return (
+      <Suspense fallback={<span>loading</span>}>
+        <isolated.ProvideZero
+          cacheURL="http://127.0.0.1:7777/zero"
+          userID="suspense-hidden"
+        >
+          <MaybeHidden />
+        </isolated.ProvideZero>
+      </Suspense>
+    )
+  }
+
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(<App />)
+    await Promise.resolve()
+  })
+
+  let settleServer: (value: string) => void = () => {}
+  const server = new Promise<string>((resolve) => {
+    settleServer = resolve
+  })
+  let settled = false
+  const acknowledgement = isolated
+    .awaitMutationServer(
+      { client: Promise.resolve('client'), server },
+      'hidden provider mutation'
+    )
+    .finally(() => {
+      settled = true
+    })
+
+  hidden = true
+  await act(async () => {
+    root?.render(<App />)
+    await Promise.resolve()
+  })
+
+  expect(container.textContent).toContain('loading')
+  expect(settled).toBe(false)
+  settleServer('server')
+  await expect(acknowledgement).resolves.toBe('server')
 })
 
 test('remint with no provider mounted returns false without burning the guard budget', async () => {

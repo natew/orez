@@ -114,6 +114,7 @@
     "test": "cd ../.. && vitest run --config vitest.config.ts packages/orez-lite/src",
     "test:application-push-workerd": "bun application-push-workerd-test.mjs",
     "test:migration-workerd": "bun migration-workerd-test.mjs",
+    "test:write-attribution-workerd": "bun write-attribution-workerd-test.mjs",
     "test:package": "bun run build && node package-runtime-test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

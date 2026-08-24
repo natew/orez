@@ -178,10 +178,26 @@ tracking rows included), not application rows. See the trade-offs page.
 
 Sampled SQL events are named `orez_sql_query_sample` and
 `orez_sql_transaction_sample`. They report duration, outcome, queue time for
-transactions, statements, rows returned, and rows changed. They never include
-SQL text, parameters, namespace names, or row values. Sampling happens once at
-the start of each query or transaction. Unsampled work pays one random-number
+transactions, statements, rows returned, and rows changed. Transaction samples
+also attribute physical Durable Object `rowsWritten` after cursor consumption:
+application table and operation, private versus synced, measurable index rows,
+`_orez_cdc_buffer`, `_zero_pending_changes`, `_zero_changes`, fixed
+transaction bookkeeping, `_orez_backup_meta`, and the physical total. Rolled-back
+transactions report `rustVisibleRows: 0` even when capture observed synced
+application rows. Coverage metadata is worker
+version, namespace class (`control`, `project`, or `test`), observation
+timestamp, process start, sampling rate, and whether that event's breakdown is
+complete. `rowsChanged` remains the logical `changes()` count and is not the
+Cloudflare bill. Events never include SQL text, parameters, namespace names,
+object ids, or row values. Emit failure cannot fail or delay the application
+transaction, and attribution writes zero SQLite rows. Cloudflare Workers logs
+may sample or drop events; every receipt includes
+`logSampling: workers_observability_may_sample_or_drop` and must not be scaled
+into an exact daily total without a denominator. Sampling happens once at the
+start of each query or transaction. Unsampled work pays one random-number
 comparison and no clock reads, row counters, object allocation, or log write.
+Set `OREZ_SQL_TELEMETRY_SAMPLE_RATE=1` when a representative day must be
+attributed completely.
 
 ## Admin surface
 
