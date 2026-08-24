@@ -3,7 +3,7 @@
 // pull responses into v51 pokes. this browser-only module implements the Orez
 // HTTP transport protocol. the
 // wire contract (lexicographic string cookies, gotQueriesPatch poke-part
-// ordering, bounded FIFO push batching, updateAuth, 401→Unauthorized frame,
+// ordering, bounded FIFO push batching, updateAuth, terminal 4xx frames,
 // teardown drain) is pinned by the tests in this directory. do not "simplify"
 // any of it without re-running those tests against a stock zero client.
 
@@ -1204,18 +1204,6 @@ class ZeroHttpSocket {
       reason: errorMessage(error),
       httpStatus: error instanceof ZeroHttpResponseError ? error.status : undefined,
     })
-    if (isAuthHTTPError(error)) {
-      this.emitMessage([
-        'error',
-        {
-          kind: 'Unauthorized',
-          message: error.message,
-          origin: 'server',
-        },
-      ])
-      if (this.readyState !== this.CLOSED) this.close(1000, error.message)
-      return
-    }
     if (isStaleClientCookieError(error)) {
       // the client's cookie is AHEAD of the server watermark — the server
       // lost or reset its change-tracking state (replica reset / restore).
@@ -1718,13 +1706,6 @@ function retryAfterMsFromResponse(response: Response, body: string) {
     }
   }
   return headerMs
-}
-
-function isAuthHTTPError(error: unknown): error is ZeroHttpResponseError {
-  return (
-    error instanceof ZeroHttpResponseError &&
-    (error.status === 401 || error.status === 403)
-  )
 }
 
 // keep only this client's own mutation results — zero-cache's pusher does the
