@@ -31,6 +31,24 @@ export type AdapterStats = {
   sqlMs: number
 }
 
+export type SqlStorageFailureBinding = {
+  index: number
+  kind: WireValue['kind']
+  value?: string | number | null
+  bytes?: number
+  truncated?: true
+}
+
+export type SqlStorageFailure = {
+  operation: 'exec' | 'query'
+  error: string
+  sql: string
+  sqlBytes: number
+  sqlTruncated?: true
+  paramCount: number
+  params: SqlStorageFailureBinding[]
+}
+
 // Match transaction control only as the statement itself. CREATE TRIGGER uses
 // `... BEGIN ... END` for its body, which is valid DO SQL and not a transaction.
 const TX_SQL = /^\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)(?=\s|;|$)/i
@@ -124,6 +142,53 @@ function encodeResult(value: unknown): WireValue {
   return encodeSqlValue(value)
 }
 
+const MAX_FAILURE_TEXT_BYTES = 256
+const MAX_FAILURE_SQL_BYTES = 64 * 1024
+const MAX_FAILURE_BINDINGS = 512
+const failureTextEncoder = new TextEncoder()
+
+function describeFailureBinding(
+  value: WireValue,
+  index: number
+): SqlStorageFailureBinding {
+  if (value.kind === 'null') return { index, kind: value.kind, value: null }
+  if (value.kind === 'blob') return { index, kind: value.kind, bytes: value.value.length }
+  if (value.kind !== 'text') return { index, kind: value.kind, value: value.value }
+  const bytes = failureTextEncoder.encode(value.value).byteLength
+  if (bytes <= MAX_FAILURE_TEXT_BYTES) {
+    return { index, kind: value.kind, value: value.value, bytes }
+  }
+  return {
+    index,
+    kind: value.kind,
+    value: `${value.value.slice(0, MAX_FAILURE_TEXT_BYTES / 2)}…${value.value.slice(-MAX_FAILURE_TEXT_BYTES / 2)}`,
+    bytes,
+    truncated: true,
+  }
+}
+
+function describeSqlFailure(
+  operation: SqlStorageFailure['operation'],
+  error: unknown,
+  sql: string,
+  params: WireValue[]
+): SqlStorageFailure {
+  const sqlBytes = failureTextEncoder.encode(sql).byteLength
+  const failure: SqlStorageFailure = {
+    operation,
+    error: String(error),
+    sql:
+      sqlBytes <= MAX_FAILURE_SQL_BYTES
+        ? sql
+        : `${sql.slice(0, MAX_FAILURE_SQL_BYTES / 2)}…${sql.slice(-MAX_FAILURE_SQL_BYTES / 2)}`,
+    sqlBytes,
+    paramCount: params.length,
+    params: params.slice(0, MAX_FAILURE_BINDINGS).map(describeFailureBinding),
+  }
+  if (sqlBytes > MAX_FAILURE_SQL_BYTES) failure.sqlTruncated = true
+  return failure
+}
+
 /**
  * The sole JS SQL adapter used by wasm. It is synchronous, consumes every
  * cursor before returning, accepts positional `?` only, and never starts or
@@ -135,7 +200,8 @@ export class SqlStorageSyncDb implements JsSyncDb {
   constructor(
     private readonly sql: SqlStorage,
     private readonly recordRowsWritten: (rows: number) => void = () => {},
-    private readonly recordRowsRead: (rows: number) => void = () => {}
+    private readonly recordRowsRead: (rows: number) => void = () => {},
+    private readonly recordFailure: (failure: SqlStorageFailure) => void = () => {}
   ) {}
 
   resetStats(): void {
@@ -147,11 +213,16 @@ export class SqlStorageSyncDb implements JsSyncDb {
   exec(sql: string, params: WireValue[]): void {
     assertHostSql(sql)
     const start = performance.now()
-    trackBillableCursorRows(
-      this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
-      this.recordRowsWritten,
-      this.recordRowsRead
-    )
+    try {
+      trackBillableCursorRows(
+        this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
+        this.recordRowsWritten,
+        this.recordRowsRead
+      )
+    } catch (error) {
+      this.recordFailure(describeSqlFailure('exec', error, sql, params))
+      throw error
+    }
     this.stats.execCalls++
     this.stats.sqlMs += performance.now() - start
   }
@@ -159,18 +230,24 @@ export class SqlStorageSyncDb implements JsSyncDb {
   query(sql: string, params: WireValue[]): WireRow[] {
     assertHostSql(sql)
     const start = performance.now()
-    const cursor = trackBillableCursorRows(
-      this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
-      this.recordRowsWritten,
-      this.recordRowsRead
-    )
-    const columns = [...cursor.columnNames]
-    // A SqlStorage cursor must be fully consumed before any await. Returning a
-    // materialized array here makes that property structural.
-    const rows = Array.from(cursor.raw()).map((values) => ({
-      columns,
-      values: values.map(encodeResult),
-    }))
+    let rows: WireRow[]
+    try {
+      const cursor = trackBillableCursorRows(
+        this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
+        this.recordRowsWritten,
+        this.recordRowsRead
+      )
+      const columns = [...cursor.columnNames]
+      // A SqlStorage cursor must be fully consumed before any await. Returning a
+      // materialized array here makes that property structural.
+      rows = Array.from(cursor.raw()).map((values) => ({
+        columns,
+        values: values.map(encodeResult),
+      }))
+    } catch (error) {
+      this.recordFailure(describeSqlFailure('query', error, sql, params))
+      throw error
+    }
     this.stats.queryCalls++
     this.stats.sqlMs += performance.now() - start
     return rows

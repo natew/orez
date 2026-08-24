@@ -7,6 +7,7 @@
 mod common;
 
 use common::TestDb;
+use rusqlite::limits::Limit;
 use serde_json::{Value, json};
 
 use sync_core::query::{handle_query_pull, init_query_schema};
@@ -279,6 +280,41 @@ fn desire_pull_then_data_change_flows_as_membership_delta() {
     h.exec("INSERT INTO issue VALUES ('i4', 't-i4', 0)");
     let r3 = h.pull("c1", c2, None);
     assert_eq!(put_ids(&r3), vec!["i4"]);
+}
+
+#[test]
+fn persisted_long_prefix_query_recovers_for_the_same_client_group() {
+    let mut h = QHost::new();
+    h.db.conn
+        .set_limit(Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 50);
+    h.exec("DELETE FROM issue");
+    let pattern =
+        "record\\_prefix\\_that\\_is\\_longer\\_than\\_the\\_durable\\_object\\_glob\\_limit\\_%";
+    let query = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "LIKE",
+        "left": { "type": "column", "name": "id" },
+        "right": { "type": "literal", "value": pattern }
+    } });
+    let first = h.pull(
+        "wedged-client",
+        json!(null),
+        Some(json!({
+            "version": 1,
+            "patch": [{ "op": "put", "hash": "long-prefix", "ast": query }],
+        })),
+    );
+    let cookie = first["cookie"].clone();
+
+    h.exec("INSERT INTO issue VALUES ('changed-target', 'done', 1)");
+    let existing_client = h.pull("wedged-client", cookie.clone(), None);
+    assert!(put_ids(&existing_client).is_empty());
+
+    let reloaded_client = h.pull("reloaded-client", cookie, None);
+    assert!(put_ids(&reloaded_client).is_empty());
+    assert_eq!(
+        reloaded_client["gotQueries"],
+        json!({ "version": 0, "patch": [] })
+    );
 }
 
 #[test]

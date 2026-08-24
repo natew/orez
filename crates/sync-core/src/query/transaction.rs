@@ -318,7 +318,7 @@ fn binary_operator(operator: &SimpleOp) -> &'static str {
     }
 }
 
-pub(crate) fn postgres_like_to_glob(pattern: &str) -> Result<String, EngineError> {
+fn postgres_like_to_glob(pattern: &str) -> Result<String, EngineError> {
     let mut output = String::with_capacity(pattern.len());
     let mut escaped = false;
     for character in pattern.chars() {
@@ -346,6 +346,102 @@ pub(crate) fn postgres_like_to_glob(pattern: &str) -> Result<String, EngineError
         return Err(reject("LIKE pattern must not end with an escape character"));
     }
     Ok(output)
+}
+
+const SQLITE_GLOB_PATTERN_LIMIT: usize = 50;
+
+enum LongLikePattern {
+    Exact(String),
+    Prefix(String),
+    Suffix(String),
+    Contains(String),
+}
+
+fn simple_long_like_pattern(pattern: &str) -> Result<Option<LongLikePattern>, EngineError> {
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let mut escaped = false;
+    for character in pattern.chars() {
+        if escaped {
+            literal.push(character);
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '_' => return Ok(None),
+            '%' => {
+                if !literal.is_empty() {
+                    parts.push(Some(std::mem::take(&mut literal)));
+                }
+                if parts.last() != Some(&None) {
+                    parts.push(None);
+                }
+            }
+            other => literal.push(other),
+        }
+    }
+    if escaped {
+        return Err(reject("LIKE pattern must not end with an escape character"));
+    }
+    if !literal.is_empty() {
+        parts.push(Some(literal));
+    }
+    Ok(match parts.as_slice() {
+        [] => Some(LongLikePattern::Exact(String::new())),
+        [Some(value)] => Some(LongLikePattern::Exact(value.clone())),
+        [Some(value), None] => Some(LongLikePattern::Prefix(value.clone())),
+        [None, Some(value)] => Some(LongLikePattern::Suffix(value.clone())),
+        [None, Some(value), None] => Some(LongLikePattern::Contains(value.clone())),
+        [None] => Some(LongLikePattern::Contains(String::new())),
+        _ => None,
+    })
+}
+
+pub(crate) fn compile_sqlite_like(
+    left: &str,
+    pattern: &str,
+    case_insensitive: bool,
+) -> Result<(String, Vec<SqlValue>), EngineError> {
+    let glob = postgres_like_to_glob(pattern)?;
+    if glob.len() <= SQLITE_GLOB_PATTERN_LIMIT {
+        let comparison = if case_insensitive {
+            format!("LOWER({left}) GLOB LOWER(?)")
+        } else {
+            format!("{left} GLOB ?")
+        };
+        return Ok((comparison, vec![SqlValue::Text(glob)]));
+    }
+
+    let Some(pattern) = simple_long_like_pattern(pattern)? else {
+        return Err(reject(format!(
+            "LIKE pattern exceeds the portable {SQLITE_GLOB_PATTERN_LIMIT}-byte GLOB limit"
+        )));
+    };
+    let left = if case_insensitive {
+        format!("LOWER({left})")
+    } else {
+        left.to_string()
+    };
+    let parameter = if case_insensitive { "LOWER(?)" } else { "?" };
+    let (comparison, params) = match pattern {
+        LongLikePattern::Exact(value) => {
+            (format!("{left} = {parameter}"), vec![SqlValue::Text(value)])
+        }
+        LongLikePattern::Prefix(value) => (
+            format!("instr({left}, {parameter}) = 1"),
+            vec![SqlValue::Text(value)],
+        ),
+        LongLikePattern::Suffix(value) => (
+            format!("substr({left}, -length({parameter})) = {parameter}"),
+            vec![SqlValue::Text(value.clone()), SqlValue::Text(value)],
+        ),
+        LongLikePattern::Contains(value) => (
+            format!("instr({left}, {parameter}) > 0"),
+            vec![SqlValue::Text(value)],
+        ),
+    };
+    Ok((comparison, params))
 }
 
 struct SqlCompiler<'a> {
@@ -456,21 +552,26 @@ impl<'a> SqlCompiler<'a> {
                 ))
             }
             SimpleOp::Like | SimpleOp::NotLike | SimpleOp::ILike | SimpleOp::NotILike => {
-                let right = match right {
-                    RightVal::Scalar(value) => {
-                        let pattern = match value {
-                            Scalar::Text(value) => SqlValue::Text(postgres_like_to_glob(value)?),
-                            other => scalar_to_sql(other),
-                        };
-                        self.bindings.push(QueryBinding::Literal(pattern));
-                        "?".to_string()
+                let comparison = match right {
+                    RightVal::Scalar(Scalar::Text(pattern)) => {
+                        let (comparison, params) = compile_sqlite_like(
+                            &left,
+                            pattern,
+                            matches!(operator, SimpleOp::ILike | SimpleOp::NotILike),
+                        )?;
+                        self.bindings
+                            .extend(params.into_iter().map(QueryBinding::Literal));
+                        comparison
+                    }
+                    RightVal::Scalar(other) => {
+                        self.push_literal(other);
+                        if matches!(operator, SimpleOp::ILike | SimpleOp::NotILike) {
+                            format!("LOWER({left}) GLOB LOWER(?)")
+                        } else {
+                            format!("{left} GLOB ?")
+                        }
                     }
                     RightVal::List(_) => return Err(reject("LIKE requires a scalar operand")),
-                };
-                let comparison = if matches!(operator, SimpleOp::ILike | SimpleOp::NotILike) {
-                    format!("LOWER({left}) GLOB LOWER({right})")
-                } else {
-                    format!("{left} GLOB {right}")
                 };
                 if matches!(operator, SimpleOp::NotLike | SimpleOp::NotILike) {
                     Ok(format!("NOT ({comparison})"))

@@ -92,7 +92,12 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 // v4: _zsync_row_refs gained addedVersion/removedVersion so membership
 // transitions replay to every client of a group, not only the one whose pull
 // observed them. the reset path rebuilds the tables at the new shape.
-pub(crate) const QUERY_SCHEMA_VERSION: i64 = 4;
+//
+// v5: the SQLite compiler stopped sending long simple LIKE patterns through
+// GLOB. reset derived query state and bump the epoch so groups wedged by a
+// previously stored long pattern resend their desires through the fixed
+// compiler without requiring a fresh browser context.
+pub(crate) const QUERY_SCHEMA_VERSION: i64 = 5;
 
 fn table_exists(db: &mut dyn SyncDb, name: &str) -> Result<bool, EngineError> {
     let rows = db.query(

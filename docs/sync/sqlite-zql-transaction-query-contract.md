@@ -78,11 +78,15 @@ The compiler accepts the current Zero AST fields `schema`, `table`, `alias`,
   case-insensitive for ASCII, matching Zero on PostgreSQL within that range.
   The compiler converts each bound PostgreSQL LIKE pattern to an escaped SQLite
   GLOB pattern. It emits `GLOB` for LIKE and `LOWER(value) GLOB LOWER(?)` for
-  ILIKE. Durable Object SQLite has no ICU case folding or custom SQL functions,
-  so non-ASCII ILIKE can diverge from PostgreSQL's locale-aware behavior. For
-  example, `ILIKE 'é%'` does not match `Émile` on this path. This intentional
-  behavior is pinned by a conformance test. Pattern matching does not depend on
-  SQLite's connection-wide `case_sensitive_like` setting.
+  ILIKE while the converted pattern fits Durable Object SQLite's 50-byte GLOB
+  limit. Longer exact, prefix, suffix, and contains patterns compile to
+  equality, `instr`, or `substr` comparisons with the same bound literal.
+  Longer patterns with an internal `%` or an unescaped `_` are rejected before
+  SQL executes. Durable Object SQLite has no ICU case folding or custom SQL
+  functions, so non-ASCII ILIKE can diverge from PostgreSQL's locale-aware
+  behavior. For example, `ILIKE 'é%'` does not match `Émile` on this path. This
+  intentional behavior is pinned by a conformance test. Pattern matching does
+  not depend on SQLite's connection-wide `case_sensitive_like` setting.
 - comparison values are resolved scalar literals. `IN` and `NOT IN` accept
   scalar literal arrays. Every value becomes a positional binding.
 - correlated `EXISTS` and `NOT EXISTS` support compound equality correlations
@@ -114,6 +118,8 @@ Compilation fails with a status-400 engine error before any SQL executes for:
 - any nonempty `related` tree that cannot be compiled completely;
 - a format tree that does not exactly describe the visible related tree;
 - static parameters, cross-table column references, or non-scalar filter values;
+- a LIKE pattern past the portable GLOB limit that cannot use the exact,
+  prefix, suffix, or contains compilation;
 - `scalar: true` correlated conditions;
 - a hidden relationship that is not Zero's exact two-hop junction shape;
 - invalid correlation arity, ordering, cursor, limit, schema type, or physical

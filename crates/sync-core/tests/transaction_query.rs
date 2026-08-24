@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestDb;
+use rusqlite::limits::Limit;
 use serde_json::json;
 
 use sync_core::query::{
@@ -258,6 +259,25 @@ fn executes_case_sensitive_like_ascii_ilike_and_null_comparison_families() {
         .unwrap();
     assert!(ids(&mut db, "ILIKE", json!("é%")).is_empty());
     assert_eq!(ids(&mut db, "ILIKE", json!("É%")), vec!["u4"]);
+
+    db.conn
+        .set_limit(Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 50);
+    let long_name = "record_prefix_that_is_longer_than_the_durable_object_glob_limit_1";
+    db.exec(
+        "INSERT INTO user_records VALUES ('u5', ?, 1, NULL)",
+        &[SqlValue::Text(long_name.to_string())],
+    )
+    .unwrap();
+    assert_eq!(
+        ids(
+            &mut db,
+            "LIKE",
+            json!(
+                "record\\_prefix\\_that\\_is\\_longer\\_than\\_the\\_durable\\_object\\_glob\\_limit\\_%"
+            )
+        ),
+        vec!["u5"]
+    );
 }
 
 #[test]

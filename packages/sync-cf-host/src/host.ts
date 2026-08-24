@@ -784,7 +784,16 @@ export function createSyncDurableObject<
       this.#engineDb = new SqlStorageSyncDb(
         ctx.storage.sql,
         recordRowsWritten,
-        recordRowsRead
+        recordRowsRead,
+        (failure) => {
+          console.error(
+            JSON.stringify({
+              event: 'sync_sql_failure',
+              hostVersion: config.hostVersion,
+              ...failure,
+            })
+          )
+        }
       )
       this.#directSql = new SqlStorageDirect(
         ctx.storage.sql,

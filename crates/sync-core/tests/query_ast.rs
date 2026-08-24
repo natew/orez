@@ -389,6 +389,13 @@ fn rejects_unsupported_shapes() {
         reject(json!({ "table": "issue", "where": simple("=", "nope", json!(1)) })),
         400
     );
+    assert_eq!(
+        reject(json!({
+            "table": "issue",
+            "where": simple("LIKE", "title", json!(format!("{}_%", "x".repeat(50))))
+        })),
+        400
+    );
     // unknown top-level field
     assert_eq!(reject(json!({ "table": "issue", "bogus": 1 })), 400);
     // static parameter left unresolved

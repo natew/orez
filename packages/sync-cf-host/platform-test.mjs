@@ -76,6 +76,21 @@ try {
   check(result.body.transaction, 'transactionSync', 'pull transaction type')
   check(result.body.snapshot, { lmid: '0', balance: 100 }, 'pull snapshot')
 
+  const patternRecovery = ns('pattern-recovery')
+  result = await call(patternRecovery, '/pattern-complexity')
+  check(result.status, 200, 'long LIKE recovery probe status')
+  check(
+    result.body.existingClient.ok,
+    true,
+    'incremental pull accepts the persisted long prefix query'
+  )
+  check(
+    result.body.reloadedClient.ok,
+    true,
+    'a reloaded client recovers in the same client group'
+  )
+  check(result.body.freshGroup.ok, true, 'fresh client group remains healthy')
+
   result = await call(transactions, '/push/read-then-write', { mutationID: 'm1' })
   check(result.status, 200, 'read-then-write status')
   check(result.body.awaitedInsideTransaction, true, 'async tx crossed await')
@@ -373,6 +388,17 @@ try {
   result = await call(guard, '/adapter-guard')
   check(result.status, 200, 'adapter guard status')
   check(result.body.errors.length, 2, 'adapter rejects tx SQL and ?N parameters')
+  check(result.body.sqlFailure.operation, 'query', 'adapter SQL failure operation')
+  check(
+    result.body.sqlFailure.sql,
+    "SELECT 1 AS matched WHERE 'x' GLOB ?",
+    'adapter SQL failure statement'
+  )
+  check(
+    result.body.sqlFailure.params[0].value,
+    'record\\_prefix\\_that\\_is\\_longer\\_than\\_the\\_durable\\_object\\_glob\\_limit\\_%',
+    'adapter SQL failure pattern'
+  )
 
   const eviction = ns('eviction')
   await call(eviction, '/push/read-then-write', { mutationID: 'persist-before-eviction' })

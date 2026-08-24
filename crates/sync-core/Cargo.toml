@@ -22,4 +22,4 @@ thiserror = { workspace = true }
 # 1.94.
 [dev-dependencies]
 proptest = "1.11"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "limits"] }

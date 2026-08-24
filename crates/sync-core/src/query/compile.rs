@@ -15,7 +15,7 @@ use crate::schema::{Tables, quote_ident};
 use super::ast::{
     Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef,
 };
-use super::transaction::postgres_like_to_glob;
+use super::transaction::compile_sqlite_like;
 
 // the SQL operator for the binary comparison ops (not IN/LIKE, which compile
 // to their own shapes)
@@ -363,24 +363,27 @@ impl<'a> Compiler<'a> {
                 Ok(format!("{left_sql} {kw} ({holes})"))
             }
             SimpleOp::Like | SimpleOp::NotLike | SimpleOp::ILike | SimpleOp::NotILike => {
-                let right_sql = match right {
-                    RightVal::Scalar(s) => {
-                        self.params.push(match s {
-                            Scalar::Text(pattern) => {
-                                SqlValue::Text(postgres_like_to_glob(pattern)?)
-                            }
-                            other => scalar_to_sql(other),
-                        });
-                        "?".to_string()
+                let comparison = match right {
+                    RightVal::Scalar(Scalar::Text(pattern)) => {
+                        let (comparison, params) = compile_sqlite_like(
+                            &left_sql,
+                            pattern,
+                            matches!(op, SimpleOp::ILike | SimpleOp::NotILike),
+                        )?;
+                        self.params.extend(params);
+                        comparison
+                    }
+                    RightVal::Scalar(other) => {
+                        self.params.push(scalar_to_sql(other));
+                        if matches!(op, SimpleOp::ILike | SimpleOp::NotILike) {
+                            format!("LOWER({left_sql}) GLOB LOWER(?)")
+                        } else {
+                            format!("{left_sql} GLOB ?")
+                        }
                     }
                     RightVal::List(_) => return Err(reject("LIKE requires a scalar operand")),
                 };
                 let negate = matches!(op, SimpleOp::NotLike | SimpleOp::NotILike);
-                let comparison = if matches!(op, SimpleOp::ILike | SimpleOp::NotILike) {
-                    format!("LOWER({left_sql}) GLOB LOWER({right_sql})")
-                } else {
-                    format!("{left_sql} GLOB {right_sql}")
-                };
                 if negate {
                     Ok(format!("NOT ({comparison})"))
                 } else {

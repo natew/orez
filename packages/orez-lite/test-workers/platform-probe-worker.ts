@@ -14,13 +14,22 @@ import {
   rust_panic_after_writes,
   value_round_trip,
 } from '../../sync-cf-host/src/wasm-platform.js'
+import {
+  engine_handle_query_pull,
+  engine_init_query_schema,
+  engine_init_schema,
+} from '../../sync-cf-host/src/wasm.js'
 import { createApplicationSqlClient, ZeroDO } from '../src/cf-do/worker.js'
 
+import type { SqlStorageFailure } from '../../sync-cf-host/src/sql-storage-adapter.js'
 import type { TransactionQueryFormat, ZeroSchemaConfig } from 'orez-sync-executor'
 
 interface Env {
   PROBE_DO: DurableObjectNamespace<ProbeDurableObject>
 }
+
+const LONG_PREFIX_PATTERN =
+  'record\\_prefix\\_that\\_is\\_longer\\_than\\_the\\_durable\\_object\\_glob\\_limit\\_%'
 
 type DeferredEffect = { mutationID: string; kind: string }
 type MutatorName = 'read-then-write' | 'multi-table' | 'application-error'
@@ -496,6 +505,7 @@ async function runApplicationCancellationProbe(
 
 export class ProbeDurableObject extends ZeroDO {
   readonly #db: SqlStorageSyncDb
+  #lastSqlFailure: SqlStorageFailure | null = null
   #bootID = crypto.randomUUID()
   #lastRequestAt = 0
   #reinstantiations = 0
@@ -505,7 +515,9 @@ export class ProbeDurableObject extends ZeroDO {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env as never)
-    this.#db = new SqlStorageSyncDb(ctx.storage.sql)
+    this.#db = new SqlStorageSyncDb(ctx.storage.sql, undefined, undefined, (failure) => {
+      this.#lastSqlFailure = failure
+    })
     ctx.storage.transactionSync(() => init_probe_schema(this.#db))
   }
 
@@ -718,6 +730,82 @@ export class ProbeDurableObject extends ZeroDO {
       })
     }
 
+    if (route === '/pattern-complexity') {
+      const schema = {
+        tables: {
+          account: transactionQuerySchema.tables.account,
+        },
+      }
+      this.ctx.storage.sql.exec('DELETE FROM accounts')
+      this.ctx.storage.transactionSync(() => {
+        engine_init_schema(this.#db, schema)
+        engine_init_query_schema(this.#db)
+      })
+      const firstPull = this.ctx.storage.transactionSync(() =>
+        engine_handle_query_pull(
+          this.#db,
+          schema,
+          '4096',
+          {
+            clientID: 'wedged-client',
+            clientGroupID: 'persisted-group',
+            cookie: null,
+            queries: {
+              version: 1,
+              patch: [
+                {
+                  op: 'put',
+                  hash: 'complex-pattern-query',
+                  ast: {
+                    table: 'account',
+                    where: {
+                      type: 'simple',
+                      op: 'LIKE',
+                      left: { type: 'column', name: 'id' },
+                      right: { type: 'literal', value: LONG_PREFIX_PATTERN },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          'u1'
+        )
+      ) as { cookie: number }
+      this.ctx.storage.sql.exec(
+        'INSERT INTO accounts (id, balance) VALUES (?, ?)',
+        'changed-target',
+        1
+      )
+      const incrementalBody = {
+        clientGroupID: 'persisted-group',
+        cookie: firstPull.cookie,
+      }
+      const pull = (clientID: string, clientGroupID = incrementalBody.clientGroupID) => {
+        this.#lastSqlFailure = null
+        try {
+          const response = this.ctx.storage.transactionSync(() =>
+            engine_handle_query_pull(
+              this.#db,
+              schema,
+              '4096',
+              { ...incrementalBody, clientID, clientGroupID },
+              'u1'
+            )
+          )
+          return { ok: true, response, failure: this.#lastSqlFailure }
+        } catch (error) {
+          return { ok: false, error: String(error), failure: this.#lastSqlFailure }
+        }
+      }
+      return json({
+        firstPull,
+        existingClient: pull('wedged-client'),
+        reloadedClient: pull('reloaded-client'),
+        freshGroup: pull('fresh-client', 'fresh-group'),
+      })
+    }
+
     if (route.startsWith('/push/')) {
       const name = route.slice('/push/'.length) as MutatorName
       if (!['read-then-write', 'multi-table', 'application-error'].includes(name)) {
@@ -793,7 +881,15 @@ export class ProbeDurableObject extends ZeroDO {
           errors.push(String(error))
         }
       }
-      return json({ errors })
+      this.#lastSqlFailure = null
+      try {
+        this.#db.query("SELECT 1 AS matched WHERE 'x' GLOB ?", [
+          { kind: 'text', value: LONG_PREFIX_PATTERN },
+        ])
+      } catch {
+        // the returned diagnostic is the assertion surface
+      }
+      return json({ errors, sqlFailure: this.#lastSqlFailure })
     }
 
     if (route === '/transaction-query') {
