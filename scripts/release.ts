@@ -29,8 +29,12 @@ import {
   currentSyncNativePlatform,
   prepareLauncherPackage,
   preparePlatformPackage,
+  syncNativeVersion,
 } from './sync-native-package.js'
-import { planSyncNativeRelease } from './sync-native-release-plan.js'
+import {
+  nextSyncNativeVersion,
+  planSyncNativeRelease,
+} from './sync-native-release-plan.js'
 
 const args = process.argv.slice(2)
 const knownArgs = new Set([
@@ -361,20 +365,43 @@ if (into) {
     sourcePackageCopies.map(({ pkg, copies }) => [pkg.name, copies])
   )
 
+  const nativePlatform = currentSyncNativePlatform()
+  if (!nativePlatform) {
+    throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
+  }
+  const nativePackageNames = new Set(['orez-sync-native', nativePlatform.npmPackage])
+  const nativeSourceVersion = syncNativeVersion()
+  const nativeCopies = [
+    ...installedCopyVersions(targetDir, 'orez-sync-native'),
+    ...installedCopyVersions(targetDir, nativePlatform.npmPackage),
+  ]
+  const nativeVersions = new Set(nativeCopies.map(({ version }) => version))
+  if (nativeVersions.size > 1) {
+    throw new Error(
+      `sync-native --into found mismatched installed versions: ${[...nativeVersions].join(', ')}`
+    )
+  }
+  const installedNativeVersion = [...nativeVersions][0]
+  const nativeReleaseVersion =
+    installedNativeVersion && installedNativeVersion !== nativeSourceVersion
+      ? nextSyncNativeVersion(installedNativeVersion, nativeSourceVersion)
+      : nativeSourceVersion
+
   console.info('building...')
   cleanRootDist()
   run('bun run build')
   run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
   const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
 
-  const nativePlatform = currentSyncNativePlatform()
-  if (!nativePlatform) {
-    throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
-  }
   run('cargo build --release -p sync-native --bin sync-native')
   const nativePlatformDir = resolve(tmpDir, 'native-platform')
   const nativeBinary = resolve(root, 'target', 'release', nativePlatform.executable)
-  preparePlatformPackage(nativePlatform.id, nativeBinary, nativePlatformDir)
+  preparePlatformPackage(
+    nativePlatform.id,
+    nativeBinary,
+    nativePlatformDir,
+    nativeReleaseVersion
+  )
   const nativePlatformPkg = JSON.parse(
     readFileSync(resolve(nativePlatformDir, 'package.json'), 'utf8')
   )
@@ -385,7 +412,7 @@ if (into) {
   })
 
   const nativeLauncherDir = resolve(tmpDir, 'native-launcher')
-  prepareLauncherPackage(nativeLauncherDir)
+  prepareLauncherPackage(nativeLauncherDir, nativeReleaseVersion)
   const nativeLauncherPkg = JSON.parse(
     readFileSync(resolve(nativeLauncherDir, 'package.json'), 'utf8')
   )
@@ -399,7 +426,10 @@ if (into) {
     pkg,
     copies: sourceCopies.get(name) ?? installedCopyVersions(targetDir, name),
   }))
-  assertLocalReleaseVersions(packageCopies)
+  for (const packageCopy of packageCopies) {
+    if (nativePackageNames.has(packageCopy.pkg.name)) continue
+    assertLocalReleaseVersions([packageCopy])
+  }
   const copies = new Map(
     packageCopies.map(({ pkg, copies }) => [pkg.name, copies.map(({ dir }) => dir)])
   )

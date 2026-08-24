@@ -174,6 +174,13 @@ the dependency is optional. Reinstall after the relevant platform package has
 published to add the binary. There is no `postinstall` download, local npm
 authentication, or native-only source commit in the release path.
 
+For local consumer validation, `bun release --into <consumer>` builds the
+current native source and installs it without publishing. Because the checked-
+in native version is only a template, the command allocates the next local
+patch when the consumer already has a different native version, then rewrites
+the staged Orez dependency to that local version. Ordinary Orez package
+versions still must match the consumer's installed release line.
+
 ## First release bootstrap
 
 Each new npm package must exist before npm trusted publishing can be configured.

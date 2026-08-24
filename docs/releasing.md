@@ -59,3 +59,24 @@ reached the registry.
 
 Stable publishing still requires an explicit dispatch; ordinary main pushes
 only publish canaries.
+
+## Local consumer validation
+
+To exercise the current Orez source in a local consumer, use a consumer whose
+installed public Orez packages match this checkout, then run:
+
+```sh
+cd ~/orez
+bun release --into ~/soot
+```
+
+The command builds and installs the current source without publishing to npm.
+It replaces ordinary packages only when their installed versions match the
+source checkout. Native packages are the exception because their checked-in
+version is a template and CI may have allocated a newer published version. If
+the consumer has native `0.1.7` while this source template says `0.1.6`, the
+local flow builds the current native binary as `0.1.8` and updates the staged
+Orez dependency to that local version. Do not copy `dist` files or install a
+different transport artifact to work around this mismatch. An ordinary Orez
+package version mismatch means the consumer and source checkout are not the
+same release line; use a matching Orez checkout before rerunning `--into`.
