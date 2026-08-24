@@ -1,12 +1,11 @@
-<!-- plan: status=active owner=m9125 reviewed= -->
+<!-- plan: status=active owner=m9426 reviewed=2026-08-24 -->
 
 # Reduce Orez change-capture physical writes
 
-date: 2026-08-23
-owner session: m9125
+date: 2026-08-23, revised 2026-08-24
 consumer plan: `/Users/n8/soot/plans/contrast/cloudflare-spend-cut-2026-08-23.md`
 
-## Objective
+## Objective and priority
 
 Reduce the physical Durable Object rows written for a captured application
 change without weakening transaction isolation, rollback, foreign-key cascade,
@@ -15,9 +14,21 @@ implementation hypothesis is removal of `_zero_pending_changes` insert/delete,
 which would move the measured marginal slope from six toward four. A two-row
 floor remains research until one universal transaction transport is proven.
 
-This plan owns Orez implementation and evidence. The Soot plan owns removing
-factory heartbeat mutations before they reach Orez. Application sharding is
-not acceptance for an Orez journal that remains amplified or unbounded.
+Priority, stated honestly: there is no current dollar case. Contrast's total
+`do.rowsWritten` is $0.130 per day, and the Soot liveness fix no longer waits
+on this plan; it removes the dominant capture traffic upstream by coarsening
+its own cadence. What this plan is worth now is smaller and different: the
+per-change physical slope matters at future scale, shorter write sessions
+reduce write-grant queueing for every Orez consumer, and the journal-bound
+work in stage 2 is a named prerequisite for Soot's control-plane
+decomposition trigger (the 2026-08-23 inspection found 164,517 retained
+`_zero_changes` rows with no active writer, and sharding application tables
+cannot fix an unbounded infrastructure journal). Stage 2's retention
+verification does not depend on the stage 0 matrix and may run first.
+
+This plan owns Orez implementation and evidence. The Soot plan owns factory
+liveness cadence. Application sharding is not acceptance for an Orez journal
+that remains amplified or unbounded.
 
 No production release, resnapshot, migration, or data mutation is authorized
 by this plan. Publishing Orez always requires Nate's explicit permission.
@@ -59,7 +70,7 @@ billing counter because it excludes trigger-side rows.
 - There may be only one capture implementation. Do not add a direct fast path
   with the current CDC/pending path as a fallback.
 
-## Stage 0 — pin the physical-cost and correctness matrix
+## Stage 0: pin the physical-cost and correctness matrix
 
 - [ ] Extend the real-workerd harness to report application rows, application
       index rows, CDC rows, pending rows, final changefeed rows, fixed transaction
@@ -77,7 +88,7 @@ billing counter because it excludes trigger-side rows.
       and after final insertion but before the client observes the acknowledgement.
       Restart must either resume idempotently or roll back completely.
 
-## Stage 1 — test the six-to-four hypothesis
+## Stage 1: test the six-to-four hypothesis
 
 Use `_orez_cdc_buffer` as the single transaction-local capture and recovery
 journal for the multi-RPC session. The proposed change removes
@@ -98,7 +109,7 @@ transaction and restores application state atomically.
 - [ ] Claim six-to-four only if the measured marginal slope is four across the
       matrix and total rows equal the documented fixed plus index costs.
 
-## Stage 2 — bound retained internal state
+## Stage 2: bound retained internal state
 
 - [ ] Give the surviving CDC/recovery journal explicit row, byte, and age
       bounds across normal commit, rollback, lost acknowledgement, Durable Object
@@ -112,12 +123,14 @@ transaction and restores application state atomically.
 - [ ] Verify `_zero_changes`, transaction manifests, and snapshot tables remain
       within their existing documented retention contracts.
 
-## Stage 3 — investigate the two-row floor
+## Stage 3: investigate the two-row floor (deprioritized research)
 
 The theoretical marginal floor is the application row plus one final
 changefeed row in the same SQLite storage transaction. Reaching it universally
 requires a serializable transaction-program contract or a co-located
-authoritative mutator boundary.
+authoritative mutator boundary. With no cost pressure behind it, this stage
+runs only after stages 0 through 2 are complete and only if a consumer names
+a concrete need.
 
 - [ ] Inventory every application transaction shape in Orez consumers,
       including data-dependent branching, loops, conditional writes, returned
@@ -148,8 +161,9 @@ authoritative mutator boundary.
   buffer or recovery state.
 - Soot may consume the Orez change only after this plan's relevant stage is
   complete, published with permission, pinned in Soot, and validated against
-  Soot's transaction/cascade fixtures. Soot sharding and coordinator rollout do
-  not wait for the two-row research stage.
+  Soot's transaction/cascade fixtures. Nothing on the Soot side waits on any
+  stage of this plan; the dependency runs the other way, with Soot's
+  decomposition trigger consuming stage 2's journal-bound proof.
 
 ## Validation receipts
 
