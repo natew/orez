@@ -21,6 +21,7 @@ export type PhysicalSource =
   | 'pending_changes'
   | 'zero_changes'
   | 'bookkeeping'
+  | 'backup_meta'
   | 'unclassified'
 
 export type TableVisibility = 'private' | 'synced'
@@ -40,6 +41,7 @@ export type WriteAttributionBreakdown = {
   pendingChanges: number
   zeroChanges: number
   bookkeeping: number
+  backupMeta: number
   unclassified: number
 }
 
@@ -49,6 +51,7 @@ export type WriteAttributionMeta = {
   processStartedAt: number
   sampleRate: number
   observedAt: number
+  outcome?: 'committed' | 'error' | 'rolled_back'
 }
 
 export type WriteAttributionFields = WriteAttributionMeta & {
@@ -128,6 +131,7 @@ function physicalTableName(raw: string): string {
 }
 
 function internalSource(table: string): PhysicalSource | null {
+  if (table.endsWith('_backup_meta')) return 'backup_meta'
   const known = INTERNAL_SOURCE[table]
   if (known) return known
   if (
@@ -217,6 +221,7 @@ export function physicalBreakdownTotal(breakdown: WriteAttributionBreakdown): nu
     breakdown.pendingChanges +
     breakdown.zeroChanges +
     breakdown.bookkeeping +
+    breakdown.backupMeta +
     breakdown.unclassified
   )
 }
@@ -405,6 +410,7 @@ export class WriteAttributionCollector {
       pendingChanges: 0,
       zeroChanges: 0,
       bookkeeping: 0,
+      backupMeta: 0,
       unclassified: 0,
     }
     const application = new Map<string, ApplicationTableBreakdown>()
@@ -427,6 +433,10 @@ export class WriteAttributionCollector {
       }
       if (entry.source === 'bookkeeping') {
         breakdown.bookkeeping += remaining
+        continue
+      }
+      if (entry.source === 'backup_meta') {
+        breakdown.backupMeta += remaining
         continue
       }
       if (entry.source === 'application' && entry.table) {
@@ -466,13 +476,17 @@ export class WriteAttributionCollector {
       (sum, row) => sum + row.logicalRows,
       0
     )
+    const rustVisibleRows =
+      meta.outcome === 'rolled_back' || meta.outcome === 'error'
+        ? 0
+        : this.#rustVisibleRows
     const fields: WriteAttributionFields = {
       ...sanitizeMeta(meta),
       complete: breakdown.unclassified === 0,
       logSampling: WORKERS_LOG_SAMPLING,
       logicalTotal,
       physicalTotal: this.#physicalTotal,
-      rustVisibleRows: this.#rustVisibleRows,
+      rustVisibleRows,
       breakdown,
     }
     assertWriteAttributionReconciles(fields)
@@ -549,6 +563,7 @@ function incompleteAttribution(
       pendingChanges: 0,
       zeroChanges: 0,
       bookkeeping: 0,
+      backupMeta: 0,
       unclassified: physicalTotal,
     },
   }

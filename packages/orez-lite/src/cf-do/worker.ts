@@ -603,6 +603,7 @@ export class ZeroDO extends DurableObject {
             processStartedAt: this.bootedAt,
             sampleRate: this.sqlTelemetrySampleRate,
             observedAt: Date.now(),
+            outcome,
           })
         : null
     } catch {
@@ -1890,7 +1891,10 @@ export class ZeroDO extends DurableObject {
    * A session that is still queued has never touched SQLite, so dropping its
    * queue entry is the whole of its cleanup.
    */
-  private releaseApplicationSqlTurn(session: ApplicationSqlSessionTarget): void {
+  private releaseApplicationSqlTurn(
+    session: ApplicationSqlSessionTarget,
+    options: { pump?: boolean } = {}
+  ): void {
     if (session.state === 'closed') return
     if (session.state === 'preempted') {
       session.state = 'closed'
@@ -1921,12 +1925,15 @@ export class ZeroDO extends DurableObject {
     session.state = 'closed'
     if (session.readOnly) this.applicationSqlReaders.delete(session)
     else {
-      if (this.activeAttribution === session.telemetry?.attribution) {
+      if (
+        options.pump !== false &&
+        this.activeAttribution === session.telemetry?.attribution
+      ) {
         this.activeAttribution = null
       }
       this.applicationSqlWriter = null
     }
-    this.pumpApplicationSqlQueue()
+    if (options.pump !== false) this.pumpApplicationSqlQueue()
   }
 
   private async withApplicationSqlTurn<Value>(
@@ -2277,6 +2284,8 @@ export class ZeroDO extends DurableObject {
   async [APPLICATION_SQL_COMMIT](session: ApplicationSqlSessionTarget): Promise<void> {
     this.assertApplicationSqlSession(session)
     let published = false
+    let outcome: 'committed' | 'error' = 'committed'
+    let error: unknown
     try {
       if (session.mutated) {
         published = await this.atomically(() => {
@@ -2285,19 +2294,27 @@ export class ZeroDO extends DurableObject {
           return committed > 0
         })
       }
-    } catch (error) {
-      this.finishApplicationSqlTelemetry(session, 'error', error)
-      throw error
-    } finally {
-      this.releaseApplicationSqlTurn(session)
+    } catch (caught) {
+      outcome = 'error'
+      error = caught
     }
+    this.releaseApplicationSqlTurn(session, { pump: false })
     try {
-      this.applicationSqlDidCommit(published, session.mutated)
-      this.finishApplicationSqlTelemetry(session, 'committed')
-    } catch (error) {
-      this.finishApplicationSqlTelemetry(session, 'error', error)
-      throw error
+      if (outcome === 'committed') {
+        this.applicationSqlDidCommit(published, session.mutated)
+      }
+    } catch (caught) {
+      outcome = 'error'
+      error = caught
+    } finally {
+      this.finishApplicationSqlTelemetry(
+        session,
+        outcome,
+        outcome === 'error' ? error : undefined
+      )
+      this.pumpApplicationSqlQueue()
     }
+    if (outcome === 'error') throw error
   }
 
   async [APPLICATION_SQL_COMMIT_PREEMPTIBLE](

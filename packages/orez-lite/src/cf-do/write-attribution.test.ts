@@ -93,6 +93,24 @@ describe('write attribution classification', () => {
       table: '_orez_tx_schema',
       op: 'DELETE',
     })
+    expect(
+      classifyPhysicalStatement(
+        'INSERT INTO _orez_backup_meta (id, write_seq) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET write_seq = write_seq + 1'
+      )
+    ).toEqual({
+      source: 'backup_meta',
+      table: '_orez_backup_meta',
+      op: 'INSERT',
+    })
+    expect(
+      classifyPhysicalStatement(
+        'INSERT INTO _soot_backup_meta (id, write_seq) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET write_seq = write_seq + 1'
+      )
+    ).toEqual({
+      source: 'backup_meta',
+      table: '_soot_backup_meta',
+      op: 'INSERT',
+    })
   })
 
   it('classifies namespace object names without emitting the raw name', () => {
@@ -122,6 +140,7 @@ describe('write attribution reconciliation', () => {
       pendingChanges: 2,
       zeroChanges: 1,
       bookkeeping: 3,
+      backupMeta: 0,
       unclassified: 0,
     }
     expect(physicalBreakdownTotal(incomplete)).toBe(9)
@@ -147,6 +166,7 @@ describe('write attribution reconciliation', () => {
           pendingChanges: 0,
           zeroChanges: 0,
           bookkeeping: 0,
+          backupMeta: 0,
           unclassified: 4,
         },
       })
@@ -177,6 +197,7 @@ describe('write attribution reconciliation', () => {
       pendingChanges: 2,
       zeroChanges: 1,
       bookkeeping: 3,
+      backupMeta: 0,
       unclassified: 0,
     })
   })
@@ -223,6 +244,29 @@ describe('write attribution reconciliation', () => {
       expect.arrayContaining([...FORBIDDEN_FROM_KEYS])
     )
     assertNoForbiddenAttributionFields(summary as unknown as Record<string, unknown>)
+  })
+
+  it('includes backup-marker upserts in physicalTotal as backupMeta', () => {
+    const collector = sixRowCapturedUpdate()
+    collector.recordPhysical(
+      'INSERT INTO _orez_backup_meta (id, write_seq) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET write_seq = write_seq + 1',
+      1
+    )
+    const summary = collector.summarize(META)
+    assertWriteAttributionReconciles(summary)
+    expect(summary.physicalTotal).toBe(10)
+    expect(summary.breakdown.backupMeta).toBe(1)
+    expect(summary.breakdown.bookkeeping).toBe(3)
+  })
+
+  it('zeros rustVisibleRows when the application transaction rolled back', () => {
+    const committed = sixRowCapturedUpdate().summarize(META)
+    expect(committed.rustVisibleRows).toBe(1)
+    const rolled = sixRowCapturedUpdate().summarize({ ...META, outcome: 'rolled_back' })
+    assertWriteAttributionReconciles(rolled)
+    expect(rolled.logicalTotal).toBe(1)
+    expect(rolled.rustVisibleRows).toBe(0)
+    expect(rolled.breakdown.zeroChanges).toBe(1)
   })
 })
 

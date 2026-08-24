@@ -182,7 +182,9 @@ transactions, statements, rows returned, and rows changed. Transaction samples
 also attribute physical Durable Object `rowsWritten` after cursor consumption:
 application table and operation, private versus synced, measurable index rows,
 `_orez_cdc_buffer`, `_zero_pending_changes`, `_zero_changes`, fixed
-transaction bookkeeping, and the physical total. Coverage metadata is worker
+transaction bookkeeping, `_orez_backup_meta`, and the physical total. Rolled-back
+transactions report `rustVisibleRows: 0` even when capture observed synced
+application rows. Coverage metadata is worker
 version, namespace class (`control`, `project`, or `test`), observation
 timestamp, process start, sampling rate, and whether that event's breakdown is
 complete. `rowsChanged` remains the logical `changes()` count and is not the

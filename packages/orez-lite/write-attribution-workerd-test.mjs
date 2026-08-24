@@ -27,7 +27,9 @@ const FIXTURES = [
 
 writeFileSync(
   join(fixture, 'worker.ts'),
-  `import { createOrezDataWorker } from '../src/cf-do/lite-data-worker.js'
+  `import { createOrezDataWorker } from ${JSON.stringify(
+    join(import.meta.dirname, 'src/cf-do/lite-data-worker.js')
+  )}
 
 const schema = {
   version: 'write-attribution-v1',
@@ -441,15 +443,10 @@ function assertEnabledReceipts(receipts, pass) {
       (sum, event) => sum + event.physicalTotal,
       0
     )
-    // the data worker bumps a post-commit backup marker after mutated sessions.
-    // that row is outside the application transaction and is not attributed.
-    const postCommitMarkers = receipt.events.filter(
-      (event) => event.outcome === 'committed'
-    ).length
     assert.equal(
-      physicalSum + postCommitMarkers,
+      physicalSum,
       receipt.billingDelta,
-      `${pass} ${receipt.name} physicalTotal ${physicalSum} + markers ${postCommitMarkers} != billing ${receipt.billingDelta}`
+      `${pass} ${receipt.name} physicalTotal ${physicalSum} != billing ${receipt.billingDelta}`
     )
     assert.equal(receipt.event.sampleRate, 1)
     assert.equal(receipt.event.namespaceClass, 'test')
@@ -459,8 +456,15 @@ function assertEnabledReceipts(receipts, pass) {
     assert.equal(typeof receipt.event.processStartedAt, 'number')
     if (receipt.name === 'rollback') {
       assert.equal(receipt.event.outcome, 'rolled_back')
+      assert.equal(receipt.event.rustVisibleRows, 0)
+      assert.equal(receipt.event.breakdown.zeroChanges, 0)
+      assert.equal(receipt.event.breakdown.backupMeta, 0)
     } else {
       assert.equal(receipt.event.outcome, 'committed')
+      assert.ok(
+        receipt.events.some((event) => event.breakdown.backupMeta >= 1),
+        `${pass} ${receipt.name} missing _orez_backup_meta rows in physicalTotal`
+      )
     }
     if (receipt.name === 'private-update') {
       const row = receipt.event.breakdown.application.find(
