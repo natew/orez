@@ -159,6 +159,14 @@ The budgets deliberately keep the hot-path counter in the worker layer and
 persist only the sticky trip state. Metering every write into a table would add
 billed writes and amplify the very incident it is meant to contain.
 
+Sampled application SQL transactions emit one structured
+`orez_sql_transaction_sample` with a physical-row breakdown (application table
+and operation, private versus synced, indexes, CDC buffer, pending changes,
+changefeed, fixed bookkeeping). The physical total is the same post-consume
+`rowsWritten` meter as the circuit breaker. Attribution is logs only: it adds
+zero SQLite rows and does not change `_zero_changes`. Cloudflare Workers logs
+may drop events, so a partial capture is not an exact object-level total.
+
 ### Transaction rollback must not copy hot tables
 
 The data worker emulates Postgres transactions over Durable Object requests.

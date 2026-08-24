@@ -42,6 +42,11 @@ import {
   ZSYNC_LOG_SEGMENTS_TABLE,
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
+import {
+  namespaceClassFromObjectName,
+  WriteAttributionCollector,
+  type WriteAttributionFields,
+} from './write-attribution.js'
 
 import type {
   ApplicationSqlClient,
@@ -86,6 +91,7 @@ export type { SqlStatementMetadata } from 'orez-sync-executor'
 
 interface Env {
   ZERO_DO: DurableObjectNamespace
+  CF_VERSION?: { id?: string }
   OREZ_DO_WRITE_BUDGET_ROWS?: string
   OREZ_DO_WRITE_BUDGET_WINDOW_MS?: string
   OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN?: string
@@ -166,6 +172,7 @@ interface SqlTelemetrySample {
   rowsReturned: number
   rowsChanged: number
   statements: number
+  attribution: WriteAttributionCollector
 }
 type PersistedWriteBudgetTrip = RowWriteBudgetTrip & {
   statement?: SqlWriteMeasurement
@@ -483,6 +490,8 @@ export class ZeroDO extends DurableObject {
   }
   private readonly sqlBillingSinceBoot = { rowsRead: 0, rowsWritten: 0 }
   private readonly sqlTelemetrySampleRate: number
+  private readonly workerVersion: string
+  private activeAttribution: WriteAttributionCollector | null = null
   private readonly writeGrantWaitMs = new RecentLatencySamples(
     WRITE_GRANT_WAIT_SAMPLE_CAPACITY
   )
@@ -511,10 +520,8 @@ export class ZeroDO extends DurableObject {
   }
 
   private startSqlTelemetrySample(): SqlTelemetrySample | null {
-    if (
-      this.sqlTelemetrySampleRate <= 0 ||
-      (this.sqlTelemetrySampleRate < 1 && Math.random() >= this.sqlTelemetrySampleRate)
-    ) {
+    const rate = Number(this.sqlTelemetrySampleRate)
+    if (!Number.isFinite(rate) || rate <= 0 || (rate < 1 && Math.random() >= rate)) {
       return null
     }
     return {
@@ -523,6 +530,7 @@ export class ZeroDO extends DurableObject {
       rowsReturned: 0,
       rowsChanged: 0,
       statements: 0,
+      attribution: new WriteAttributionCollector(),
     }
   }
 
@@ -539,7 +547,8 @@ export class ZeroDO extends DurableObject {
     name: string,
     outcome: 'committed' | 'error' | 'rolled_back' | 'success',
     sample: SqlTelemetrySample | null,
-    error?: unknown
+    error?: unknown,
+    attribution?: WriteAttributionFields | null
   ): void {
     if (!sample) return
     try {
@@ -559,6 +568,7 @@ export class ZeroDO extends DurableObject {
           rowsChanged: sample.rowsChanged,
           statements: sample.statements,
           sampleRate: this.sqlTelemetrySampleRate,
+          ...(attribution ?? null),
           ...(error
             ? {
                 errorName: (error instanceof Error ? error.name : typeof error).slice(
@@ -579,12 +589,32 @@ export class ZeroDO extends DurableObject {
   ): void {
     if (session.telemetryFinished) return
     session.telemetryFinished = true
+    if (this.activeAttribution === session.telemetry?.attribution) {
+      this.activeAttribution = null
+    }
+    let attribution: WriteAttributionFields | null = null
+    try {
+      attribution = session.telemetry
+        ? session.telemetry.attribution.summarize({
+            workerVersion: this.workerVersion,
+            namespaceClass: namespaceClassFromObjectName(
+              typeof this.ctx.id?.name === 'string' ? this.ctx.id.name : null
+            ),
+            processStartedAt: this.bootedAt,
+            sampleRate: this.sqlTelemetrySampleRate,
+            observedAt: Date.now(),
+          })
+        : null
+    } catch {
+      attribution = null
+    }
     this.emitSqlTelemetry(
       'orez_sql_transaction_sample',
       session.readOnly ? 'application_sql_read' : 'application_sql_write',
       outcome,
       session.telemetry,
-      error
+      error,
+      attribution
     )
   }
 
@@ -684,6 +714,10 @@ export class ZeroDO extends DurableObject {
       env.OREZ_SQL_TELEMETRY_SAMPLE_RATE,
       DEFAULT_SQL_TELEMETRY_SAMPLE_RATE
     )
+    this.workerVersion =
+      typeof env.CF_VERSION?.id === 'string' && env.CF_VERSION.id.length > 0
+        ? env.CF_VERSION.id
+        : 'local'
     this.writeBudget = new RollingRowWriteBudget({
       budgetRows: positiveEnvInteger(
         env.OREZ_DO_WRITE_BUDGET_ROWS,
@@ -721,6 +755,9 @@ export class ZeroDO extends DurableObject {
           this.sqlBillingSinceBoot.rowsWritten += rows
           if (!measurement) return
           measurement.rowsWritten += rows
+          try {
+            this.activeAttribution?.recordPhysical(statement, rows)
+          } catch {}
           if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows, measurement)
         },
         (rows) => {
@@ -1786,6 +1823,7 @@ export class ZeroDO extends DurableObject {
       if (waiter.session.readOnly) this.applicationSqlReaders.add(waiter.session)
       else {
         this.applicationSqlWriter = waiter.session
+        this.activeAttribution = waiter.session.telemetry?.attribution ?? null
         this.writeGrantWaitMs.record(performance.now() - waiter.queuedAt)
       }
       waiter.admit()
@@ -1882,7 +1920,12 @@ export class ZeroDO extends DurableObject {
     this.assertApplicationSqlSession(session)
     session.state = 'closed'
     if (session.readOnly) this.applicationSqlReaders.delete(session)
-    else this.applicationSqlWriter = null
+    else {
+      if (this.activeAttribution === session.telemetry?.attribution) {
+        this.activeAttribution = null
+      }
+      this.applicationSqlWriter = null
+    }
     this.pumpApplicationSqlQueue()
   }
 
@@ -2538,6 +2581,26 @@ export class ZeroDO extends DurableObject {
     if (rowMutation) this.writeBudget.recordLogical(changes)
     if (mutation && !rowMutation) this.cdc.invalidateSchema()
     const captured = track || (this.cdc.active && rowMutation) ? this.cdc.drain() : []
+    try {
+      const attribution = transactionTelemetry?.attribution
+      if (attribution && captured.length > 0) {
+        attribution.noteTriggerCaptures(captured.length)
+        for (const change of captured) {
+          const visibility =
+            change.publish === false
+              ? 'private'
+              : (this.cdc.tableVisibility(change.physicalTableName) ?? 'synced')
+          attribution.recordLogicalCapture({
+            table: change.physicalTableName,
+            op: change.op,
+            visibility,
+            publish: change.publish !== false && visibility === 'synced',
+          })
+        }
+      } else if (attribution && rowMutation && changes > 0) {
+        attribution.recordUncapturedLogical(changes)
+      }
+    } catch {}
     for (const change of captured) {
       this.appendCapturedChange(
         change,

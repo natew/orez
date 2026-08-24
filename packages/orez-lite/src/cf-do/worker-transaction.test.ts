@@ -99,6 +99,8 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   }
   zero.sqlBillingSinceBoot = { rowsRead: 0, rowsWritten: 0 }
   zero.sqlTelemetrySampleRate = 0
+  zero.workerVersion = 'local'
+  zero.activeAttribution = null
   const writeGrantWaitSamples: number[] = []
   zero.writeGrantWaitMs = {
     record: (value: number) => writeGrantWaitSamples.push(value),
@@ -119,7 +121,7 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   zero.applicationSqlQueue = []
   zero.applicationSqlDidCommit = () => {}
   zero.ctx = {
-    id: { toString: () => 'test-object-id' },
+    id: { toString: () => 'test-object-id', name: 'test-write-attribution' },
     storage: { sql: { databaseSize: 12_345 }, transaction },
   }
   return { storage, writeGrantWaitSamples, zero }
@@ -211,6 +213,13 @@ describe('ZeroDO trusted application transaction', () => {
       rowsChanged: 0,
       statements: 1,
       sampleRate: 1,
+      workerVersion: 'local',
+      namespaceClass: 'test',
+      complete: true,
+      logSampling: 'workers_observability_may_sample_or_drop',
+      logicalTotal: 0,
+      physicalTotal: 0,
+      rustVisibleRows: 0,
     })
     expect(events[2]).toMatchObject({
       event: 'orez_sql_query_sample',
@@ -227,6 +236,26 @@ describe('ZeroDO trusted application transaction', () => {
     expect(events.every((event) => !Object.hasOwn(event, 'sql'))).toBe(true)
     expect(events.every((event) => !Object.hasOwn(event, 'params'))).toBe(true)
     expect(events.every((event) => !Object.hasOwn(event, 'namespace'))).toBe(true)
+    expect(events.every((event) => !Object.hasOwn(event, 'objectId'))).toBe(true)
+    expect(events.every((event) => !Object.hasOwn(event, 'objectName'))).toBe(true)
+  })
+
+  it('commits the application transaction when the log sink throws', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    zero.sqlTelemetrySampleRate = 1
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {
+      throw new Error('log sink failed')
+    })
+    try {
+      const session = await zero.applicationSqlSession('log-sink-failure')
+      await session.begin()
+      await expect(session.queryPlan(flatPlan(), 'item.byId')).resolves.toEqual([
+        { id: 'row-1', enabled: true },
+      ])
+      await expect(session.commit()).resolves.toBeUndefined()
+    } finally {
+      log.mockRestore()
+    }
   })
 
   it('binds the private application client to one Durable Object namespace', async () => {
