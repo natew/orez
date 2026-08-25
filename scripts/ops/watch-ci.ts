@@ -5,16 +5,16 @@
 // This exists so an agent waiting on CI spends no turns polling: run it as a
 // background task and the harness wakes you once, with the answer. Polling
 // happens inside this process, where it is free. The interval is deliberately
-// coarse — GitHub allows 60 REST calls an hour and `gh run watch` alone drains
-// that in about three minutes.
+// coarse so one monitor does not waste GitHub API calls.
 //
-//   bun scripts/ops/watch-ci.ts [--sha <sha>] [--interval <seconds>]
+//   bun scripts/ops/watch-ci.ts [--sha <sha>] [--workflow <file>] [--interval <seconds>]
 
 const args = process.argv.slice(2)
 const flag = (name: string): string | undefined => {
   const index = args.indexOf(`--${name}`)
   return index === -1 ? undefined : args[index + 1]
 }
+const workflow = flag('workflow')
 
 // `gh run list --commit` matches the full 40-character sha only: an
 // abbreviated one silently returns no runs, which reads as "CI has not started"
@@ -41,6 +41,7 @@ async function runsForSha(): Promise<Run[]> {
     'gh',
     'run',
     'list',
+    ...(workflow ? ['--workflow', workflow] : []),
     '--commit',
     sha,
     '--limit',
@@ -53,7 +54,9 @@ async function runsForSha(): Promise<Run[]> {
   return JSON.parse(text || '[]') as Run[]
 }
 
-console.log(`[watch-ci] waiting on ${sha.slice(0, 12)} every ${intervalMs / 1000}s`)
+console.log(
+  `[watch-ci] waiting on ${workflow ?? 'all workflows'} for ${sha.slice(0, 12)} every ${intervalMs / 1000}s`
+)
 for (;;) {
   let runs: Run[]
   try {

@@ -25,6 +25,7 @@ concurrency:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     outputs:
       version: ${{ steps.plan.outputs.version }}
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -37,6 +38,16 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.12
+
+      - name: Wait for exact commit CI
+        run: >-
+          bun scripts/ops/watch-ci.ts
+          --sha "$GITHUB_SHA"
+          --workflow ci.yml
+          --interval 120
+          --timeout 2400
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -61,15 +72,6 @@ jobs:
           git fetch origin main --no-tags
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
             echo 'sync-native releases must use the current main commit' >&2
-            exit 1
-          fi
-          successful_ci_runs="$(
-            gh api \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" \
-              --jq '[.workflow_runs[] | select(.conclusion == "success")] | length'
-          )"
-          if [ "$successful_ci_runs" -eq 0 ]; then
-            echo "CI has not passed for $GITHUB_SHA" >&2
             exit 1
           fi
           bun scripts/sync-native-package.ts check
