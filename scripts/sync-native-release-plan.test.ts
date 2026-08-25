@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   nextSyncNativeVersion,
   parseNpmMetadata,
+  syncNativeContractCheckMode,
   syncNativeRevision,
 } from './sync-native-release-plan.js'
 
@@ -29,6 +30,33 @@ describe('sync-native release planning', () => {
     }
     expect(parseNpmMetadata(JSON.stringify(metadata))).toEqual(metadata)
     expect(parseNpmMetadata(JSON.stringify([metadata]))).toEqual(metadata)
+  })
+
+  it('selects and verifies the native contract for every trusted package release', () => {
+    expect(
+      syncNativeContractCheckMode({
+        dryRun: false,
+        packOnly: false,
+        rePublish: false,
+        trustedPublishing: true,
+      })
+    ).toBe('select-and-verify')
+    expect(
+      syncNativeContractCheckMode({
+        dryRun: true,
+        packOnly: false,
+        rePublish: false,
+        trustedPublishing: true,
+      })
+    ).toBe('verify')
+    expect(
+      syncNativeContractCheckMode({
+        dryRun: false,
+        packOnly: true,
+        rePublish: false,
+        trustedPublishing: true,
+      })
+    ).toBe('skip')
   })
 
   it('rejects malformed versions and binary output', () => {

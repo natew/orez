@@ -27,6 +27,22 @@ export type SyncNativeReleasePlan = {
   reason: string
 }
 
+export function syncNativeContractCheckMode({
+  dryRun,
+  packOnly,
+  rePublish,
+  trustedPublishing,
+}: {
+  dryRun: boolean
+  packOnly: boolean
+  rePublish: boolean
+  trustedPublishing: boolean
+}): 'select-and-verify' | 'verify' | 'skip' {
+  if (packOnly || rePublish) return 'skip'
+  if (trustedPublishing && !dryRun) return 'select-and-verify'
+  return 'verify'
+}
+
 function parseVersion(version: string): [number, number, number] {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version)
   if (!match) throw new Error(`sync-native version must be major.minor.patch: ${version}`)

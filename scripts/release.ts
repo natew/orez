@@ -34,6 +34,7 @@ import {
 import {
   nextSyncNativeVersion,
   planSyncNativeRelease,
+  syncNativeContractCheckMode,
 } from './sync-native-release-plan.js'
 
 const args = process.argv.slice(2)
@@ -75,6 +76,12 @@ const trustedPublishing =
   process.env.GITHUB_ACTIONS === 'true' &&
   Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL) &&
   Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN)
+const nativeContractCheckMode = syncNativeContractCheckMode({
+  dryRun,
+  packOnly,
+  rePublish,
+  trustedPublishing,
+})
 
 if (!patch && !minor && !major && !canary && !rePublish && !packOnly && !into) {
   console.info(
@@ -607,14 +614,7 @@ const nativeLauncherPkg = JSON.parse(
   readFileSync(resolve(root, 'packages', 'orez-sync-native', 'package.json'), 'utf8')
 )
 let nativeReleaseVersion = process.env.OREZ_SYNC_NATIVE_VERSION
-if (
-  !nativeReleaseVersion &&
-  trustedPublishing &&
-  !packOnly &&
-  !dryRun &&
-  !canary &&
-  !rePublish
-) {
+if (!nativeReleaseVersion && nativeContractCheckMode === 'select-and-verify') {
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
     throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
@@ -688,7 +688,7 @@ if (!packOnly && !rePublish) {
 // (soot factory defect #49, 2026-08-06). compare the schema revision the two
 // binaries actually report. the stable OIDC workflow publishes native first
 // and passes the exact version selected by its contract-aware release plan.
-if (!packOnly && !canary && !rePublish) {
+if (nativeContractCheckMode !== 'skip') {
   console.info('\nchecking npm sync-native contract...')
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
