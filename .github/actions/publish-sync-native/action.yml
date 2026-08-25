@@ -50,7 +50,10 @@ runs:
         # npm can retain the pre-publish 404 for an optional dependency even
         # after npm view sees the new package. Installing the target explicitly
         # still exercises the launcher while avoiding that negative-cache race.
+        # musl packages are built on same-architecture glibc runners, so force
+        # npm past its host-libc filter before executing the static binary.
         npm install \
+          --force \
           --prefer-online \
           --prefix .release/smoke \
           --ignore-scripts \
