@@ -251,6 +251,55 @@ describe('namespace backup export', () => {
     expect(stored.pointers.has('backups/singleton/latest.json')).toBe(false)
   })
 
+  it('lets a normal-priority export keep its read turn under writer pressure', async () => {
+    const stored = writableBucket()
+    const priorities: unknown[] = []
+    const query = async (_env: unknown, _namespace: string, sql: string) => {
+      if (sql.includes('SELECT write_seq')) return [{ write_seq: 9 }]
+      if (sql.includes('sqlite_master')) {
+        return [{ name: 'message', sql: 'CREATE TABLE message (id TEXT)', type: 'table' }]
+      }
+      if (sql.includes('FROM "message"')) return []
+      throw new Error(`unexpected export query: ${sql}`)
+    }
+    const manager = backupManager({
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      excludedTables: ['_test_backup_meta'],
+      files: () => stored.bucket,
+      query,
+      readSession: async (
+        env: unknown,
+        namespace: string,
+        work: any,
+        readOptions: unknown
+      ) => {
+        const priority =
+          typeof readOptions === 'object' &&
+          readOptions !== null &&
+          'priority' in readOptions
+            ? readOptions.priority
+            : null
+        priorities.push(priority)
+        const value = await work((sql: string, params: readonly unknown[] = []) =>
+          query(env, namespace, sql, params)
+        )
+        if (priority !== 'normal') throw new ApplicationSqlSessionPreemptedError()
+        return value
+      },
+      batch: async () => {},
+      listNamespaces: async () => ['singleton'],
+    })
+
+    const result = await manager.exportNamespace({}, 'singleton', {
+      priority: 'normal',
+    })
+
+    expect(result.outcome).toBe('exported')
+    expect(priorities).not.toHaveLength(0)
+    expect(priorities.every((priority) => priority === 'normal')).toBe(true)
+  })
+
   it('still rejects a genuine export failure', async () => {
     const stored = writableBucket()
     const manager = backupManager({

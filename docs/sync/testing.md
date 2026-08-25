@@ -359,11 +359,11 @@ list-append --consistency-models serializable`, failing the job on `false`,
    session for its whole length, and
    `namespace backup export consistency > dumps a state that some transaction
 actually produced` pins it (red proof: with per-statement reads the dump
-   carries `balance 0` against a ledger summing to `100`). Two gaps remain
-   stated rather than closed: the durable object's own maintenance writes
-   (transaction rollback, recovery) run outside the admission queue, so a read
-   session is writer exclusion and not snapshot isolation
-   (`application-sql.ts`, `readTransaction`); and holding one session for the
-   whole scan blocks application writes for the export's duration, which a
-   queued writer surfaces as a 30-second admission timeout
-   (`APPLICATION_SQL_TURN_WAIT_MS`) rather than as a backup failure.
+   carries `balance 0` against a ledger summing to `100`). The scan now uses
+   short marker-fenced sessions, uploads between them, retries a preempted
+   chunk, and restarts a scan after a commit changes the marker. Normal-priority
+   exports additionally keep each bounded chunk's queue turn while preserving
+   the between-chunk marker fence. The remaining gap is narrower: the durable
+   object's own maintenance writes (transaction rollback, recovery) run outside
+   the admission queue, so a read session is writer exclusion and not snapshot
+   isolation (`application-sql.ts`, `readTransaction`).

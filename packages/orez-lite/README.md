@@ -120,3 +120,11 @@ never waits behind R2 and no single writer can end the export. A writer that
 preempts one chunk costs that chunk; a transaction that commits mid-scan costs
 one scan, retried up to `scanAttempts` times before the export reports
 `outcome: 'preempted'` and leaves the work for the next run.
+
+Exports use background admission by default. A consumer with a bounded
+freshness requirement can call
+`backupManager.exportNamespace(env, namespace, { priority: 'normal' })`. Each
+normal chunk keeps its queue turn until it completes instead of being
+preempted by a later writer; writers may still commit between chunks, and the
+same marker fence then restarts the scan. Keep normal admission limited to
+explicit correctness deadlines rather than using it for a fleet-wide sweep.
