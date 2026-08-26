@@ -484,8 +484,8 @@ fn finish_cleanup_generation(db: &mut dyn SyncDb, generation: i64) -> Result<(),
 fn cleanup_one_snapshot_batch(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     let rows = db.query(
         "SELECT CAST(generation AS TEXT) AS generation, stageName
-         FROM _zsync_snapshot_cleanup
-         ORDER BY generation, stageName
+         FROM _zsync_snapshot_cleanup AS cleanup
+         ORDER BY cleanup.generation, cleanup.stageName
          LIMIT 1",
         &[],
     )?;

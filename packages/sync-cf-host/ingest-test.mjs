@@ -960,6 +960,81 @@ try {
     }),
   })
   assert.equal(corruptDerived.status, 200)
+
+  // Preserve the production ledger shape that exposed a resnapshot cutover
+  // failure: one retained segment is just over the rotation threshold and a
+  // newer active segment already exists. Finalization must append its reset to
+  // the newer segment instead of trying to rotate the retained one again.
+  const retainedPayload = JSON.stringify({
+    format: 2,
+    transactions: [
+      {
+        version: '101651',
+        changes: [['item', { id: 'x'.repeat(790_000) }]],
+      },
+    ],
+  })
+  const activePayload = JSON.stringify({
+    format: 2,
+    transactions: Array.from({ length: 421 }, (_, index) => ({
+      version: String(101_652 + index + Math.min(index, 370)),
+      changes: [['item', { id: `retained-shape-${index}` }]],
+    })),
+  })
+  const clearLedger = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: 'DELETE FROM _zsync_log_segments',
+    }),
+  })
+  assert.equal(clearLedger.status, 200)
+  const seedRetainedSegment = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: `INSERT INTO _zsync_log_segments
+                (startVersion, endVersion, payload, pending, captureMode)
+              VALUES (90032, 101651, ?, '[]', 0)`,
+      params: [{ kind: 'text', value: retainedPayload }],
+    }),
+  })
+  assert.equal(seedRetainedSegment.status, 200)
+  const seedActiveSegment = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: `INSERT INTO _zsync_log_segments
+                (startVersion, endVersion, payload, pending, captureMode)
+              VALUES (101652, 102442, ?, '[]', 0)`,
+      params: [{ kind: 'text', value: activePayload }],
+    }),
+  })
+  assert.equal(seedActiveSegment.status, 200)
+  const rotatedLedger = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: `SELECT startVersion, endVersion, length(CAST(payload AS BLOB)) AS bytes
+              FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 2`,
+    }),
+  }).then((response) => response.json())
+  assert.equal(rotatedLedger.rows.length, 2)
+  assert.ok(rotatedLedger.rows[0].bytes < 786_432)
+  assert.ok(rotatedLedger.rows[1].bytes >= 786_432)
+
   const beforeResnapshot = await fetch(`${origin}/admin/status`, {
     headers: { 'x-admin-key': 'ingest-harness-admin' },
   }).then((response) => response.json())

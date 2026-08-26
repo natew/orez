@@ -201,6 +201,40 @@ fn same_cookie_pull_is_unchanged() {
 }
 
 #[test]
+fn incremental_segments_crossing_a_decimal_width_stay_in_numeric_order() {
+    let mut h = setup();
+    h.pull(json!(null), "u1").unwrap();
+    h.db.conn
+        .execute("DELETE FROM _zsync_log_segments", [])
+        .unwrap();
+    let payload = |versions: &[i64]| {
+        serde_json::to_string(&json!({
+            "format": 2,
+            "transactions": versions
+                .iter()
+                .map(|version| json!({
+                    "version": version.to_string(),
+                    "changes": [["item", { "id": "seed1" }]],
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    };
+    let insert = "INSERT INTO _zsync_log_segments
+                    (startVersion, endVersion, payload, pending, captureMode)
+                  VALUES (?, ?, ?, '[]', 0)";
+    h.db.conn
+        .execute(insert, rusqlite::params![9, 10, payload(&[9, 10])])
+        .unwrap();
+    h.db.conn
+        .execute(insert, rusqlite::params![11, 11, payload(&[11])])
+        .unwrap();
+
+    let response = h.pull(json!(8), "u1").unwrap();
+    assert_eq!(cookie_of(&response), 11);
+}
+
+#[test]
 fn future_cookie_is_409() {
     let mut h = setup();
     let err = h.pull(json!(99), "u1").unwrap_err();

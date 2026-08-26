@@ -100,7 +100,8 @@ fn active(db: &mut dyn SyncDb) -> Result<ActiveSegment, EngineError> {
         "SELECT CAST(startVersion AS TEXT) AS startVersion,
                 CAST(endVersion AS TEXT) AS endVersion,
                 payload, pending, CAST(captureMode AS TEXT) AS captureMode
-         FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
+         FROM _zsync_log_segments AS segment
+         ORDER BY segment.startVersion DESC LIMIT 1",
         &[],
     )?;
     let Some(row) = rows.first() else {
@@ -444,8 +445,8 @@ pub(crate) fn scan_since(db: &mut dyn SyncDb, cookie: i64) -> Result<ScannedLedg
     let rows = db.query(
         "SELECT CAST(startVersion AS TEXT) AS startVersion,
                 CAST(endVersion AS TEXT) AS endVersion, payload
-         FROM _zsync_log_segments
-         WHERE endVersion > ? ORDER BY startVersion",
+         FROM _zsync_log_segments AS segment
+         WHERE segment.endVersion > ? ORDER BY segment.startVersion",
         &[SqlValue::Integer(cookie)],
     )?;
     let mut changes = BTreeSet::new();

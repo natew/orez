@@ -188,6 +188,29 @@ fn progress_reads_fail_closed_when_the_progress_table_is_unreadable() {
 }
 
 #[test]
+fn abandoned_generation_cleanup_crossing_a_decimal_width_stays_numeric() {
+    let (mut db, tables) = setup();
+    db.exec(
+        "INSERT INTO _zsync_snapshot_cleanup (generation, stageName)
+         VALUES (9, 'missing-nine'), (10, 'missing-ten')",
+        &[],
+    )
+    .unwrap();
+
+    db.transaction(|db| begin_snapshot_generation(db, &tables, 5))
+        .unwrap();
+
+    let remaining = db
+        .query(
+            "SELECT generation FROM _zsync_snapshot_cleanup ORDER BY generation",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].values[0], SqlValue::Integer(10));
+}
+
+#[test]
 fn corrupt_incomplete_progress_is_an_error_instead_of_no_progress() {
     let (mut db, tables) = setup();
     db.transaction(|db| begin_snapshot_generation(db, &tables, 5))
