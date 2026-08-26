@@ -13,7 +13,10 @@ The native package is versioned independently from the `orez` npm version. CI
 allocates its immutable npm version from the registry; the checked-in Cargo and
 npm manifests are package-shape templates, not a release trigger. Ordinary
 `orez` releases reuse a complete native version when its durable contract still
-matches the source tree.
+matches the source tree and its deterministic native-source revision matches the
+Rust inputs in the source tree. The contract revision answers whether the
+installed durable shape is compatible; the source revision separately answers
+whether the package was built from the current native implementation.
 
 ## Standalone contract
 
@@ -134,13 +137,17 @@ bun scripts/normalize-sync-native-licenses.ts LICENSES.txt
 Native versions are allocated by CI, not checked into a dedicated version-bump
 commit. An explicitly dispatched stable release starts `Release sync-native`
 as its top-level workflow so its GitHub OIDC identity matches the trusted
-publisher registered on npm. The native plan compares the current durable
-contract to the complete platform release on npm. When they differ, it selects
-the next unused native patch version and injects that version while compiling
-and packaging the source commit. After every native package succeeds, this
-workflow dispatches the top-level `Release` workflow, whose separate OIDC
-identity publishes the stable package family and creates the version commit and
-tag.
+publisher registered on npm. The native plan compares both the current durable
+contract and a deterministic hash of the native Rust source inputs to the
+complete platform release on npm. It publishes when either value is stale. The
+contract revision is the compatibility signal used by runtime schema
+initialization; the source revision is the build-freshness signal and is never
+derived from the compiled binary because native outputs are not reproducible
+across runners. When a publish is needed, the plan selects the next unused
+native patch version and injects that version while compiling and packaging the
+source commit. After every native package succeeds, this workflow dispatches
+the top-level `Release` workflow, whose separate OIDC identity publishes the
+stable package family and creates the version commit and tag.
 
 The workflow can also be dispatched directly for an emergency native-only
 release. Either entry point requires current `main` and green CI for that exact
@@ -165,9 +172,12 @@ commit.
 
 Every published package records its source commit. A retry may reuse a package
 only when it came from the same commit, so one native version cannot combine
-binaries from different source revisions. A complete npm version with the
-current contract is reused without rebuilding; an incomplete or mixed-source
-version causes CI to allocate a fresh patch version.
+binaries from different commits. That commit proves only that the package
+family is internally complete and from one commit; it does not compare the
+package with current native source. The separate native-source revision closes
+that gap. A complete npm version with both the current contract and current
+source revision is reused without rebuilding; an incomplete, mixed-source, or
+stale version causes CI to allocate a fresh patch version.
 
 An `orez` install performed before its native packages exist succeeds because
 the dependency is optional. Reinstall after the relevant platform package has

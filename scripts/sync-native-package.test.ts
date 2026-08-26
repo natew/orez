@@ -61,10 +61,18 @@ describe('sync-native npm packages', () => {
     const fakeBinary = resolve(temporary, 'fake-sync-native')
     cpSync(process.execPath, fakeBinary)
     const version = '9.8.7'
+    const sourceRevision = 'sha256:def456'
     const platformDir = resolve(temporary, 'platform')
-    preparePlatformPackage(platform.id, fakeBinary, platformDir, version, 'abc123')
+    preparePlatformPackage(
+      platform.id,
+      fakeBinary,
+      platformDir,
+      version,
+      'abc123',
+      sourceRevision
+    )
     const launcherDir = resolve(temporary, 'launcher')
-    prepareLauncherPackage(launcherDir, version, 'abc123')
+    prepareLauncherPackage(launcherDir, version, 'abc123', sourceRevision)
 
     const platformManifest = JSON.parse(
       readFileSync(resolve(platformDir, 'package.json'), 'utf8')
@@ -76,6 +84,8 @@ describe('sync-native npm packages', () => {
     expect(launcherManifest.version).toBe(version)
     expect(platformManifest.orezSourceCommit).toBe('abc123')
     expect(launcherManifest.orezSourceCommit).toBe('abc123')
+    expect(platformManifest.orezNativeSourceRevision).toBe(sourceRevision)
+    expect(launcherManifest.orezNativeSourceRevision).toBe(sourceRevision)
     expect(syncNativeVersion()).not.toBe(version)
     expect(readFileSync(resolve(platformDir, 'LICENSES.txt'), 'utf8')).toBe(
       readFileSync('LICENSES.txt', 'utf8')

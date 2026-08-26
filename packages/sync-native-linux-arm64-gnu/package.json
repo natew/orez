@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-native-linux-arm64-gnu",
-  "version": "0.1.7",
+  "version": "0.1.6",
   "description": "Prebuilt Orez sync-native host for Linux ARM64 glibc",
   "license": "MIT",
   "repository": {

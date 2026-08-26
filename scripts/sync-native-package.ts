@@ -87,7 +87,8 @@ export function preparePlatformPackage(
   binaryPath: string,
   outputDir: string,
   version = syncNativeVersion(),
-  sourceCommit?: string
+  sourceCommit?: string,
+  sourceRevision?: string
 ): string {
   // Source manifests remain a checked workspace template. The release plan
   // already validates their Cargo version once; cross-platform packaging only
@@ -106,6 +107,7 @@ export function preparePlatformPackage(
   const manifest = readJson(resolve(root, platform.packageDir, 'package.json'))
   manifest.version = version
   if (sourceCommit) manifest.orezSourceCommit = sourceCommit
+  if (sourceRevision) manifest.orezNativeSourceRevision = sourceRevision
   writeJson(resolve(outputDir, 'package.json'), manifest)
   cpSync(resolve(root, 'LICENSE'), resolve(outputDir, 'LICENSE'))
   cpSync(resolve(root, 'LICENSES.txt'), resolve(outputDir, 'LICENSES.txt'))
@@ -118,7 +120,8 @@ export function preparePlatformPackage(
 export function prepareLauncherPackage(
   outputDir: string,
   version = syncNativeVersion(),
-  sourceCommit?: string
+  sourceCommit?: string,
+  sourceRevision?: string
 ): string {
   const sourceVersion = readJson(
     resolve(root, 'packages/orez-sync-native/package.json')
@@ -129,6 +132,7 @@ export function prepareLauncherPackage(
   const manifest = readJson(resolve(root, 'packages/orez-sync-native/package.json'))
   manifest.version = version
   if (sourceCommit) manifest.orezSourceCommit = sourceCommit
+  if (sourceRevision) manifest.orezNativeSourceRevision = sourceRevision
   manifest.optionalDependencies = Object.fromEntries(
     SYNC_NATIVE_PLATFORMS.map(({ npmPackage }) => [npmPackage, version])
   )
@@ -208,19 +212,28 @@ if (import.meta.main) {
   } else if (command === 'check') {
     validateSyncNativePackages(args[0])
   } else if (command === 'prepare-platform') {
-    const [id, binaryPath, outputDir, version, sourceCommit] = args
+    const [id, binaryPath, outputDir, version, sourceCommit, sourceRevision] = args
     if (!id || !binaryPath || !outputDir) {
       throw new Error(
-        'usage: prepare-platform <id> <binary> <output-dir> [version] [source-commit]'
+        'usage: prepare-platform <id> <binary> <output-dir> [version] [source-commit] [source-revision]'
       )
     }
-    preparePlatformPackage(id, binaryPath, outputDir, version, sourceCommit)
+    preparePlatformPackage(
+      id,
+      binaryPath,
+      outputDir,
+      version,
+      sourceCommit,
+      sourceRevision
+    )
   } else if (command === 'prepare-launcher') {
-    const [outputDir, version, sourceCommit] = args
+    const [outputDir, version, sourceCommit, sourceRevision] = args
     if (!outputDir) {
-      throw new Error('usage: prepare-launcher <output-dir> [version] [source-commit]')
+      throw new Error(
+        'usage: prepare-launcher <output-dir> [version] [source-commit] [source-revision]'
+      )
     }
-    prepareLauncherPackage(outputDir, version, sourceCommit)
+    prepareLauncherPackage(outputDir, version, sourceCommit, sourceRevision)
   } else if (command === 'prepare-bootstrap') {
     const [outputDir, version] = args
     if (!outputDir) {

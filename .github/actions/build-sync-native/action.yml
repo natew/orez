@@ -14,6 +14,9 @@ inputs:
   version:
     description: Native package version
     required: true
+  source-revision:
+    description: Deterministic revision of native Rust source inputs
+    required: true
   libc:
     description: Linux libc variant
     required: false
@@ -100,7 +103,8 @@ runs:
           'target/${{ inputs.target }}/release/${{ inputs.executable }}' \
           '.release/platform' \
           '${{ inputs.version }}' \
-          '${{ github.sha }}'
+          '${{ github.sha }}' \
+          '${{ inputs.source-revision }}'
 
     - name: Smoke-test packed npm packages
       shell: bash
@@ -109,7 +113,8 @@ runs:
         bun scripts/sync-native-package.ts prepare-launcher \
           .release/launcher \
           '${{ inputs.version }}' \
-          '${{ github.sha }}'
+          '${{ github.sha }}' \
+          '${{ inputs.source-revision }}'
         platform_tgz="$(npm pack \
           .release/platform \
           --pack-destination .release/packed \

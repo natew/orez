@@ -30,6 +30,7 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       matrix: ${{ steps.plan.outputs.matrix }}
       publish: ${{ steps.plan.outputs.publish }}
+      source_revision: ${{ steps.plan.outputs.source_revision }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -85,6 +86,7 @@ jobs:
           {
             echo "version=$(jq -r .version <<< "$plan")"
             echo "publish=$(jq -r .publish <<< "$plan")"
+            echo "source_revision=$(jq -r .localSourceRevision <<< "$plan")"
             echo "matrix=$(bun scripts/sync-native-package.ts matrix darwin-arm64)"
           } >> "$GITHUB_OUTPUT"
         env:
@@ -123,7 +125,8 @@ jobs:
           bun scripts/sync-native-package.ts prepare-launcher \
             .release/launcher \
             "$version" \
-            '${{ github.sha }}'
+            '${{ github.sha }}' \
+            '${{ needs.plan.outputs.source_revision }}'
           mkdir -p .release/packed
           npm pack \
             .release/launcher \
@@ -133,6 +136,11 @@ jobs:
             published_commit="$(npm view "orez-sync-native@$version" orezSourceCommit)"
             if [ "$published_commit" != '${{ github.sha }}' ]; then
               echo "orez-sync-native@$version came from $published_commit, not ${{ github.sha }}" >&2
+              exit 1
+            fi
+            published_revision="$(npm view "orez-sync-native@$version" orezNativeSourceRevision)"
+            if [ "$published_revision" != '${{ needs.plan.outputs.source_revision }}' ]; then
+              echo "orez-sync-native@$version carries native source $published_revision, not ${{ needs.plan.outputs.source_revision }}" >&2
               exit 1
             fi
             echo "orez-sync-native@$version already has this source commit"
@@ -156,6 +164,7 @@ jobs:
           target: aarch64-apple-darwin
           executable: sync-native
           version: ${{ needs.plan.outputs.version }}
+          source-revision: ${{ needs.plan.outputs.source_revision }}
 
       - uses: ./.github/actions/publish-sync-native
         with:
@@ -180,6 +189,7 @@ jobs:
           target: ${{ matrix.target }}
           executable: ${{ matrix.executable }}
           version: ${{ needs.plan.outputs.version }}
+          source-revision: ${{ needs.plan.outputs.source_revision }}
           libc: ${{ matrix.libc }}
 
       - uses: ./.github/actions/publish-sync-native

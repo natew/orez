@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'bun:test'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 
 import {
+  decideSyncNativeRelease,
   nextSyncNativeVersion,
   parseNpmMetadata,
   syncNativeContractCheckMode,
   syncNativeRevision,
+  syncNativeSourceRevision,
 } from './sync-native-release-plan.js'
 
 describe('sync-native release planning', () => {
@@ -27,9 +33,71 @@ describe('sync-native release planning', () => {
     const metadata = {
       version: '0.1.6',
       orezSourceCommit: 'abc123',
+      orezNativeSourceRevision: 'sha256:def456',
     }
     expect(parseNpmMetadata(JSON.stringify(metadata))).toEqual(metadata)
     expect(parseNpmMetadata(JSON.stringify([metadata]))).toEqual(metadata)
+  })
+
+  it('publishes a behavior-only Rust change without changing the durable contract', () => {
+    const localSourceRevision = syncNativeSourceRevision()
+    expect(
+      decideSyncNativeRelease({
+        latestVersion: '0.1.8',
+        sourceVersion: '0.1.6',
+        completeRelease: true,
+        localRevision: 'core0.1.6:s3:q5:t3:l2',
+        publishedRevision: 'core0.1.6:s3:q5:t3:l2',
+        localSourceRevision,
+        publishedSourceRevision: 'sha256:stale',
+      })
+    ).toMatchObject({
+      publish: true,
+      version: '0.1.9',
+      reason: 'npm 0.1.8 was built from native source sha256:stale',
+    })
+  })
+
+  it('reuses a complete native package built from the exact same source', () => {
+    const sourceRevision = syncNativeSourceRevision()
+    expect(
+      decideSyncNativeRelease({
+        latestVersion: '0.1.9',
+        sourceVersion: '0.1.6',
+        completeRelease: true,
+        localRevision: 'core0.1.6:s3:q5:t3:l2',
+        publishedRevision: 'core0.1.6:s3:q5:t3:l2',
+        localSourceRevision: sourceRevision,
+        publishedSourceRevision: sourceRevision,
+      })
+    ).toMatchObject({
+      publish: false,
+      version: '0.1.9',
+    })
+  })
+
+  it('hashes the native Rust inputs deterministically', () => {
+    const revision = syncNativeSourceRevision()
+    expect(revision).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(syncNativeSourceRevision()).toBe(revision)
+
+    const differentWorkingDirectory = mkdtempSync(
+      resolve(tmpdir(), 'orez-native-source-revision-')
+    )
+    try {
+      const moduleUrl = new URL('./sync-native-release-plan.ts', import.meta.url).href
+      const fromAnotherDirectory = execFileSync(
+        process.execPath,
+        [
+          '-e',
+          `import { syncNativeSourceRevision } from ${JSON.stringify(moduleUrl)}; console.log(syncNativeSourceRevision())`,
+        ],
+        { cwd: differentWorkingDirectory, encoding: 'utf8' }
+      ).trim()
+      expect(fromAnotherDirectory).toBe(revision)
+    } finally {
+      rmSync(differentWorkingDirectory, { recursive: true })
+    }
   })
 
   it('selects and verifies the native contract for every trusted package release', () => {

@@ -1,7 +1,16 @@
 #!/usr/bin/env bun
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -9,14 +18,25 @@ import { currentSyncNativePlatform, syncNativeVersion } from './sync-native-pack
 import { SYNC_NATIVE_PLATFORMS } from './sync-native-platforms.js'
 
 const launcherPackage = 'orez-sync-native'
+const root = resolve(import.meta.dirname, '..')
 const nativePackages = [
   launcherPackage,
   ...SYNC_NATIVE_PLATFORMS.map(({ npmPackage }) => npmPackage),
+]
+const nativeSourceInputs = [
+  'Cargo.lock',
+  'Cargo.toml',
+  'rust-toolchain.toml',
+  'crates/sync-core/Cargo.toml',
+  'crates/sync-core/src',
+  'crates/sync-native/Cargo.toml',
+  'crates/sync-native/src',
 ]
 
 type PackageMetadata = {
   version?: string
   orezSourceCommit?: string
+  orezNativeSourceRevision?: string
 }
 
 export type SyncNativeReleasePlan = {
@@ -24,7 +44,19 @@ export type SyncNativeReleasePlan = {
   version: string
   localRevision: string
   publishedRevision?: string
+  localSourceRevision: string
+  publishedSourceRevision?: string
   reason: string
+}
+
+type SyncNativeReleaseDecision = {
+  latestVersion: string
+  sourceVersion: string
+  completeRelease: boolean
+  localRevision: string
+  publishedRevision?: string
+  localSourceRevision: string
+  publishedSourceRevision?: string
 }
 
 export function syncNativeContractCheckMode({
@@ -78,6 +110,72 @@ export function syncNativeRevision(versionOutput: string): string {
   return fields.slice(2).join(' ')
 }
 
+function sourceFiles(relativePath: string): string[] {
+  const absolutePath = resolve(root, relativePath)
+  if (!statSync(absolutePath).isDirectory()) return [relativePath]
+  return readdirSync(absolutePath)
+    .flatMap((name) => sourceFiles(`${relativePath}/${name}`))
+    .sort()
+}
+
+// The schema revision answers whether the installed durable shape is
+// compatible. This source revision separately answers whether the native
+// package was built from these Rust inputs. Hash inputs rather than artifacts:
+// native binaries are not reproducible across release runners.
+export function syncNativeSourceRevision(): string {
+  const hash = createHash('sha256')
+  for (const path of nativeSourceInputs.flatMap(sourceFiles).sort()) {
+    hash.update(path)
+    hash.update('\0')
+    hash.update(readFileSync(resolve(root, path)))
+    hash.update('\0')
+  }
+  return `sha256:${hash.digest('hex')}`
+}
+
+export function decideSyncNativeRelease({
+  latestVersion,
+  sourceVersion,
+  completeRelease,
+  localRevision,
+  publishedRevision,
+  localSourceRevision,
+  publishedSourceRevision,
+}: SyncNativeReleaseDecision): SyncNativeReleasePlan {
+  const currentContract = publishedRevision === localRevision
+  const currentSource = publishedSourceRevision === localSourceRevision
+  if (completeRelease && currentContract && currentSource) {
+    return {
+      publish: false,
+      version: latestVersion,
+      localRevision,
+      publishedRevision,
+      localSourceRevision,
+      publishedSourceRevision,
+      reason: `npm ${latestVersion} already carries this contract and native source on every platform`,
+    }
+  }
+
+  const version = nextSyncNativeVersion(latestVersion, sourceVersion)
+  let reason: string
+  if (!completeRelease) {
+    reason = `npm ${latestVersion} is incomplete or has mixed source provenance`
+  } else if (!currentContract) {
+    reason = `npm ${latestVersion} carries contract ${publishedRevision ?? 'none'}`
+  } else {
+    reason = `npm ${latestVersion} was built from native source ${publishedSourceRevision ?? 'none'}`
+  }
+  return {
+    publish: true,
+    version,
+    localRevision,
+    publishedRevision,
+    localSourceRevision,
+    publishedSourceRevision,
+    reason,
+  }
+}
+
 export function parseNpmMetadata(output: string): PackageMetadata {
   const raw = JSON.parse(output) as
     | PackageMetadata
@@ -91,7 +189,15 @@ export function parseNpmMetadata(output: string): PackageMetadata {
 function npmMetadata(spec: string): PackageMetadata | undefined {
   const result = spawnSync(
     'npm',
-    ['view', spec, 'version', 'orezSourceCommit', '--json', '--prefer-online'],
+    [
+      'view',
+      spec,
+      'version',
+      'orezSourceCommit',
+      'orezNativeSourceRevision',
+      '--json',
+      '--prefer-online',
+    ],
     { encoding: 'utf8' }
   )
   if (result.error) throw result.error
@@ -153,41 +259,34 @@ export function planSyncNativeRelease(localBinary: string): SyncNativeReleasePla
     ])
   )
   const sourceCommit = metadata.get(launcherPackage)?.orezSourceCommit
+  const publishedSourceRevision = metadata.get(launcherPackage)?.orezNativeSourceRevision
+  // orezSourceCommit proves only that the package family is internally
+  // complete and from one commit. It does not compare that commit with the
+  // current native source, which is why behavior-only fixes were once skipped.
   const completeRelease =
     Boolean(sourceCommit) &&
+    Boolean(publishedSourceRevision) &&
     nativePackages.every((packageName) => {
       const candidate = metadata.get(packageName)
       return (
         candidate?.version === latest.version &&
-        candidate.orezSourceCommit === sourceCommit
+        candidate.orezSourceCommit === sourceCommit &&
+        candidate.orezNativeSourceRevision === publishedSourceRevision
       )
     })
   const currentPlatform = metadata.get(platform.npmPackage)
   const publishedRevision = currentPlatform
     ? packedRevision(platform.npmPackage, latest.version, platform.executable)
     : undefined
-
-  if (completeRelease && publishedRevision === localRevision) {
-    return {
-      publish: false,
-      version: latest.version,
-      localRevision,
-      publishedRevision,
-      reason: `npm ${latest.version} already carries this contract on every platform`,
-    }
-  }
-
-  const version = nextSyncNativeVersion(latest.version, syncNativeVersion())
-  return {
-    publish: true,
-    version,
+  return decideSyncNativeRelease({
+    latestVersion: latest.version,
+    sourceVersion: syncNativeVersion(),
+    completeRelease,
     localRevision,
     publishedRevision,
-    reason:
-      publishedRevision === localRevision
-        ? `npm ${latest.version} is incomplete or has mixed source provenance`
-        : `npm ${latest.version} carries ${publishedRevision ?? 'no contract'}`,
-  }
+    localSourceRevision: syncNativeSourceRevision(),
+    publishedSourceRevision,
+  })
 }
 
 if (import.meta.main) {

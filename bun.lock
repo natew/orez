@@ -130,7 +130,7 @@
     },
     "packages/orez-sync-native": {
       "name": "orez-sync-native",
-      "version": "0.1.7",
+      "version": "0.1.6",
       "bin": {
         "sync-native": "bin/sync-native.cjs",
       },
@@ -197,35 +197,35 @@
     },
     "packages/sync-native-darwin-arm64": {
       "name": "orez-sync-native-darwin-arm64",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "packages/sync-native-darwin-x64": {
       "name": "orez-sync-native-darwin-x64",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "packages/sync-native-linux-arm64-gnu": {
       "name": "orez-sync-native-linux-arm64-gnu",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "packages/sync-native-linux-arm64-musl": {
       "name": "orez-sync-native-linux-arm64-musl",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "packages/sync-native-linux-x64-gnu": {
       "name": "orez-sync-native-linux-x64-gnu",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "packages/sync-native-linux-x64-musl": {
       "name": "orez-sync-native-linux-x64-musl",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "packages/sync-native-win32-arm64": {
       "name": "orez-sync-native-win32-arm64",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "packages/sync-native-win32-x64": {
       "name": "orez-sync-native-win32-x64",
-      "version": "0.1.7",
+      "version": "0.1.6",
     },
     "sqlite-wasm": {
       "name": "bedrock-sqlite",

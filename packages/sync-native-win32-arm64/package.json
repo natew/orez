@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-native-win32-arm64",
-  "version": "0.1.7",
+  "version": "0.1.6",
   "description": "Prebuilt Orez sync-native host for Windows ARM64",
   "license": "MIT",
   "repository": {
