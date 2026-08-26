@@ -179,6 +179,36 @@ that gap. A complete npm version with both the current contract and current
 source revision is reused without rebuilding; an incomplete, mixed-source, or
 stale version causes CI to allocate a fresh patch version.
 
+### What the source revision does not cover
+
+The hash covers `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml`, and the
+`sync-core` and `sync-native` crate manifests and sources. `sync-native` depends
+on no other workspace crate, so that set is the whole local crate graph.
+
+It does not cover the build recipe. `.github/actions/build-sync-native/action.yml`
+pins `toolchain: 1.94.0` and `RUSTUP_TOOLCHAIN: 1.94.0` inline and hardcodes the
+zigbuild glibc 2.17 floor and the musl linker, so `rust-toolchain.toml` is hashed
+even though the job's inline pin is what actually selects the compiler. Changing
+that pin or the linker recipe on its own ships a different binary while the
+freshness revision stays put, which is the silent skip the source revision exists
+to prevent. Move the inline pins in step with `rust-toolchain.toml`, or add the
+action file to `nativeSourceInputs` in `scripts/sync-native-release-plan.ts`.
+
+The hash also walks the filesystem rather than the git index, so an untracked
+file under a hashed directory changes it. CI checkouts are clean and the platform
+build jobs consume the plan's value instead of recomputing it, so this only makes
+a local plan run disagree with CI.
+
+### Lockfile drift is silent
+
+`cargo metadata --locked` and `bun install --frozen-lockfile --dry-run` both
+rewrite a lockfile whose workspace version has drifted, and exit 0 instead of
+failing. Even the dry run writes. A
+`Cargo.lock` or `bun.lock` left at an old workspace version therefore passes
+every check in this repository. A native version change is only complete once
+`Cargo.toml`, `Cargo.lock`, `bun.lock`, `LICENSES.txt`, and all nine
+`packages/*/package.json` files agree.
+
 An `orez` install performed before its native packages exist succeeds because
 the dependency is optional. Reinstall after the relevant platform package has
 published to add the binary. There is no `postinstall` download, local npm
