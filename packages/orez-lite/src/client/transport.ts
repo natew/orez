@@ -1518,63 +1518,28 @@ export async function readResponseTextWithDeadline(
     await response.body?.cancel().catch(() => {})
     throw new Error(`Orez HTTP ${path} response exceeded ${maxBytes} bytes`)
   }
-  if (!response.body) return ''
-  const reader = response.body.getReader()
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    controller.abort(
-      new Error(`Orez HTTP ${path} response body missed ${deadlineMs}ms deadline`)
-    )
-    void reader.cancel().catch(() => {})
-  }, deadlineMs)
-  const chunks: Uint8Array[] = []
-  let bytes = 0
-  try {
-    for (;;) {
-      const result = await readBodyChunk(reader, controller.signal)
-      if (result.done) break
-      bytes += result.value.byteLength
-      if (bytes > maxBytes) {
-        await reader.cancel().catch(() => {})
-        throw new Error(`Orez HTTP ${path} response exceeded ${maxBytes} bytes`)
-      }
-      chunks.push(result.value)
-    }
-  } finally {
-    clearTimeout(timer)
-  }
-  const body = new Uint8Array(bytes)
-  let offset = 0
-  for (const chunk of chunks) {
-    body.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return new TextDecoder().decode(body)
-}
-
-function readBodyChunk(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  signal: AbortSignal
-): Promise<ReadableStreamReadResult<Uint8Array>> {
-  if (signal.aborted) return Promise.reject(signal.reason)
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      cleanup()
-      reject(signal.reason)
-    }
-    const cleanup = () => signal.removeEventListener('abort', onAbort)
-    signal.addEventListener('abort', onAbort, { once: true })
-    void reader.read().then(
-      (result) => {
-        cleanup()
-        resolve(result)
-      },
-      (error) => {
-        cleanup()
-        reject(error)
-      }
-    )
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const body = await Promise.race([
+    // React Native's fetch Response can expose a body reader that reports
+    // `done` before yielding its buffered bytes. The platform text reader is
+    // the only portable body source across browser, Node, and native fetch.
+    response.text(),
+    new Promise<string>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        void response.body?.cancel().catch(() => {})
+        reject(
+          new Error(`Orez HTTP ${path} response body missed ${deadlineMs}ms deadline`)
+        )
+      }, deadlineMs)
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer)
   })
+  const bytes = new TextEncoder().encode(body).byteLength
+  if (bytes > maxBytes) {
+    throw new Error(`Orez HTTP ${path} response exceeded ${maxBytes} bytes`)
+  }
+  return body
 }
 
 function jsonByteLength(value: unknown): number {

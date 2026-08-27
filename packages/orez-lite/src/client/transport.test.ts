@@ -1887,6 +1887,24 @@ describe('fetchWithHeaderDeadline', () => {
     ).rejects.toThrow('response body missed 20ms deadline')
   })
 
+  test('reads through the platform text implementation when the body reader loses bytes', async () => {
+    const text = vi.fn(async () => '{"ok":true}')
+    const response = {
+      headers: new Headers(),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      text,
+    } as unknown as Response
+
+    await expect(
+      readResponseTextWithDeadline(response, '/pull', 100, 1024)
+    ).resolves.toBe('{"ok":true}')
+    expect(text).toHaveBeenCalledTimes(1)
+  })
+
   test('a chunked successful response is bounded by bytes', async () => {
     const response = new Response(
       new ReadableStream({
