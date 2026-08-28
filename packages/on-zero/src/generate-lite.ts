@@ -110,6 +110,8 @@ export type LiteParsedFile = {
   queries: LiteQueryExport[]
   relations?: LiteRelationInfo[]
   tables?: LiteTableInfo[]
+  // source and target table names declared by exported aggregate definitions.
+  aggregateTables?: string[]
   // static table names reached through tx.mutate.<table> or tx.query.<table>.
   // element access such as tx.mutate[name] is intentionally omitted.
   supportTables?: string[]
@@ -447,6 +449,17 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     (namespace): namespace is LiteNamespace & { modelPath: string } =>
       namespace.modelPath !== null
   )
+  const aggregateTables = new Map<string, string[]>()
+  for (const namespace of namespaces) {
+    if (!namespace.aggregatePath) continue
+    const parsed = parse(files[namespace.aggregatePath]!, namespace.aggregatePath)
+    if (parsed.parseError) {
+      throw new Error(
+        `[on-zero] unable to derive aggregate membership from ${namespace.aggregatePath}: ${parsed.parseError}`
+      )
+    }
+    aggregateTables.set(namespace.name, [...new Set(parsed.aggregateTables ?? [])])
+  }
   const relations = new Map<string, Map<string, string>>()
   const tableColumns = new Map<string, Set<string>>()
   for (const path of Object.keys(files).filter(
@@ -643,6 +656,18 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     )
     const synced = new Set(direct)
     for (const namespace of instance.namespaces) {
+      for (const table of aggregateTables.get(namespace.name) ?? []) {
+        const owner = owners.get(table) ?? relatedOwners.get(table)
+        if (owner && owner !== instance.name) {
+          throw new Error(
+            `[on-zero] ${namespace.name} aggregates in instance '${instance.name}' reach ` +
+              `table '${table}' owned by instance '${owner}'`
+          )
+        }
+        relatedOwners.set(table, instance.name)
+        direct.add(table)
+        synced.add(table)
+      }
       for (const query of queryPaths.get(namespace.name) ?? []) {
         const rootOwner =
           owners.get(query.rootTable) ?? relatedOwners.get(query.rootTable)

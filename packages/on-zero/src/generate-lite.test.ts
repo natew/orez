@@ -129,6 +129,16 @@ describe('generateLite', () => {
       dir: DIR,
       parse: makeParse({
         [`${DIR}/post/queries.ts`]: { mutations: [], queries: [] },
+        [`${DIR}/post/aggregates.ts`]: {
+          mutations: [],
+          queries: [],
+          aggregateTables: [],
+        },
+        [`${DIR}/order/aggregates.ts`]: {
+          mutations: [],
+          queries: [],
+          aggregateTables: [],
+        },
       }),
     })
 
@@ -220,6 +230,31 @@ describe('generateLite', () => {
     })
 
     expect(result.instances[0]?.syncTables).toEqual(['expense'])
+  })
+
+  test('derives aggregate source and target membership', () => {
+    const mutationsPath = `${DIR}/expense/mutations.ts`
+    const aggregatesPath = `${DIR}/expense/aggregates.ts`
+    const result = generateLite({
+      files: {
+        [mutationsPath]: '// mutations',
+        [aggregatesPath]: '// aggregates',
+      },
+      dir: DIR,
+      parse: makeParse({
+        [mutationsPath]: {
+          mutations: [{ modelName: 'expense', handlers: [], schema: null }],
+          queries: [],
+        },
+        [aggregatesPath]: {
+          mutations: [],
+          queries: [],
+          aggregateTables: ['expense', 'dashboardSummary'],
+        },
+      }),
+    })
+
+    expect(result.instances[0]?.syncTables).toEqual(['dashboardSummary', 'expense'])
   })
 
   test('includes a fileless support table in every lite instance that uses it', () => {

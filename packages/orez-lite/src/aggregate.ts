@@ -650,6 +650,7 @@ export function aggregateMigrationSQL(aggregates: AggregateSet): string {
 }
 
 type AggregateRow = Readonly<Record<string, unknown>>
+type AggregateTransactionOverlay = Map<string, AggregateRow | null>
 
 function aggregateRow(value: unknown, context: string): AggregateRow {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -671,8 +672,15 @@ async function readAggregateRow(
   builder: object,
   tableName: string,
   primaryKey: readonly string[],
-  key: AggregateRow
+  key: AggregateRow,
+  overlay?: AggregateTransactionOverlay
 ): Promise<AggregateRow | null> {
+  const overlayKey = JSON.stringify([
+    tableName,
+    ...primaryKey.map((columnName) => key[columnName]),
+  ])
+  if (overlay?.has(overlayKey)) return overlay.get(overlayKey) ?? null
+
   let query: unknown = Reflect.get(builder, tableName)
   if (!query || typeof query !== 'object') {
     throw new TypeError(`aggregate query table is unavailable: ${tableName}`)
@@ -698,9 +706,12 @@ async function readAggregateRow(
   }
   const singular = Reflect.apply(one, query, [])
   const result = await Reflect.apply(run, tx, [singular])
-  return result === undefined || result === null
-    ? null
-    : aggregateRow(result, `aggregate query result for ${tableName}`)
+  const row =
+    result === undefined || result === null
+      ? null
+      : aggregateRow(result, `aggregate query result for ${tableName}`)
+  overlay?.set(overlayKey, row)
+  return row
 }
 
 function groupKey(aggregate: CompiledAggregate, row: AggregateRow): AggregateRow {
@@ -749,7 +760,8 @@ async function mutateAggregateTarget(
   tx: object,
   aggregate: CompiledAggregate,
   operation: 'delete' | 'insert' | 'update',
-  row: AggregateRow
+  row: AggregateRow,
+  overlay: AggregateTransactionOverlay
 ): Promise<void> {
   const mutate = Reflect.get(tx, 'mutate')
   if (!mutate || typeof mutate !== 'object') {
@@ -768,13 +780,27 @@ async function mutateAggregateTarget(
     )
   }
   await Reflect.apply(method, tableMutate, [row])
+  const overlayKey = JSON.stringify([
+    aggregate.target.logical,
+    ...aggregate.target.primaryKey.map((columnName) => row[columnName]),
+  ])
+  const previous = overlay.get(overlayKey)
+  overlay.set(
+    overlayKey,
+    operation === 'delete'
+      ? null
+      : operation === 'update' && previous
+        ? { ...previous, ...row }
+        : row
+  )
 }
 
 async function addAggregateContribution(
   tx: object,
   builder: object,
   aggregate: CompiledAggregate,
-  sourceRow: AggregateRow
+  sourceRow: AggregateRow,
+  overlay: AggregateTransactionOverlay
 ): Promise<void> {
   const key = groupKey(aggregate, sourceRow)
   const targetRow = await readAggregateRow(
@@ -782,12 +808,19 @@ async function addAggregateContribution(
     builder,
     aggregate.target.logical,
     aggregate.target.primaryKey,
-    key
+    key,
+    overlay
   )
   const contribution = aggregateContribution(aggregate, sourceRow)
   if (!targetRow) {
     if (aggregate.mode === 'materialized') {
-      await mutateAggregateTarget(tx, aggregate, 'insert', { ...key, ...contribution })
+      await mutateAggregateTarget(
+        tx,
+        aggregate,
+        'insert',
+        { ...key, ...contribution },
+        overlay
+      )
     }
     return
   }
@@ -800,14 +833,15 @@ async function addAggregateContribution(
         false
       ) + contribution[column.target.logical]!
   }
-  await mutateAggregateTarget(tx, aggregate, 'update', update)
+  await mutateAggregateTarget(tx, aggregate, 'update', update, overlay)
 }
 
 async function removeAggregateContribution(
   tx: object,
   builder: object,
   aggregate: CompiledAggregate,
-  sourceRow: AggregateRow
+  sourceRow: AggregateRow,
+  overlay: AggregateTransactionOverlay
 ): Promise<void> {
   const key = groupKey(aggregate, sourceRow)
   const targetRow = await readAggregateRow(
@@ -815,7 +849,8 @@ async function removeAggregateContribution(
     builder,
     aggregate.target.logical,
     aggregate.target.primaryKey,
-    key
+    key,
+    overlay
   )
   if (!targetRow) return
   const contribution = aggregateContribution(aggregate, sourceRow)
@@ -836,10 +871,10 @@ async function removeAggregateContribution(
     remainingCount !== null &&
     remainingCount <= 0
   ) {
-    await mutateAggregateTarget(tx, aggregate, 'delete', key)
+    await mutateAggregateTarget(tx, aggregate, 'delete', key, overlay)
     return
   }
-  await mutateAggregateTarget(tx, aggregate, 'update', update)
+  await mutateAggregateTarget(tx, aggregate, 'update', update, overlay)
 }
 
 async function updateAggregateContribution(
@@ -847,13 +882,14 @@ async function updateAggregateContribution(
   builder: object,
   aggregate: CompiledAggregate,
   previousSourceRow: AggregateRow,
-  nextSourceRow: AggregateRow
+  nextSourceRow: AggregateRow,
+  overlay: AggregateTransactionOverlay
 ): Promise<void> {
   const previousKey = groupKey(aggregate, previousSourceRow)
   const nextKey = groupKey(aggregate, nextSourceRow)
   if (!sameKey(aggregate, previousKey, nextKey)) {
-    await removeAggregateContribution(tx, builder, aggregate, previousSourceRow)
-    await addAggregateContribution(tx, builder, aggregate, nextSourceRow)
+    await removeAggregateContribution(tx, builder, aggregate, previousSourceRow, overlay)
+    await addAggregateContribution(tx, builder, aggregate, nextSourceRow, overlay)
     return
   }
 
@@ -871,7 +907,8 @@ async function updateAggregateContribution(
     builder,
     aggregate.target.logical,
     aggregate.target.primaryKey,
-    nextKey
+    nextKey,
+    overlay
   )
   if (!targetRow) return
   const update: Record<string, unknown> = { ...nextKey }
@@ -885,7 +922,7 @@ async function updateAggregateContribution(
       next[column.target.logical]! -
       previous[column.target.logical]!
   }
-  await mutateAggregateTarget(tx, aggregate, 'update', update)
+  await mutateAggregateTarget(tx, aggregate, 'update', update, overlay)
 }
 
 /**
@@ -907,6 +944,7 @@ export function withOptimisticAggregates<T extends object>(
   }
   const builder = runtime.queryBuilder
   const bySource = runtime.bySource
+  const overlay: AggregateTransactionOverlay = new Map()
   const tableProxies = new Map<PropertyKey, object>()
   const wrappedMutate = new Proxy(baseMutate, {
     get(target, tableName, receiver) {
@@ -934,34 +972,48 @@ export function withOptimisticAggregates<T extends object>(
             )
             const definitions = bySource.get(tableName)!
             const source = definitions[0]!.source
-            const previous =
-              operation === 'insert'
-                ? null
-                : await readAggregateRow(
-                    tx,
-                    builder,
-                    source.logical,
-                    source.primaryKey,
-                    input
-                  )
+            const previous = await readAggregateRow(
+              tx,
+              builder,
+              source.logical,
+              source.primaryKey,
+              input,
+              overlay
+            )
             await Reflect.apply(method, tableTarget, args)
             const next =
               operation === 'delete'
                 ? null
-                : await readAggregateRow(
-                    tx,
-                    builder,
-                    source.logical,
-                    source.primaryKey,
-                    input
-                  )
+                : operation === 'update'
+                  ? previous && { ...previous, ...input }
+                  : operation === 'insert'
+                    ? (previous ?? input)
+                    : input
+            const sourceOverlayKey = JSON.stringify([
+              source.logical,
+              ...source.primaryKey.map((columnName) => input[columnName]),
+            ])
+            overlay.set(sourceOverlayKey, next)
             for (const aggregate of definitions) {
               if (previous && next) {
-                await updateAggregateContribution(tx, builder, aggregate, previous, next)
+                await updateAggregateContribution(
+                  tx,
+                  builder,
+                  aggregate,
+                  previous,
+                  next,
+                  overlay
+                )
               } else if (previous) {
-                await removeAggregateContribution(tx, builder, aggregate, previous)
+                await removeAggregateContribution(
+                  tx,
+                  builder,
+                  aggregate,
+                  previous,
+                  overlay
+                )
               } else if (next) {
-                await addAggregateContribution(tx, builder, aggregate, next)
+                await addAggregateContribution(tx, builder, aggregate, next, overlay)
               }
             }
           }

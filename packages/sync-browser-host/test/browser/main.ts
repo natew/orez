@@ -917,6 +917,60 @@ async function runHybridCaptureCase() {
   return { helper: true, raw: true, wrongHelperRolledBack: true }
 }
 
+async function runExactTriggerSideEffectCase() {
+  const connection = await openConnection(`exact-trigger:${crypto.randomUUID()}`)
+  const initial = await post(connection.client, '/pull', {
+    clientID: 'summary-reader',
+    clientGroupID: 'summary-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        { op: 'put', hash: 'expense-summaries', name: 'allExpenseSummaries', args: [] },
+      ],
+    },
+  })
+  equal(initial.status, 200, 'exact-trigger initial pull status')
+
+  const pushed = await post(
+    connection.client,
+    '/push',
+    mutation('summary-writer', 1, 'test.expenseExact', {
+      id: 'exact-trigger-expense',
+      amount: 4250,
+      category: 'Food',
+      date: 1,
+    })
+  )
+  equal(pushed.status, 200, 'exact-trigger push status')
+
+  const incremental = await post(connection.client, '/pull', {
+    clientID: 'summary-reader',
+    clientGroupID: 'summary-group',
+    cookie: initial.body.cookie,
+  })
+  equal(incremental.status, 200, 'exact-trigger incremental pull status')
+  assert(
+    (incremental.body.rowsPatch as Array<Record<string, unknown>>).some(
+      (entry) =>
+        entry.op === 'put' &&
+        entry.tableName === 'expenseSummary' &&
+        (
+          entry.value as {
+            category?: unknown
+            expenseCount?: unknown
+            totalAmount?: unknown
+          }
+        )?.category === 'Food' &&
+        (entry.value as { expenseCount?: unknown }).expenseCount === 1 &&
+        (entry.value as { totalAmount?: unknown }).totalAmount === 4250
+    ),
+    'incremental pull includes the database-trigger-derived summary row'
+  )
+  connection.terminate()
+  return { summaryUpdated: true }
+}
+
 async function runBrowserHostSpike() {
   const storageKey = `browser-host:${crypto.randomUUID()}`
   let connection = await openConnection(storageKey)
@@ -1046,7 +1100,8 @@ async function runBrowserHostSpike() {
     count: number
   }>(
     `SELECT tbl_name AS tableName, COUNT(*) AS count FROM sqlite_master
-     WHERE type = 'trigger' AND tbl_name IN ('budget', 'expense', 'savingsGoal')
+     WHERE type = 'trigger' AND name LIKE '_zsync_tr_%'
+       AND tbl_name IN ('budget', 'expense', 'savingsGoal')
      GROUP BY tbl_name ORDER BY tbl_name`
   )
   equal(
@@ -1314,6 +1369,7 @@ async function runBrowserHostSpike() {
   const incrementalCheckpoint = await runIncrementalCheckpointCase()
   const checkpointDecoupling = await runCheckpointDecouplingCase()
   const hybridCapture = await runHybridCaptureCase()
+  const exactTriggerSideEffect = await runExactTriggerSideEffectCase()
 
   const result = {
     initialCookie: initial.body.cookie,
@@ -1330,6 +1386,7 @@ async function runBrowserHostSpike() {
     incrementalCheckpoint,
     checkpointDecoupling,
     hybridCapture,
+    exactTriggerSideEffect,
     seedProbe: {
       sqlCounts: seedSqlCounts,
       changeCounts: seedChanges,

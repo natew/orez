@@ -692,6 +692,83 @@ function queriedTables(
   return reached
 }
 
+function aggregateTables(
+  ts: typeof import('typescript'),
+  namespace: DataNamespace
+): string[] {
+  if (!namespace.aggregatePath) return []
+  const source = ts.createSourceFile(
+    namespace.aggregatePath,
+    readFileSync(namespace.aggregatePath, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true
+  )
+  const unwrap = (node: ts.Expression): ts.Expression => {
+    let current = node
+    while (
+      ts.isSatisfiesExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isParenthesizedExpression(current)
+    ) {
+      current = current.expression
+    }
+    return current
+  }
+  const tables = new Set<string>()
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue
+    if (
+      !statement.modifiers?.some(
+        (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+      )
+    ) {
+      continue
+    }
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        !ts.isIdentifier(declaration.name) ||
+        declaration.name.text !== 'aggregates' ||
+        !declaration.initializer
+      ) {
+        continue
+      }
+      const definitions = unwrap(declaration.initializer)
+      if (!ts.isObjectLiteralExpression(definitions)) {
+        throw new Error(
+          `[on-zero] ${namespace.aggregatePath} must export aggregates as an object literal`
+        )
+      }
+      for (const property of definitions.properties) {
+        if (!ts.isPropertyAssignment(property)) {
+          throw new Error(
+            `[on-zero] ${namespace.aggregatePath} aggregate definitions must use explicit properties`
+          )
+        }
+        const definition = unwrap(property.initializer)
+        if (!ts.isObjectLiteralExpression(definition)) {
+          throw new Error(
+            `[on-zero] ${namespace.aggregatePath} aggregate ${property.name.getText(source)} must be an object literal`
+          )
+        }
+        for (const fieldName of ['source', 'target']) {
+          const field = definition.properties.find(
+            (candidate): candidate is ts.PropertyAssignment =>
+              ts.isPropertyAssignment(candidate) &&
+              propertyName(ts, candidate.name) === fieldName
+          )
+          if (!field || !ts.isStringLiteralLike(unwrap(field.initializer))) {
+            throw new Error(
+              `[on-zero] ${namespace.aggregatePath} aggregate ${property.name.getText(source)} ${fieldName} must be a string literal`
+            )
+          }
+          tables.add((unwrap(field.initializer) as ts.StringLiteralLike).text)
+        }
+      }
+    }
+  }
+  return [...tables].sort()
+}
+
 function mutationSupportTables(
   ts: typeof import('typescript'),
   baseDir: string,
@@ -890,6 +967,18 @@ export function discoverDataLayout(
     )
     const syncTables = new Set(tables)
     for (const namespace of instance.namespaces) {
+      for (const table of aggregateTables(ts, namespace)) {
+        const owner = tableOwners.get(table) ?? relatedOwners.get(table)
+        if (owner && owner !== instance.name) {
+          throw new Error(
+            `[on-zero] ${namespace.name} aggregates in instance '${instance.name}' reach ` +
+              `table '${table}' owned by instance '${owner}'`
+          )
+        }
+        relatedOwners.set(table, instance.name)
+        tables.add(table)
+        syncTables.add(table)
+      }
       for (const reached of queriedTables(ts, namespace, relations)) {
         const owner = tableOwners.get(reached.table) ?? relatedOwners.get(reached.table)
         if (owner && owner !== instance.name) {

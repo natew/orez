@@ -219,6 +219,37 @@ export async function writeAudit(tx: Transaction) {
     })
   })
 
+  test('derives aggregate source and target membership', async () => {
+    writeFileSync(
+      join(dataDir(), 'expense/mutations.ts'),
+      `export const mutate = mutations('expense', permissions, { save: async () => {} })`
+    )
+    writeFileSync(
+      join(dataDir(), 'expense/aggregates.ts'),
+      `export const aggregates = {
+        dashboardSummary: {
+          source: 'expense',
+          target: 'dashboardSummary',
+          mode: 'materialized',
+          groupBy: { userId: 'userId' },
+          columns: { expenseCount: count() },
+        },
+      } satisfies AggregateDefinitions<typeof schema>`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toEqual({
+      instances: {
+        default: {
+          tables: ['dashboardSummary', 'expense'],
+          syncTables: ['dashboardSummary', 'expense'],
+          supportTables: [],
+          scope: null,
+        },
+      },
+      allTables: ['dashboardSummary', 'expense'],
+    })
+  })
+
   test('includes a fileless support table in every instance that uses it', async () => {
     writeFileSync(
       join(dataDir(), 'control/account.ts'),

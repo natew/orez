@@ -792,13 +792,15 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
     Ok(())
 }
 
-// the trigger statements that append raw-sql touched pks to the active packed
-// segment. generated helpers set captureMode while they carry exact keys in
-// memory, so the same trigger definitions preserve raw sql without double work.
+// the trigger statements that append touched pks to the active packed segment.
+// raw sql records complete transactions while generated helpers set captureMode
+// and commit exact keys in one transaction. exact-mode triggers still append
+// keys so writes made by application database triggers are not lost; commit
+// merges and deduplicates those keys with the generated helper's keys.
 // bump when the trigger bodies change shape. versioned names make startup
 // idempotent, and the version feeds schema_revision so hosts re-run the
 // schema pass exactly once when new bodies ship.
-pub const TRIGGER_VERSION: u32 = 3;
+pub const TRIGGER_VERSION: u32 = 4;
 
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();
@@ -851,6 +853,14 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
             END;";
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_i} AFTER INSERT ON {tq} BEGIN
+                UPDATE _zsync_log_segments
+                SET pending = json_insert(
+                    pending,
+                    '$[#]',
+                    json_array({tl}, {new_pk})
+                )
+                WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+                  AND captureMode = 1;
                 {rotate}
                 UPDATE _zsync_log_segments
                 SET endVersion = endVersion + 1,
@@ -869,6 +879,18 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
         ));
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_u} AFTER UPDATE ON {tq} BEGIN
+                UPDATE _zsync_log_segments
+                SET pending = json_insert(
+                    json_insert(
+                        pending,
+                        '$[#]',
+                        json_array({tl}, {old_pk})
+                    ),
+                    '$[#]',
+                    json_array({tl}, {new_pk})
+                )
+                WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+                  AND captureMode = 1;
                 {rotate}
                 UPDATE _zsync_log_segments
                 SET endVersion = endVersion + 2,
@@ -890,6 +912,14 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
         ));
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_d} AFTER DELETE ON {tq} BEGIN
+                UPDATE _zsync_log_segments
+                SET pending = json_insert(
+                    pending,
+                    '$[#]',
+                    json_array({tl}, {old_pk})
+                )
+                WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+                  AND captureMode = 1;
                 {rotate}
                 UPDATE _zsync_log_segments
                 SET endVersion = endVersion + 1,

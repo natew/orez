@@ -11,7 +11,7 @@ use serde_json::json;
 use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::schema::TableSpec;
 use sync_core::value::ZeroColumnType;
-use sync_core::{SyncDb, Tables, Transactor, init_schema, trigger_ddl};
+use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema, trigger_ddl};
 
 // the classic breakout payload: a table name that, unescaped, closes the trigger
 // name and appends an injected trigger that deletes from a victim table.
@@ -240,6 +240,76 @@ fn rows_patch_uses_physical_names_for_identity_and_mapped_schema() {
             .unwrap();
         assert_eq!(diff["rowsPatch"], json!([expected_del]), "{label}");
     }
+}
+
+#[test]
+fn exact_capture_keeps_database_trigger_side_effects() {
+    let tables = Tables::from_zero_schema(&json!({
+        "tables": {
+            "expense": {
+                "columns": { "id": { "type": "string" } },
+                "primaryKey": ["id"],
+            },
+            "expenseSummary": {
+                "columns": {
+                    "id": { "type": "string" },
+                    "count": { "type": "number" },
+                },
+                "primaryKey": ["id"],
+            },
+        }
+    }))
+    .unwrap();
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE expense (id TEXT PRIMARY KEY)", &[])
+        .unwrap();
+    db.exec(
+        "CREATE TABLE expenseSummary (id TEXT PRIMARY KEY, count INTEGER NOT NULL)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "CREATE TRIGGER expense_summary_insert AFTER INSERT ON expense BEGIN
+           INSERT INTO expenseSummary (id, count) VALUES ('all', 1)
+           ON CONFLICT (id) DO UPDATE SET count = count + 1;
+         END",
+        &[],
+    )
+    .unwrap();
+    init_schema(&mut db, &tables).unwrap();
+
+    db.exec(
+        "UPDATE _zsync_log_segments SET captureMode = 1
+         WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)",
+        &[],
+    )
+    .unwrap();
+    let changes_before = db.conn.total_changes();
+    db.exec("INSERT INTO expense (id) VALUES ('expense-1')", &[])
+        .unwrap();
+    assert_eq!(
+        db.conn.total_changes() - changes_before,
+        4,
+        "one source row, one derived row, and one pending-key write for each",
+    );
+
+    let rows = db
+        .query(
+            "SELECT pending FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
+            &[],
+        )
+        .unwrap();
+    let pending = match rows[0].get("pending") {
+        Some(SqlValue::Text(value)) => serde_json::from_str::<serde_json::Value>(value).unwrap(),
+        value => panic!("expected pending JSON text, got {value:?}"),
+    };
+    assert_eq!(
+        pending,
+        json!([
+            ["expense", { "id": "expense-1" }],
+            ["expenseSummary", { "id": "all" }],
+        ])
+    );
 }
 
 #[test]

@@ -199,7 +199,7 @@ describe('Orez Lite aggregates', () => {
     ])
   })
 
-  it('projects the same changes through a client transaction only', async () => {
+  it('projects client changes when transaction reads do not expose buffered writes', async () => {
     const tables: Record<string, Array<Record<string, unknown>>> = {
       expense: [
         {
@@ -253,6 +253,7 @@ describe('Orez Lite aggregates', () => {
       post: ['id'],
       comment: ['id'],
     }
+    const transactionReads = structuredClone(tables)
     const targetWrites: string[] = []
     const mutate = Object.fromEntries(
       Object.keys(tables).map((tableName) => {
@@ -333,7 +334,7 @@ describe('Orez Lite aggregates', () => {
             Object.is(row[column], Reflect.get(right, 'value'))
           )
         }
-        return tables[tableName]?.find((row) => matches(row, where))
+        return transactionReads[tableName]?.find((row) => matches(row, where))
       },
     }
     const tx = withOptimisticAggregates(transaction, aggregates)

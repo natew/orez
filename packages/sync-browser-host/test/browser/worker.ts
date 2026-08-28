@@ -52,6 +52,15 @@ const schema = {
       },
       primaryKey: ['id'],
     },
+    expenseSummary: {
+      name: 'expenseSummary',
+      columns: {
+        category: { type: 'string' },
+        expenseCount: { type: 'number' },
+        totalAmount: { type: 'number' },
+      },
+      primaryKey: ['category'],
+    },
     savingsGoal: {
       name: 'savingsGoal',
       columns: {
@@ -194,6 +203,10 @@ const mutators = Object.freeze({
         primaryKeys: [{ after: { id: value.id } }],
       }
     )
+  },
+  async 'test.expenseExact'({ tx, args }) {
+    const value = args as { id: string; amount: number; category: string; date: number }
+    await tx.mutate.expense.insert(value)
   },
   async 'test.rawWrite'({ tx, args }) {
     const value = args as { id: string }
@@ -464,6 +477,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       ),
       allTodos: defineQuery(() => zql.todo!.orderBy('id', 'asc') as never),
       allExpenses: defineQuery(() => zql.expense!.orderBy('date', 'desc') as never),
+      allExpenseSummaries: defineQuery(() => zql.expenseSummary as never),
       allBudgets: defineQuery(() => zql.budget as never),
       allSavingsGoals: defineQuery(() => zql.savingsGoal as never),
     })
@@ -483,6 +497,19 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
         sql.exec(
           'CREATE TABLE IF NOT EXISTS expense (id TEXT PRIMARY KEY, amount INTEGER NOT NULL, category TEXT NOT NULL, date INTEGER NOT NULL, description TEXT)'
         )
+        sql.exec(
+          'CREATE TABLE IF NOT EXISTS expenseSummary (category TEXT PRIMARY KEY, expenseCount INTEGER NOT NULL, totalAmount INTEGER NOT NULL)'
+        )
+        sql.exec(`
+          CREATE TRIGGER IF NOT EXISTS expense_summary_insert
+          AFTER INSERT ON expense WHEN NEW.id = 'exact-trigger-expense' BEGIN
+            INSERT INTO expenseSummary (category, expenseCount, totalAmount)
+            VALUES (NEW.category, 1, NEW.amount)
+            ON CONFLICT (category) DO UPDATE SET
+              expenseCount = expenseCount + 1,
+              totalAmount = totalAmount + NEW.amount;
+          END
+        `)
         sql.exec(
           'CREATE TABLE IF NOT EXISTS savingsGoal (id TEXT PRIMARY KEY, name TEXT NOT NULL, targetAmount INTEGER NOT NULL, currentAmount INTEGER NOT NULL DEFAULT 0, targetDate INTEGER)'
         )
