@@ -399,10 +399,8 @@ describe('createOrezDataWorker', () => {
       rollback: vi.fn(async () => undefined),
     }
     const applicationSqlSession = vi.fn(
-      async (_sessionID: string, options?: { readOnly?: boolean; priority?: string }) => {
-        expect(options).toEqual({ readOnly: true, priority: 'background' })
-        return session
-      }
+      async (_sessionID: string, _options?: { readOnly?: boolean; priority?: string }) =>
+        session
     )
     const applicationSqlQuery = vi.fn(
       async (sql: string) => rowsFor(sql) as Record<string, unknown>[]
@@ -455,6 +453,24 @@ describe('createOrezDataWorker', () => {
     expect(session.commitPreemptible).toHaveBeenCalledOnce()
     expect(session.commit).not.toHaveBeenCalled()
     expect(session.rollback).not.toHaveBeenCalled()
+
+    await runtime.backupManager!.exportNamespace(env as any, 'singleton', {
+      priority: 'normal',
+      scanChunkBytes: 32 * 1024 * 1024,
+    })
+
+    expect(applicationSqlSession).toHaveBeenNthCalledWith(1, expect.any(String), {
+      readOnly: true,
+      priority: 'background',
+    })
+    expect(applicationSqlSession).toHaveBeenNthCalledWith(2, expect.any(String), {
+      readOnly: true,
+      priority: 'normal',
+    })
+    expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
+    expect(session.query).toHaveBeenCalledTimes(2)
+    expect(session.commitPreemptible).toHaveBeenCalledOnce()
+    expect(session.commit).toHaveBeenCalledOnce()
   })
 
   it('schedules an application consumer only after a published commit', async () => {

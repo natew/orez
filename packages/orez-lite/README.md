@@ -120,3 +120,18 @@ never waits behind R2 and no single writer can end the export. A writer that
 preempts one chunk costs that chunk; a transaction that commits mid-scan costs
 one scan, retried up to `scanAttempts` times before the export reports
 `outcome: 'preempted'` and leaves the work for the next run.
+
+An export with a strict freshness deadline can use normal admission for a
+bounded local scan:
+
+```ts
+backupManager.exportNamespace(env, namespace, {
+  priority: 'normal',
+  scanChunkBytes: 32 * 1024 * 1024,
+})
+```
+
+Normal chunks keep their queue turn until the SQLite reads finish. R2 uploads
+still happen after each chunk closes, so request writes never wait behind R2.
+Set the per-export byte bound from a measured dump size and monitor its growth;
+the returned rows are buffered until the chunk closes.

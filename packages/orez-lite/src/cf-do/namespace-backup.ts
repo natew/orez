@@ -44,6 +44,19 @@ export type NamespaceBackupExportResult =
   | { outcome: 'exported'; summary: NamespaceBackupSummary }
   | { outcome: 'preempted'; namespace: string }
 
+export type NamespaceBackupReadPriority = 'background' | 'normal'
+
+export interface NamespaceBackupExportOptions {
+  /** Keep each bounded scan chunk's queue turn instead of yielding it to writers. */
+  priority?: NamespaceBackupReadPriority
+  /** Override the configured chunk bound for this export. */
+  scanChunkBytes?: number
+}
+
+export interface NamespaceBackupReadOptions {
+  priority: NamespaceBackupReadPriority
+}
+
 export interface NamespaceRestoreSummary {
   ok: true
   ns: string
@@ -67,21 +80,17 @@ export interface NamespaceBackupOptions<Env> {
     params: readonly unknown[]
   ): Promise<Record<string, any>[]>
   /**
-   * Run `work` against a single read session that excludes application writers
-   * for its whole life.
-   *
-   * The export scan spans one statement per table page. Run through `query`,
-   * each of those is its own session, so a commit lands between two of them and
-   * the dump holds a state no transaction ever produced: a parent row read
-   * before the write and its child rows read after it. The scan therefore owns
-   * one session for its whole length.
+   * Run one bounded scan chunk in a consistent read session. The supplied
+   * priority decides whether a writer may preempt that chunk; the export's
+   * marker fence owns consistency between chunks.
    */
   readSession<Value>(
     env: Env,
     namespace: string,
     work: (
       query: (sql: string, params?: readonly unknown[]) => Promise<Record<string, any>[]>
-    ) => Promise<Value>
+    ) => Promise<Value>,
+    options: NamespaceBackupReadOptions
   ): Promise<Value>
   batch(
     env: Env,
@@ -124,7 +133,11 @@ export interface NamespaceBackupOptions<Env> {
 export interface NamespaceBackupManager<Env> {
   backupPrefix(namespace: string): string
   readMarker(env: Env, namespace: string): Promise<number>
-  exportNamespace(env: Env, namespace: string): Promise<NamespaceBackupExportResult>
+  exportNamespace(
+    env: Env,
+    namespace: string,
+    options?: NamespaceBackupExportOptions
+  ): Promise<NamespaceBackupExportResult>
   importNamespace(
     env: Env,
     namespace: string,
@@ -313,7 +326,7 @@ export function createNamespaceBackupManager<Env>(
   const keepControlPlane = options.keepControlPlane ?? 30
   const controlPlaneNamespace = options.controlPlaneNamespace ?? 'singleton'
   const runBudgetMs = options.runBudgetMs ?? 10 * 60 * 1000
-  const scanChunkBytes = options.scanChunkBytes ?? partBytes
+  const configuredScanChunkBytes = options.scanChunkBytes ?? partBytes
   const maxInflightParts = Math.max(1, options.maxInflightParts ?? 4)
   const scanAttempts = Math.max(1, options.scanAttempts ?? 3)
   const chunkAttempts = Math.max(1, options.chunkAttempts ?? 3)
@@ -397,13 +410,14 @@ export function createNamespaceBackupManager<Env>(
   const readChunk = async <Value>(
     env: Env,
     namespace: string,
-    work: (read: SessionQuery) => Promise<Value>
+    work: (read: SessionQuery) => Promise<Value>,
+    readOptions: NamespaceBackupReadOptions
   ): Promise<{ outcome: 'read'; value: Value } | { outcome: 'preempted' }> => {
     for (let attempt = 0; attempt < chunkAttempts; attempt++) {
       try {
         return {
           outcome: 'read',
-          value: await options.readSession(env, namespace, work),
+          value: await options.readSession(env, namespace, work, readOptions),
         }
       } catch (error) {
         if (!(error instanceof ApplicationSqlSessionPreemptedError)) throw error
@@ -483,7 +497,12 @@ export function createNamespaceBackupManager<Env>(
    * and the pages already collected are from a state that no longer exists.
    */
   const readScanChunk =
-    (fenceMarker: number, tables: readonly ExportTable[], cursor: ScanCursor) =>
+    (
+      fenceMarker: number,
+      tables: readonly ExportTable[],
+      cursor: ScanCursor,
+      scanChunkBytes: number
+    ) =>
     async (read: SessionQuery) => {
       const marker = await readMarkerWith(read)
       if (marker !== fenceMarker) return { torn: true, marker } as const
@@ -576,7 +595,9 @@ export function createNamespaceBackupManager<Env>(
     env: Env,
     namespace: string,
     key: string,
-    exportedAt: string
+    exportedAt: string,
+    readOptions: NamespaceBackupReadOptions,
+    scanChunkBytes: number
   ): Promise<
     | {
         outcome: 'scanned'
@@ -591,7 +612,7 @@ export function createNamespaceBackupManager<Env>(
     | { outcome: 'preempted' }
   > => {
     const files = options.files(env)
-    const schemaChunk = await readChunk(env, namespace, readScanSchema)
+    const schemaChunk = await readChunk(env, namespace, readScanSchema, readOptions)
     if (schemaChunk.outcome === 'preempted') return { outcome: 'preempted' }
     const { marker, tables } = schemaChunk.value
 
@@ -671,7 +692,8 @@ export function createNamespaceBackupManager<Env>(
         const chunk = await readChunk(
           env,
           namespace,
-          readScanChunk(marker, tables, cursor)
+          readScanChunk(marker, tables, cursor, scanChunkBytes),
+          readOptions
         )
         if (chunk.outcome === 'preempted') {
           await abortUpload()
@@ -720,9 +742,17 @@ export function createNamespaceBackupManager<Env>(
 
   const exportNamespace = async (
     env: Env,
-    namespace: string
+    namespace: string,
+    exportOptions: NamespaceBackupExportOptions = {}
   ): Promise<NamespaceBackupExportResult> => {
     const startedAt = Date.now()
+    const priority = exportOptions.priority ?? 'background'
+    const requestedScanChunkBytes =
+      exportOptions.scanChunkBytes ?? configuredScanChunkBytes
+    if (!Number.isSafeInteger(requestedScanChunkBytes) || requestedScanChunkBytes < 1) {
+      throw new TypeError('backup scanChunkBytes must be a positive safe integer')
+    }
+    const readOptions = { priority } satisfies NamespaceBackupReadOptions
     const files = options.files(env)
     let torn = 0
     for (let attempt = 0; attempt < scanAttempts; attempt++) {
@@ -730,12 +760,21 @@ export function createNamespaceBackupManager<Env>(
       const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
       let scan: Awaited<ReturnType<typeof runScanAttempt>>
       try {
-        scan = await runScanAttempt(env, namespace, key, exportedAt)
+        scan = await runScanAttempt(
+          env,
+          namespace,
+          key,
+          exportedAt,
+          readOptions,
+          requestedScanChunkBytes
+        )
       } catch (error) {
         log({
           phase: 'export_upload',
           outcome: 'error',
           namespace,
+          priority,
+          scanChunkBytes: requestedScanChunkBytes,
           durationMs: Date.now() - startedAt,
           error: errorMessage(error),
         })
@@ -746,6 +785,8 @@ export function createNamespaceBackupManager<Env>(
           phase: 'export',
           outcome: 'preempted',
           namespace,
+          priority,
+          scanChunkBytes: requestedScanChunkBytes,
           reason: 'session_preempted',
           torn,
           durationMs: Date.now() - startedAt,
@@ -758,6 +799,8 @@ export function createNamespaceBackupManager<Env>(
           phase: 'export_scan',
           outcome: 'torn',
           namespace,
+          priority,
+          scanChunkBytes: requestedScanChunkBytes,
           marker: scan.marker,
           observedMarker: scan.observed,
           attempt: attempt + 1,
@@ -796,6 +839,8 @@ export function createNamespaceBackupManager<Env>(
         phase: 'export',
         outcome: 'success',
         namespace,
+        priority,
+        scanChunkBytes: requestedScanChunkBytes,
         durationMs: Date.now() - startedAt,
         rows: summary.rows,
         bytes: summary.bytes,
@@ -808,6 +853,8 @@ export function createNamespaceBackupManager<Env>(
       phase: 'export',
       outcome: 'preempted',
       namespace,
+      priority,
+      scanChunkBytes: requestedScanChunkBytes,
       reason: 'torn',
       torn,
       durationMs: Date.now() - startedAt,

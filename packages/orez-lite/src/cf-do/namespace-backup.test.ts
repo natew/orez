@@ -475,7 +475,7 @@ function durableObject(
   db: InstanceType<typeof BetterSqlite3>,
   onRead: (sql: string) => void = () => {}
 ) {
-  const readers = new Set<{ preempted: boolean }>()
+  const readers = new Set<{ preempted: boolean; priority: 'background' | 'normal' }>()
   const queuedWrites: Array<() => void> = []
   let sessions = 0
   let openReaders = 0
@@ -513,6 +513,10 @@ function durableObject(
     uploadsWithSessionOpen: () => uploadsWithSessionOpen,
     /** admitted immediately, preempting whatever background reader is open */
     writeNow(mutate: () => void, mutates = true) {
+      if ([...readers].some((reader) => reader.priority === 'normal')) {
+        queuedWrites.push(() => commitWrite(mutate, mutates))
+        return
+      }
       commitWrite(mutate, mutates)
     },
     /** admitted the moment the open session closes, so it lands between chunks */
@@ -542,9 +546,10 @@ function durableObject(
           sql: string,
           params?: readonly unknown[]
         ) => Promise<Record<string, any>[]>
-      ) => Promise<Value>
+      ) => Promise<Value>,
+      options: { priority: 'background' | 'normal' } = { priority: 'background' }
     ): Promise<Value> {
-      const session = { preempted: false }
+      const session = { preempted: false, priority: options.priority }
       sessions++
       readers.add(session)
       openReaders++
@@ -664,7 +669,8 @@ describe('namespace backup export under a live writer', () => {
       scanChunkBytes: 1,
       files: () => files,
       query: object.query,
-      readSession: (env, namespace, work) => object.readSession(env, namespace, work),
+      readSession: (env, namespace, work, options) =>
+        object.readSession(env, namespace, work, options),
       batch: async () => {},
       listNamespaces: async () => ['singleton'],
       ...managerOptions,
@@ -705,6 +711,33 @@ describe('namespace backup export under a live writer', () => {
     expect(events.filter((event) => event.outcome === 'torn')).not.toHaveLength(0)
     // the writer was never made to wait: its deposit is live before the export
     // returns, not replayed after it
+    expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
+      balance: 100,
+    })
+    db.close()
+  })
+
+  it('completes one bounded normal scan while a writer waits for its turn', async () => {
+    const db = ledgerDatabase(600)
+    let deposits = 0
+    const { manager, object, stored } = scenario(db, (self, sql) => {
+      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+      deposits++
+      self.writeNow(deposit(db, 'l1', 100))
+    })
+
+    const value = await manager.exportNamespace({}, 'singleton', {
+      priority: 'normal',
+      scanChunkBytes: Number.MAX_SAFE_INTEGER,
+    })
+
+    expect(value.outcome).toBe('exported')
+    expect(deposits).toBe(1)
+    const dump = dumped(stored)
+    expect(dump.balance()).toBe(0)
+    expect(dump.ledgerTotal()).toBe(0)
+    expect(object.sessions()).toBe(2)
+    expect(object.uploadsWithSessionOpen()).toBe(0)
     expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
       balance: 100,
     })
@@ -859,7 +892,8 @@ describe('namespace backup export under a live writer', () => {
         },
       }),
       query: object.query,
-      readSession: (env, namespace, work) => object.readSession(env, namespace, work),
+      readSession: (env, namespace, work, options) =>
+        object.readSession(env, namespace, work, options),
       batch: async () => {},
       listNamespaces: async () => ['singleton'],
     })
