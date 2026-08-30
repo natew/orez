@@ -4,7 +4,7 @@ status: in progress (2026-06-08) · embed restart contract landed (2026-06-10)
 
 ## embed restart contract (2026-06-10)
 
-The gen-2 wedge that forced hibernation off on the SootBean demo is RCA'd and
+The gen-2 wedge that forced hibernation off on the Contrast demo is RCA'd and
 fixed. A second embed generation in one isolate inherited everything the dead
 generation never released — zero-cache is designed for process-per-worker
 lifecycles and relies on **process death** for final cleanup, which an embed
