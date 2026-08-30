@@ -15,18 +15,18 @@ which would move the measured marginal slope from six toward four. A two-row
 floor remains research until one universal transaction transport is proven.
 
 Priority, stated honestly: there is no current dollar case. Contrast's total
-`do.rowsWritten` is $0.130 per day, and the Soot liveness fix no longer waits
+`do.rowsWritten` is $0.130 per day, and the Contrast liveness fix no longer waits
 on this plan; it removes the dominant capture traffic upstream by coarsening
 its own cadence. What this plan is worth now is smaller and different: the
 per-change physical slope matters at future scale, shorter write sessions
 reduce write-grant queueing for every Orez consumer, and the journal-bound
-work in stage 2 is a named prerequisite for Soot's control-plane
+work in stage 2 is a named prerequisite for Contrast's control-plane
 decomposition trigger (the 2026-08-23 inspection found 164,517 retained
 `_zero_changes` rows with no active writer, and sharding application tables
 cannot fix an unbounded infrastructure journal). Stage 2's retention
 verification does not depend on the stage 0 matrix and may run first.
 
-This plan owns Orez implementation and evidence. The Soot plan owns factory
+This plan owns Orez implementation and evidence. The Contrast plan owns factory
 liveness cadence. Application sharding is not acceptance for an Orez journal
 that remains amplified or unbounded.
 
@@ -159,10 +159,10 @@ a concrete need.
   presented as a Cloudflare bill.
 - Rust ingestion receives each final change exactly once and does not ingest
   buffer or recovery state.
-- Soot may consume the Orez change only after this plan's relevant stage is
-  complete, published with permission, pinned in Soot, and validated against
-  Soot's transaction/cascade fixtures. Nothing on the Soot side waits on any
-  stage of this plan; the dependency runs the other way, with Soot's
+- Contrast may consume the Orez change only after this plan's relevant stage is
+  complete, published with permission, pinned in Contrast, and validated against
+  Contrast's transaction/cascade fixtures. Nothing on the Contrast side waits on any
+  stage of this plan; the dependency runs the other way, with Contrast's
   decomposition trigger consuming stage 2's journal-bound proof.
 
 ## Validation receipts
@@ -175,5 +175,5 @@ a concrete need.
 - [ ] Six-to-four falsification matrix receipt.
 - [ ] Orez lint, format, typecheck, unit, workerd, and Rust compatibility
       receipts required by the changed packages.
-- [ ] Published-version receipt and Soot consumer pin, only after explicit
+- [ ] Published-version receipt and Contrast consumer pin, only after explicit
       publish approval.

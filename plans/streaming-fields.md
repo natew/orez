@@ -16,15 +16,15 @@ Everything below is in `packages/orez-lite/src/realtime/`, covered by 124 tests.
   buffer.
 - `store.ts` is the client overlay, with the `durable | streaming | committing |
 stale` handoff.
-- `publisher.ts` / `writer.ts` are the producer API. `writer.ts` is the one soot
+- `publisher.ts` / `writer.ts` are the producer API. `writer.ts` is the one Contrast
   uses: a synchronous `set(handle, value)` with no session to track.
 - `local.ts` wires all of it in one process. This is what an app whose producer
-  runs in the browser needs, and it is all soot needed.
+  runs in the browser needs, and it is all Contrast needed.
 - `producer-socket.ts` + `host.ts` are the off-host producer path: an
   application server generates values while the subscribers are browsers
   elsewhere.
 
-Consumed by soot as of `soot@0bfa3274`, against `orez-lite@0.10.7-canary.1785181620131`.
+Consumed by Contrast as of `soot@0bfa3274`, against `orez-lite@0.10.7-canary.1785181620131`.
 `orez/realtime` re-exports the whole module for apps on the full package.
 
 ## What is NOT built
@@ -92,7 +92,7 @@ Declare streamable fields in a parallel manifest derived from the stock Zero
 schema. Do not add `streaming` metadata to Zero's schema objects or extend the
 Zero wire protocol.
 
-This gives Chat, Soot, and future consumers one implementation for:
+This gives Chat, Contrast, and future consumers one implementation for:
 
 - socket lifecycle and reconnection;
 - topic subscription and fan-out;
@@ -126,10 +126,10 @@ That separation is useful:
 The write avoidance matters on Cloudflare. A logical field update writes the
 application row, its indexes, CDC records, the sync replica, and its indexes.
 Orez has measured small application pushes at roughly 1,300 billable rows in
-Soot's production-shaped schema. Writing every token, or even every small token
+Contrast's production-shaped schema. Writing every token, or even every small token
 batch, would turn display progress into database load.
 
-## What Chat and Soot do today
+## What Chat and Contrast do today
 
 The architectural observation is right, although the primary app transports
 are HTTP streams rather than application WebSockets.
@@ -145,7 +145,7 @@ path. The implementation lives in:
 - `~/chat/src/features/ai/chatStreamStore.ts`
 - `~/chat/src/features/ai/respond.server.ts`
 
-Soot runs its Pi agent loop in the browser. `/api/llm` returns
+Contrast runs its Pi agent loop in the browser. `/api/llm` returns
 `application/x-ndjson` with structured start, text, thinking, tool-call, done,
 and error events. The active browser reduces those events into process-local
 emitters and writes the final content, parts, and status through Zero at turn
@@ -160,14 +160,14 @@ lives in:
 - `~/soot/src/ai/agent-session.ts`
 - `~/soot/app/api/llm+api.ts`
 
-Soot also applies a three-attempt retry wrapper in the browser and another
+Contrast also applies a three-attempt retry wrapper in the browser and another
 three-attempt wrapper at the server proxy. Before the first meaningful delta,
 one client operation can therefore create as many as nine provider attempts.
 After a meaningful delta, neither layer can resume without duplicating output.
 This is another useful boundary: Orez should own stream generation and delivery
 state, while one application layer owns provider retries.
 
-Soot's tool events are more durable than display tokens. It checkpoints active
+Contrast's tool events are more durable than display tokens. It checkpoints active
 tool turns and completed tool results before the whole assistant turn finishes.
 Those semantic writes should remain. The generic field path removes automatic
 per-token persistence; it does not prohibit an application from ending one
@@ -175,9 +175,9 @@ generation at a meaningful checkpoint, committing it, and beginning another.
 
 Both apps already use Orez Lite's HTTP pull transport plus its advisory wake
 WebSocket for durable transcript distribution. Chat's application-specific
-work centers on repeated durable snapshots. Soot's centers on NDJSON parsing,
+work centers on repeated durable snapshots. Contrast's centers on NDJSON parsing,
 local overlay state, retry rules, final handoff, and abandoned-stream cleanup.
-The proposed API combines Soot's selector-isolated overlay with Chat's
+The proposed API combines Contrast's selector-isolated overlay with Chat's
 cross-client visibility.
 
 ## Goals
@@ -390,7 +390,7 @@ opens one private, service-bound producer WebSocket to the namespace object for
 the life of the stream. This avoids one Worker and Durable Object request per
 field value. Local and native runners supply the same interface directly.
 
-An application such as Soot may keep its model reducer in the browser. It uses
+An application such as Contrast may keep its model reducer in the browser. It uses
 the same logical publisher over a dedicated producer socket after one
 authoritative `realtime.authorizePublish(topic, claims, env)` check at `begin`.
 In a delegated deployment that callback asks the application worker to apply
@@ -571,7 +571,7 @@ existing durable membership:
 3. require a positive `_zsync_row_refs` entry for that client group and row;
 4. require the field in the streaming manifest.
 
-Chat and Soot already run query-aware hosts, so this reuses the exact rows
+Chat and Contrast already run query-aware hosts, so this reuses the exact rows
 their transformed Zero queries authorized.
 
 An optimistic row can reach the component before the server has recorded query
@@ -803,9 +803,9 @@ would create a second replication protocol hidden inside the Zero protocol.
 
 ### Slice 3: app migrations
 
-1. Move Chat's message content and Soot's message content onto the shared
+1. Move Chat's message content and Contrast's message content onto the shared
    publisher and hook.
-2. Delete Chat's repeated snapshot writer and Soot's replaced local field
+2. Delete Chat's repeated snapshot writer and Contrast's replaced local field
    emitter, final-handoff, and abandoned-overlay code.
 3. Compare hard reload, mid-stream disconnect, token refresh, model failure,
    and final database state against the old implementations.
@@ -813,11 +813,11 @@ would create a second replication protocol hidden inside the Zero protocol.
    smaller and preserves their current behavior.
 
 The provider-facing transports stay application-owned. Chat still consumes the
-model provider stream on its server, and Soot still consumes structured NDJSON
+model provider stream on its server, and Contrast still consumes structured NDJSON
 from its LLM proxy. Orez replaces field delivery from those producers to
 interested clients, not the provider protocol or tool-event reducer.
 
-Soot keeps its durable tool-turn and completed-tool-result writes. If it later
+Contrast keeps its durable tool-turn and completed-tool-result writes. If it later
 streams `parts`, each such write ends the current field generation, uses the
 existing durable checkpoint, and starts a new generation from the committed
 parts value.
@@ -842,7 +842,7 @@ parts value.
   respects the namespace fan-out budget.
 - Local, native, browser-worker, and Cloudflare implementations pass the same
   protocol conformance vectors.
-- Chat and Soot delete the field-delivery and overlay code replaced by the
+- Chat and Contrast delete the field-delivery and overlay code replaced by the
   shared publisher and hook.
 
 ## Open decisions
@@ -853,7 +853,7 @@ parts value.
    explicit expected generation? Automatic supersession matches LLM retry
    behavior; applications that can race final writes still need database
    fencing.
-3. What default bounds fit real Chat and Soot payloads? Measure their largest
+3. What default bounds fit real Chat and Contrast payloads? Measure their largest
    content and parts values before choosing package defaults.
 4. Should the socket endpoint remain `/wake` with typed frames or become
    `/realtime` while `/wake` stays as a compatibility alias? One underlying

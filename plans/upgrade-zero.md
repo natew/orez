@@ -251,14 +251,14 @@ Current pipeline (Rust runtimes), in release order:
    upgrade unless the owner separately authorizes the release. Upgrade Chat's
    Orez npm family to that canary and its Rust crate git rev to the pushed SHA,
    then run `bun run test e2e` again. This is the authoritative Chat/Orez gate.
-4. **soot browser-host** — in an isolated worktree, use its catalogs (`bun up
+4. **Contrast browser-host** — in an isolated worktree, use its catalogs (`bun up
 zero`, then `bun up orez --canary`), run `bun check`, then
    `test:orez:smoke` → `test:orez`
    → `test:orez:robust`, then `test:ultimate:quick`. See §4.4.
 5. **Team Machine** — align the GUI's Zero and canonical Orez package pins,
    frozen-install check, then run the GUI's package checks and relevant tests.
 6. **Manual smoke pass (§4.5).** Non-optional. Nothing above catches a console
-   error. Smoke Chat, Soot, and Team Machine from freshly started processes.
+   error. Smoke Chat, Contrast, and Team Machine from freshly started processes.
 
 _Legacy stages, run only if deliberately keeping those paths alive:_ orez
 integration/native (`native:bootstrap && test:integration`), orez-web, orez-cf.
@@ -268,7 +268,7 @@ See §7 for the historical soot plan.
 
 Three traps have each cost a full misdiagnosis:
 
-- **soot's browser-host tests need `NODE_EXTRA_CA_CERTS`.** The stack serves
+- **Contrast's browser-host tests need `NODE_EXTRA_CA_CERTS`.** The stack serves
   HTTPS with a mkcert cert; Node's `fetch` uses its bundled CA list, not the
   system store, so a direct `bun run test:orez` dies at login with
   `SELF_SIGNED_CERT_IN_CHAIN` before running a single check. `createPortScopedEnv`
@@ -335,11 +335,11 @@ pass. Its whole job is the noise the assertions cannot see.
       DO-backend e2e — see §6). Note: that e2e drives chat through orez's cf-do
       _translation layer_ against a local `wrangler dev`; it is a strong lower
       bound but **not** the authoritative orez-cf validation (§7, stage 5).
-4. **orez-web** — soot bundles orez into browser workers and tests cross-surface
+4. **orez-web** — Contrast bundles orez into browser workers and tests cross-surface
    sync (`test/orez-web-sync.test.ts`). Validate in `~/soot`. **See §7, stage 4.**
    ✅ done for 1.6.
 5. **orez-cf** — the Cloudflare Durable Object backend (`src/cf-do/`,
-   `src/worker/` overlay). **Requires coordination with `~/soot`** (soot is the
+   `src/worker/` overlay). **Requires coordination with `~/soot`** (Contrast is the
    downstream CF consumer). Validate the overlay build + a real DO deploy.
    **See §7, stage 5.** ✅ done for 1.6 — both legs validated.
 
