@@ -122,6 +122,16 @@ write cost, though `RETURNING` sees only the statement's own target table, so
 it cannot observe rows a foreign-key cascade touched. That is the open question
 against removing a staging hop, not a settled design.
 
+The packed sync ledger has the same boundary. Generated helpers know their own
+returned keys, but database triggers and cascades can write additional rows that
+`RETURNING` cannot see. Exact capture therefore keeps the SQLite capture
+triggers active and merges their pending keys with the helper's returned keys at
+commit. On the workerd fixture, which has one primary-key index, the integration
+gate pins that cost at `3N + 3` billable writes for an exact helper batch and
+`3N + 2` for a raw-SQL batch. Packing reduces the number of transaction
+envelopes and the data clients read; it does not claim fewer physical writes
+while opaque trigger side effects must remain observable.
+
 At current volumes none of this costs anything. The 50-million-writes included
 tier covers roughly 8 million captured changes per month before a single dollar
 is billed, so this is a number to watch as a namespace grows rather than a

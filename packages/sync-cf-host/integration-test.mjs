@@ -799,11 +799,6 @@ try {
       logicalRows + 1,
       `${logicalRows}-row raw batch preserves trigger envelopes plus its LMID`
     )
-    equal(
-      helperCost.rowsWritten < rawCost.rowsWritten || logicalRows === 1,
-      true,
-      `${logicalRows}-row Cloudflare meter distinguishes helper and raw lanes`
-    )
     console.log(
       `[ledger-cost] ${JSON.stringify({
         logicalRows,
@@ -813,6 +808,16 @@ try {
         },
         raw: { ...rawCost, ratio: rawCost.rowsWritten / logicalRows },
       })}`
+    )
+    equal(
+      helperCost.rowsWritten,
+      logicalRows * 3 + 3,
+      `${logicalRows}-row exact capture preserves trigger side effects at the pinned cost`
+    )
+    equal(
+      rawCost.rowsWritten,
+      logicalRows * 3 + 2,
+      `${logicalRows}-row raw capture stays at the pinned trigger cost`
     )
   }
 
