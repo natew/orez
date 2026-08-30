@@ -11,7 +11,7 @@ Browser scenarios cross the real Worker, WASM, IndexedDB, proxy, and zero-cache 
 
 ## Current evidence areas
 
-The Soot implementation has browser scenarios for:
+The Contrast implementation has browser scenarios for:
 
 - worker graph boot and readiness;
 - direct SQL queries and writes;
@@ -36,7 +36,7 @@ These scenarios will move with the package during upstreaming so implementation 
 
 ## Current limitations
 
-- The package is private and currently sourced from Soot.
+- The package is private and currently sourced from Contrast.
 - The worker build is coupled to pinned Zero internals.
 - Browser startup downloads and initializes several substantial WASM and worker assets.
 - SharedArrayBuffer requires cross-origin isolation and compatible subresources.

@@ -227,9 +227,9 @@ eviction, storage-faults, backup-restore, state-machine 24 steps) against that
 live origin, then deletes the worker. Because it needs external credentials it
 is kept off the PR path (see "What is not covered" item 7).
 
-`harness/src/soot-deployed-conformance.ts` is a faithful port of soot's own
-integration test, run against the deployed worker in soot's dialect. It exists
-because the generic fixture lanes cannot target soot's exact composition.
+`harness/src/soot-deployed-conformance.ts` is a faithful port of Contrast's own
+integration test, run against the deployed worker in Contrast's dialect. It exists
+because the generic fixture lanes cannot target Contrast's exact composition.
 
 ## Data-worker CDC and Chat compatibility
 

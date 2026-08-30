@@ -47,10 +47,10 @@ change-tracking rows the sync model appends for every write. The billable number
 is therefore much larger than the application row count, and it grows with your
 index count.
 
-The measured figures from the 2026-07-10 and 2026-07-11 soot incident analysis:
+The measured figures from the 2026-07-10 and 2026-07-11 Contrast incident analysis:
 
 - **About 1.3k billable rows per push.** 100 control pushes wrote 133,819
-  billable rows on soot's data tier. A single small mutation is not a single
+  billable rows on Contrast's data tier. A single small mutation is not a single
   billable row; it is a mutation plus its indexes plus change tracking, times
   the tables it touches.
 - **About 127.5k billable rows for one cascading account delete.** A single
@@ -148,7 +148,7 @@ so a failure in one does not disable the others.
    (default 150,000 per five minutes) it becomes sticky and mutating endpoints
    return HTTP 429 `writeBudgetExceeded`. Reads stay open, the trip is persisted
    so an eviction cannot quietly reopen it, and a `POST /_orez/write-budget/reopen`
-   with the admin token clears it. The 150k default sits below soot's external
+   with the admin token clears it. The 150k default sits below Contrast's external
    200k-per-five-minute alert.
 2. **Sync-host ingest breaker** (`packages/sync-cf-host/src/host.ts`). One
    breaker catches two signatures: more than `ingestBudgetRows` billable rows in

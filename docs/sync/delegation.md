@@ -22,7 +22,7 @@ the host's mutator adapter inside the engine's SQLite, and pulls read that same
 store. That works, but it forces every consumer to bundle its mutation logic
 into the sync host, and it leaves anything that runs outside the host on a
 different database than the one clients read. Chat's server actions (unfurls,
-notifications, agent turns) and soot's projections and jobs write through the
+notifications, agent turns) and Contrast's projections and jobs write through the
 app, not through the sync host. In local-mutator mode those writes either fail
 closed or land in the wrong database.
 

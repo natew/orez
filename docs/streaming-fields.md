@@ -7,7 +7,7 @@ is a way to show a value early.
 The case it exists for is generated text. A model produces a message over
 several seconds, and the reader should watch it arrive rather than wait for a
 finished row. Writing each token durably is the obvious approach and the wrong
-one: in Soot's production-shaped schema one small application push costs roughly
+one: in Contrast's production-shaped schema one small application push costs roughly
 1,300 billable rows once you count the row, its indexes, CDC records, the sync
 replica, and its indexes. Streaming a thousand tokens that way turns display
 progress into database load.
@@ -174,7 +174,7 @@ decide who may subscribe.
 
 Expect the answer to be no. It is easy to look at one deployment of an
 application and conclude its producer is in-process, and be wrong about the
-same application's other deployments. Soot runs its agent loop in the browser on
+same application's other deployments. Contrast runs its agent loop in the browser on
 desktop and routes the same chat through a separate Cloudflare service on
 mobile; the second one is a server-side producer whatever the first one is. Pick
 the surface per deployment, not per application.
@@ -251,7 +251,7 @@ producer.fields.set(streaming.message.content({ id }), text)
 ```
 
 Open that socket when the producer is warmed rather than on its first value.
-Soot measured warm calls into its chat service at 386ms and 393ms while the
+Contrast measured warm calls into its chat service at 386ms and 393ms while the
 service itself reported 0ms of work, so almost all of the cost is in getting
 there, and paying it on the first token would sit squarely in the latency the
 stream exists to hide.

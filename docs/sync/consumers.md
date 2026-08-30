@@ -8,7 +8,7 @@ host runs writes inside the Durable Object, remain a supported composition mode;
 Chat used it before upstream ingest existed and has since migrated.)
 
 - **Chat** (start.chat, live) uses delegated push with upstream ingest.
-- **Soot** (mid-cutover) uses delegated push with upstream ingest.
+- **Contrast** (mid-cutover) uses delegated push with upstream ingest.
 
 Both pass the same Zero query registry used by their clients into
 `config.queries`. The host resolves desired named queries in-process, with
@@ -82,9 +82,9 @@ project ingest, delegated message pushes, cold named-query pulls, hard-reload
 durability, cross-context live wake, and a server-action mutation replicated
 back into the Rust DO.
 
-## Soot: delegated push with ingest
+## Contrast: delegated push with ingest
 
-Soot's integration lives in `integrations/soot-rust-sync/`. Its config is a
+Contrast's integration lives in `integrations/soot-rust-sync/`. Its config is a
 factory so the authenticator can differ between test and production
 (`src/config.ts`):
 
@@ -116,7 +116,7 @@ The pieces:
 - **Push is delegated.** The client push is forwarded to
   `/api/zero/push?schema=soot_0&appID=soot` over the `APP` binding, and the DO
   then ingests the committed change stream from the `DATA` binding's feed at
-  `upstream.namespacePath`. Soot has no local mutator registry at all. Its
+  `upstream.namespacePath`. Contrast has no local mutator registry at all. Its
   projections and jobs keep writing through the app's real push endpoint, and
   clients read what ingest replicates.
 - **Two service bindings.** `APP` is used by push and auth, while `DATA` serves
@@ -124,10 +124,10 @@ The pieces:
 - **`namespace` has planes.** `soot` and its legacy alias map to the
   control-plane namespace; `proj-<id>` and `p-<id>` map to a project
   namespace. Claims carry a `plane` discriminator plus project id and role.
-- Soot sets `retainChanges`, `idleTeardownMs`, and `wakeCoalesceMs` explicitly
+- Contrast sets `retainChanges`, `idleTeardownMs`, and `wakeCoalesceMs` explicitly
   rather than taking defaults.
 
-Soot is mid-cutover. The default deployable worker (`src/worker.ts`) still wires
+Contrast is mid-cutover. The default deployable worker (`src/worker.ts`) still wires
 a test authenticator gated by `SOOT_SYNC_TEST_AUTH`, so the primary artifact is
 a harness. The production path exists (`src/production-worker.server.ts` plus
 `src/production-auth.server.ts`, which resolves identity and project membership
@@ -137,7 +137,7 @@ deploy-only entrypoint; the everyday worker ships test auth.
 
 ## How they differ
 
-| Aspect           | Chat (live)                             | Soot (mid-cutover)                      |
+| Aspect           | Chat (live)                             | Contrast (mid-cutover)                  |
 | ---------------- | --------------------------------------- | --------------------------------------- |
 | Push             | Delegated `mutateUrl` + `mutateBinding` | Delegated `mutateUrl` + `mutateBinding` |
 | Upstream ingest  | `upstream` from the `DATA` feed         | `upstream` from the `DATA` feed         |
@@ -173,7 +173,7 @@ Then choose exactly one push model:
 - **Local**: `mutators` built with `registerMutators({...})`, keyed
   by wire mutation name. No `upstream`. Right when your entire write surface can
   live in the host.
-- **Delegated** (like Chat and Soot): `mutateUrl` (an absolute path on the app),
+- **Delegated** (like Chat and Contrast): `mutateUrl` (an absolute path on the app),
   `mutateBinding` (defaults to `upstream.binding`), and a required `upstream:
 {binding, namespacePath}`. Right when writes must run in the app worker, when
   server-side effects (jobs, projections, notifications) run outside the sync
@@ -217,7 +217,7 @@ layer (handle preflight, echo headers, pass 101 upgrades through).
 - For delegated push, a second `[[services]]` `DATA` binding for the change
   feed, matching `upstream.binding`.
 - Vars for the app origin and any admin or test flags. Import the published
-  `orez-sync-cf-host` (as Chat and Soot do); aliasing the bare import to the orez
+  `orez-sync-cf-host` (as Chat and Contrast do); aliasing the bare import to the orez
   source is only for local orez development.
 
 ### 4. App-worker endpoints
@@ -244,7 +244,7 @@ fix and watch production keep exhibiting the old behavior indefinitely.
 To force a data-worker DO onto new code: stop whatever is polling it (for a
 disposable host worker, `wrangler delete` it), wait for the DO to go idle and
 evict (about a minute), then redeploy the host. This came from a real incident
-during the Soot cutover: a catalog-cache fix was deployed but the resident
+during the Contrast cutover: a catalog-cache fix was deployed but the resident
 `ZeroSqlDO` stayed on the old class because the host never stopped polling
 `/changes`.
 
@@ -256,7 +256,7 @@ moment the worker deploys, without evicting resident objects.
 
 - **Environment selection.** A deploy script run through a dev-oriented env
   loader (`bun src/env.ts -- ...` styles that default to `.env.development`)
-  will silently deploy dev-valued secrets to production workers. The Soot data
+  will silently deploy dev-valued secrets to production workers. The Contrast data
   worker twice received a dev `BETTER_AUTH_SECRET` (which also feeds
   `OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN`) this way; the app kept serving because
   the app worker held the prod value, so smoke checks passed while admin

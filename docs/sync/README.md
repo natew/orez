@@ -38,7 +38,7 @@ incremental sync.
   amplification billing that caused real incidents, the circuit breakers, and the
   client reset on cutover.
 - **[Consumers and integration guide](./consumers.md)**: how Chat (live) and
-  Soot (mid-cutover) compose the host, and a distilled guide for a new app.
+  Contrast (mid-cutover) compose the host, and a distilled guide for a new app.
 
 ## The server shape in one screen
 

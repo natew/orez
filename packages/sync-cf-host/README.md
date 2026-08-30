@@ -263,7 +263,7 @@ upstream `/changes` feed before the application worker returns. The sync host
 then ingests through those effects, journals the acknowledged LMID after them,
 and only then returns the push response. This keeps change-log order intact so
 an acknowledgement cannot reach a client before its effects.
-Chat and Soot use an application-to-data service path that provides this
+Chat and Contrast use an application-to-data service path that provides this
 ordering today. A future topology that cannot provide it must extend the
 delegated response with an upstream watermark receipt and make the host ingest
 through that receipt before finalization. Do not add a second best-effort path.
