@@ -1551,6 +1551,29 @@ describe('Orez HTTP transport', () => {
     ])
   })
 
+  test('a wake channel the server never accepts backs off instead of retrying forever', async () => {
+    const wakeSockets = useFakeNativeWebSocket()
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch: unchangedPullFetch(),
+      wake: true,
+    })
+    transports.push(transport)
+
+    openRawSocketWithMessages()
+    // every handshake is refused, the shape a misrouted /wake produces
+    const seenAt: number[] = []
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      await eventually(() => expect(wakeSockets).toHaveLength(attempt), 5_000)
+      seenAt.push(Date.now())
+      wakeSockets[attempt - 1].onerror?.()
+    }
+
+    const gaps = seenAt.slice(1).map((at, index) => at - seenAt[index])
+    expect(gaps[1]).toBeGreaterThan(480)
+    expect(gaps[2]).toBeGreaterThan(980)
+  })
+
   test('wake token rejection leaves pulls healthy and retries the advisory channel', async () => {
     const wakeSockets = useFakeNativeWebSocket()
     const getToken = vi.fn(async () => {

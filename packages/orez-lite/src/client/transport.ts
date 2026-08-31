@@ -140,6 +140,14 @@ const REQUEST_HEADER_DEADLINE_MS = 60_000
 // ceiling on a server-supplied Retry-After. a daily quota can report a reset
 // hours out; honoring that verbatim would leave the client dark until then.
 const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
+// the wake channel is advisory (the interval poll is what guarantees
+// convergence), so a server that never accepts it must not cost a retry per
+// half second forever. each attempt mints a fresh wake token and opens a
+// handshake, and a misrouted /wake billed 1.94M requests that way. back off to
+// a 30s ceiling, halved-plus-jitter so a fleet reconnecting after one outage
+// does not arrive in lockstep. a socket that reaches open resets the ladder.
+const WAKE_RECONNECT_BASE_MS = 500
+const WAKE_RECONNECT_MAX_MS = 30_000
 
 export type HttpPullTransport = {
   pull(): Promise<void>
@@ -573,6 +581,7 @@ class ZeroHttpSocket {
   private wakeSocket: { close(): void } | undefined
   private wakeConnecting = false
   private wakeReconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private wakeReconnectAttempts = 0
   private readonly generation: number
   private readonly zeroInstanceID: string
   private readonly connectionAttemptID: string
@@ -851,7 +860,9 @@ class ZeroHttpSocket {
       // historical frame exists for that interval, so catch up once the socket
       // is actually open.
       socket.onopen = () => {
-        if (this.wakeSocket === socket) this.requestPullAfterCurrent()
+        if (this.wakeSocket !== socket) return
+        this.wakeReconnectAttempts = 0
+        this.requestPullAfterCurrent()
       }
       socket.onmessage = () => this.requestPullAfterCurrent()
       socket.onclose = reconnect
@@ -861,10 +872,18 @@ class ZeroHttpSocket {
 
   private scheduleWakeReconnect() {
     if (this.readyState !== this.OPEN || this.wakeReconnectTimer) return
-    this.wakeReconnectTimer = setTimeout(() => {
-      this.wakeReconnectTimer = undefined
-      this.openWakeChannel()
-    }, 500)
+    const ceiling = Math.min(
+      WAKE_RECONNECT_BASE_MS * 2 ** this.wakeReconnectAttempts,
+      WAKE_RECONNECT_MAX_MS
+    )
+    this.wakeReconnectAttempts++
+    this.wakeReconnectTimer = setTimeout(
+      () => {
+        this.wakeReconnectTimer = undefined
+        this.openWakeChannel()
+      },
+      ceiling / 2 + Math.random() * (ceiling / 2)
+    )
   }
 
   private closeWakeChannel() {
@@ -872,6 +891,7 @@ class ZeroHttpSocket {
       clearTimeout(this.wakeReconnectTimer)
       this.wakeReconnectTimer = undefined
     }
+    this.wakeReconnectAttempts = 0
     const socket = this.wakeSocket
     this.wakeSocket = undefined
     if (socket) {
