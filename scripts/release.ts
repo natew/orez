@@ -605,7 +605,7 @@ if (existsSync(onZeroPkgPath)) {
   })
 }
 
-// orez-database shares the orez version with the rest of the release family.
+// @o/database shares the orez version with the rest of the release family.
 const databaseDir = resolve(root, 'packages', 'database')
 const databasePkgPath = resolve(databaseDir, 'package.json')
 if (existsSync(databasePkgPath)) {
