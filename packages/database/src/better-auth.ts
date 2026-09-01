@@ -6,7 +6,7 @@ import {
   type SQLiteSchema,
   type SQLiteTransactionExecutor,
   type SQLiteTransactionProvider,
-} from './sqlite'
+} from './sqlite.js'
 
 import type { AnyRelations, EmptyRelations } from 'drizzle-orm'
 

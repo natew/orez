@@ -1,9 +1,9 @@
 export {
   createBetterAuthSQLiteAdapter,
   type CreateBetterAuthSQLiteAdapterOptions,
-} from './better-auth'
-export { isPrivateTable, privateTable } from './private-table'
-export { applySeed, type SeedClient, type SeedData, type SeedRows } from './seed'
+} from './better-auth.js'
+export { isPrivateTable, privateTable } from './private-table.js'
+export { applySeed, type SeedClient, type SeedData, type SeedRows } from './seed.js'
 export {
   createBunSQLiteExecutor,
   createBunSQLiteTransactionProvider,
@@ -20,4 +20,4 @@ export {
   type SQLiteTransactionExecutor,
   type SQLiteTransactionProvider,
   type SqlStatementMetadata,
-} from './sqlite'
+} from './sqlite.js'
