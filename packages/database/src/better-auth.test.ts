@@ -4,11 +4,11 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { betterAuth, type BetterAuthOptions } from 'better-auth/minimal'
 import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
-import { createBetterAuthSQLiteAdapter } from './better-auth'
+import { createBetterAuthSQLiteAdapter } from './better-auth.js'
 import {
   createBunSQLiteTransactionProvider,
   type SQLiteTransactionProvider,
-} from './sqlite'
+} from './sqlite.js'
 
 const user = sqliteTable('user', {
   id: text().primaryKey(),

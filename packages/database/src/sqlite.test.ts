@@ -7,7 +7,7 @@ import {
   createBunSQLiteExecutor,
   createBunSQLiteTransactionProvider,
   createSQLiteDatabase,
-} from './sqlite'
+} from './sqlite.js'
 
 const todo = sqliteTable('todo', {
   id: integer().primaryKey(),

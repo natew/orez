@@ -1,8 +1,12 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
+    // NodeNext, not Bundler: this package ships plain tsc output as ESM, and
+    // Bundler resolution accepts extensionless relative imports that tsc then
+    // emits verbatim, producing dist files Node cannot load. NodeNext makes
+    // that a compile error instead of a published break.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "lib": ["ES2022", "DOM"],
     "strict": true,
     "noEmit": true,
