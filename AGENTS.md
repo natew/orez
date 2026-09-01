@@ -9,6 +9,13 @@ ALWAYS merge finished work to main and push (pull first). Standing
 permission from nate (2026-07-16): main pushes do not need re-asking.
 Publishing/releasing still ALWAYS needs explicit permission.
 
+Worktrees go under `~/.worktrees/orez-<slug>`, never in `/tmp` or inside the
+repo. Remove yours (`git worktree remove <path>`) when the task ends, or leave
+it clean with every commit pushed to its branch. Uncommitted work in a worktree
+at session end is lost work: commit and push, as `wip:` if unfinished. Managers
+prune any worktree with no live owner, a clean tree, and a pushed HEAD without
+asking; `tm drift` is the audit.
+
 USE CONVENTIONAL COMMITS
 
 Lint and format are SEPARATE CI gates. `bun run lint` (oxlint) passing does not
