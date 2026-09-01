@@ -233,8 +233,70 @@ async function githubJson<T>(path: string): Promise<T> {
       },
     }
   )
-  if (!response.ok) throw new Error(`GitHub API ${path} returned ${response.status}`)
+  if (!response.ok) throw new GithubApiError(path, response.status)
   return (await response.json()) as T
+}
+
+class GithubApiError extends Error {
+  constructor(
+    path: string,
+    readonly status: number
+  ) {
+    super(`GitHub API ${path} returned ${status}`)
+  }
+}
+
+function parseSemver(version: string): [number, number, number] | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version)
+  if (!match) return null
+  return [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+function compareSemver(a: [number, number, number], b: [number, number, number]): number {
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index]
+  }
+  return 0
+}
+
+/**
+ * The newest stable `vX.Y.Z` tag that is not newer than the checked-in package
+ * version. A main build whose manifest already records the next version, before
+ * the stable release workflow has created its tag, still describes the latest
+ * release that actually exists.
+ */
+export function latestReleasedTag(tags: string[], packageVersion: string): string | null {
+  const ceiling = parseSemver(packageVersion)
+  let best: { tag: string; version: [number, number, number] } | null = null
+  for (const tag of tags) {
+    if (!tag.startsWith('v')) continue
+    const version = parseSemver(tag)
+    if (!version) continue
+    if (ceiling && compareSemver(version, ceiling) > 0) continue
+    if (!best || compareSemver(version, best.version) > 0) best = { tag, version }
+  }
+  return best?.tag ?? null
+}
+
+async function resolveReleaseTag(packageTag: string, packageVersion: string): Promise<string> {
+  try {
+    await githubJson(`/repos/${githubRepository}/git/ref/tags/${packageTag}`)
+    return packageTag
+  } catch (error) {
+    if (!(error instanceof GithubApiError) || error.status !== 404) throw error
+  }
+  const tags = await githubJson<{ name: string }[]>(
+    `/repos/${githubRepository}/tags?per_page=100`
+  )
+  const fallback = latestReleasedTag(
+    tags.map((tag) => tag.name),
+    packageVersion
+  )
+  if (!fallback) {
+    throw new Error(`no stable release tag exists at or below ${packageTag}`)
+  }
+  console.warn(`release tag ${packageTag} is not published yet; recording ${fallback}`)
+  return fallback
 }
 
 async function releaseSha(tag: string): Promise<string> {
@@ -349,7 +411,7 @@ async function generate(): Promise<void> {
       `release tag ${pushedTag} does not match package version ${litePackage.version}`
     )
   }
-  const releaseTag = pushedTag ?? packageTag
+  const releaseTag = pushedTag ?? (await resolveReleaseTag(packageTag, litePackage.version))
   const releaseVersion = releaseTag.startsWith('v') ? releaseTag.slice(1) : releaseTag
   const [run, jobsResponse] = await Promise.all([
     githubJson<ActionsRun>(`/repos/${githubRepository}/actions/runs/${runId}`),

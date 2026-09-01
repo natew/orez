@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { classifyEvidenceIdentity } from '../site/lib/evidence-identity'
 import {
   laneCountFromWorkflow,
+  latestReleasedTag,
   statusForQualifiedBuild,
   traceRestartCount,
   traceStepCount,
@@ -101,6 +102,15 @@ describe('exact-SHA release evidence identity', () => {
 
   it('keeps a missing build unverified', () => {
     expect(statusForQualifiedBuild(null)).toBe('unverified')
+  })
+
+  it('records the newest published stable tag when the manifest is ahead of the tags', () => {
+    const tags = ['v0.16.11', 'v0.16.9', 'v0.16.10', 'v0.16.11-canary.1', 'nightly', 'v0.9.7']
+    expect(latestReleasedTag(tags, '0.16.12')).toBe('v0.16.11')
+    expect(latestReleasedTag(tags, '0.16.10')).toBe('v0.16.10')
+    expect(latestReleasedTag(tags, '0.16.11')).toBe('v0.16.11')
+    expect(latestReleasedTag(['v0.17.0'], '0.16.12')).toBeNull()
+    expect(latestReleasedTag([], '0.16.12')).toBeNull()
   })
 })
 
