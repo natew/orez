@@ -2049,11 +2049,18 @@ export class ZeroDO extends DurableObject {
 
   private registerApplicationSqlTables(tables: readonly ApplicationSqlTable[]): void {
     for (const table of tables) {
-      this.cdc.ensureTable({
-        physicalTableName: table.table,
-        tableName: table.publicTable,
-        ...(table.publish === false ? { publish: false } : null),
-      })
+      // registration carries the schema's declared capture set, so its publish
+      // state is authoritative: this is the runtime path that can demote an
+      // already published table to rollback-only capture.
+      this.cdc.ensureTable(
+        {
+          physicalTableName: table.table,
+          tableName: table.publicTable,
+          ...(table.publish === false ? { publish: false } : null),
+        },
+        false,
+        true
+      )
     }
   }
 

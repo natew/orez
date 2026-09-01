@@ -90,6 +90,34 @@ describe('buildMigrationModuleSource', () => {
     expect(registerTables).toHaveBeenCalledWith(configuredPublicTables)
   })
 
+  it('passes a rollback-only capture exemption through to table registration', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = { tables: {}, relationships: {} }
+    `)
+    const configuredPublicTables = [
+      { table: 'widget', publicTable: 'public.widget' },
+      { table: 'usageLedger', publicTable: 'public.usageLedger', publish: false },
+    ]
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-v8',
+        schemaImportSpecifier: schemaModuleUrl,
+        nativeSqlStatements: [],
+        publicTables: configuredPublicTables,
+      })
+    )
+
+    const registerTables = vi.fn()
+    await expect(
+      migrationModule.orezAppSchema.migrate({
+        registrationOnly: true,
+        client: { registerTables },
+      })
+    ).resolves.toEqual({ tables: ['public.widget', 'public.usageLedger'] })
+    expect(registerTables).toHaveBeenCalledWith(configuredPublicTables)
+  })
+
   it('exports a coherent no-op descriptor', async () => {
     const migrationModule = await importJavascriptModule(
       buildMigrationModuleSource(defineCloudflareConfig('contrast'), {

@@ -495,6 +495,36 @@ describe('billable write amplification on a synced namespace', () => {
     expect(one.billed).toBe(6 + 3)
   })
 
+  it('bills a rollback-only write for staging churn but never a changefeed row', async () => {
+    const ns = await controlNamespace()
+    ns.zero.cdc.syncTables([
+      { physicalTableName: 'user', tableName: 'user' },
+      { physicalTableName: 'project', tableName: 'project' },
+      { physicalTableName: 'file', tableName: 'file', publish: false },
+    ])
+    ns.zero.cdc.drain()
+
+    // the first write on a namespace seeds `_zero_change_state`; warm that
+    // one-off row off before measuring, as the published-path test does.
+    ns.syncedWrite(
+      'tx-private-warm',
+      "UPDATE file SET body = 'warm' WHERE id = 'f1'",
+      ns.fileUpdate
+    )
+    const write = ns.syncedWrite(
+      'tx-private-bill',
+      "UPDATE file SET body = 'private' WHERE id = 'f1'",
+      ns.fileUpdate
+    )
+    expect(write.snapshots).toEqual([])
+    expect(ns.written.some((w) => /^INSERT INTO _zero_changes/.test(w.sql))).toBe(false)
+    // application row + trigger buffer row, the buffer drain, the pending
+    // insert and delete, plus the tx schema guard in and out. no changefeed
+    // insert and no change-state watermark bump: those two rows are what a
+    // demote saves per write.
+    expect(write.billed).toBe(5 + 2)
+  })
+
   it('counts logical rows as rows changed, not rows returned', async () => {
     const ns = await controlNamespace()
     // exactly the statement shape packages/sync-executor/src/crud.ts emits: no

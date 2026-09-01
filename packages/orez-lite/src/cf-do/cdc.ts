@@ -820,12 +820,23 @@ export class TransactionalCdc {
    * or cannot be undone row-by-row, which leaves the caller on its table
    * snapshot path rather than capturing changes it could never roll back.
    */
-  ensureTable(registration: CdcTableRegistration, refresh = false): boolean {
+  ensureTable(
+    registration: CdcTableRegistration,
+    refresh = false,
+    authoritative = refresh
+  ): boolean {
     const physicalTableName = String(registration.physicalTableName || '')
     const tableName = String(registration.tableName || '')
     const cached = this.registered(physicalTableName)
-    // A rollback-only request must never demote an already published table.
-    const publish = cached?.publish || registration.publish !== false
+    // Only an authoritative caller (table registration, syncTables, the
+    // schema-change restore) carries the schema's declared capture set, so only
+    // it may change whether a table publishes: demoting one to rollback-only
+    // capture or promoting it back. Every other ensure keeps the cached state
+    // in both directions: a rollback-only request must never demote an already
+    // published table, and a flagless tracked write must never re-promote a
+    // table the schema declared private.
+    const publish =
+      authoritative || !cached ? registration.publish !== false : cached.publish
     if (
       !refresh &&
       cached?.tableName === tableName &&
@@ -887,7 +898,7 @@ export class TransactionalCdc {
       desired.set(physicalTableName, {
         physicalTableName,
         tableName,
-        publish: true,
+        publish: registration.publish !== false,
         ...(registration.columns?.length
           ? { columns: registration.columns.map(String) }
           : null),

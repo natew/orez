@@ -326,6 +326,65 @@ describe('ZeroDO transactional CDC integration', () => {
     ])
   })
 
+  it('serves historical change rows after an authoritative demote and publishes nothing new', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE usageLedger (id TEXT PRIMARY KEY, amount INTEGER)')
+
+    const published = await zero.applicationSqlSession('demote-published-registration')
+    await published.begin()
+    await published.registerTables([
+      { table: 'usageLedger', publicTable: 'public.usageLedger' },
+    ])
+    await published.exec("INSERT INTO usageLedger VALUES ('u1', 10)", [], {
+      table: 'usageLedger',
+      publicTable: 'public.usageLedger',
+      kind: 'insert',
+    })
+    await published.commit()
+    const history = zero.readChangesSince(0)
+    expect(history).toMatchObject([
+      {
+        tableName: 'public.usageLedger',
+        op: 'INSERT',
+        rowData: { id: 'u1', amount: 10 },
+      },
+    ])
+
+    const demote = await zero.applicationSqlSession('demote-registration')
+    await demote.begin()
+    await demote.registerTables([
+      { table: 'usageLedger', publicTable: 'public.usageLedger', publish: false },
+    ])
+    await demote.commit()
+    expect(
+      sql
+        .exec("SELECT publish FROM _orez_cdc_tables WHERE physical_table = 'usageLedger'")
+        .one()
+    ).toEqual({ publish: 0 })
+
+    const write = await zero.applicationSqlSession('demoted-write')
+    await write.begin()
+    await write.exec("INSERT INTO usageLedger VALUES ('u2', 20)", [], {
+      table: 'usageLedger',
+      publicTable: 'public.usageLedger',
+      kind: 'insert',
+    })
+    await write.commit()
+
+    // the pre-demotion row still serves from its baked-in image; the new write
+    // adds nothing to the changefeed
+    expect(zero.readChangesSince(0)).toEqual(history)
+
+    // rollback still restores from the private row images
+    const rolledBack = await zero.applicationSqlSession('demoted-rollback')
+    await rolledBack.begin()
+    await rolledBack.exec("UPDATE usageLedger SET amount = 99 WHERE id = 'u2'")
+    rolledBack[Symbol.dispose]()
+    expect(sql.exec("SELECT amount FROM usageLedger WHERE id = 'u2'").one()).toEqual({
+      amount: 20,
+    })
+  })
+
   it('does not report an application transaction that rolls back', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')

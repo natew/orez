@@ -41,7 +41,8 @@ export type CloudflareMigrationModuleSourceParts =
       schemaVersion: string
       schemaImportSpecifier: string
       nativeSqlStatements: unknown
-      publicTables?: Array<{ table: string; publicTable: string }>
+      /** publish: false keeps rollback-image capture without a changefeed. */
+      publicTables?: Array<{ table: string; publicTable: string; publish?: boolean }>
       expectedTables?: CloudflareNativeTableShape[]
       expectedIndexes?: CloudflareNativeIndexShape[]
     }

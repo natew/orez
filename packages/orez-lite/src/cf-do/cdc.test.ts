@@ -281,6 +281,68 @@ describe('TransactionalCdc', () => {
     expect(cdc.drain()).toEqual([])
   })
 
+  it('demotes a published table to rollback-only capture on an authoritative sync', () => {
+    const { sql } = createSqliteStorage()
+    sql.exec('CREATE TABLE ledger (id INTEGER PRIMARY KEY, amount INTEGER)')
+    const cdc = new TransactionalCdc(sql)
+    cdc.syncTables([{ physicalTableName: 'ledger', tableName: 'public.ledger' }])
+    sql.exec('INSERT INTO ledger VALUES (1, 10)')
+    expect(cdc.drain()).toMatchObject([{ op: 'INSERT', rowData: { id: 1, amount: 10 } }])
+
+    cdc.syncTables([
+      { physicalTableName: 'ledger', tableName: 'public.ledger', publish: false },
+    ])
+    expect(
+      sql
+        .exec("SELECT publish FROM _orez_cdc_tables WHERE physical_table = 'ledger'")
+        .one()
+    ).toEqual({ publish: 0 })
+
+    sql.exec('INSERT INTO ledger VALUES (2, 20)')
+    sql.exec('UPDATE ledger SET amount = 21 WHERE id = 2')
+    const [insert, update] = cdc.drain()
+    expect(insert).toMatchObject({ op: 'INSERT', publish: false, rowData: null })
+    // the private NEW image carries only the key needed to find the row during
+    // undo; the OLD image stays complete because rollback restores it
+    expect(Object.keys(insert?.rowJournal ?? {})).toEqual(['id'])
+    expect(update).toMatchObject({ op: 'UPDATE', publish: false, oldData: null })
+    expect(Object.keys(update?.rowJournal ?? {})).toEqual(['id'])
+    expect(Object.keys(update?.oldJournal ?? {}).sort()).toEqual(['amount', 'id'])
+
+    cdc.syncTables([{ physicalTableName: 'ledger', tableName: 'public.ledger' }])
+    sql.exec('INSERT INTO ledger VALUES (3, 30)')
+    expect(cdc.drain()).toMatchObject([{ op: 'INSERT', rowData: { id: 3, amount: 30 } }])
+  })
+
+  it('keeps the declared publish state against flagless and rollback-only ensures', () => {
+    const { sql } = createSqliteStorage()
+    sql.exec('CREATE TABLE ledger (id INTEGER PRIMARY KEY, amount INTEGER)')
+    sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+    const cdc = new TransactionalCdc(sql)
+    cdc.syncTables([
+      { physicalTableName: 'ledger', tableName: 'public.ledger', publish: false },
+      { physicalTableName: 'item', tableName: 'public.item' },
+    ])
+
+    // a flagless tracked ensure must not re-promote the declared-private table
+    expect(
+      cdc.ensureTable({ physicalTableName: 'ledger', tableName: 'public.ledger' })
+    ).toBe(true)
+    sql.exec('INSERT INTO ledger VALUES (1, 10)')
+    expect(cdc.drain()).toMatchObject([{ publish: false, rowData: null }])
+
+    // a rollback-only ensure must not demote the published table
+    expect(
+      cdc.ensureTable({
+        physicalTableName: 'item',
+        tableName: 'public.item',
+        publish: false,
+      })
+    ).toBe(true)
+    sql.exec("INSERT INTO item VALUES (1, 'kept')")
+    expect(cdc.drain()).toMatchObject([{ rowData: { id: 1, body: 'kept' } }])
+  })
+
   it('preserves null columns when wide rows require multiple JSON calls', () => {
     const { sql } = createSqliteStorage()
     const columns = Array.from({ length: 51 }, (_, index) => `value_${index}`)
