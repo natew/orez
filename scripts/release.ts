@@ -363,6 +363,13 @@ if (into) {
     pkgDirs.push({ name: onZeroPkg.name, dir: onZeroDir, pkg: onZeroPkg })
   }
 
+  const databaseDir = resolve(root, 'packages', 'database')
+  const databasePkgPath = resolve(databaseDir, 'package.json')
+  if (existsSync(databasePkgPath)) {
+    const databasePkg = JSON.parse(readFileSync(databasePkgPath, 'utf-8'))
+    pkgDirs.push({ name: databasePkg.name, dir: databaseDir, pkg: databasePkg })
+  }
+
   const sourcePackageCopies = pkgDirs.map(({ name, pkg }) => ({
     pkg,
     copies: installedCopyVersions(targetDir, name),
@@ -594,6 +601,20 @@ if (existsSync(onZeroPkgPath)) {
     originalVersion: onZeroPkg.version,
     pkgPath: onZeroPkgPath,
     pkg: onZeroPkg,
+    next: orezNext,
+  })
+}
+
+// orez-database shares the orez version with the rest of the release family.
+const databaseDir = resolve(root, 'packages', 'database')
+const databasePkgPath = resolve(databaseDir, 'package.json')
+if (existsSync(databasePkgPath)) {
+  const databasePkg = JSON.parse(readFileSync(databasePkgPath, 'utf-8'))
+  packages.push({
+    dir: databaseDir,
+    originalVersion: databasePkg.version,
+    pkgPath: databasePkgPath,
+    pkg: databasePkg,
     next: orezNext,
   })
 }

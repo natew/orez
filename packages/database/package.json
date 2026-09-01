@@ -1,0 +1,57 @@
+{
+  "name": "orez-database",
+  "version": "0.16.11",
+  "description": "SQLite database helpers for Orez hosts: Drizzle over a host-owned transaction, a Better Auth adapter with read and write lanes, seed application, and private-table marking.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "import": "./dist/sqlite.js",
+      "default": "./dist/sqlite.js"
+    },
+    "./better-auth": {
+      "types": "./dist/better-auth.d.ts",
+      "import": "./dist/better-auth.js",
+      "default": "./dist/better-auth.js"
+    },
+    "./seed": {
+      "types": "./dist/seed.d.ts",
+      "import": "./dist/seed.js",
+      "default": "./dist/seed.js"
+    }
+  },
+  "files": ["dist", "LICENSE", "README.md"],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint src",
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "better-auth": ">=1.6.0 <2",
+    "drizzle-orm": ">=1.0.0-beta.0 <2"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "better-auth": "1.6.30",
+    "drizzle-orm": "1.0.0-beta.9-e89174b",
+    "oxfmt": "0.28.0",
+    "oxlint": "1.43.0",
+    "typescript": "5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
