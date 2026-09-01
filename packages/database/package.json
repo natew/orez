@@ -1,8 +1,13 @@
 {
   "name": "@o/database",
-  "version": "0.16.11",
+  "version": "0.16.12",
   "description": "SQLite database helpers for Orez hosts: Drizzle over a host-owned transaction, a Better Auth adapter with read and write lanes, seed application, and private-table marking.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "packages/database"
+  },
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -30,7 +35,11 @@
       "default": "./dist/seed.js"
     }
   },
-  "files": ["dist", "LICENSE", "README.md"],
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "format": "oxfmt",
