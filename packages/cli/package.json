@@ -40,12 +40,10 @@
   "dependencies": {
     "@clack/prompts": "^0.8.2",
     "@lydell/node-pty": "^1.2.0-beta.3",
-    "picocolors": "^1.1.1",
-    "semver": "^7.7.3"
+    "picocolors": "^1.1.1"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
-    "@types/semver": "^7.7.1",
     "oxfmt": "0.28.0",
     "oxlint": "1.43.0",
     "typescript": "5.9.3"
