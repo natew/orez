@@ -278,7 +278,10 @@ export function latestReleasedTag(tags: string[], packageVersion: string): strin
   return best?.tag ?? null
 }
 
-async function resolveReleaseTag(packageTag: string, packageVersion: string): Promise<string> {
+async function resolveReleaseTag(
+  packageTag: string,
+  packageVersion: string
+): Promise<string> {
   try {
     await githubJson(`/repos/${githubRepository}/git/ref/tags/${packageTag}`)
     return packageTag
@@ -411,7 +414,8 @@ async function generate(): Promise<void> {
       `release tag ${pushedTag} does not match package version ${litePackage.version}`
     )
   }
-  const releaseTag = pushedTag ?? (await resolveReleaseTag(packageTag, litePackage.version))
+  const releaseTag =
+    pushedTag ?? (await resolveReleaseTag(packageTag, litePackage.version))
   const releaseVersion = releaseTag.startsWith('v') ? releaseTag.slice(1) : releaseTag
   const [run, jobsResponse] = await Promise.all([
     githubJson<ActionsRun>(`/repos/${githubRepository}/actions/runs/${runId}`),
