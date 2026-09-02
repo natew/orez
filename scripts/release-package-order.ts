@@ -4,6 +4,13 @@ type PackageManifest = {
   optionalDependencies?: Record<string, string>
 }
 
+export const sharedReleasePackageDirectories = [
+  'database',
+  'helpers',
+  'env',
+  'cli',
+] as const
+
 export function assertLocalReleaseVersions(
   packages: {
     pkg: { name: string; version: string }

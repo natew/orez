@@ -24,6 +24,7 @@ import {
   assertLocalReleaseVersions,
   orderReleasePackages,
   selectLocalReleasePackages,
+  sharedReleasePackageDirectories,
 } from './release-package-order.js'
 import {
   currentSyncNativePlatform,
@@ -363,11 +364,12 @@ if (into) {
     pkgDirs.push({ name: onZeroPkg.name, dir: onZeroDir, pkg: onZeroPkg })
   }
 
-  const databaseDir = resolve(root, 'packages', 'database')
-  const databasePkgPath = resolve(databaseDir, 'package.json')
-  if (existsSync(databasePkgPath)) {
-    const databasePkg = JSON.parse(readFileSync(databasePkgPath, 'utf-8'))
-    pkgDirs.push({ name: databasePkg.name, dir: databaseDir, pkg: databasePkg })
+  for (const packageDirectory of sharedReleasePackageDirectories) {
+    const dir = resolve(root, 'packages', packageDirectory)
+    const pkgPath = resolve(dir, 'package.json')
+    if (!existsSync(pkgPath)) continue
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+    pkgDirs.push({ name: pkg.name, dir, pkg })
   }
 
   const sourcePackageCopies = pkgDirs.map(({ name, pkg }) => ({
@@ -605,16 +607,17 @@ if (existsSync(onZeroPkgPath)) {
   })
 }
 
-// @o/database shares the orez version with the rest of the release family.
-const databaseDir = resolve(root, 'packages', 'database')
-const databasePkgPath = resolve(databaseDir, 'package.json')
-if (existsSync(databasePkgPath)) {
-  const databasePkg = JSON.parse(readFileSync(databasePkgPath, 'utf-8'))
+// shared application packages all ship on the orez release train.
+for (const packageDirectory of sharedReleasePackageDirectories) {
+  const dir = resolve(root, 'packages', packageDirectory)
+  const pkgPath = resolve(dir, 'package.json')
+  if (!existsSync(pkgPath)) continue
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
   packages.push({
-    dir: databaseDir,
-    originalVersion: databasePkg.version,
-    pkgPath: databasePkgPath,
-    pkg: databasePkg,
+    dir,
+    originalVersion: pkg.version,
+    pkgPath,
+    pkg,
     next: orezNext,
   })
 }

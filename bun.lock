@@ -39,6 +39,20 @@
         "vite",
       ],
     },
+    "packages/cli": {
+      "name": "@o/cli",
+      "version": "0.16.13",
+      "dependencies": {
+        "@clack/prompts": "^0.8.2",
+        "picocolors": "^1.1.1",
+      },
+      "devDependencies": {
+        "@types/bun": "1.3.14",
+        "oxfmt": "0.28.0",
+        "oxlint": "1.43.0",
+        "typescript": "5.9.3",
+      },
+    },
     "packages/database": {
       "name": "@o/database",
       "version": "0.16.13",
@@ -70,6 +84,39 @@
         "@rocicorp/zero": ">=1.7.0",
         "drizzle-orm": ">=1.0.0-beta.0 <2",
       },
+    },
+    "packages/env": {
+      "name": "@o/env",
+      "version": "0.16.13",
+      "devDependencies": {
+        "@types/bun": "1.3.14",
+        "oxfmt": "0.28.0",
+        "oxlint": "1.43.0",
+        "typescript": "5.9.3",
+      },
+    },
+    "packages/helpers": {
+      "name": "@o/helpers",
+      "version": "0.16.13",
+      "dependencies": {
+        "dequal": "^2.0.3",
+      },
+      "devDependencies": {
+        "@types/bun": "1.3.14",
+        "@types/react": "^19.0.0",
+        "oxfmt": "0.28.0",
+        "oxlint": "1.43.0",
+        "react": "^19.0.0",
+        "react-native": "*",
+        "typescript": "5.9.3",
+      },
+      "peerDependencies": {
+        "react": "*",
+        "react-native": "*",
+      },
+      "optionalPeers": [
+        "react-native",
+      ],
     },
     "packages/on-zero": {
       "name": "on-zero",
@@ -376,6 +423,10 @@
 
     "@bramus/specificity": ["@bramus/specificity@2.4.2", "", { "dependencies": { "css-tree": "^3.0.0" }, "bin": { "specificity": "bin/cli.js" } }, "sha512-ctxtJ/eA+t+6q2++vj5j7FYX3nRu311q1wfYH3xjlLOsczhlhxAg2FWNUXhpGvAw3BWo1xBcvOV6/YLc2r5FJw=="],
 
+    "@clack/core": ["@clack/core@0.3.5", "", { "dependencies": { "picocolors": "^1.0.0", "sisteransi": "^1.0.5" } }, "sha512-5cfhQNH+1VQ2xLQlmzXMqUoiaH0lRBq9/CLW9lTyMbuKLC3+xEK01tHVvyut++mLOn5urSHmkm6I0Lg9MaJSTQ=="],
+
+    "@clack/prompts": ["@clack/prompts@0.8.2", "", { "dependencies": { "@clack/core": "0.3.5", "picocolors": "^1.0.0", "sisteransi": "^1.0.5" } }, "sha512-6b9Ab2UiZwJYA9iMyboYyW9yJvAO9V753ZhS+DHKEjZRKAxPPOb7MXXu84lsPFG+vZt6FRFniZ8rXi+zCIw4yQ=="],
+
     "@cloudflare/kv-asset-handler": ["@cloudflare/kv-asset-handler@0.5.0", "", {}, "sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg=="],
 
     "@cloudflare/unenv-preset": ["@cloudflare/unenv-preset@2.16.1", "", { "peerDependencies": { "unenv": "2.0.0-rc.24", "workerd": ">1.20260305.0 <2.0.0-0" }, "optionalPeers": ["workerd"] }, "sha512-ECxObrMfyTl5bhQf/lZCXwo5G6xX9IAUo+nDMKK4SZ8m4Jvvxp52vilxyySSWh2YTZz8+HQ07qGH/2rEom1vDw=="],
@@ -608,7 +659,13 @@
 
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
 
+    "@o/cli": ["@o/cli@workspace:packages/cli"],
+
     "@o/database": ["@o/database@workspace:packages/database"],
+
+    "@o/env": ["@o/env@workspace:packages/env"],
+
+    "@o/helpers": ["@o/helpers@workspace:packages/helpers"],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
 
@@ -1935,6 +1992,8 @@
     "siginfo": ["siginfo@2.0.0", "", {}, "sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g=="],
 
     "signal-exit": ["signal-exit@3.0.7", "", {}, "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ=="],
+
+    "sisteransi": ["sisteransi@1.0.5", "", {}, "sha512-bLGGlR1QxBcynn2d5YmDX4MGjlZvy2MRBDRNHLJ8VI6l6+9FUiyTFNJ0IveOSP0bcXgVDPRcfGqA0pjaqUpfVg=="],
 
     "sonic-boom": ["sonic-boom@4.2.0", "", { "dependencies": { "atomic-sleep": "^1.0.0" } }, "sha512-INb7TM37/mAcsGmc9hyyI6+QR3rR1zVRu36B0NeGXKnOOLiZOfER5SA+N7X7k3yUYRzLWafduTDvJAfDswwEww=="],
 
