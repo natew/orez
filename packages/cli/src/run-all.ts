@@ -9,7 +9,6 @@ import fs from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
 import { handleProcessExit } from './handle-process-exit.js'
-import { checkNodeVersion } from './node-version-check.js'
 import { getIsExiting } from './process-state.js'
 import { flattenScripts } from './resolve-script.js'
 
@@ -428,11 +427,6 @@ export async function runParallelScripts(
   }
 
   try {
-    checkNodeVersion().catch((err: unknown) => {
-      console.error((err as Error).message)
-      exit(1)
-    })
-
     if (runCommands.length > 0) {
       const lastScript = runCommands[runCommands.length - 1]
 
