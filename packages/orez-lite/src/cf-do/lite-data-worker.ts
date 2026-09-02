@@ -988,7 +988,8 @@ export function createOrezDataWorker<
             (tx) =>
               work({
                 query: (sql, params = []) => tx.query(sql, params),
-                queryBatch: (statements) => tx.queryBatch(statements),
+                queryBatch: (statements, batchOptions) =>
+                  tx.queryBatch(statements, batchOptions),
               })
           ),
         batch: async (env, namespace, statements) => {

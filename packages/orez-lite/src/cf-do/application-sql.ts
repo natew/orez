@@ -25,6 +25,18 @@ export type ApplicationSqlQueryStatement = {
   params?: readonly unknown[]
 }
 
+export type ApplicationSqlQueryBatchOptions = {
+  maxResultBytes?: number
+}
+
+export type ApplicationSqlQueryBatchResult<
+  Row extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  results: Row[][]
+  statements: number
+  resultBytes: number
+}
+
 export type ApplicationSqlTransaction = {
   exec(
     sql: string,
@@ -36,8 +48,9 @@ export type ApplicationSqlTransaction = {
     params?: readonly unknown[]
   ): Promise<Row[]>
   queryBatch<Row extends Record<string, unknown> = Record<string, unknown>>(
-    statements: readonly ApplicationSqlQueryStatement[]
-  ): Promise<Row[][]>
+    statements: readonly ApplicationSqlQueryStatement[],
+    options?: ApplicationSqlQueryBatchOptions
+  ): Promise<ApplicationSqlQueryBatchResult<Row>>
   queryAst<Result = unknown>(
     ast: unknown,
     format: TransactionQueryFormat,
@@ -115,11 +128,13 @@ export type ApplicationSqlSessionRpc = Disposable & {
     params?: readonly unknown[]
   ): Promise<ApplicationSqlPreemptibleResult<Row[]>>
   queryBatch<Row extends Record<string, unknown> = Record<string, unknown>>(
-    statements: readonly ApplicationSqlQueryStatement[]
-  ): Promise<Row[][]>
+    statements: readonly ApplicationSqlQueryStatement[],
+    options?: ApplicationSqlQueryBatchOptions
+  ): Promise<ApplicationSqlQueryBatchResult<Row>>
   queryBatchPreemptible<Row extends Record<string, unknown> = Record<string, unknown>>(
-    statements: readonly ApplicationSqlQueryStatement[]
-  ): Promise<ApplicationSqlPreemptibleResult<Row[][]>>
+    statements: readonly ApplicationSqlQueryStatement[],
+    options?: ApplicationSqlQueryBatchOptions
+  ): Promise<ApplicationSqlPreemptibleResult<ApplicationSqlQueryBatchResult<Row>>>
   exec(
     sql: string,
     params?: readonly unknown[],
@@ -288,12 +303,12 @@ export function createApplicationSqlClient(
           sessionOptions.priority === 'background' || options.priority === 'background'
             ? applicationSqlPreemptibleValue(await active.queryPreemptible(sql, params))
             : active.query(sql, params),
-        queryBatch: async (statements) =>
+        queryBatch: async (statements, batchOptions) =>
           sessionOptions.priority === 'background' || options.priority === 'background'
             ? applicationSqlPreemptibleValue(
-                await active.queryBatchPreemptible(statements)
+                await active.queryBatchPreemptible(statements, batchOptions)
               )
-            : active.queryBatch(statements),
+            : active.queryBatch(statements, batchOptions),
         async queryAst(ast, format, queryName) {
           const plan = await compileQuery(ast, format)
           if (

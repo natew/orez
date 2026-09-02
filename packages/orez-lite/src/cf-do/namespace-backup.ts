@@ -57,11 +57,22 @@ export interface NamespaceBackupReadOptions {
   priority: NamespaceBackupReadPriority
 }
 
+export interface NamespaceBackupQueryBatchOptions {
+  maxResultBytes?: number
+}
+
+export interface NamespaceBackupQueryBatchResult {
+  results: Record<string, any>[][]
+  statements: number
+  resultBytes: number
+}
+
 export interface NamespaceBackupRead {
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, any>[]>
   queryBatch(
-    statements: readonly NamespaceBackupStatement[]
-  ): Promise<Record<string, any>[][]>
+    statements: readonly NamespaceBackupStatement[],
+    options?: NamespaceBackupQueryBatchOptions
+  ): Promise<NamespaceBackupQueryBatchResult>
 }
 
 export interface NamespaceRestoreSummary {
@@ -335,6 +346,7 @@ export function createNamespaceBackupManager<Env>(
   const maxInflightParts = Math.max(1, options.maxInflightParts ?? 4)
   const scanAttempts = Math.max(1, options.scanAttempts ?? 3)
   const chunkAttempts = Math.max(1, options.chunkAttempts ?? 3)
+  const queryBatchStatements = 32
   const excludedTables = new Set(options.excludedTables ?? [])
   const acceptedFormats = new Set([options.format, ...(options.acceptedFormats ?? [])])
   const backupPrefix =
@@ -389,7 +401,7 @@ export function createNamespaceBackupManager<Env>(
   type ScanCursor = {
     tableIndex: number
     tableOpened: boolean
-    rowidCursor: unknown
+    rowidCursor: unknown | null
     primaryKeyCursor: unknown[] | null
     limit: number
   }
@@ -463,7 +475,24 @@ export function createNamespaceBackupManager<Env>(
     const indexes = master.filter(
       (row) => row.type === 'index' && !isExcluded(row.name) && !isExcluded(row.tbl_name)
     )
-    const populated = await read.queryBatch(
+    const readAllQueryBatches = async (
+      statements: readonly NamespaceBackupStatement[]
+    ) => {
+      const results: Record<string, any>[][] = []
+      for (let offset = 0; offset < statements.length; ) {
+        const batch = await read.queryBatch(
+          statements.slice(offset, offset + queryBatchStatements),
+          { maxResultBytes: chunkTargetBytes }
+        )
+        if (batch.statements < 1) {
+          throw new Error('application SQLite query batch made no progress')
+        }
+        results.push(...batch.results)
+        offset += batch.statements
+      }
+      return results
+    }
+    const populated = await readAllQueryBatches(
       orderedNames.map((name) => ({
         sql: `SELECT 1 AS present FROM "${quoteIdentifier(name)}" LIMIT 1`,
       }))
@@ -471,7 +500,7 @@ export function createNamespaceBackupManager<Env>(
     const withoutRowidNames = orderedNames.filter((name) =>
       /\bWITHOUT\s+ROWID\b/i.test(String(tableByName.get(name)!.sql))
     )
-    const primaryKeyRows = await read.queryBatch(
+    const primaryKeyRows = await readAllQueryBatches(
       withoutRowidNames.map((name) => ({
         sql: `PRAGMA table_info("${quoteIdentifier(name)}")`,
       }))
@@ -533,9 +562,9 @@ export function createNamespaceBackupManager<Env>(
       const openNextTable = () => {
         next.tableIndex++
         next.tableOpened = false
-        next.rowidCursor = 0
+        next.rowidCursor = null
         next.primaryKeyCursor = null
-        next.limit = 200
+        next.limit = 20
       }
       while (next.tableIndex < tables.length && produced < scanChunkBytes) {
         const table = tables[next.tableIndex]!
@@ -555,53 +584,117 @@ export function createNamespaceBackupManager<Env>(
           openNextTable()
           continue
         }
-        const quotedPrimaryKey = table.primaryKeyColumns
-          .map((column) => `"${quoteIdentifier(column)}"`)
-          .join(', ')
-        const usedLimit = next.limit
-        const pages = Math.max(
-          1,
-          Math.min(8, Math.ceil((scanChunkBytes - produced) / chunkTargetBytes))
-        )
-        const baseParams = next.primaryKeyCursor ?? []
-        const results = await read.queryBatch(
-          Array.from({ length: pages }, (_, page) =>
-            table.withoutRowid
+        const pages = [] as Array<{
+          tableIndex: number
+          table: ExportTable
+          usedLimit: number
+          statement: NamespaceBackupStatement
+        }>
+        for (
+          let tableIndex = next.tableIndex;
+          tableIndex < tables.length && pages.length < queryBatchStatements;
+          tableIndex++
+        ) {
+          const plannedTable = tables[tableIndex]!
+          if (!plannedTable.hasRows) continue
+          const current = tableIndex === next.tableIndex
+          const usedLimit = current ? next.limit : 20
+          const primaryKeyCursor = current ? next.primaryKeyCursor : null
+          const rowidCursor = current ? next.rowidCursor : null
+          const quotedPrimaryKey = plannedTable.primaryKeyColumns
+            .map((column) => `"${quoteIdentifier(column)}"`)
+            .join(', ')
+          pages.push({
+            tableIndex,
+            table: plannedTable,
+            usedLimit,
+            statement: plannedTable.withoutRowid
               ? {
-                  sql: next.primaryKeyCursor
-                    ? `SELECT * FROM "${quoteIdentifier(table.name)}" WHERE (${quotedPrimaryKey}) > (${table.primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ? OFFSET ?`
-                    : `SELECT * FROM "${quoteIdentifier(table.name)}" ORDER BY ${quotedPrimaryKey} LIMIT ? OFFSET ?`,
-                  params: [...baseParams, usedLimit, page * usedLimit],
+                  sql: primaryKeyCursor
+                    ? `SELECT * FROM "${quoteIdentifier(plannedTable.name)}" WHERE (${quotedPrimaryKey}) > (${plannedTable.primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
+                    : `SELECT * FROM "${quoteIdentifier(plannedTable.name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
+                  params: primaryKeyCursor
+                    ? [...primaryKeyCursor, usedLimit]
+                    : [usedLimit],
                 }
-              : {
-                  sql: `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.name)}" WHERE rowid > ? ORDER BY rowid LIMIT ? OFFSET ?`,
-                  params: [next.rowidCursor, usedLimit, page * usedLimit],
-                }
-          )
+              : rowidCursor === null
+                ? {
+                    sql: `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(plannedTable.name)}" ORDER BY rowid LIMIT ?`,
+                    params: [usedLimit],
+                  }
+                : {
+                    sql: `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(plannedTable.name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+                    params: [rowidCursor, usedLimit],
+                  },
+          })
+        }
+        const batch = await read.queryBatch(
+          pages.map((page) => page.statement),
+          {
+            maxResultBytes: Math.max(
+              1,
+              Math.min(chunkTargetBytes, scanChunkBytes - produced)
+            ),
+          }
         )
-        for (const rows of results) {
+        if (batch.statements < 1) {
+          throw new Error('application SQLite query batch made no progress')
+        }
+        for (let pageIndex = 0; pageIndex < batch.statements; pageIndex++) {
+          const page = pages[pageIndex]!
+          const rows = batch.results[pageIndex]!
+          while (next.tableIndex < page.tableIndex) {
+            const skipped = tables[next.tableIndex]!
+            if (!next.tableOpened) {
+              const line = encodeLine({
+                kind: 'table',
+                name: skipped.name,
+                sql: skipped.sql,
+                indexes: skipped.indexes,
+              })
+              lines.push(line)
+              produced += line.bytes.byteLength
+              next.tableOpened = true
+              tableRows[skipped.name] = tableRows[skipped.name] ?? 0
+            }
+            openNextTable()
+          }
+          if (!next.tableOpened) {
+            const line = encodeLine({
+              kind: 'table',
+              name: page.table.name,
+              sql: page.table.sql,
+              indexes: page.table.indexes,
+            })
+            lines.push(line)
+            produced += line.bytes.byteLength
+            next.tableOpened = true
+            tableRows[page.table.name] = tableRows[page.table.name] ?? 0
+          }
           if (rows.length === 0) {
             openNextTable()
-            break
+            continue
           }
-          if (table.withoutRowid) {
+          if (page.table.withoutRowid) {
             const last = rows.at(-1)!
-            next.primaryKeyCursor = table.primaryKeyColumns.map((column) => last[column])
+            next.primaryKeyCursor = page.table.primaryKeyColumns.map(
+              (column) => last[column]
+            )
           } else {
             next.rowidCursor = rows.at(-1)?.__orez_backup_rowid
             for (const row of rows) delete row.__orez_backup_rowid
           }
-          const line = encodeLine({ kind: 'rows', table: table.name, rows })
+          const line = encodeLine({ kind: 'rows', table: page.table.name, rows })
           lines.push(line)
           produced += line.bytes.byteLength
-          tableRows[table.name] = (tableRows[table.name] ?? 0) + rows.length
+          tableRows[page.table.name] = (tableRows[page.table.name] ?? 0) + rows.length
           const perRow = Math.max(1, Math.ceil(line.bytes.byteLength / rows.length))
           next.limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
-          if (rows.length < usedLimit) {
+          if (rows.length < page.usedLimit) {
             openNextTable()
-            break
+            continue
           }
-          if (produced >= scanChunkBytes) break
+          break
         }
       }
       return { torn: false, lines, tableRows, next } as const
@@ -723,9 +816,9 @@ export function createNamespaceBackupManager<Env>(
       let cursor: ScanCursor = {
         tableIndex: 0,
         tableOpened: false,
-        rowidCursor: 0,
+        rowidCursor: null,
         primaryKeyCursor: null,
-        limit: 200,
+        limit: 20,
       }
       while (cursor.tableIndex < tables.length) {
         const chunk = await readChunk(

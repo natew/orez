@@ -53,6 +53,8 @@ import type {
   ApplicationSqlClientOptions,
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
+  ApplicationSqlQueryBatchOptions,
+  ApplicationSqlQueryBatchResult,
   ApplicationSqlQueryStatement,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
@@ -71,6 +73,8 @@ export type {
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
+  ApplicationSqlQueryBatchOptions,
+  ApplicationSqlQueryBatchResult,
   ApplicationSqlQueryCompiler,
   ApplicationSqlQueryStatement,
   ApplicationSqlRpc,
@@ -391,6 +395,17 @@ const APPLICATION_SQL_QUERY_BATCH_PREEMPTIBLE = Symbol(
   'applicationSqlQueryBatchPreemptible'
 )
 const APPLICATION_SQL_EXEC = Symbol('applicationSqlExec')
+
+const applicationSqlResultEncoder = new TextEncoder()
+const applicationSqlQueryBatchStatements = 32
+
+function isApplicationSqlReadStatement(sql: string): boolean {
+  if (classifySql(sql).mutation) return false
+  if (!/(?:^|;)\s*PRAGMA\b/i.test(sql)) return true
+  return /^\s*PRAGMA\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:table_info|table_xinfo|index_list|index_info|index_xinfo|foreign_key_list)\s*\([^;]*\)\s*;?\s*$/i.test(
+    sql
+  )
+}
 const APPLICATION_SQL_QUERY_PLAN = Symbol('applicationSqlQueryPlan')
 const APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE = Symbol(
   'applicationSqlQueryPlanPreemptible'
@@ -435,15 +450,17 @@ class ApplicationSqlSessionTarget extends RpcTarget {
   }
 
   queryBatch<Row extends Record<string, unknown> = Record<string, unknown>>(
-    statements: readonly ApplicationSqlQueryStatement[]
-  ): Promise<Row[][]> {
-    return this.owner[APPLICATION_SQL_QUERY_BATCH](this, statements)
+    statements: readonly ApplicationSqlQueryStatement[],
+    options?: ApplicationSqlQueryBatchOptions
+  ): Promise<ApplicationSqlQueryBatchResult<Row>> {
+    return this.owner[APPLICATION_SQL_QUERY_BATCH](this, statements, options)
   }
 
   queryBatchPreemptible<Row extends Record<string, unknown> = Record<string, unknown>>(
-    statements: readonly ApplicationSqlQueryStatement[]
-  ): Promise<ApplicationSqlPreemptibleResult<Row[][]>> {
-    return this.owner[APPLICATION_SQL_QUERY_BATCH_PREEMPTIBLE](this, statements)
+    statements: readonly ApplicationSqlQueryStatement[],
+    options?: ApplicationSqlQueryBatchOptions
+  ): Promise<ApplicationSqlPreemptibleResult<ApplicationSqlQueryBatchResult<Row>>> {
+    return this.owner[APPLICATION_SQL_QUERY_BATCH_PREEMPTIBLE](this, statements, options)
   }
 
   exec(
@@ -2040,12 +2057,12 @@ export class ZeroDO extends DurableObject {
                   await session.queryPreemptible(sql, params)
                 )
               : session.query(sql, params),
-          queryBatch: async (statements) =>
+          queryBatch: async (statements, batchOptions) =>
             options.priority === 'background'
               ? applicationSqlPreemptibleValue(
-                  await session.queryBatchPreemptible(statements)
+                  await session.queryBatchPreemptible(statements, batchOptions)
                 )
-              : session.queryBatch(statements),
+              : session.queryBatch(statements, batchOptions),
           registerTables: (tables) => session.registerTables(tables),
           async queryAst(ast, format, queryName) {
             const plan = await compileQuery(ast, format)
@@ -2185,7 +2202,7 @@ export class ZeroDO extends DurableObject {
     sql: string
   ): void {
     this.assertApplicationSqlSession(session)
-    if (session.readOnly && classifySql(sql).mutation) {
+    if (session.readOnly && !isApplicationSqlReadStatement(sql)) {
       throw new Error('read-only application SQLite session cannot execute a mutation')
     }
   }
@@ -2230,38 +2247,58 @@ export class ZeroDO extends DurableObject {
     Row extends Record<string, unknown> = Record<string, unknown>,
   >(
     session: ApplicationSqlSessionTarget,
-    statements: readonly ApplicationSqlQueryStatement[]
-  ): Promise<Row[][]> {
+    statements: readonly ApplicationSqlQueryStatement[],
+    options: ApplicationSqlQueryBatchOptions = {}
+  ): Promise<ApplicationSqlQueryBatchResult<Row>> {
     this.assertApplicationSqlSession(session)
+    const maxResultBytes = options.maxResultBytes ?? Number.MAX_SAFE_INTEGER
+    if (!Number.isSafeInteger(maxResultBytes) || maxResultBytes < 1) {
+      throw new TypeError(
+        'application SQLite query batch maxResultBytes must be positive'
+      )
+    }
+    if (statements.length > applicationSqlQueryBatchStatements) {
+      throw new RangeError(
+        `application SQLite query batch cannot exceed ${applicationSqlQueryBatchStatements} statements`
+      )
+    }
     for (const statement of statements) {
-      if (classifySql(statement.sql).mutation) {
+      if (!isApplicationSqlReadStatement(statement.sql)) {
         throw new Error('application SQLite query batch cannot execute a mutation')
       }
     }
-    return this.atomically(() =>
-      statements.map(
-        (statement) =>
-          this.executeSQL(
-            statement.sql,
-            [...(statement.params ?? [])],
-            undefined,
-            session.sessionID,
-            session.telemetry
-          ).rows as Row[]
-      )
-    )
+    return this.atomically(() => {
+      const results: Row[][] = []
+      let resultBytes = 0
+      for (const statement of statements) {
+        const rows = this.executeSQL(
+          statement.sql,
+          [...(statement.params ?? [])],
+          undefined,
+          session.sessionID,
+          session.telemetry
+        ).rows as Row[]
+        const bytes = applicationSqlResultEncoder.encode(JSON.stringify(rows)).byteLength
+        if (results.length > 0 && resultBytes + bytes > maxResultBytes) break
+        results.push(rows)
+        resultBytes += bytes
+        if (resultBytes >= maxResultBytes) break
+      }
+      return { results, statements: results.length, resultBytes }
+    })
   }
 
   async [APPLICATION_SQL_QUERY_BATCH_PREEMPTIBLE]<
     Row extends Record<string, unknown> = Record<string, unknown>,
   >(
     session: ApplicationSqlSessionTarget,
-    statements: readonly ApplicationSqlQueryStatement[]
-  ): Promise<ApplicationSqlPreemptibleResult<Row[][]>> {
+    statements: readonly ApplicationSqlQueryStatement[],
+    options: ApplicationSqlQueryBatchOptions = {}
+  ): Promise<ApplicationSqlPreemptibleResult<ApplicationSqlQueryBatchResult<Row>>> {
     if (session.state === 'preempted') return { outcome: 'preempted' }
     return {
       outcome: 'completed',
-      value: await this[APPLICATION_SQL_QUERY_BATCH]<Row>(session, statements),
+      value: await this[APPLICATION_SQL_QUERY_BATCH]<Row>(session, statements, options),
     }
   }
 

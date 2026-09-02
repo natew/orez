@@ -414,6 +414,14 @@ describe('createOrezDataWorker', () => {
   it('runs a namespace backup through one read-only application SQL session', async () => {
     const rowsFor = (sql: string) =>
       sql.includes('SELECT write_seq') ? [{ write_seq: 7 }] : []
+    const batchFor = (statements: readonly { sql: string }[]) => {
+      const results = statements.map((statement) => rowsFor(statement.sql))
+      return {
+        results,
+        statements: results.length,
+        resultBytes: new TextEncoder().encode(JSON.stringify(results)).byteLength,
+      }
+    }
     const session = {
       [Symbol.dispose]: vi.fn(),
       begin: vi.fn(async () => undefined),
@@ -423,11 +431,11 @@ describe('createOrezDataWorker', () => {
         value: rowsFor(sql),
       })),
       queryBatch: vi.fn(async (statements: readonly { sql: string }[]) =>
-        statements.map((statement) => rowsFor(statement.sql))
+        batchFor(statements)
       ),
       queryBatchPreemptible: vi.fn(async (statements: readonly { sql: string }[]) => ({
         outcome: 'completed' as const,
-        value: statements.map((statement) => rowsFor(statement.sql)),
+        value: batchFor(statements),
       })),
       exec: vi.fn(),
       queryPlan: vi.fn(),
@@ -491,7 +499,7 @@ describe('createOrezDataWorker', () => {
     expect(applicationSqlQuery).not.toHaveBeenCalled()
     expect(session.begin).toHaveBeenCalledOnce()
     expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
-    expect(session.queryBatchPreemptible).toHaveBeenCalledTimes(2)
+    expect(session.queryBatchPreemptible).not.toHaveBeenCalled()
     expect(session.query).not.toHaveBeenCalled()
     expect(session.queryBatch).not.toHaveBeenCalled()
     expect(session.commitPreemptible).toHaveBeenCalledOnce()
@@ -512,9 +520,9 @@ describe('createOrezDataWorker', () => {
       priority: 'normal',
     })
     expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
-    expect(session.queryBatchPreemptible).toHaveBeenCalledTimes(2)
+    expect(session.queryBatchPreemptible).not.toHaveBeenCalled()
     expect(session.query).toHaveBeenCalledTimes(2)
-    expect(session.queryBatch).toHaveBeenCalledTimes(2)
+    expect(session.queryBatch).not.toHaveBeenCalled()
     expect(session.commitPreemptible).toHaveBeenCalledOnce()
     expect(session.commit).toHaveBeenCalledOnce()
   })

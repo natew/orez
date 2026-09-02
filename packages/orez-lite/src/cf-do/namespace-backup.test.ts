@@ -7,6 +7,7 @@ import { ApplicationSqlSessionPreemptedError } from './application-sql.js'
 import {
   createNamespaceBackupManager,
   type NamespaceBackupBucket,
+  type NamespaceBackupQueryBatchOptions,
   type NamespaceBackupStatement,
 } from './namespace-backup.js'
 
@@ -129,6 +130,25 @@ function writableBucket() {
 
 const BetterSqlite3 = BedrockSqlite.Database
 
+async function queryBatch(
+  query: (sql: string, params?: readonly unknown[]) => Promise<Record<string, any>[]>,
+  statements: readonly NamespaceBackupStatement[],
+  options: NamespaceBackupQueryBatchOptions = {}
+) {
+  const maxResultBytes = options.maxResultBytes ?? Number.MAX_SAFE_INTEGER
+  const results: Record<string, any>[][] = []
+  let resultBytes = 0
+  for (const statement of statements) {
+    const rows = await query(statement.sql, statement.params ?? [])
+    const bytes = new TextEncoder().encode(JSON.stringify(rows)).byteLength
+    if (results.length > 0 && resultBytes + bytes > maxResultBytes) break
+    results.push(rows)
+    resultBytes += bytes
+    if (resultBytes >= maxResultBytes) break
+  }
+  return { results, statements: results.length, resultBytes }
+}
+
 // every export read runs in one session. these tests exercise the scan itself,
 // so the session is a pass-through over the same query callback.
 function backupManager<Env>(options: any) {
@@ -138,10 +158,11 @@ function backupManager<Env>(options: any) {
         options.query(env, namespace, sql, params)
       return work({
         query,
-        queryBatch: (statements: readonly NamespaceBackupStatement[]) =>
-          Promise.all(
-            statements.map((statement) => query(statement.sql, statement.params ?? []))
-          ),
+        queryBatch: async (statements, batchOptions) => {
+          const result = await queryBatch(query, statements, batchOptions)
+          options.onQueryBatch?.(statements, batchOptions, result)
+          return result
+        },
       })
     },
     ...options,
@@ -152,7 +173,8 @@ function realSqliteManager(
   db: InstanceType<typeof BetterSqlite3>,
   bucket: NamespaceBackupBucket,
   batchSizes: number[] = [],
-  metrics?: { queries: string[]; rowsRead: number }
+  metrics?: { queries: string[]; rowsRead: number },
+  onQueryBatch?: (...args: any[]) => void
 ) {
   return backupManager({
     format: 'test-v3',
@@ -184,6 +206,7 @@ function realSqliteManager(
       }
     },
     listNamespaces: async () => ['singleton'],
+    onQueryBatch,
   })
 }
 
@@ -208,7 +231,9 @@ describe('namespace backup export', () => {
         }
         if (sql.includes('FROM "empty"')) return []
         if (sql.includes('FROM "message"')) {
-          return Number(params[0]) === 0 ? [{ __orez_backup_rowid: 1, id: 'one' }] : []
+          return sql.includes('WHERE rowid >')
+            ? []
+            : [{ __orez_backup_rowid: 1, id: 'one' }]
         }
         throw new Error(`unexpected export query: ${sql}`)
       },
@@ -250,12 +275,8 @@ describe('namespace backup export', () => {
           query(env, namespace, sql, params)
         await work({
           query: sessionQuery,
-          queryBatch: (statements: readonly NamespaceBackupStatement[]) =>
-            Promise.all(
-              statements.map((statement) =>
-                sessionQuery(statement.sql, statement.params ?? [])
-              )
-            ),
+          queryBatch: (statements, batchOptions) =>
+            queryBatch(sessionQuery, statements, batchOptions),
         })
         throw new ApplicationSqlSessionPreemptedError()
       },
@@ -324,8 +345,11 @@ describe('namespace backup export', () => {
         }
         if (sql.includes('FROM "message"')) {
           pageQueries.push({ sql, params })
-          const limit = Number(params.at(-2))
-          const offset = Number(params.at(-1))
+          const limit = Number(params.at(-1))
+          const offset = sql.includes(' WHERE ')
+            ? rows.findIndex((row) => row.tenant === params[0] && row.id === params[1]) +
+              1
+            : 0
           return rows.slice(offset, offset + limit)
         }
         throw new Error(`unexpected export query: ${sql}`)
@@ -344,20 +368,12 @@ describe('namespace backup export', () => {
     })
     expect(pageQueries).toEqual([
       {
-        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
-        params: [200, 0],
+        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ?',
+        params: [20],
       },
       {
-        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
-        params: [200, 200],
-      },
-      {
-        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
-        params: [200, 400],
-      },
-      {
-        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
-        params: [200, 600],
+        sql: 'SELECT * FROM "message" WHERE ("tenant", "id") > (?, ?) ORDER BY "tenant", "id" LIMIT ?',
+        params: ['tenant-one', 'message-019', 1000],
       },
     ])
   })
@@ -396,6 +412,108 @@ describe('namespace backup export', () => {
 
     expect(summary).toMatchObject({ marker: 7, rows: 1_201 })
     expect(exported).toEqual(expected)
+    db.close()
+  })
+
+  it('exports explicit negative and zero ROWIDs before positive ROWIDs', async () => {
+    const db = new BetterSqlite3(':memory:')
+    const stored = writableBucket()
+    db.exec('CREATE TABLE message (body TEXT)')
+    db.exec('CREATE TABLE _test_backup_meta (id INTEGER PRIMARY KEY, write_seq INTEGER)')
+    db.exec('INSERT INTO _test_backup_meta VALUES (1, 3)')
+    db.prepare('INSERT INTO message (rowid, body) VALUES (?, ?)').run(-1, 'negative')
+    db.prepare('INSERT INTO message (rowid, body) VALUES (?, ?)').run(0, 'zero')
+    db.prepare('INSERT INTO message (rowid, body) VALUES (?, ?)').run(1, 'positive')
+
+    const summary = await exportedSummary(
+      realSqliteManager(db, stored.bucket).exportNamespace({}, 'singleton')
+    )
+
+    expect(summary.rows).toBe(3)
+    expect(dumped(stored).rowsOf('message')).toEqual([
+      { body: 'negative' },
+      { body: 'zero' },
+      { body: 'positive' },
+    ])
+    db.close()
+  })
+
+  it('batches populated tables instead of making one RPC per table', async () => {
+    const db = new BetterSqlite3(':memory:')
+    const stored = writableBucket()
+    db.exec('CREATE TABLE _test_backup_meta (id INTEGER PRIMARY KEY, write_seq INTEGER)')
+    db.exec('INSERT INTO _test_backup_meta VALUES (1, 5)')
+    db.exec('BEGIN')
+    for (let index = 0; index < 200; index++) {
+      const table = `item_${String(index).padStart(3, '0')}`
+      db.exec(`CREATE TABLE "${table}" (value TEXT)`)
+      db.exec(`INSERT INTO "${table}" VALUES ('row-${index}')`)
+    }
+    db.exec('COMMIT')
+    let schemaBatches = 0
+    let dataBatches = 0
+    let largestBatch = 0
+    const manager = realSqliteManager(
+      db,
+      stored.bucket,
+      [],
+      undefined,
+      (statements: readonly NamespaceBackupStatement[]) => {
+        largestBatch = Math.max(largestBatch, statements.length)
+        if (
+          statements.some((statement) => statement.sql.includes('__orez_backup_rowid'))
+        ) {
+          dataBatches++
+        } else {
+          schemaBatches++
+        }
+      }
+    )
+
+    const summary = await exportedSummary(manager.exportNamespace({}, 'singleton'))
+
+    expect(summary).toMatchObject({ tables: 200, rows: 200 })
+    expect(largestBatch).toBe(32)
+    expect(schemaBatches).toBe(7)
+    expect(dataBatches).toBe(7)
+    db.close()
+  })
+
+  it('keeps wide-row data RPCs near the configured target before preemption', async () => {
+    const db = new BetterSqlite3(':memory:')
+    const stored = writableBucket()
+    db.exec('CREATE TABLE message (body TEXT)')
+    db.exec('CREATE TABLE _test_backup_meta (id INTEGER PRIMARY KEY, write_seq INTEGER)')
+    db.exec('INSERT INTO _test_backup_meta VALUES (1, 8)')
+    const insert = db.prepare('INSERT INTO message VALUES (?)')
+    const body = 'x'.repeat(32_000)
+    db.exec('BEGIN')
+    for (let index = 0; index < 800; index++) insert.run(`${index}:${body}`)
+    db.exec('COMMIT')
+    const dataBatchBytes: number[] = []
+    const manager = realSqliteManager(
+      db,
+      stored.bucket,
+      [],
+      undefined,
+      (
+        statements: readonly NamespaceBackupStatement[],
+        _options: NamespaceBackupQueryBatchOptions,
+        result: { resultBytes: number }
+      ) => {
+        if (
+          statements.some((statement) => statement.sql.includes('__orez_backup_rowid'))
+        ) {
+          dataBatchBytes.push(result.resultBytes)
+        }
+      }
+    )
+
+    const summary = await exportedSummary(manager.exportNamespace({}, 'singleton'))
+
+    expect(summary.rows).toBe(800)
+    expect(dataBatchBytes.length).toBeGreaterThan(1)
+    expect(Math.max(...dataBatchBytes)).toBeLessThan(2_200_000)
     db.close()
   })
 })
@@ -459,12 +577,8 @@ describe('namespace backup export consistency', () => {
             run(sql, params)
           return await work({
             query,
-            queryBatch: (statements: readonly NamespaceBackupStatement[]) =>
-              Promise.all(
-                statements.map((statement) =>
-                  query(statement.sql, statement.params ?? [])
-                )
-              ),
+            queryBatch: (statements, batchOptions) =>
+              queryBatch(query, statements, batchOptions),
           })
         } finally {
           readersOpen--
@@ -586,8 +700,9 @@ function durableObject(
       work: (read: {
         query(sql: string, params?: readonly unknown[]): Promise<Record<string, any>[]>
         queryBatch(
-          statements: readonly NamespaceBackupStatement[]
-        ): Promise<Record<string, any>[][]>
+          statements: readonly NamespaceBackupStatement[],
+          batchOptions?: NamespaceBackupQueryBatchOptions
+        ): ReturnType<typeof queryBatch>
       }) => Promise<Value>,
       options: { priority: 'background' | 'normal' } = { priority: 'background' }
     ): Promise<Value> {
@@ -604,10 +719,8 @@ function durableObject(
         }
         const value = await work({
           query,
-          queryBatch: (statements) =>
-            Promise.all(
-              statements.map((statement) => query(statement.sql, statement.params ?? []))
-            ),
+          queryBatch: (statements, batchOptions) =>
+            queryBatch(query, statements, batchOptions),
         })
         // a session preempted after its last read still fails at commit
         if (session.preempted) throw new ApplicationSqlSessionPreemptedError()
@@ -922,7 +1035,7 @@ describe('namespace backup export under a live writer', () => {
       excludedTables: ['_test_backup_meta'],
       scanChunkBytes: 1,
       // small parts so the scan produces many uploads before it finishes
-      partBytes: 2048,
+      partBytes: 256,
       maxInflightParts: 64,
       files: () => ({
         ...stored.bucket,

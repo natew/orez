@@ -171,7 +171,7 @@ function relatedPlan() {
 
 describe('ZeroDO trusted application transaction', () => {
   it('samples named query and transaction timing without logging SQL values', async () => {
-    const { zero } = await createTestZero(async (work) => await work())
+    const { storage, zero } = await createTestZero(async (work) => await work())
     zero.sqlTelemetrySampleRate = 1
     const events: Array<Record<string, unknown>> = []
     const log = vi.spyOn(console, 'log').mockImplementation((message) => {
@@ -627,7 +627,7 @@ describe('ZeroDO trusted application transaction', () => {
   })
 
   it('refuses a mutation from a read session instead of escalating it', async () => {
-    const { zero } = await createTestZero(async (work) => await work())
+    const { storage, zero } = await createTestZero(async (work) => await work())
     const reader = await zero.applicationSqlSession('reader', { readOnly: true })
     await reader.begin()
 
@@ -645,10 +645,33 @@ describe('ZeroDO trusted application transaction', () => {
         { sql: 'SELECT id FROM item' },
         { sql: 'SELECT enabled FROM item' },
       ])
-    ).resolves.toEqual([[{ id: 'row-1', enabled: 1 }], [{ id: 'row-1', enabled: 1 }]])
+    ).resolves.toEqual({
+      results: [[{ id: 'row-1', enabled: 1 }], [{ id: 'row-1', enabled: 1 }]],
+      statements: 2,
+      resultBytes: 56,
+    })
     await expect(
       reader.queryBatch([{ sql: "UPDATE item SET enabled = 0 WHERE id = 'row-1'" }])
     ).rejects.toThrow('application SQLite query batch cannot execute a mutation')
+    await expect(
+      reader.queryBatch([{ sql: 'PRAGMA user_version = 73' }])
+    ).rejects.toThrow('application SQLite query batch cannot execute a mutation')
+    await expect(
+      reader.queryBatch(
+        Array.from({ length: 33 }, () => ({ sql: 'SELECT id FROM item' }))
+      )
+    ).rejects.toThrow('application SQLite query batch cannot exceed 32 statements')
+    await expect(
+      reader.queryBatch(
+        [{ sql: 'SELECT id FROM item' }, { sql: 'SELECT enabled FROM item' }],
+        { maxResultBytes: 1 }
+      )
+    ).resolves.toEqual({
+      results: [[{ id: 'row-1', enabled: 1 }]],
+      statements: 1,
+      resultBytes: 28,
+    })
+    expect(storage.lastSql).toBe('SELECT id FROM item')
     zero.releaseApplicationSqlTurn(reader)
   })
 
