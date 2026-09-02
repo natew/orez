@@ -38,7 +38,9 @@ export type SQLiteTransactionExecutor = {
    * atomic step. a remote owner holds its writer across each round trip, so a
    * list sent one statement at a time holds it for the whole exchange.
    */
-  execMany(statements: readonly SQLiteStatement[]): SQLiteExecResult[] | Promise<SQLiteExecResult[]>
+  execMany(
+    statements: readonly SQLiteStatement[]
+  ): SQLiteExecResult[] | Promise<SQLiteExecResult[]>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]

@@ -83,8 +83,8 @@ describe('createSQLiteDatabase', () => {
           { sql: 'INSERT INTO todo (id, title) VALUES (?, ?)', params: [1, 'first'] },
           { sql: 'INSERT INTO todo (id, title) VALUES (?, ?)', params: [2, 'second'] },
           { sql: "UPDATE todo SET title = 'renamed' WHERE id <= 2" },
-        ]),
-      ),
+        ])
+      )
     ).resolves.toEqual([{ changes: 1 }, { changes: 1 }, { changes: 2 }])
 
     expect(native.query('SELECT title FROM todo ORDER BY id').all()).toEqual([

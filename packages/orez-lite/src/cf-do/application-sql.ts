@@ -56,7 +56,9 @@ export type ApplicationSqlTransaction = {
    * a write session holds the exclusive writer across each round trip, so a
    * list of statements sent one at a time holds it for the whole exchange.
    */
-  execMany(statements: readonly ApplicationSqlStatement[]): Promise<ApplicationSqlExecResult[]>
+  execMany(
+    statements: readonly ApplicationSqlStatement[]
+  ): Promise<ApplicationSqlExecResult[]>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -142,7 +144,9 @@ export type ApplicationSqlSessionRpc = Disposable & {
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult>
-  execMany(statements: readonly ApplicationSqlStatement[]): Promise<ApplicationSqlExecManyOutcome>
+  execMany(
+    statements: readonly ApplicationSqlStatement[]
+  ): Promise<ApplicationSqlExecManyOutcome>
   queryPlan<Result = unknown>(
     plan: CompiledTransactionQueryPlan,
     queryName?: string,

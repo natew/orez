@@ -202,7 +202,8 @@ describe('buildMigrationModuleSource', () => {
       async execMany(
         statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
       ) {
-        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        for (const statement of statements)
+          await this.exec(statement.sql, [...(statement.params ?? [])])
         return statements.map(() => ({ changes: 0 }))
       },
       async registerTables() {},
@@ -297,7 +298,8 @@ describe('buildMigrationModuleSource', () => {
       async execMany(
         statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
       ) {
-        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        for (const statement of statements)
+          await this.exec(statement.sql, [...(statement.params ?? [])])
         return statements.map(() => ({ changes: 0 }))
       },
       async registerTables() {},
@@ -611,7 +613,8 @@ describe('buildMigrationModuleSource', () => {
       async execMany(
         statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
       ) {
-        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        for (const statement of statements)
+          await this.exec(statement.sql, [...(statement.params ?? [])])
         return statements.map(() => ({ changes: 0 }))
       },
       async registerTables() {},
@@ -687,7 +690,8 @@ describe('buildMigrationModuleSource', () => {
         async execMany(
           statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
         ) {
-          for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+          for (const statement of statements)
+            await this.exec(statement.sql, [...(statement.params ?? [])])
           return statements.map(() => ({ changes: 0 }))
         },
         async registerTables() {},
@@ -843,7 +847,8 @@ describe('buildMigrationModuleSource', () => {
       async execMany(
         statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
       ) {
-        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        for (const statement of statements)
+          await this.exec(statement.sql, [...(statement.params ?? [])])
         return statements.map(() => ({ changes: 0 }))
       },
       async registerTables() {},

@@ -259,7 +259,10 @@ describe('application session statement lists', () => {
         { sql: `INSERT INTO todo (id, title) VALUES ('t1', 'one')` },
         { sql: `INSERT INTO todo (id, title) VALUES ('t0', 'duplicate key')` },
       ])
-    ).resolves.toMatchObject({ failedIndex: 1, message: expect.stringContaining('UNIQUE') })
+    ).resolves.toMatchObject({
+      failedIndex: 1,
+      message: expect.stringContaining('UNIQUE'),
+    })
 
     // the storage transaction dropped the whole list, including its first row,
     // while the earlier call's row waits for the session's own verdict.
