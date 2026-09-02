@@ -1,4 +1,5 @@
 export { assertString } from './assert.js'
+export { useAsyncEffect, useAsyncLayoutEffect } from './async/useAsyncEffect.js'
 export { sleep } from './async/sleep.js'
 export { isActiveElementFormField } from './browser/isActiveElementFormField.js'
 export { openCenteredPopup } from './browser/openPopup.js'
@@ -11,6 +12,7 @@ export {
   useEmitterValue,
 } from './emitter.js'
 export { isEqualIdentity } from './object/isEqualIdentity.js'
+export { isEqualNever } from './object/isEqualNever.js'
 export { createGlobalContext } from './react/createGlobalContext.js'
 export { createStorage, createStorageValue } from './storage/createStorage.js'
 export {
