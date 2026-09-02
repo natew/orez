@@ -1,6 +1,6 @@
 {
   "name": "@o/cli",
-  "version": "0.16.13",
+  "version": "0.16.14",
   "description": "Typed command and subprocess helpers for Orez consumers.",
   "license": "MIT",
   "repository": {
