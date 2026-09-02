@@ -17,7 +17,10 @@ import {
   WriteBudgetExceededError,
   type RowWriteBudgetTrip,
 } from '../do-sql-tracking.js'
-import { applicationSqlPreemptibleValue } from './application-sql.js'
+import {
+  applicationSqlPreemptibleValue,
+  applicationSqlSessionTransaction,
+} from './application-sql.js'
 import {
   TransactionalCdc,
   schemaChangeTargets,
@@ -2024,25 +2027,14 @@ export class ZeroDO extends DurableObject {
       queryBudget?: Partial<TransactionQueryBudget>
     ) =>
       run(readOnly, async (session) =>
-        work({
-          exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
-          query: async (sql, params = []) =>
-            options.priority === 'background'
-              ? applicationSqlPreemptibleValue(
-                  await session.queryPreemptible(sql, params)
-                )
-              : session.query(sql, params),
-          registerTables: (tables) => session.registerTables(tables),
-          async queryAst(ast, format, queryName) {
-            const plan = await compileQuery(ast, format)
-            if (options.priority === 'background') {
-              return applicationSqlPreemptibleValue(
-                await session.queryPlanPreemptible(plan, queryName, queryBudget)
-              )
-            }
-            return session.queryPlan(plan, queryName, queryBudget)
-          },
-        })
+        work(
+          applicationSqlSessionTransaction(
+            session,
+            options.priority === 'background',
+            compileQuery,
+            queryBudget
+          )
+        )
       )
     return {
       namespace,

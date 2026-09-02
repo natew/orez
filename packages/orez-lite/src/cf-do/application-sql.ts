@@ -75,6 +75,57 @@ export type ApplicationSqlTransactionWork<Value> = (
   tx: ApplicationSqlTransaction
 ) => Value | Promise<Value>
 
+/** the session methods a transaction executor is built over */
+export type ApplicationSqlSessionExecutor = Pick<
+  ApplicationSqlSessionRpc,
+  | 'exec'
+  | 'execMany'
+  | 'query'
+  | 'queryPreemptible'
+  | 'queryPlan'
+  | 'queryPlanPreemptible'
+  | 'registerTables'
+>
+
+/**
+ * the one transaction executor over an application SQL session, whether the
+ * session is reached over RPC from a worker or held directly inside the
+ * durable object. every method of ApplicationSqlTransaction is defined here,
+ * so a session-backed client cannot drift from the contract.
+ */
+export function applicationSqlSessionTransaction(
+  session: ApplicationSqlSessionExecutor,
+  background: boolean,
+  compileQuery: ApplicationSqlQueryCompiler,
+  queryBudget?: Partial<TransactionQueryBudget>
+): ApplicationSqlTransaction {
+  return {
+    exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
+    execMany: async (statements) => {
+      if (statements.length === 0) return []
+      const outcome = await session.execMany(statements)
+      if ('failedIndex' in outcome) {
+        throw new ApplicationSqlStatementError(outcome.failedIndex, outcome.message)
+      }
+      return outcome.results
+    },
+    query: async (sql, params = []) =>
+      background
+        ? applicationSqlPreemptibleValue(await session.queryPreemptible(sql, params))
+        : session.query(sql, params),
+    async queryAst(ast, format, queryName) {
+      const plan = await compileQuery(ast, format)
+      if (background) {
+        return applicationSqlPreemptibleValue(
+          await session.queryPlanPreemptible(plan, queryName, queryBudget)
+        )
+      }
+      return session.queryPlan(plan, queryName, queryBudget)
+    },
+    registerTables: (tables) => session.registerTables(tables),
+  }
+}
+
 /**
  * admission lane for one application SQLite session.
  *
@@ -304,34 +355,14 @@ export function createApplicationSqlClient(
     queryBudget?: Partial<TransactionQueryBudget>
   ) =>
     session(sessionOptions, (active) =>
-      work({
-        exec: (sql, params = [], metadata) => active.exec(sql, params, metadata),
-        execMany: async (statements) => {
-          if (statements.length === 0) return []
-          const outcome = await active.execMany(statements)
-          if ('failedIndex' in outcome) {
-            throw new ApplicationSqlStatementError(outcome.failedIndex, outcome.message)
-          }
-          return outcome.results
-        },
-        query: async (sql, params = []) =>
-          sessionOptions.priority === 'background' || options.priority === 'background'
-            ? applicationSqlPreemptibleValue(await active.queryPreemptible(sql, params))
-            : active.query(sql, params),
-        async queryAst(ast, format, queryName) {
-          const plan = await compileQuery(ast, format)
-          if (
-            sessionOptions.priority === 'background' ||
-            options.priority === 'background'
-          ) {
-            return applicationSqlPreemptibleValue(
-              await active.queryPlanPreemptible(plan, queryName, queryBudget)
-            )
-          }
-          return active.queryPlan(plan, queryName, queryBudget)
-        },
-        registerTables: (tables) => active.registerTables(tables),
-      })
+      work(
+        applicationSqlSessionTransaction(
+          active,
+          sessionOptions.priority === 'background' || options.priority === 'background',
+          compileQuery,
+          queryBudget
+        )
+      )
     )
   return {
     namespace,

@@ -211,11 +211,14 @@ try {
   // the 588 current ids take 19 primary-key probe statements. unmatched
   // historical rows do not add reads; the previous scan read all 1,001 rows
   // once per session while opening prepare + one session per file + finalize.
+  // the write count fell when the schema snapshot stopped being rewritten on
+  // every DDL transaction; a statement list sent through execMany costs the
+  // same rows and statements as the same list sent one call at a time.
   assert.deepEqual(cost, {
-    rowsRead: 979,
-    rowsWritten: 69,
+    rowsRead: 954,
+    rowsWritten: 30,
     sessions: 2,
-    statements: 93,
+    statements: 81,
     callbacks: 0,
   })
 } finally {

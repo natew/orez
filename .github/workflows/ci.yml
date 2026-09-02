@@ -563,6 +563,17 @@ jobs:
       - name: sync-cf-host suite
         run: cd packages/sync-cf-host && bun run test
 
+      # orez-lite durable object lanes against local workerd: migration replay
+      # cost, application push, and write attribution. the migration lane
+      # exercises the in-object schema replay, which no vitest lane reaches.
+      - name: orez-lite workerd lanes
+        run: |
+          cd packages/orez-lite
+          bun run build
+          bun run test:migration-workerd
+          bun run test:application-push-workerd
+          bun run test:write-attribution-workerd
+
       # harness lanes import orez-sync-executor by package path, which resolves
       # to dist. Bun reads the rest of the harness from TypeScript source, so
       # nothing else in these lanes needs a build and it is easy to assume this
