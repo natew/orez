@@ -55,6 +55,8 @@ import type {
   ApplicationSqlPreemptibleResult,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
+  ApplicationSqlExecManyOutcome,
+  ApplicationSqlStatement,
   ApplicationSqlTable,
   ApplicationSqlTransactionWork,
 } from './application-sql.js'
@@ -75,6 +77,7 @@ export type {
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
   ApplicationSqlSessionRpc,
+  ApplicationSqlStatement,
   ApplicationSqlTable,
   ApplicationSqlTransaction,
   ApplicationSqlTransactionWork,
@@ -385,6 +388,7 @@ const APPLICATION_SQL_ACQUIRE = Symbol('applicationSqlAcquire')
 const APPLICATION_SQL_QUERY = Symbol('applicationSqlQuery')
 const APPLICATION_SQL_QUERY_PREEMPTIBLE = Symbol('applicationSqlQueryPreemptible')
 const APPLICATION_SQL_EXEC = Symbol('applicationSqlExec')
+const APPLICATION_SQL_EXEC_MANY = Symbol('applicationSqlExecMany')
 const APPLICATION_SQL_QUERY_PLAN = Symbol('applicationSqlQueryPlan')
 const APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE = Symbol(
   'applicationSqlQueryPlanPreemptible'
@@ -434,6 +438,12 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult> {
     return this.owner[APPLICATION_SQL_EXEC](this, sql, params, metadata)
+  }
+
+  execMany(
+    statements: readonly ApplicationSqlStatement[]
+  ): Promise<ApplicationSqlExecManyOutcome> {
+    return this.owner[APPLICATION_SQL_EXEC_MANY](this, statements)
   }
 
   queryPlan<Result = unknown>(
@@ -2222,6 +2232,48 @@ export class ZeroDO extends DurableObject {
       )
       return { changes: result.changes }
     })
+  }
+
+  async [APPLICATION_SQL_EXEC_MANY](
+    session: ApplicationSqlSessionTarget,
+    statements: readonly ApplicationSqlStatement[]
+  ): Promise<ApplicationSqlExecManyOutcome> {
+    for (const statement of statements) {
+      this.assertApplicationSqlStatement(session, statement.sql)
+    }
+    // one storage transaction for the whole list: a failure part-way rolls
+    // back every statement in it together with its journal rows, so the
+    // session's own rollback still undoes exactly what earlier calls committed.
+    let failure: { failedIndex: number; message: string } | undefined
+    try {
+      const results = await this.atomically(() =>
+        statements.map(({ sql, params = [], metadata }, index) => {
+          try {
+            if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
+              session.mutated = true
+            }
+            const result = this.executeSQL(
+              sql,
+              [...params],
+              applicationSqlTrack(metadata),
+              session.sessionID,
+              session.telemetry
+            )
+            return { changes: result.changes }
+          } catch (error) {
+            failure = {
+              failedIndex: index,
+              message: error instanceof Error ? error.message : String(error),
+            }
+            throw error
+          }
+        })
+      )
+      return { results }
+    } catch (error) {
+      if (failure) return failure
+      throw error
+    }
   }
 
   async [APPLICATION_SQL_QUERY_PLAN]<Result = unknown>(

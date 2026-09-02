@@ -220,3 +220,53 @@ describe('abandoned application session and the packed ledger', () => {
     expect(Number(core.sql.exec('SELECT COUNT(*) AS c FROM todo').one().c)).toBe(1)
   })
 })
+
+describe('application session statement lists', () => {
+  it('runs the list in order as one atomic storage transaction', async () => {
+    const core = await createWorkerCore()
+    core.sql.exec('CREATE TABLE todo (id TEXT PRIMARY KEY, title TEXT)')
+    createPackedLedger(core.sql)
+
+    const session = await core.zero.applicationSqlSession('batch-1')
+    await session.begin()
+    await session.registerTables([{ table: 'todo', publicTable: 'todo' }])
+    await expect(
+      session.execMany([
+        { sql: `INSERT INTO todo (id, title) VALUES ('t1', 'one')` },
+        { sql: `INSERT INTO todo (id, title) VALUES (?, ?)`, params: ['t2', 'two'] },
+        { sql: `UPDATE todo SET title = 'renamed'` },
+      ])
+    ).resolves.toEqual({ results: [{ changes: 1 }, { changes: 1 }, { changes: 2 }] })
+    await session.commit()
+
+    expect(core.sql.exec('SELECT title FROM todo ORDER BY id').toArray()).toEqual([
+      { title: 'renamed' },
+      { title: 'renamed' },
+    ])
+  })
+
+  it('applies none of a list whose later statement fails', async () => {
+    const core = await createWorkerCore()
+    core.sql.exec('CREATE TABLE todo (id TEXT PRIMARY KEY, title TEXT)')
+    createPackedLedger(core.sql)
+
+    const session = await core.zero.applicationSqlSession('batch-2')
+    await session.begin()
+    await session.registerTables([{ table: 'todo', publicTable: 'todo' }])
+    await session.exec(`INSERT INTO todo (id, title) VALUES ('t0', 'earlier call')`)
+    await expect(
+      session.execMany([
+        { sql: `INSERT INTO todo (id, title) VALUES ('t1', 'one')` },
+        { sql: `INSERT INTO todo (id, title) VALUES ('t0', 'duplicate key')` },
+      ])
+    ).resolves.toMatchObject({ failedIndex: 1, message: expect.stringContaining('UNIQUE') })
+
+    // the storage transaction dropped the whole list, including its first row,
+    // while the earlier call's row waits for the session's own verdict.
+    expect(core.sql.exec('SELECT id FROM todo ORDER BY id').toArray()).toEqual([
+      { id: 't0' },
+    ])
+    await session.rollback()
+    expect(Number(core.sql.exec('SELECT COUNT(*) AS c FROM todo').one().c)).toBe(0)
+  })
+})

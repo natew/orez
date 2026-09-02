@@ -404,6 +404,10 @@ describe('ZeroDO trusted application transaction', () => {
           events.push('exec')
           return { changes: 1 }
         },
+        execMany: async (statements: readonly { sql: string }[]) => {
+          events.push(`execMany:${statements.length}`)
+          return { results: statements.map(() => ({ changes: 1 })) }
+        },
         queryPlan: async () => {
           events.push('queryAst')
           return [{ id: 'row-1', enabled: true }]
@@ -428,13 +432,19 @@ describe('ZeroDO trusted application transaction', () => {
           kind: 'update',
         })
         expect(execResult).toEqual({ changes: 1 })
+        await expect(
+          tx.execMany([
+            { sql: 'DELETE FROM item WHERE id = ?', params: ['row-2'] },
+            { sql: 'DELETE FROM item WHERE id = ?', params: ['row-3'] },
+          ])
+        ).resolves.toEqual([{ changes: 1 }, { changes: 1 }])
         return rows
       }
     )
 
     expect(result).toEqual([{ id: 'row-1', enabled: true }])
     expect(events[0]).toMatch(/^begin:/)
-    expect(events.slice(1)).toEqual(['queryAst', 'exec', 'commit'])
+    expect(events.slice(1)).toEqual(['queryAst', 'exec', 'execMany:2', 'commit'])
   })
 
   it('leaves no server ownership behind for a disposed waiting session', async () => {

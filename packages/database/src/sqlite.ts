@@ -21,12 +21,24 @@ export type SQLiteExecResult = {
   changes: number
 }
 
+export type SQLiteStatement = {
+  sql: string
+  params?: readonly unknown[]
+  metadata?: SqlStatementMetadata
+}
+
 export type SQLiteTransactionExecutor = {
   exec(
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
   ): SQLiteExecResult | Promise<SQLiteExecResult>
+  /**
+   * every statement in one call to the storage owner, in order, as one
+   * atomic step. a remote owner holds its writer across each round trip, so a
+   * list sent one statement at a time holds it for the whole exchange.
+   */
+  execMany(statements: readonly SQLiteStatement[]): SQLiteExecResult[] | Promise<SQLiteExecResult[]>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -140,6 +152,11 @@ export function createBunSQLiteExecutor({
     exec(sql, params = []) {
       const result = database.prepare(sql).run(...bunBindings(params))
       return { changes: result.changes }
+    },
+    execMany(statements) {
+      return statements.map(({ sql, params = [] }) => ({
+        changes: database.prepare(sql).run(...bunBindings(params)).changes,
+      }))
     },
     query<Row extends Record<string, unknown>>(
       sql: string,

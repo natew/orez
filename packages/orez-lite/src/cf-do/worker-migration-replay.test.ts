@@ -267,6 +267,15 @@ function migrationClient(core: Awaited<ReturnType<typeof createWorkerCore>>) {
             changes: core.zero.executeSQL(sql, [...params], undefined, sessionID).changes,
           }
         },
+        execMany: async (
+          statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+        ) =>
+          statements.map(({ sql, params = [] }) => {
+            if (core.zero.prepareApplicationSqlMutation(sessionID, sql)) mutated = true
+            return {
+              changes: core.zero.executeSQL(sql, [...params], undefined, sessionID).changes,
+            }
+          }),
         query: async (sql: string, params: readonly unknown[] = []) =>
           core.zero.executeSQL(sql, [...params], undefined, sessionID).rows,
         registerTables: async (tables: Array<{ table: string; publicTable: string }>) =>

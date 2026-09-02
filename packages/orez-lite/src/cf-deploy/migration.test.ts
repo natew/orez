@@ -199,6 +199,12 @@ describe('buildMigrationModuleSource', () => {
         }
         throw new Error(`unexpected exec: ${sql}`)
       },
+      async execMany(
+        statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+      ) {
+        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        return statements.map(() => ({ changes: 0 }))
+      },
       async registerTables() {},
     }
     const client = {
@@ -288,6 +294,12 @@ describe('buildMigrationModuleSource', () => {
         }
         throw new Error(`unexpected exec: ${sql}`)
       },
+      async execMany(
+        statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+      ) {
+        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        return statements.map(() => ({ changes: 0 }))
+      },
       async registerTables() {},
     }
     const client = {
@@ -362,6 +374,12 @@ describe('buildMigrationModuleSource', () => {
           return
         }
         throw new Error(`unexpected exec: ${sql}`)
+      },
+      async execMany(
+        statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+      ) {
+        for (const statement of statements) await this.exec(statement.sql)
+        return statements.map(() => ({ changes: 0 }))
       },
       async registerTables() {},
     }
@@ -468,6 +486,12 @@ describe('buildMigrationModuleSource', () => {
           return
         }
         throw new Error(`unexpected exec: ${sql}`)
+      },
+      async execMany(
+        statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+      ) {
+        for (const statement of statements) await this.exec(statement.sql)
+        return statements.map(() => ({ changes: 0 }))
       },
       async registerTables() {},
     }
@@ -584,6 +608,12 @@ describe('buildMigrationModuleSource', () => {
         }
         throw new Error(`unexpected exec: ${sql}`)
       },
+      async execMany(
+        statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+      ) {
+        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        return statements.map(() => ({ changes: 0 }))
+      },
       async registerTables() {},
     }
     const client = {
@@ -653,6 +683,12 @@ describe('buildMigrationModuleSource', () => {
             return
           }
           throw new Error(`unexpected exec: ${sql}`)
+        },
+        async execMany(
+          statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+        ) {
+          for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+          return statements.map(() => ({ changes: 0 }))
         },
         async registerTables() {},
       }
@@ -803,6 +839,12 @@ describe('buildMigrationModuleSource', () => {
           return
         }
         throw new Error(`unexpected exec: ${sql}`)
+      },
+      async execMany(
+        statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+      ) {
+        for (const statement of statements) await this.exec(statement.sql, [...(statement.params ?? [])])
+        return statements.map(() => ({ changes: 0 }))
       },
       async registerTables() {},
     }

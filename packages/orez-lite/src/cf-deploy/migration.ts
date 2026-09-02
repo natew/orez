@@ -928,6 +928,71 @@ async function applyNativeSchema(tx, instance, {
   // never happened. compensate explicitly: on failure, delete the rows this
   // run inserted before rethrowing.
   const insertedThisRun = []
+  // a fresh namespace replays hundreds of statements, and one durable object
+  // round trip each was the slowest part of provisioning. statements queue
+  // here with their ledger rows and flush as a single execMany call, breaking
+  // only where a skip condition has to read schema the queue would change.
+  const queued = []
+  const flushQueued = async () => {
+    if (queued.length === 0) return
+    const entries = queued.splice(0)
+    const owners = []
+    const statements = []
+    for (const entry of entries) {
+      for (const statement of entry.statements) {
+        owners.push(entry)
+        statements.push(statement)
+      }
+    }
+    try {
+      await tx.execMany(statements)
+    } catch (error) {
+      const failed =
+        (error && typeof error.statementIndex === 'number' && owners[error.statementIndex]) ||
+        entries[entries.length - 1]
+      const { item, baseId } = failed
+      // a bare sqlite message ("no such table: x") names neither the failing
+      // statement nor which of its siblings the ledger already recorded, and
+      // that ledger state is the only thing that explains a half-applied
+      // table-recreate block. the live column list of the target table is
+      // the other half of that story for DDL chains.
+      const file = baseId.split(':')[0]
+      const siblings = [...applied].filter((appliedId) => appliedId.startsWith(file))
+      let tableInfo = ''
+      // CREATE INDEX belongs here as much as the DML shapes: "no such
+      // column" on an index names a column the target table is missing,
+      // and the table's real column list is the whole diagnosis. it also
+      // has to come BEFORE the ledger list, which runs to hundreds of ids
+      // and truncated every trailing byte of this off the stored error.
+      const target =
+        /(?:UPDATE|ALTER TABLE|DELETE FROM|INSERT INTO)\\s+[\`"]?(\\w+)/i.exec(item.sql) ||
+        /^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+(?:IF NOT EXISTS\\s+)?[\`"]?\\w+[\`"]?\\s+ON\\s+[\`"]?(\\w+)/i.exec(item.sql)
+      if (target) {
+        try {
+          const columns = await tx.query('PRAGMA table_info(' + quoteIdentifier(target[1]) + ')')
+          tableInfo = ' | table_info(' + target[1] + '): ' +
+            (columns.map((column) => column.name + ':' + column.type).join(', ') ||
+              '(no columns)')
+        } catch (infoError) {
+          tableInfo = ' | table_info(' + target[1] + ') failed: ' +
+            ((infoError && infoError.message) || String(infoError))
+        }
+      }
+      throw new Error(
+        'migration statement ' + baseId + ' failed on instance ' + instance + ': ' +
+          (error && error.message ? error.message : String(error)) +
+          ' | sql: ' + item.sql.replace(/\\s+/g, ' ').slice(0, 160) +
+          tableInfo +
+          ' | ledger for ' + file + ': ' + (siblings.join(', ') || '(none)'),
+        { cause: error },
+      )
+    }
+    for (const { baseId, id } of entries) {
+      applied.add(baseId)
+      appliedStatementIds.add(baseId)
+      insertedThisRun.push({ baseId, id })
+    }
+  }
   try {
     for (const [index, statement] of nativeSqlStatements.entries()) {
       const item = typeof statement === 'string'
@@ -950,57 +1015,26 @@ async function applyNativeSchema(tx, instance, {
       // records which source version ran, but editing an old migration must never
       // make destructive SQL run again under the same id.
       if (appliedStatementIds.has(baseId)) continue
+      // a skip condition reads the live schema, which queued statements change.
+      if (
+        item.skipIfTableMissing ||
+        item.migrateIfColumnType ||
+        item.skipIfColumnExists ||
+        item.skipIfColumnMissing
+      ) {
+        await flushQueued()
+      }
+      const statements = []
       if (!(await shouldSkipStatement(tx, item))) {
-        try {
-          await tx.exec(item.sql, Array.isArray(item.params) ? item.params : [])
-        } catch (error) {
-          // a bare sqlite message ("no such table: x") names neither the failing
-          // statement nor which of its siblings the ledger already recorded, and
-          // that ledger state is the only thing that explains a half-applied
-          // table-recreate block. the live column list of the target table is
-          // the other half of that story for DDL chains.
-          const file = baseId.split(':')[0]
-          const siblings = [...applied].filter((appliedId) => appliedId.startsWith(file))
-          let tableInfo = ''
-          // CREATE INDEX belongs here as much as the DML shapes: "no such
-          // column" on an index names a column the target table is missing,
-          // and the table's real column list is the whole diagnosis. it also
-          // has to come BEFORE the ledger list, which runs to hundreds of ids
-          // and truncated every trailing byte of this off the stored error.
-          const target =
-            /(?:UPDATE|ALTER TABLE|DELETE FROM|INSERT INTO)\\s+[\`"]?(\\w+)/i.exec(item.sql) ||
-            /^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+(?:IF NOT EXISTS\\s+)?[\`"]?\\w+[\`"]?\\s+ON\\s+[\`"]?(\\w+)/i.exec(item.sql)
-          if (target) {
-            try {
-              const columns = await tx.query('PRAGMA table_info(' + quoteIdentifier(target[1]) + ')')
-              tableInfo = ' | table_info(' + target[1] + '): ' +
-                (columns.map((column) => column.name + ':' + column.type).join(', ') ||
-                  '(no columns)')
-            } catch (infoError) {
-              tableInfo = ' | table_info(' + target[1] + ') failed: ' +
-                ((infoError && infoError.message) || String(infoError))
-            }
-          }
-          throw new Error(
-            'migration statement ' + baseId + ' failed on instance ' + instance + ': ' +
-              (error && error.message ? error.message : String(error)) +
-              ' | sql: ' + item.sql.replace(/\\s+/g, ' ').slice(0, 160) +
-              tableInfo +
-              ' | ledger for ' + file + ': ' + (siblings.join(', ') || '(none)'),
-            { cause: error },
-          )
-        }
+        statements.push({ sql: item.sql, params: Array.isArray(item.params) ? item.params : [] })
       }
-      if (!appliedStatementIds.has(baseId)) {
-        await tx.exec(
-          'INSERT INTO ' + quoteIdentifier(migrationTable) + ' (id, applied_at) VALUES (?, ?)',
-          [id, Date.now()],
-        )
-        applied.add(baseId)
-        appliedStatementIds.add(baseId)
-        insertedThisRun.push({ baseId, id })
-      }
+      statements.push({
+        sql: 'INSERT INTO ' + quoteIdentifier(migrationTable) + ' (id, applied_at) VALUES (?, ?)',
+        params: [id, Date.now()],
+      })
+      queued.push({ item, baseId, id, statements })
     }
+    await flushQueued()
     if (finalize && remainingMigrationFiles.length === 0) {
       await assertExpectedSchema(tx)
       await tx.exec(
@@ -1015,10 +1049,11 @@ async function applyNativeSchema(tx, instance, {
         const published = new Map(
           publishedRows.map((row) => [String(row.name), String(row.schema_json)]),
         )
-        for (const statement of schemaMetadataStatements()) {
-          if (published.get(statement.params[0]) === statement.params[1]) continue
-          await tx.exec(statement.sql, statement.params)
-        }
+        await tx.execMany(
+          schemaMetadataStatements().filter(
+            (statement) => published.get(statement.params[0]) !== statement.params[1],
+          ),
+        )
         await tx.registerTables(publicTables())
       } catch (error) {
         // publication runs against every registered table, so a table this schema
@@ -1032,13 +1067,15 @@ async function applyNativeSchema(tx, instance, {
       }
     }
   } catch (error) {
+    try {
+      await tx.execMany(
+        insertedThisRun.map((inserted) => ({
+          sql: 'DELETE FROM ' + quoteIdentifier(migrationTable) + ' WHERE id = ?',
+          params: [inserted.id],
+        })),
+      )
+    } catch {}
     for (const inserted of insertedThisRun) {
-      try {
-        await tx.exec(
-          'DELETE FROM ' + quoteIdentifier(migrationTable) + ' WHERE id = ?',
-          [inserted.id],
-        )
-      } catch {}
       applied.delete(inserted.baseId)
       appliedStatementIds.delete(inserted.baseId)
     }

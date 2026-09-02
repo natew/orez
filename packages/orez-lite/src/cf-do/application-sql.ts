@@ -20,12 +20,43 @@ export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTa
 
 export type ApplicationSqlExecResult = ExecResult
 
+export type ApplicationSqlStatement = {
+  sql: string
+  params?: readonly unknown[]
+  metadata?: SqlStatementMetadata
+}
+
+/**
+ * what the durable object answers for a statement list. a statement failure
+ * comes back as data rather than a thrown error because rpc keeps only an
+ * error's message, and the caller needs the position to name the statement.
+ */
+export type ApplicationSqlExecManyOutcome =
+  | { results: ApplicationSqlExecResult[] }
+  | { failedIndex: number; message: string }
+
+export class ApplicationSqlStatementError extends Error {
+  constructor(
+    readonly statementIndex: number,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ApplicationSqlStatementError'
+  }
+}
+
 export type ApplicationSqlTransaction = {
   exec(
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult>
+  /**
+   * every statement in one durable object call and one storage transaction.
+   * a write session holds the exclusive writer across each round trip, so a
+   * list of statements sent one at a time holds it for the whole exchange.
+   */
+  execMany(statements: readonly ApplicationSqlStatement[]): Promise<ApplicationSqlExecResult[]>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -111,6 +142,7 @@ export type ApplicationSqlSessionRpc = Disposable & {
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult>
+  execMany(statements: readonly ApplicationSqlStatement[]): Promise<ApplicationSqlExecManyOutcome>
   queryPlan<Result = unknown>(
     plan: CompiledTransactionQueryPlan,
     queryName?: string,
@@ -270,6 +302,14 @@ export function createApplicationSqlClient(
     session(sessionOptions, (active) =>
       work({
         exec: (sql, params = [], metadata) => active.exec(sql, params, metadata),
+        execMany: async (statements) => {
+          if (statements.length === 0) return []
+          const outcome = await active.execMany(statements)
+          if ('failedIndex' in outcome) {
+            throw new ApplicationSqlStatementError(outcome.failedIndex, outcome.message)
+          }
+          return outcome.results
+        },
         query: async (sql, params = []) =>
           sessionOptions.priority === 'background' || options.priority === 'background'
             ? applicationSqlPreemptibleValue(await active.queryPreemptible(sql, params))
