@@ -139,6 +139,41 @@ describe('Orez Lite feed projection', () => {
     })
   })
 
+  it('skips rollback-only registrations and still rejects published tables missing from the schema', () => {
+    const rollbackOnly = {
+      ...descriptor,
+      publicTables: [
+        ...descriptor.publicTables,
+        { table: 'user', publicTable: 'public.user', publish: false },
+      ],
+    }
+    expect(
+      projectOrezFeedBody(rollbackOnly, {
+        watermark: 3,
+        tables: { 'public.widget': [{ widget_id: 'w1', display_title: 'Kept' }] },
+        changes: [],
+      })
+    ).toEqual({
+      watermark: 3,
+      tables: {
+        widget: [{ id: 'w1', title: 'Kept' }],
+        syncCursor: [{ id: 'zero-http', watermark: 3 }],
+      },
+      changes: [],
+    })
+
+    const publishedButAbsent = {
+      ...descriptor,
+      publicTables: [
+        ...descriptor.publicTables,
+        { table: 'user', publicTable: 'public.user' },
+      ],
+    }
+    expect(() =>
+      projectOrezFeedBody(publishedButAbsent, { watermark: 3, changes: [] })
+    ).toThrow('absent from the Zero schema')
+  })
+
   it('projects known internal cursor sources without schema enumeration', () => {
     const result = projectOrezFeedBody(descriptor, {
       watermark: 12,

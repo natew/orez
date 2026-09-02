@@ -44,6 +44,8 @@ export interface OrezAppSchemaDescriptor<S extends Schema = Schema> {
     table: string
     /** Published name recorded in the Orez change feed. */
     publicTable: string
+    /** false registers rollback-only capture; the table emits no feed rows. */
+    publish?: boolean
   }[]
   migrate(options?: OrezSchemaMigrationOptions): Promise<unknown>
 }
@@ -374,6 +376,9 @@ function schemaFeedTables(
   const result = new Map<string, ProjectedTable>()
   const schemaTables = Object.entries(descriptor.schema.tables)
   for (const published of descriptor.publicTables) {
+    // a rollback-only registration never emits changefeed rows, so it needs no
+    // projection and may name a table outside the zero schema
+    if (published.publish === false) continue
     const publicName = stripPublicPrefix(published.publicTable)
     const matched = schemaTables.find(([logicalName, table]) => {
       const physicalName = table.serverName ?? table.name
@@ -1037,7 +1042,10 @@ export function createOrezDataWorker<
   ): Promise<Response> => {
     const isApplicationFeed =
       resolved.pathname === '/changes' || resolved.pathname === '/snapshot'
-    if (isApplicationFeed && options.schema.publicTables.length === 0) {
+    if (
+      isApplicationFeed &&
+      options.schema.publicTables.every((t) => t.publish === false)
+    ) {
       return new Response('Orez data feeds require a published application schema', {
         status: 503,
       })
