@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 
@@ -16,10 +16,100 @@ const bootstrapDir = resolve(root, '.release/bootstrap')
 const npmPrefix = resolve(root, `.release/npm-runtime`)
 const nodeCli = resolve(npmPrefix, 'node_modules/node/bin/node')
 const npmCli = resolve(npmPrefix, 'node_modules/npm/bin/npm-cli.js')
-const packages = [
-  'orez-sync-native',
-  ...SYNC_NATIVE_PLATFORMS.map(({ npmPackage }) => npmPackage),
-]
+
+type BootstrapTarget = {
+  confirmation: string
+  errorLabel: string
+  packageNames: string[]
+  preparePackages: () => string[]
+  relevantPaths: string[]
+  successMessage: string
+  validateName: (name: string) => boolean
+  workflow: string
+  workspaceName: string
+}
+
+function writeJson(path: string, value: unknown): void {
+  writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
+}
+
+function prepareSharedBootstrapPackages(): string[] {
+  const packageDirs = ['packages/helpers', 'packages/env', 'packages/cli']
+  rmSync(bootstrapDir, { recursive: true, force: true })
+
+  return packageDirs.map((sourceDir) => {
+    const manifest = JSON.parse(
+      readFileSync(resolve(root, sourceDir, 'package.json'), 'utf8')
+    ) as Record<string, unknown>
+    const packageDir = resolve(bootstrapDir, sourceDir.replace('packages/', ''))
+    mkdirSync(packageDir, { recursive: true })
+    manifest.version = bootstrapVersion
+    manifest.description = `${String(manifest.description)} (package-name bootstrap only)`
+    delete manifest.bin
+    delete manifest.dependencies
+    delete manifest.devDependencies
+    delete manifest.exports
+    delete manifest.files
+    delete manifest.main
+    delete manifest.module
+    delete manifest.scripts
+    delete manifest.types
+    writeJson(resolve(packageDir, 'package.json'), manifest)
+    cpSync(resolve(root, 'LICENSE'), resolve(packageDir, 'LICENSE'))
+    return packageDir
+  })
+}
+
+function resolveTarget(): BootstrapTarget {
+  const requested = process.argv[2] ?? 'native'
+  if (requested === 'shared') {
+    return {
+      confirmation: 'CLAIM OREZ SHARED PACKAGES',
+      errorLabel: 'shared release files',
+      packageNames: ['@o/helpers', '@o/env', '@o/cli'],
+      preparePackages: prepareSharedBootstrapPackages,
+      relevantPaths: [
+        '.github/workflows/release.yml',
+        'scripts/bootstrap-sync-native-packages.ts',
+        'packages/helpers',
+        'packages/env',
+        'packages/cli',
+      ],
+      successMessage:
+        'All three Orez shared package names and trusted publishers are ready.',
+      validateName: (name) => name.startsWith('@o/'),
+      workflow: 'release.yml',
+      workspaceName: 'orez-shared-bootstrap-workspace',
+    }
+  }
+  if (requested !== 'native') {
+    throw new Error('usage: bootstrap-sync-native-packages.ts [native|shared]')
+  }
+
+  const packageNames = [
+    'orez-sync-native',
+    ...SYNC_NATIVE_PLATFORMS.map(({ npmPackage }) => npmPackage),
+  ]
+  return {
+    confirmation: 'CLAIM OREZ NATIVE PACKAGES',
+    errorLabel: 'native release files',
+    packageNames,
+    preparePackages: () => prepareBootstrapPackages(bootstrapDir, bootstrapVersion),
+    relevantPaths: [
+      '.github/workflows/release-sync-native.yml',
+      'scripts/bootstrap-sync-native-packages.ts',
+      'scripts/sync-native-package.ts',
+      'scripts/sync-native-platforms.ts',
+      'packages/orez-sync-native',
+      ...SYNC_NATIVE_PLATFORMS.map(({ packageDir }) => packageDir),
+    ],
+    successMessage:
+      'All nine Orez native package names and trusted publishers are ready.',
+    validateName: (name) => !name.startsWith('@'),
+    workflow: 'release-sync-native.yml',
+    workspaceName: 'orez-sync-native-bootstrap-workspace',
+  }
+}
 
 function capture(command: string, args: string[], cwd = root): string {
   return execFileSync(command, args, { cwd, encoding: 'utf8' }).trim()
@@ -82,11 +172,11 @@ function readTrust(name: string): TrustConfig | undefined {
   return JSON.parse(result.stdout)
 }
 
-function trustMatches(config: TrustConfig): boolean {
+function trustMatches(config: TrustConfig, workflow: string): boolean {
   return (
     config.type === 'github' &&
     config.repository === 'natew/orez' &&
-    config.file === 'release-sync-native.yml' &&
+    config.file === workflow &&
     config.environment === undefined &&
     config.permissions?.length === 1 &&
     config.permissions[0] === 'createPackage'
@@ -94,6 +184,7 @@ function trustMatches(config: TrustConfig): boolean {
 }
 
 async function main(): Promise<void> {
+  const target = resolveTarget()
   if (capture('git', ['branch', '--show-current']) !== 'main') {
     throw new Error('run this only from the Orez main branch')
   }
@@ -106,23 +197,12 @@ async function main(): Promise<void> {
   }
   const relevantDiff = spawnSync(
     'git',
-    [
-      'diff',
-      '--quiet',
-      'HEAD',
-      '--',
-      '.github/workflows/release-sync-native.yml',
-      'scripts/bootstrap-sync-native-packages.ts',
-      'scripts/sync-native-package.ts',
-      'scripts/sync-native-platforms.ts',
-      'packages/orez-sync-native',
-      ...SYNC_NATIVE_PLATFORMS.map(({ packageDir }) => packageDir),
-    ],
+    ['diff', '--quiet', 'HEAD', '--', ...target.relevantPaths],
     { cwd: root, stdio: 'inherit' }
   )
   if (relevantDiff.error) throw relevantDiff.error
   if (relevantDiff.status !== 0) {
-    throw new Error('native release files differ from the current commit')
+    throw new Error(`${target.errorLabel} differ from the current commit`)
   }
 
   const runs = JSON.parse(
@@ -160,7 +240,7 @@ async function main(): Promise<void> {
     throw new Error('npm must be authenticated as nwienert')
   }
 
-  const generated = prepareBootstrapPackages(bootstrapDir, bootstrapVersion)
+  const generated = target.preparePackages()
   const generatedByName = new Map(
     generated.map((packageDir) => {
       const manifest = JSON.parse(
@@ -170,27 +250,31 @@ async function main(): Promise<void> {
     })
   )
   if (
-    generatedByName.size !== packages.length ||
-    packages.some((name) => !generatedByName.has(name) || name.startsWith('@'))
+    generatedByName.size !== target.packageNames.length ||
+    target.packageNames.some(
+      (name) => !generatedByName.has(name) || !target.validateName(name)
+    )
   ) {
-    throw new Error('generated bootstrap packages do not match the unscoped platform map')
+    throw new Error(
+      'generated bootstrap packages do not match the requested package names'
+    )
   }
 
   const missing: string[] = []
-  for (const name of packages) {
+  for (const name of target.packageNames) {
     if (!packageExists(name)) {
       missing.push(name)
       continue
     }
     verifyOwner(name)
     const trust = readTrust(name)
-    if (trust && !trustMatches(trust)) {
+    if (trust && !trustMatches(trust, target.workflow)) {
       throw new Error(`${name} already has a different trusted publisher`)
     }
   }
 
   console.log(`\nThis permanently claims and configures these npm package names:\n`)
-  for (const name of packages) console.log(`  ${name}`)
+  for (const name of target.packageNames) console.log(`  ${name}`)
   console.log(
     `\n${missing.length} package name(s) need the ${bootstrapVersion} bootstrap publish.`
   )
@@ -199,10 +283,10 @@ async function main(): Promise<void> {
   )
   const prompt = createInterface({ input: process.stdin, output: process.stdout })
   const confirmation = await prompt.question(
-    '\nType CLAIM OREZ NATIVE PACKAGES to continue: '
+    `\nType ${target.confirmation} to continue: `
   )
   prompt.close()
-  if (confirmation !== 'CLAIM OREZ NATIVE PACKAGES') {
+  if (confirmation !== target.confirmation) {
     throw new Error('package bootstrap cancelled')
   }
 
@@ -211,7 +295,7 @@ async function main(): Promise<void> {
       resolve(bootstrapDir, 'package.json'),
       JSON.stringify(
         {
-          name: 'orez-sync-native-bootstrap-workspace',
+          name: target.workspaceName,
           private: true,
           workspaces: missing.map((name) =>
             relative(bootstrapDir, generatedByName.get(name)!)
@@ -237,11 +321,11 @@ async function main(): Promise<void> {
     )
   }
 
-  for (const name of packages) {
+  for (const name of target.packageNames) {
     if (!packageExists(name)) throw new Error(`${name} was not published`)
     verifyOwner(name)
     const trust = readTrust(name)
-    if (trustMatches(trust ?? {})) {
+    if (trustMatches(trust ?? {}, target.workflow)) {
       console.log(`${name}: trusted publisher already configured`)
       continue
     }
@@ -253,18 +337,18 @@ async function main(): Promise<void> {
       '--repo',
       'natew/orez',
       '--file',
-      'release-sync-native.yml',
+      target.workflow,
       '--allow-publish',
       '--yes',
     ])
     const configured = readTrust(name)
-    if (!configured || !trustMatches(configured)) {
+    if (!configured || !trustMatches(configured, target.workflow)) {
       throw new Error(`${name} trusted publisher did not match after configuration`)
     }
     await Bun.sleep(2_000)
   }
 
-  console.log('\nAll nine Orez native package names and trusted publishers are ready.')
+  console.log(`\n${target.successMessage}`)
 }
 
 main().catch((error) => {

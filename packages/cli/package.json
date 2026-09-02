@@ -13,6 +13,9 @@
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "o": "./dist/cli.js"
+  },
   "exports": {
     "./package.json": "./package.json",
     ".": {
@@ -27,7 +30,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp src/run-pty.mjs dist/run-pty.mjs && chmod +x dist/cli.js dist/run-pty.mjs",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "lint": "oxlint src",
@@ -36,10 +39,13 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.8.2",
-    "picocolors": "^1.1.1"
+    "@lydell/node-pty": "^1.2.0-beta.3",
+    "picocolors": "^1.1.1",
+    "semver": "^7.7.3"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
+    "@types/semver": "^7.7.1",
     "oxfmt": "0.28.0",
     "oxlint": "1.43.0",
     "typescript": "5.9.3"

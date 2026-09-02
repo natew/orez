@@ -76,6 +76,7 @@
     "test:chat:smoke": "bun scripts/test-chat-integration.ts --smoke",
     "release": "bun scripts/release.ts",
     "release:native:bootstrap": "bun scripts/bootstrap-sync-native-packages.ts",
+    "release:shared:bootstrap": "bun scripts/bootstrap-sync-native-packages.ts shared",
     "perf:load": "bun run perf/load/harness.ts",
     "perf:memory": "bun run perf/memory/profile.ts",
     "perf:bench": "bun run perf/scripts/bench-all.ts",

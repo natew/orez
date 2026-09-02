@@ -34,6 +34,18 @@ Configure all packages before `release.yml` reaches `main`. A package
 without the trusted publisher will reject its publish after earlier packages may
 already have been published.
 
+New shared package names are bootstrapped from a clean, current `main` checkout
+after hosted CI passes:
+
+```sh
+bun run release:shared:bootstrap
+```
+
+The command claims any missing `@o/helpers`, `@o/env`, and `@o/cli` names at
+`0.0.0-bootstrap.0` under the `bootstrap` tag, then configures the
+`natew/orez` / `release.yml` trusted publisher. Reruns verify and skip completed
+names. Bootstrapping is a release action and requires explicit approval.
+
 ## Stable releases
 
 Stable releases remain explicit. From a clean, current `main` checkout, dispatch

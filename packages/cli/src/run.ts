@@ -86,8 +86,8 @@ export async function run(
   return runInternal()
 
   async function runInternal() {
-    // respect TKO_SILENT env var for quiet mode in watch scenarios
-    const effectiveSilent = silent || process.env.TKO_SILENT === '1'
+    // respect O_CLI_SILENT for quiet mode in watch scenarios
+    const effectiveSilent = silent || process.env.O_CLI_SILENT === '1'
     if (!effectiveSilent) {
       console.info(`$ ${command}${cwd ? ` (in ${cwd})` : ``}`)
     }
