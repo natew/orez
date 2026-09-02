@@ -640,6 +640,15 @@ describe('ZeroDO trusted application transaction', () => {
     await expect(reader.query('SELECT id FROM item')).resolves.toEqual([
       { id: 'row-1', enabled: 1 },
     ])
+    await expect(
+      reader.queryBatch([
+        { sql: 'SELECT id FROM item' },
+        { sql: 'SELECT enabled FROM item' },
+      ])
+    ).resolves.toEqual([[{ id: 'row-1', enabled: 1 }], [{ id: 'row-1', enabled: 1 }]])
+    await expect(
+      reader.queryBatch([{ sql: "UPDATE item SET enabled = 0 WHERE id = 'row-1'" }])
+    ).rejects.toThrow('application SQLite query batch cannot execute a mutation')
     zero.releaseApplicationSqlTurn(reader)
   })
 

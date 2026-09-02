@@ -133,10 +133,17 @@ const BetterSqlite3 = BedrockSqlite.Database
 // so the session is a pass-through over the same query callback.
 function backupManager<Env>(options: any) {
   return createNamespaceBackupManager<Env>({
-    readSession: (env: any, namespace: string, work: any) =>
-      work((sql: string, params: readonly unknown[] = []) =>
+    readSession: (env: any, namespace: string, work: any) => {
+      const query = (sql: string, params: readonly unknown[] = []) =>
         options.query(env, namespace, sql, params)
-      ),
+      return work({
+        query,
+        queryBatch: (statements: readonly NamespaceBackupStatement[]) =>
+          Promise.all(
+            statements.map((statement) => query(statement.sql, statement.params ?? []))
+          ),
+      })
+    },
     ...options,
   })
 }
@@ -195,6 +202,10 @@ describe('namespace backup export', () => {
             { name: 'message', sql: 'CREATE TABLE message (id TEXT)', type: 'table' },
           ]
         }
+        if (sql.includes('SELECT 1 AS present FROM "empty"')) return []
+        if (sql.includes('SELECT 1 AS present FROM "message"')) {
+          return [{ present: 1 }]
+        }
         if (sql.includes('FROM "empty"')) return []
         if (sql.includes('FROM "message"')) {
           return Number(params[0]) === 0 ? [{ __orez_backup_rowid: 1, id: 'one' }] : []
@@ -235,9 +246,17 @@ describe('namespace backup export', () => {
       files: () => stored.bucket,
       query,
       readSession: async (env: unknown, namespace: string, work: any) => {
-        await work((sql: string, params: readonly unknown[] = []) =>
+        const sessionQuery = (sql: string, params: readonly unknown[] = []) =>
           query(env, namespace, sql, params)
-        )
+        await work({
+          query: sessionQuery,
+          queryBatch: (statements: readonly NamespaceBackupStatement[]) =>
+            Promise.all(
+              statements.map((statement) =>
+                sessionQuery(statement.sql, statement.params ?? [])
+              )
+            ),
+        })
         throw new ApplicationSqlSessionPreemptedError()
       },
       batch: async () => {},
@@ -300,9 +319,14 @@ describe('namespace backup export', () => {
             { name: 'body', pk: 0 },
           ]
         }
+        if (sql.includes('SELECT 1 AS present FROM "message"')) {
+          return [{ present: 1 }]
+        }
         if (sql.includes('FROM "message"')) {
           pageQueries.push({ sql, params })
-          return params.length === 1 ? rows.slice(0, 200) : rows.slice(200)
+          const limit = Number(params.at(-2))
+          const offset = Number(params.at(-1))
+          return rows.slice(offset, offset + limit)
         }
         throw new Error(`unexpected export query: ${sql}`)
       },
@@ -320,12 +344,20 @@ describe('namespace backup export', () => {
     })
     expect(pageQueries).toEqual([
       {
-        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ?',
-        params: [200],
+        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
+        params: [200, 0],
       },
       {
-        sql: 'SELECT * FROM "message" WHERE ("tenant", "id") > (?, ?) ORDER BY "tenant", "id" LIMIT ?',
-        params: ['tenant-one', 'message-199', 1000],
+        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
+        params: [200, 200],
+      },
+      {
+        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
+        params: [200, 400],
+      },
+      {
+        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ? OFFSET ?',
+        params: [200, 600],
       },
     ])
   })
@@ -423,7 +455,17 @@ describe('namespace backup export consistency', () => {
       readSession: async (_env, _namespace, work) => {
         readersOpen++
         try {
-          return await work(async (sql, params = []) => run(sql, params))
+          const query = async (sql: string, params: readonly unknown[] = []) =>
+            run(sql, params)
+          return await work({
+            query,
+            queryBatch: (statements: readonly NamespaceBackupStatement[]) =>
+              Promise.all(
+                statements.map((statement) =>
+                  query(statement.sql, statement.params ?? [])
+                )
+              ),
+          })
         } finally {
           readersOpen--
           admitWrites()
@@ -541,12 +583,12 @@ function durableObject(
     async readSession<Value>(
       _env: unknown,
       _namespace: string,
-      work: (
-        query: (
-          sql: string,
-          params?: readonly unknown[]
-        ) => Promise<Record<string, any>[]>
-      ) => Promise<Value>,
+      work: (read: {
+        query(sql: string, params?: readonly unknown[]): Promise<Record<string, any>[]>
+        queryBatch(
+          statements: readonly NamespaceBackupStatement[]
+        ): Promise<Record<string, any>[][]>
+      }) => Promise<Value>,
       options: { priority: 'background' | 'normal' } = { priority: 'background' }
     ): Promise<Value> {
       const session = { preempted: false, priority: options.priority }
@@ -554,11 +596,18 @@ function durableObject(
       readers.add(session)
       openReaders++
       try {
-        const value = await work(async (sql, params = []) => {
+        const query = async (sql: string, params: readonly unknown[] = []) => {
           if (session.preempted) throw new ApplicationSqlSessionPreemptedError()
           onRead(sql)
           if (session.preempted) throw new ApplicationSqlSessionPreemptedError()
           return run(sql, params)
+        }
+        const value = await work({
+          query,
+          queryBatch: (statements) =>
+            Promise.all(
+              statements.map((statement) => query(statement.sql, statement.params ?? []))
+            ),
         })
         // a session preempted after its last read still fails at commit
         if (session.preempted) throw new ApplicationSqlSessionPreemptedError()
@@ -689,7 +738,7 @@ describe('namespace backup export under a live writer', () => {
     const db = ledgerDatabase(600)
     let deposits = 0
     const { manager, object, stored } = scenario(db, (self, sql) => {
-      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+      if (deposits > 0 || !sql.includes('__orez_backup_rowid')) return
       deposits++
       self.writeNow(deposit(db, 'l1', 100))
     })
@@ -721,7 +770,7 @@ describe('namespace backup export under a live writer', () => {
     const db = ledgerDatabase(600)
     let deposits = 0
     const { manager, object, stored } = scenario(db, (self, sql) => {
-      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+      if (deposits > 0 || !sql.includes('__orez_backup_rowid')) return
       deposits++
       self.writeNow(deposit(db, 'l1', 100))
     })
@@ -756,7 +805,7 @@ describe('namespace backup export under a live writer', () => {
     const { manager, object, stored } = scenario(
       db,
       (self, sql) => {
-        if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+        if (deposits > 0 || !sql.includes('__orez_backup_rowid')) return
         deposits++
         self.writeNow(deposit(db, 'l1', 100))
       },

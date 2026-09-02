@@ -422,6 +422,13 @@ describe('createOrezDataWorker', () => {
         outcome: 'completed' as const,
         value: rowsFor(sql),
       })),
+      queryBatch: vi.fn(async (statements: readonly { sql: string }[]) =>
+        statements.map((statement) => rowsFor(statement.sql))
+      ),
+      queryBatchPreemptible: vi.fn(async (statements: readonly { sql: string }[]) => ({
+        outcome: 'completed' as const,
+        value: statements.map((statement) => rowsFor(statement.sql)),
+      })),
       exec: vi.fn(),
       queryPlan: vi.fn(),
       queryPlanPreemptible: vi.fn(),
@@ -484,7 +491,9 @@ describe('createOrezDataWorker', () => {
     expect(applicationSqlQuery).not.toHaveBeenCalled()
     expect(session.begin).toHaveBeenCalledOnce()
     expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
+    expect(session.queryBatchPreemptible).toHaveBeenCalledTimes(2)
     expect(session.query).not.toHaveBeenCalled()
+    expect(session.queryBatch).not.toHaveBeenCalled()
     expect(session.commitPreemptible).toHaveBeenCalledOnce()
     expect(session.commit).not.toHaveBeenCalled()
     expect(session.rollback).not.toHaveBeenCalled()
@@ -503,7 +512,9 @@ describe('createOrezDataWorker', () => {
       priority: 'normal',
     })
     expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
+    expect(session.queryBatchPreemptible).toHaveBeenCalledTimes(2)
     expect(session.query).toHaveBeenCalledTimes(2)
+    expect(session.queryBatch).toHaveBeenCalledTimes(2)
     expect(session.commitPreemptible).toHaveBeenCalledOnce()
     expect(session.commit).toHaveBeenCalledOnce()
   })

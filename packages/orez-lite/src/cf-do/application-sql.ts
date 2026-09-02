@@ -20,6 +20,11 @@ export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTa
 
 export type ApplicationSqlExecResult = ExecResult
 
+export type ApplicationSqlQueryStatement = {
+  sql: string
+  params?: readonly unknown[]
+}
+
 export type ApplicationSqlTransaction = {
   exec(
     sql: string,
@@ -30,6 +35,9 @@ export type ApplicationSqlTransaction = {
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
+  queryBatch<Row extends Record<string, unknown> = Record<string, unknown>>(
+    statements: readonly ApplicationSqlQueryStatement[]
+  ): Promise<Row[][]>
   queryAst<Result = unknown>(
     ast: unknown,
     format: TransactionQueryFormat,
@@ -106,6 +114,12 @@ export type ApplicationSqlSessionRpc = Disposable & {
     sql: string,
     params?: readonly unknown[]
   ): Promise<ApplicationSqlPreemptibleResult<Row[]>>
+  queryBatch<Row extends Record<string, unknown> = Record<string, unknown>>(
+    statements: readonly ApplicationSqlQueryStatement[]
+  ): Promise<Row[][]>
+  queryBatchPreemptible<Row extends Record<string, unknown> = Record<string, unknown>>(
+    statements: readonly ApplicationSqlQueryStatement[]
+  ): Promise<ApplicationSqlPreemptibleResult<Row[][]>>
   exec(
     sql: string,
     params?: readonly unknown[],
@@ -274,6 +288,12 @@ export function createApplicationSqlClient(
           sessionOptions.priority === 'background' || options.priority === 'background'
             ? applicationSqlPreemptibleValue(await active.queryPreemptible(sql, params))
             : active.query(sql, params),
+        queryBatch: async (statements) =>
+          sessionOptions.priority === 'background' || options.priority === 'background'
+            ? applicationSqlPreemptibleValue(
+                await active.queryBatchPreemptible(statements)
+              )
+            : active.queryBatch(statements),
         async queryAst(ast, format, queryName) {
           const plan = await compileQuery(ast, format)
           if (

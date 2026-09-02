@@ -57,6 +57,13 @@ export interface NamespaceBackupReadOptions {
   priority: NamespaceBackupReadPriority
 }
 
+export interface NamespaceBackupRead {
+  query(sql: string, params?: readonly unknown[]): Promise<Record<string, any>[]>
+  queryBatch(
+    statements: readonly NamespaceBackupStatement[]
+  ): Promise<Record<string, any>[][]>
+}
+
 export interface NamespaceRestoreSummary {
   ok: true
   ns: string
@@ -87,9 +94,7 @@ export interface NamespaceBackupOptions<Env> {
   readSession<Value>(
     env: Env,
     namespace: string,
-    work: (
-      query: (sql: string, params?: readonly unknown[]) => Promise<Record<string, any>[]>
-    ) => Promise<Value>,
+    work: (read: NamespaceBackupRead) => Promise<Value>,
     options: NamespaceBackupReadOptions
   ): Promise<Value>
   batch(
@@ -353,14 +358,9 @@ export function createNamespaceBackupManager<Env>(
     )
   }
 
-  type SessionQuery = (
-    sql: string,
-    params?: readonly unknown[]
-  ) => Promise<Record<string, any>[]>
-
-  const readMarkerWith = async (query: SessionQuery) => {
+  const readMarkerWith = async (read: Pick<NamespaceBackupRead, 'query'>) => {
     try {
-      const rows = await query(
+      const rows = await read.query(
         `SELECT write_seq FROM "${quoteIdentifier(options.markerTable)}" WHERE id = 1`,
         []
       )
@@ -372,7 +372,9 @@ export function createNamespaceBackupManager<Env>(
   }
 
   const readMarker = (env: Env, namespace: string) =>
-    readMarkerWith((sql, params = []) => options.query(env, namespace, sql, params))
+    readMarkerWith({
+      query: (sql, params = []) => options.query(env, namespace, sql, params),
+    })
 
   type ExportTable = {
     name: string
@@ -380,6 +382,7 @@ export function createNamespaceBackupManager<Env>(
     indexes: string[]
     withoutRowid: boolean
     primaryKeyColumns: string[]
+    hasRows: boolean
   }
 
   /** Where the scan stands, so a chunk that has to be re-read can resume. */
@@ -410,7 +413,7 @@ export function createNamespaceBackupManager<Env>(
   const readChunk = async <Value>(
     env: Env,
     namespace: string,
-    work: (read: SessionQuery) => Promise<Value>,
+    work: (read: NamespaceBackupRead) => Promise<Value>,
     readOptions: NamespaceBackupReadOptions
   ): Promise<{ outcome: 'read'; value: Value } | { outcome: 'preempted' }> => {
     for (let attempt = 0; attempt < chunkAttempts; attempt++) {
@@ -431,11 +434,11 @@ export function createNamespaceBackupManager<Env>(
    * ROWID table in one session, so the scan below knows what to page and what
    * marker every one of its chunks has to agree with.
    */
-  const readScanSchema = async (read: SessionQuery) => {
+  const readScanSchema = async (read: NamespaceBackupRead) => {
     // Read before scanning. A concurrent write then leaves the live marker
     // ahead of latest.json and guarantees another backup.
     const marker = await readMarkerWith(read)
-    const master = await read(
+    const master = await read.query(
       "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name",
       []
     )
@@ -460,17 +463,33 @@ export function createNamespaceBackupManager<Env>(
     const indexes = master.filter(
       (row) => row.type === 'index' && !isExcluded(row.name) && !isExcluded(row.tbl_name)
     )
+    const populated = await read.queryBatch(
+      orderedNames.map((name) => ({
+        sql: `SELECT 1 AS present FROM "${quoteIdentifier(name)}" LIMIT 1`,
+      }))
+    )
+    const withoutRowidNames = orderedNames.filter((name) =>
+      /\bWITHOUT\s+ROWID\b/i.test(String(tableByName.get(name)!.sql))
+    )
+    const primaryKeyRows = await read.queryBatch(
+      withoutRowidNames.map((name) => ({
+        sql: `PRAGMA table_info("${quoteIdentifier(name)}")`,
+      }))
+    )
+    const primaryKeys = new Map(
+      withoutRowidNames.map((name, index) => [
+        name,
+        primaryKeyRows[index]!.filter((column) => Number(column.pk) > 0)
+          .sort((left, right) => Number(left.pk) - Number(right.pk))
+          .map((column) => String(column.name)),
+      ])
+    )
     const tables: ExportTable[] = []
-    for (const name of orderedNames) {
+    for (const [index, name] of orderedNames.entries()) {
       const row = tableByName.get(name)!
       const sql = String(row.sql)
       const withoutRowid = /\bWITHOUT\s+ROWID\b/i.test(sql)
-      const primaryKeyColumns = withoutRowid
-        ? (await read(`PRAGMA table_info("${quoteIdentifier(name)}")`, []))
-            .filter((column) => Number(column.pk) > 0)
-            .sort((left, right) => Number(left.pk) - Number(right.pk))
-            .map((column) => String(column.name))
-        : []
+      const primaryKeyColumns = primaryKeys.get(name) ?? []
       if (withoutRowid && primaryKeyColumns.length === 0) {
         throw new Error(`WITHOUT ROWID table ${name} has no primary key`)
       }
@@ -482,6 +501,7 @@ export function createNamespaceBackupManager<Env>(
           .map((index) => String(index.sql)),
         withoutRowid,
         primaryKeyColumns,
+        hasRows: populated[index]!.length > 0,
       })
     }
     return { marker, tables }
@@ -503,7 +523,7 @@ export function createNamespaceBackupManager<Env>(
       cursor: ScanCursor,
       scanChunkBytes: number
     ) =>
-    async (read: SessionQuery) => {
+    async (read: NamespaceBackupRead) => {
       const marker = await readMarkerWith(read)
       if (marker !== fenceMarker) return { torn: true, marker } as const
       const lines: ScanLine[] = []
@@ -531,39 +551,58 @@ export function createNamespaceBackupManager<Env>(
           next.tableOpened = true
           tableRows[table.name] = tableRows[table.name] ?? 0
         }
+        if (!table.hasRows) {
+          openNextTable()
+          continue
+        }
         const quotedPrimaryKey = table.primaryKeyColumns
           .map((column) => `"${quoteIdentifier(column)}"`)
           .join(', ')
         const usedLimit = next.limit
-        const rows: Record<string, unknown>[] = table.withoutRowid
-          ? await read(
-              next.primaryKeyCursor
-                ? `SELECT * FROM "${quoteIdentifier(table.name)}" WHERE (${quotedPrimaryKey}) > (${table.primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
-                : `SELECT * FROM "${quoteIdentifier(table.name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
-              next.primaryKeyCursor ? [...next.primaryKeyCursor, usedLimit] : [usedLimit]
-            )
-          : await read(
-              `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
-              [next.rowidCursor, usedLimit]
-            )
-        if (rows.length === 0) {
-          openNextTable()
-          continue
+        const pages = Math.max(
+          1,
+          Math.min(8, Math.ceil((scanChunkBytes - produced) / chunkTargetBytes))
+        )
+        const baseParams = next.primaryKeyCursor ?? []
+        const results = await read.queryBatch(
+          Array.from({ length: pages }, (_, page) =>
+            table.withoutRowid
+              ? {
+                  sql: next.primaryKeyCursor
+                    ? `SELECT * FROM "${quoteIdentifier(table.name)}" WHERE (${quotedPrimaryKey}) > (${table.primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ? OFFSET ?`
+                    : `SELECT * FROM "${quoteIdentifier(table.name)}" ORDER BY ${quotedPrimaryKey} LIMIT ? OFFSET ?`,
+                  params: [...baseParams, usedLimit, page * usedLimit],
+                }
+              : {
+                  sql: `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.name)}" WHERE rowid > ? ORDER BY rowid LIMIT ? OFFSET ?`,
+                  params: [next.rowidCursor, usedLimit, page * usedLimit],
+                }
+          )
+        )
+        for (const rows of results) {
+          if (rows.length === 0) {
+            openNextTable()
+            break
+          }
+          if (table.withoutRowid) {
+            const last = rows.at(-1)!
+            next.primaryKeyCursor = table.primaryKeyColumns.map((column) => last[column])
+          } else {
+            next.rowidCursor = rows.at(-1)?.__orez_backup_rowid
+            for (const row of rows) delete row.__orez_backup_rowid
+          }
+          const line = encodeLine({ kind: 'rows', table: table.name, rows })
+          lines.push(line)
+          produced += line.bytes.byteLength
+          tableRows[table.name] = (tableRows[table.name] ?? 0) + rows.length
+          const perRow = Math.max(1, Math.ceil(line.bytes.byteLength / rows.length))
+          next.limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
+          if (rows.length < usedLimit) {
+            openNextTable()
+            break
+          }
+          if (produced >= scanChunkBytes) break
         }
-        if (table.withoutRowid) {
-          const last = rows.at(-1)!
-          next.primaryKeyCursor = table.primaryKeyColumns.map((column) => last[column])
-        } else {
-          next.rowidCursor = rows.at(-1)?.__orez_backup_rowid
-          for (const row of rows) delete row.__orez_backup_rowid
-        }
-        const line = encodeLine({ kind: 'rows', table: table.name, rows })
-        lines.push(line)
-        produced += line.bytes.byteLength
-        tableRows[table.name] = (tableRows[table.name] ?? 0) + rows.length
-        const perRow = Math.max(1, Math.ceil(line.bytes.byteLength / rows.length))
-        next.limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
-        if (rows.length < usedLimit) openNextTable()
       }
       return { torn: false, lines, tableRows, next } as const
     }

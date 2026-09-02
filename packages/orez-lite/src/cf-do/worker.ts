@@ -53,6 +53,7 @@ import type {
   ApplicationSqlClientOptions,
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
+  ApplicationSqlQueryStatement,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
   ApplicationSqlTable,
@@ -71,6 +72,7 @@ export type {
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
   ApplicationSqlQueryCompiler,
+  ApplicationSqlQueryStatement,
   ApplicationSqlRpc,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
@@ -384,6 +386,10 @@ type ApplicationSqlWaiter = {
 const APPLICATION_SQL_ACQUIRE = Symbol('applicationSqlAcquire')
 const APPLICATION_SQL_QUERY = Symbol('applicationSqlQuery')
 const APPLICATION_SQL_QUERY_PREEMPTIBLE = Symbol('applicationSqlQueryPreemptible')
+const APPLICATION_SQL_QUERY_BATCH = Symbol('applicationSqlQueryBatch')
+const APPLICATION_SQL_QUERY_BATCH_PREEMPTIBLE = Symbol(
+  'applicationSqlQueryBatchPreemptible'
+)
 const APPLICATION_SQL_EXEC = Symbol('applicationSqlExec')
 const APPLICATION_SQL_QUERY_PLAN = Symbol('applicationSqlQueryPlan')
 const APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE = Symbol(
@@ -426,6 +432,18 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     params: readonly unknown[] = []
   ): Promise<ApplicationSqlPreemptibleResult<Row[]>> {
     return this.owner[APPLICATION_SQL_QUERY_PREEMPTIBLE](this, sql, params)
+  }
+
+  queryBatch<Row extends Record<string, unknown> = Record<string, unknown>>(
+    statements: readonly ApplicationSqlQueryStatement[]
+  ): Promise<Row[][]> {
+    return this.owner[APPLICATION_SQL_QUERY_BATCH](this, statements)
+  }
+
+  queryBatchPreemptible<Row extends Record<string, unknown> = Record<string, unknown>>(
+    statements: readonly ApplicationSqlQueryStatement[]
+  ): Promise<ApplicationSqlPreemptibleResult<Row[][]>> {
+    return this.owner[APPLICATION_SQL_QUERY_BATCH_PREEMPTIBLE](this, statements)
   }
 
   exec(
@@ -2022,6 +2040,12 @@ export class ZeroDO extends DurableObject {
                   await session.queryPreemptible(sql, params)
                 )
               : session.query(sql, params),
+          queryBatch: async (statements) =>
+            options.priority === 'background'
+              ? applicationSqlPreemptibleValue(
+                  await session.queryBatchPreemptible(statements)
+                )
+              : session.queryBatch(statements),
           registerTables: (tables) => session.registerTables(tables),
           async queryAst(ast, format, queryName) {
             const plan = await compileQuery(ast, format)
@@ -2199,6 +2223,45 @@ export class ZeroDO extends DurableObject {
     return {
       outcome: 'completed',
       value: await this[APPLICATION_SQL_QUERY]<Row>(session, sql, params),
+    }
+  }
+
+  async [APPLICATION_SQL_QUERY_BATCH]<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(
+    session: ApplicationSqlSessionTarget,
+    statements: readonly ApplicationSqlQueryStatement[]
+  ): Promise<Row[][]> {
+    this.assertApplicationSqlSession(session)
+    for (const statement of statements) {
+      if (classifySql(statement.sql).mutation) {
+        throw new Error('application SQLite query batch cannot execute a mutation')
+      }
+    }
+    return this.atomically(() =>
+      statements.map(
+        (statement) =>
+          this.executeSQL(
+            statement.sql,
+            [...(statement.params ?? [])],
+            undefined,
+            session.sessionID,
+            session.telemetry
+          ).rows as Row[]
+      )
+    )
+  }
+
+  async [APPLICATION_SQL_QUERY_BATCH_PREEMPTIBLE]<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(
+    session: ApplicationSqlSessionTarget,
+    statements: readonly ApplicationSqlQueryStatement[]
+  ): Promise<ApplicationSqlPreemptibleResult<Row[][]>> {
+    if (session.state === 'preempted') return { outcome: 'preempted' }
+    return {
+      outcome: 'completed',
+      value: await this[APPLICATION_SQL_QUERY_BATCH]<Row>(session, statements),
     }
   }
 

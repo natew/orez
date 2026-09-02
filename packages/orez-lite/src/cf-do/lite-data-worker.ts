@@ -985,7 +985,11 @@ export function createOrezDataWorker<
             () => {
               throw new Error('backup export does not compile ZQL')
             },
-            (tx) => work((sql, params = []) => tx.query(sql, params))
+            (tx) =>
+              work({
+                query: (sql, params = []) => tx.query(sql, params),
+                queryBatch: (statements) => tx.queryBatch(statements),
+              })
           ),
         batch: async (env, namespace, statements) => {
           const instance = canonical(namespace)
