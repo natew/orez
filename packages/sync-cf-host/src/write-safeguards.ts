@@ -1,4 +1,7 @@
-export type IngestBreakerReason = 'ingestBudgetExceeded' | 'ingestCursorStalled'
+export type IngestBreakerReason =
+  | 'ingestBudgetExceeded'
+  | 'ingestCursorStalled'
+  | 'ingestTableUnpublished'
 
 export type IngestBreakerOptions = {
   budgetRows: number

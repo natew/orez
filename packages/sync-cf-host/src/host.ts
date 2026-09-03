@@ -108,6 +108,9 @@ type UpstreamBatch = {
   watermark: number
   oldestCommitTimeMs?: number
   sourceTimeMs?: number
+  // tables whose changes the upstream feed dropped because it does not publish
+  // them. absent on an upstream that predates the field.
+  unpublishedTables?: string[]
   changes: Array<{
     watermark: number
     tableName: string
@@ -138,6 +141,23 @@ type SnapshotProgress = {
   cursor: string | null
   state: 'paging' | 'catching_up'
   catchupWatermark: string
+}
+
+// a feed that drops a table this replica MODELS is a publication
+// misconfiguration, not a subset replica. it is invisible otherwise: the page
+// applies nothing, the cursor still advances on the trailing syncCursor marker,
+// and every query keeps answering from the last row that made it through, so
+// clients see a database frozen at the moment of the bad deploy with no error
+// anywhere. name the offending tables so the caller can stop instead.
+function modelledUnpublishedTables(
+  batch: UpstreamBatch,
+  schema: { tables: Record<string, unknown> }
+): string[] {
+  const reported = batch.unpublishedTables
+  if (!Array.isArray(reported) || reported.length === 0) return []
+  return reported.filter(
+    (table) => typeof table === 'string' && Object.hasOwn(schema.tables, table)
+  )
 }
 
 function upstreamBatchTables(batch: UpstreamBatch): Set<string> {
@@ -910,7 +930,8 @@ export function createSyncDurableObject<
         const ingestBreakerReason = this.#controlGet('ingestBreakerReason')
         if (
           ingestBreakerReason === 'ingestBudgetExceeded' ||
-          ingestBreakerReason === 'ingestCursorStalled'
+          ingestBreakerReason === 'ingestCursorStalled' ||
+          ingestBreakerReason === 'ingestTableUnpublished'
         ) {
           this.#ingestBreaker.restore(
             ingestBreakerReason,
@@ -1145,7 +1166,7 @@ export function createSyncDurableObject<
     }
 
     #tripIngest(
-      reason: 'ingestBudgetExceeded' | 'ingestCursorStalled',
+      reason: 'ingestBudgetExceeded' | 'ingestCursorStalled' | 'ingestTableUnpublished',
       fields: Record<string, unknown>
     ): never {
       try {
@@ -1423,6 +1444,17 @@ export function createSyncDurableObject<
             if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
               throw new Error('invalid upstream changes response')
             }
+            const catchupUnpublished = modelledUnpublishedTables(batch, config.schema)
+            if (catchupUnpublished.length > 0) {
+              this.#tripIngest('ingestTableUnpublished', {
+                phase: 'snapshot_catchup',
+                generation: activeProgress.generation,
+                cursor,
+                batchWatermark: batch.watermark,
+                changeRows: batch.changes.length,
+                tables: catchupUnpublished,
+              })
+            }
             for (const table of upstreamBatchTables(batch)) changedTables.add(table)
             this.#resetSnapshotBillingWindow()
             const result = this.#withIngestBilling(
@@ -1524,6 +1556,16 @@ export function createSyncDurableObject<
               oldestLiveCommitTimeMs === undefined
                 ? batchCommitTimeMs
                 : Math.min(oldestLiveCommitTimeMs, batchCommitTimeMs)
+          }
+          const unpublished = modelledUnpublishedTables(batch, config.schema)
+          if (unpublished.length > 0) {
+            this.#tripIngest('ingestTableUnpublished', {
+              phase: 'changes',
+              cursor,
+              batchWatermark: batch.watermark,
+              changeRows: batch.changes.length,
+              tables: unpublished,
+            })
           }
           for (const table of upstreamBatchTables(batch)) changedTables.add(table)
           const result = this.#withIngestBilling(

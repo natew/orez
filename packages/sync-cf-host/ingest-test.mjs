@@ -1646,6 +1646,38 @@ try {
     .map((entry) => entry.value.meta)
   assert.deepEqual(actualJson, expectedJson)
 
+  // A feed that drops rows for a table this replica MODELS is a publication
+  // misconfiguration, and it is otherwise invisible: the page applies nothing
+  // while the cursor still advances, so every query keeps answering from the
+  // last row that got through and no error is raised anywhere. Trip instead of
+  // serving a silently frozen replica.
+  const unpublishedNamespace = `unpublished-${crypto.randomUUID()}`
+  const unpublishedOrigin = `${base}/${unpublishedNamespace}`
+  await fetch(`${base}/unpublished-control/${unpublishedNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  })
+  const unpublishedPull = await fetch(`${unpublishedOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'unpublished-reader',
+      clientGroupID: 'unpublished-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(unpublishedPull.status, 429)
+  assert.equal((await unpublishedPull.json()).error, 'ingestTableUnpublished')
+  await fetch(`${base}/unpublished-control/${unpublishedNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  })
+
   // A feed that keeps returning changes while the engine cursor no longer
   // advances must trip the ingest breaker instead of hot-looping. Once the
   // bad feed is removed and an admin reopens the circuit, normal pulls recover.

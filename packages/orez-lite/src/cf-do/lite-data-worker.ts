@@ -491,6 +491,12 @@ function projectFeedBody(
 
   if (Array.isArray(value.changes)) {
     const changes: unknown[] = []
+    // a replica cannot tell "this table is deliberately not in my subset" from
+    // "publication for a table I do sync was misconfigured": both look like a
+    // page that applied nothing while the cursor still advanced on the trailing
+    // syncCursor marker. name the dropped tables so the replica can compare
+    // them against its own schema and refuse to diverge in silence.
+    const unpublishedTables = new Set<string>()
     let trailingUnpublishedChange: JsonRecord | undefined
     for (const rawChange of value.changes) {
       if (!isRecord(rawChange)) continue
@@ -509,6 +515,7 @@ function projectFeedBody(
       }
       const table = feedTables.get(rawName)
       if (!table) {
+        if (rawName) unpublishedTables.add(rawName)
         trailingUnpublishedChange = rawChange
         continue
       }
@@ -534,6 +541,7 @@ function projectFeedBody(
       })
     }
     projected.changes = changes
+    projected.unpublishedTables = [...unpublishedTables].sort()
   }
 
   return projected

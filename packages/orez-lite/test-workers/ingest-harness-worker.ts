@@ -50,6 +50,7 @@ const streaming = defineStreamingFields(schema, {
 })
 
 const runawayNamespaces = new Set<string>()
+const unpublishedNamespaces = new Set<string>()
 const numericTextNamespaces = new Set<string>()
 const jsonValueNamespaces = new Set<string>()
 const hydratedNamespaces = new Set<string>()
@@ -346,6 +347,18 @@ export class DataService extends WorkerEntrypoint<Env> {
                     oldData: null,
                   },
                 ],
+        })
+      )
+    }
+    // a feed that drops rows for a table the replica models, reporting the drop
+    // and still advancing the cursor. this is what a publication misconfiguration
+    // looks like from the replica's side.
+    if (pathname.endsWith('/changes') && unpublishedNamespaces.has(namespace)) {
+      return Promise.resolve(
+        Response.json({
+          watermark: 100,
+          changes: [],
+          unpublishedTables: ['item'],
         })
       )
     }
@@ -758,6 +771,22 @@ export default {
             numericTextNamespaces.add(namespace)
           else numericTextNamespaces.delete(namespace)
           return Response.json({ ok: true, namespace })
+        })
+    }
+    if (url.pathname.startsWith('/unpublished-control/')) {
+      const namespace = url.pathname.slice('/unpublished-control/'.length)
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          if ((body as { enabled?: unknown }).enabled === true)
+            unpublishedNamespaces.add(namespace)
+          else unpublishedNamespaces.delete(namespace)
+          return Response.json({
+            ok: true,
+            namespace,
+            enabled: unpublishedNamespaces.has(namespace),
+          })
         })
     }
     if (url.pathname.startsWith('/runaway-control/')) {
