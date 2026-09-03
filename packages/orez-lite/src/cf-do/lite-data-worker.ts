@@ -547,7 +547,11 @@ function projectFeedBody(
       })
     }
     projected.changes = changes
-    projected.unpublishedTables = [...unpublishedTables].sort()
+    // only carried when something was actually dropped: a replica reads an
+    // empty list and an absent one identically, and every page pays for the key.
+    if (unpublishedTables.size > 0) {
+      projected.unpublishedTables = [...unpublishedTables].sort()
+    }
   }
 
   return projected

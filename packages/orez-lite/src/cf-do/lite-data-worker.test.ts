@@ -136,6 +136,7 @@ describe('Orez Lite feed projection', () => {
           oldData: null,
         },
       ],
+      unpublishedTables: ['private_table'],
     })
   })
 
