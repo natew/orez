@@ -1,6 +1,6 @@
 {
   "name": "@o/env",
-  "version": "0.16.14",
+  "version": "0.16.15",
   "description": "Typed environment configuration for browser-safe application modules and local tooling.",
   "license": "MIT",
   "repository": {

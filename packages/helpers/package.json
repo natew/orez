@@ -1,6 +1,6 @@
 {
   "name": "@o/helpers",
-  "version": "0.16.14",
+  "version": "0.16.15",
   "description": "Small browser, React, storage, string, and timing helpers used by Orez consumers.",
   "license": "MIT",
   "repository": {
