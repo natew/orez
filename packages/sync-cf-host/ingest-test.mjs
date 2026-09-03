@@ -1665,33 +1665,30 @@ try {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ enabled: true }),
   })
-  const seededNeverPublished = await fetch(
-    `${neverPublishedUpstream}/api/zero/push`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        clientGroupID: 'upstream',
-        mutations: [
-          {
-            type: 'custom',
-            clientID: 'seed',
-            id: 1,
-            name: 'item.insert',
-            args: [
-              {
-                id: 'never-published-row',
-                label: 'captured upstream, never published',
-                rank: 1,
-                done: false,
-                meta: null,
-              },
-            ],
-          },
-        ],
-      }),
-    }
-  )
+  const seededNeverPublished = await fetch(`${neverPublishedUpstream}/api/zero/push`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      clientGroupID: 'upstream',
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'seed',
+          id: 1,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'never-published-row',
+              label: 'captured upstream, never published',
+              rank: 1,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
   assert.equal(seededNeverPublished.status, 200)
   // the drop leaves nothing to serve, so the served cookie never moves. what
   // proves the page travelled the ingest path is the replica's upstream cursor
