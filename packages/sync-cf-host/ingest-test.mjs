@@ -1646,33 +1646,147 @@ try {
     .map((entry) => entry.value.meta)
   assert.deepEqual(actualJson, expectedJson)
 
-  // A feed that drops rows for a table this replica MODELS is a publication
-  // misconfiguration, and it is otherwise invisible: the page applies nothing
-  // while the cursor still advances, so every query keeps answering from the
-  // last row that got through and no error is raised anywhere. Trip instead of
-  // serving a silently frozen replica.
-  const unpublishedNamespace = `unpublished-${crypto.randomUUID()}`
-  const unpublishedOrigin = `${base}/${unpublishedNamespace}`
-  await fetch(`${base}/unpublished-control/${unpublishedNamespace}`, {
+  // A feed that stops publishing a table this replica already syncs is a
+  // publication misconfiguration, and it is otherwise invisible: the page
+  // applies nothing, the trailing cursor marker still advances, and every query
+  // keeps answering from the last row that got through. Trip instead of serving
+  // a silently frozen replica.
+  //
+  // An app may also model tables it captures for rollback and never publishes.
+  // Those look identical in any one page, so a replica that has never received
+  // the table must keep serving.
+  const neverPublishedNamespace = `unpublished-never-${crypto.randomUUID()}`
+  const neverPublishedOrigin = `${base}/${neverPublishedNamespace}`
+  const neverPublishedUpstream = `${base}/upstream/${neverPublishedNamespace}`
+  // drop first, then write. the write is what drives ingest, so this replica
+  // meets the dropped table without ever having received a row of it.
+  await fetch(`${base}/unpublished-control/${neverPublishedNamespace}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ enabled: true }),
   })
-  const unpublishedPull = await fetch(`${unpublishedOrigin}/pull`, {
+  const seededNeverPublished = await fetch(
+    `${neverPublishedUpstream}/api/zero/push`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        clientGroupID: 'upstream',
+        mutations: [
+          {
+            type: 'custom',
+            clientID: 'seed',
+            id: 1,
+            name: 'item.insert',
+            args: [
+              {
+                id: 'never-published-row',
+                label: 'captured upstream, never published',
+                rank: 1,
+                done: false,
+                meta: null,
+              },
+            ],
+          },
+        ],
+      }),
+    }
+  )
+  assert.equal(seededNeverPublished.status, 200)
+  // the drop leaves nothing to serve, so the served cookie never moves. what
+  // proves the page travelled the ingest path is the replica's upstream cursor
+  // reaching the feed head, and a replica that tripped would stop short of it.
+  let neverPublishedWatermark = null
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const neverPublishedPull = await fetch(`${neverPublishedOrigin}/pull`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        clientID: 'unpublished-never-reader',
+        clientGroupID: 'unpublished-never-group',
+        cookie: null,
+      }),
+    })
+    assert.equal(neverPublishedPull.status, 200)
+    const status = await fetch(`${neverPublishedOrigin}/admin/status`, {
+      headers: { 'x-admin-key': 'ingest-harness-admin' },
+    })
+    assert.equal(status.status, 200)
+    neverPublishedWatermark = (await status.json()).engine.upstreamWatermark
+    if (neverPublishedWatermark === '100') break
+    await Bun.sleep(10)
+  }
+  assert.equal(neverPublishedWatermark, '100')
+  await fetch(`${base}/unpublished-control/${neverPublishedNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  })
+
+  const demotedNamespace = `unpublished-${crypto.randomUUID()}`
+  const demotedOrigin = `${base}/${demotedNamespace}`
+  const demotedUpstream = `${base}/upstream/${demotedNamespace}`
+  const seededDemoted = await fetch(`${demotedUpstream}/api/zero/push`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      clientGroupID: 'upstream',
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'seed',
+          id: 1,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'demoted-row',
+              label: 'published before the bad deploy',
+              rank: 1,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(seededDemoted.status, 200)
+  const demotedPull = await fetch(`${demotedOrigin}/pull`, {
     method: 'POST',
     headers: {
       authorization: 'Bearer token-user-a',
       'content-type': 'application/json',
     },
     body: JSON.stringify({
-      clientID: 'unpublished-reader',
-      clientGroupID: 'unpublished-group',
+      clientID: 'demoted-reader',
+      clientGroupID: 'demoted-group',
       cookie: null,
     }),
   })
-  assert.equal(unpublishedPull.status, 429)
-  assert.equal((await unpublishedPull.json()).error, 'ingestTableUnpublished')
-  await fetch(`${base}/unpublished-control/${unpublishedNamespace}`, {
+  assert.equal(demotedPull.status, 200)
+  await fetch(`${base}/unpublished-control/${demotedNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  })
+  const demotedAfterPull = await fetch(`${demotedOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'demoted-reader',
+      clientGroupID: 'demoted-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(demotedAfterPull.status, 429)
+  assert.equal((await demotedAfterPull.json()).error, 'ingestTableUnpublished')
+  await fetch(`${base}/unpublished-control/${demotedNamespace}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ enabled: false }),

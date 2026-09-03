@@ -353,11 +353,48 @@ export class DataService extends WorkerEntrypoint<Env> {
     // a feed that drops rows for a table the replica models, reporting the drop
     // and still advancing the cursor. this is what a publication misconfiguration
     // looks like from the replica's side.
+    if (pathname.endsWith('/snapshot') && unpublishedNamespaces.has(namespace)) {
+      // what the data worker answers for a table it does not publish: a
+      // finished page with no rows, naming the table, so the generation walks
+      // past it instead of stranding the whole namespace in `paging`.
+      const table = new URL(request.url).searchParams.get('table')
+      if (table === 'item') {
+        return Promise.resolve(
+          Response.json({
+            watermark: 100,
+            rows: [],
+            nextCursor: null,
+            unpublishedTables: ['item'],
+          })
+        )
+      }
+    }
     if (pathname.endsWith('/changes') && unpublishedNamespaces.has(namespace)) {
+      // a real feed answers a cursor that already sits at the head with an
+      // empty page. returning the drop page forever instead would look like a
+      // stalled cursor and trip a different breaker.
+      const changesParams = new URL(request.url).searchParams
+      const changesCursor = Number(
+        changesParams.get('since') ?? changesParams.get('watermark') ?? 0
+      )
+      if (changesCursor >= 100) {
+        return Promise.resolve(Response.json({ watermark: 100, changes: [] }))
+      }
+      // exactly what the data worker emits when it drops a table's rows: the
+      // page carries no row for it, a trailing syncCursor marker still advances
+      // the replica's cursor, and the drop is named.
       return Promise.resolve(
         Response.json({
           watermark: 100,
-          changes: [],
+          changes: [
+            {
+              watermark: 100,
+              tableName: 'syncCursor',
+              op: 'INSERT',
+              rowData: { id: 'zero-http', watermark: 100 },
+              oldData: null,
+            },
+          ],
           unpublishedTables: ['item'],
         })
       )

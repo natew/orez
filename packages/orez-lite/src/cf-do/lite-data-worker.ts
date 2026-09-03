@@ -468,11 +468,17 @@ function projectFeedBody(
     } else {
       const table = feedTables.get(stripPublicPrefix(snapshotTable))
       if (!table) {
-        throw new Error(
-          `snapshot table ${JSON.stringify(snapshotTable)} is not published`
-        )
+        // a table the app keeps out of its publication contributes exactly zero
+        // rows to a snapshot, so answer with a finished empty page. failing the
+        // request instead strands the generation mid-paging, and a generation
+        // stuck in `paging` blocks live ingest for the whole namespace: one
+        // excluded table would freeze every table beside it.
+        projected.rows = []
+        projected.nextCursor = null
+        projected.unpublishedTables = [stripPublicPrefix(snapshotTable)]
+      } else {
+        projected.rows = value.rows.map((row) => projectedRow(table, row))
       }
-      projected.rows = value.rows.map((row) => projectedRow(table, row))
     }
   }
 

@@ -143,20 +143,30 @@ type SnapshotProgress = {
   catchupWatermark: string
 }
 
-// a feed that drops a table this replica MODELS is a publication
-// misconfiguration, not a subset replica. it is invisible otherwise: the page
-// applies nothing, the cursor still advances on the trailing syncCursor marker,
-// and every query keeps answering from the last row that made it through, so
-// clients see a database frozen at the moment of the bad deploy with no error
-// anywhere. name the offending tables so the caller can stop instead.
-function modelledUnpublishedTables(
+// a feed that STOPS publishing a table this replica already syncs is a
+// publication misconfiguration, and it is invisible otherwise: the page applies
+// nothing, the cursor still advances on the trailing syncCursor marker, and
+// every query keeps answering from the last row that made it through, so
+// clients see a table frozen at the moment of the bad deploy with no error
+// anywhere.
+//
+// an app may also model tables it deliberately never publishes, capturing them
+// for rollback only. in any single page those look identical to a demotion, so
+// the test is not "modelled but dropped" but "dropped after this replica had
+// already been receiving it": compare against the tables this replica has
+// actually ingested and name only the ones that left.
+function unpublishedRegressions(
   batch: UpstreamBatch,
-  schema: { tables: Record<string, unknown> }
+  schema: { tables: Record<string, unknown> },
+  publishedSeen: ReadonlySet<string>
 ): string[] {
   const reported = batch.unpublishedTables
   if (!Array.isArray(reported) || reported.length === 0) return []
   return reported.filter(
-    (table) => typeof table === 'string' && Object.hasOwn(schema.tables, table)
+    (table) =>
+      typeof table === 'string' &&
+      Object.hasOwn(schema.tables, table) &&
+      publishedSeen.has(table)
   )
 }
 
@@ -173,6 +183,7 @@ type SnapshotPage = {
   watermark: number
   rows: Record<string, unknown>[]
   nextCursor: string | null
+  unpublishedTables?: string[]
 }
 // A hibernatable socket outlives the object holding the hub, so anything the
 // hub must not lose lives here. Identity is recorded at the authenticated
@@ -1007,6 +1018,47 @@ export function createSyncDurableObject<
       )
     }
 
+    // the set of tables this replica has actually received published changes
+    // for. it is the baseline that separates "the app never publishes this
+    // table" from "the feed stopped publishing a table we were syncing", and it
+    // has to survive eviction, so it lives in _zsync_host_control rather than
+    // an instance field. it only ever grows, and a write only happens the first
+    // time a table shows up.
+    #publishedSeenCache: Set<string> | null = null
+
+    #publishedSeen(): Set<string> {
+      if (!this.#publishedSeenCache) {
+        const stored = this.#controlGet('publishedTablesSeen')
+        let names: unknown = null
+        if (stored !== null) {
+          try {
+            names = JSON.parse(stored)
+          } catch {
+            names = null
+          }
+        }
+        this.#publishedSeenCache = new Set(
+          Array.isArray(names)
+            ? names.filter((name): name is string => typeof name === 'string')
+            : []
+        )
+      }
+      return this.#publishedSeenCache
+    }
+
+    #notePublishedTables(tables: Iterable<string>): void {
+      const seen = this.#publishedSeen()
+      let added = false
+      for (const table of tables) {
+        if (seen.has(table)) continue
+        seen.add(table)
+        added = true
+      }
+      if (added) {
+        this.#controlSet('publishedTablesSeen', JSON.stringify([...seen].sort()))
+      }
+    }
+
     #controlDelete(...keys: string[]): void {
       if (keys.length === 0) return
       this.#directSql.exec(
@@ -1292,6 +1344,11 @@ export function createSyncDurableObject<
       ) {
         throw new Error('invalid upstream snapshot page response')
       }
+      // a snapshot answer is upstream stating outright whether it publishes this
+      // table, which makes it the one place that can build a complete baseline:
+      // every modelled table is paged here, not just the ones that happen to be
+      // written while this replica is watching.
+      if (!page.unpublishedTables?.includes(table)) this.#notePublishedTables([table])
       return page as SnapshotPage
     }
 
@@ -1444,7 +1501,11 @@ export function createSyncDurableObject<
             if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
               throw new Error('invalid upstream changes response')
             }
-            const catchupUnpublished = modelledUnpublishedTables(batch, config.schema)
+            const catchupUnpublished = unpublishedRegressions(
+              batch,
+              config.schema,
+              this.#publishedSeen()
+            )
             if (catchupUnpublished.length > 0) {
               this.#tripIngest('ingestTableUnpublished', {
                 phase: 'snapshot_catchup',
@@ -1455,7 +1516,9 @@ export function createSyncDurableObject<
                 tables: catchupUnpublished,
               })
             }
-            for (const table of upstreamBatchTables(batch)) changedTables.add(table)
+            const catchupTables = upstreamBatchTables(batch)
+            for (const table of catchupTables) changedTables.add(table)
+            this.#notePublishedTables(catchupTables)
             this.#resetSnapshotBillingWindow()
             const result = this.#withIngestBilling(
               {
@@ -1557,7 +1620,11 @@ export function createSyncDurableObject<
                 ? batchCommitTimeMs
                 : Math.min(oldestLiveCommitTimeMs, batchCommitTimeMs)
           }
-          const unpublished = modelledUnpublishedTables(batch, config.schema)
+          const unpublished = unpublishedRegressions(
+            batch,
+            config.schema,
+            this.#publishedSeen()
+          )
           if (unpublished.length > 0) {
             this.#tripIngest('ingestTableUnpublished', {
               phase: 'changes',
@@ -1567,7 +1634,9 @@ export function createSyncDurableObject<
               tables: unpublished,
             })
           }
-          for (const table of upstreamBatchTables(batch)) changedTables.add(table)
+          const batchTables = upstreamBatchTables(batch)
+          for (const table of batchTables) changedTables.add(table)
+          this.#notePublishedTables(batchTables)
           const result = this.#withIngestBilling(
             {
               phase: 'changes',
