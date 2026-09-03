@@ -623,10 +623,7 @@ import * as Queries from './groupedQueries'
             return `  ${q.name}: defineQuery(() => Queries.${file}.${q.name}()),`
           }
 
-          const indentedValidator = validatorDef
-            .split('\n')
-            .map((line, i) => (i === 0 ? line : `    ${line}`))
-            .join('\n')
+          const indentedValidator = indentContinuationLines(validatorDef, 2)
 
           return `  ${q.name}: defineQuery(
     ${indentedValidator},
@@ -719,6 +716,14 @@ export function extractValibotExpression(valibotCode: string): string {
   return valibotCode.trim() || 'v.unknown()'
 }
 
+function indentContinuationLines(value: string, spaces: number): string {
+  const indentation = ' '.repeat(spaces)
+  return value
+    .split('\n')
+    .map((line, index) => (index === 0 ? line : `${indentation}${line}`))
+    .join('\n')
+}
+
 // parse a column builder source-text fragment (e.g. "string().optional()") into
 // a SchemaColumn. used by generate-lite.ts when the caller extracts raw
 // column builder text from their AST.
@@ -753,7 +758,7 @@ export function generateSyncedMutationsFile(modelMutations: ModelMutations[]): s
             const customMut = model.custom.find((m) => m.name === mode)!
             if (customMut.valibotCode) {
               entries.push(
-                `    ${mode}: ${extractValibotExpression(customMut.valibotCode)},`
+                `    ${mode}: ${indentContinuationLines(extractValibotExpression(customMut.valibotCode), 2)},`
               )
             } else {
               // fall back to schema-derived
@@ -781,7 +786,9 @@ export function generateSyncedMutationsFile(modelMutations: ModelMutations[]): s
           entries.push(`    ${mut.name}: v.unknown(),`)
           continue
         }
-        entries.push(`    ${mut.name}: ${extractValibotExpression(mut.valibotCode)},`)
+        entries.push(
+          `    ${mut.name}: ${indentContinuationLines(extractValibotExpression(mut.valibotCode), 2)},`
+        )
       }
 
       return `  ${model.modelName}: {\n${entries.join('\n')}\n  },`

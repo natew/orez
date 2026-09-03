@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import {
   generateGroupedQueriesFile,
   generateModelsFile,
+  generateSyncedMutationsFile,
   generateTablesFile,
 } from './generate-helpers'
 
@@ -37,5 +38,39 @@ describe('generated module identifiers', () => {
     ] as Parameters<typeof generateTablesFile>[0])
 
     expectNoDuplicates(source)
+  })
+})
+
+describe('generated mutation validators', () => {
+  test('indents multiline custom validators inside their mutation entries', () => {
+    const source = generateSyncedMutationsFile([
+      {
+        modelName: 'post',
+        hasCRUD: true,
+        columns: {
+          id: { type: 'string', optional: false, customType: undefined },
+        },
+        primaryKeys: ['id'],
+        custom: [
+          {
+            name: 'update',
+            paramType: '{ id: string }',
+            valibotCode: 'v.object({\n    id: v.string(),\n  })',
+          },
+          {
+            name: 'publish',
+            paramType: '{ id: string }',
+            valibotCode: 'v.object({\n    id: v.string(),\n  })',
+          },
+        ],
+      },
+    ])
+
+    expect(source).toContain(`    update: v.object({
+      id: v.string(),
+    }),`)
+    expect(source).toContain(`    publish: v.object({
+      id: v.string(),
+    }),`)
   })
 })
