@@ -1,4 +1,4 @@
 [tools]
-bun = "1.3.14"
+bun = "1.4.0"
 node = "24.3.0"
 "cargo:wasm-pack" = "0.14.0"
