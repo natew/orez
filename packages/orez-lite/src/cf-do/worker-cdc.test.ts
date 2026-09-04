@@ -320,9 +320,15 @@ describe('ZeroDO transactional CDC integration', () => {
       { id: 'one', body: 'private' },
     ])
     expect(zero.readChangesSince(0)).toEqual([])
+    // [published, changedData]. Neither commit publishes a change, for two
+    // different reasons, and the second argument is what separates them: the
+    // private insert really wrote a row and has to move the backup marker even
+    // though nothing subscribes to it, while the no-op update matched nothing
+    // and must not, or it tears a running export over a database that did not
+    // move.
     expect(committed.mock.calls).toEqual([
       [false, true],
-      [false, true],
+      [false, false],
     ])
   })
 

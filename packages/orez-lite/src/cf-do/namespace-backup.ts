@@ -578,14 +578,21 @@ export function createNamespaceBackupManager<Env>(
    * normally.
    *
    * The dump only has to be one state the database actually had, and
-   * `write_seq` answers that directly: it advances on every committed
-   * application-SQL mutation, which is the same invariant `runScheduledBackups`
-   * already trusts when it skips a namespace whose marker has not moved. So
-   * each chunk reads the marker and its pages inside one short session, and
-   * every chunk has to observe the marker the schema read did. Equal markers at
-   * both ends of a monotonic counter means no transaction committed in between,
-   * which is the same guarantee the single session bought, without holding the
-   * database across the network.
+   * `write_seq` answers that directly: it advances on every commit that changed
+   * data, which is the same invariant `runScheduledBackups` already trusts when
+   * it skips a namespace whose marker has not moved. So each chunk reads the
+   * marker and its pages inside one short session, and every chunk has to
+   * observe the marker the schema read did. Equal markers at both ends of a
+   * monotonic counter means nothing changed in between, which is the same
+   * guarantee the single session bought, without holding the database across
+   * the network.
+   *
+   * "changed data" is load-bearing and narrower than "ran a mutating
+   * statement". The marker used to move for any statement that could write, so
+   * an UPDATE matching no rows tore a scan reading a database that had not
+   * moved. Production's control plane took such a bump roughly every five
+   * seconds and went 22 hours with no backup, every attempt torn by exactly one
+   * increment. See `applicationSqlChangedData` in worker.ts.
    *
    * Uploads happen between chunks with no session open, and are not awaited
    * until the scan finishes or `maxInflightParts` are outstanding, so R2 stays

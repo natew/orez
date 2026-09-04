@@ -405,6 +405,13 @@ const APPLICATION_SQL_DISPOSE = Symbol('applicationSqlDispose')
 class ApplicationSqlSessionTarget extends RpcTarget {
   state: ApplicationSqlSessionState = 'created'
   mutated = false
+  /**
+   * Whether a statement in this session actually changed the data, as opposed
+   * to merely being the kind of statement that can. `mutated` drives the
+   * transaction journal and rollback and has to be set before a statement runs;
+   * this is settled after it runs, and is what the backup marker keys on.
+   */
+  changedData = false
   telemetryFinished = false
 
   constructor(
@@ -523,7 +530,7 @@ export class ZeroDO extends DurableObject {
   private applicationSqlWriter: ApplicationSqlSessionTarget | null = null
   private applicationSqlReaders = new Set<ApplicationSqlSessionTarget>()
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
-  protected applicationSqlDidCommit(_published: boolean, _mutated: boolean): void {}
+  protected applicationSqlDidCommit(_published: boolean, _changedData: boolean): void {}
 
   private durableObjectIdentity(): { objectId: string; objectName: string | null } {
     return {
@@ -2122,6 +2129,25 @@ export class ZeroDO extends DurableObject {
     )
   }
 
+  /**
+   * Did this statement actually change the data the backup fence stands for?
+   *
+   * `prepareApplicationSqlMutation` answers a deliberately wider question:
+   * whether the statement is one that MAY write, which is what the journal and
+   * rollback need to know BEFORE it runs. The backup marker needs the narrow
+   * answer, and only after the fact. An UPDATE or DELETE whose WHERE matched
+   * nothing leaves the database byte-identical, so advancing the marker for it
+   * tears any running export for no reason and tells the sweep to re-export a
+   * namespace whose contents did not move.
+   *
+   * A schema change always counts. The dump carries every CREATE statement, so
+   * a table that appeared or changed shape is a different database even when no
+   * row moved.
+   */
+  private applicationSqlChangedData(sql: string, changes: number): boolean {
+    return isSqlRowMutation(sql) ? changes > 0 : true
+  }
+
   private prepareApplicationSqlMutation(sessionID: string, sql: string): boolean {
     if (!isSqlMutation(sql)) return false
     if (!isSqlRowMutation(sql)) {
@@ -2177,16 +2203,19 @@ export class ZeroDO extends DurableObject {
   ): Promise<Row[]> {
     this.assertApplicationSqlStatement(session, sql)
     return this.atomically(() => {
-      if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
-        session.mutated = true
-      }
-      return this.executeSQL(
+      const mutation = this.prepareApplicationSqlMutation(session.sessionID, sql)
+      if (mutation) session.mutated = true
+      const result = this.executeSQL(
         sql,
         [...params],
         undefined,
         session.sessionID,
         session.telemetry
-      ).rows as Row[]
+      )
+      if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
+        session.changedData = true
+      }
+      return result.rows as Row[]
     })
   }
 
@@ -2212,9 +2241,8 @@ export class ZeroDO extends DurableObject {
   ): Promise<ApplicationSqlExecResult> {
     this.assertApplicationSqlStatement(session, sql)
     return this.atomically(() => {
-      if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
-        session.mutated = true
-      }
+      const mutation = this.prepareApplicationSqlMutation(session.sessionID, sql)
+      if (mutation) session.mutated = true
       const result = this.executeSQL(
         sql,
         [...params],
@@ -2222,6 +2250,9 @@ export class ZeroDO extends DurableObject {
         session.sessionID,
         session.telemetry
       )
+      if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
+        session.changedData = true
+      }
       return { changes: result.changes }
     })
   }
@@ -2241,9 +2272,8 @@ export class ZeroDO extends DurableObject {
       const results = await this.atomically(() =>
         statements.map(({ sql, params = [], metadata }, index) => {
           try {
-            if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
-              session.mutated = true
-            }
+            const mutation = this.prepareApplicationSqlMutation(session.sessionID, sql)
+            if (mutation) session.mutated = true
             const result = this.executeSQL(
               sql,
               [...params],
@@ -2251,6 +2281,9 @@ export class ZeroDO extends DurableObject {
               session.sessionID,
               session.telemetry
             )
+            if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
+              session.changedData = true
+            }
             return { changes: result.changes }
           } catch (error) {
             failure = {
@@ -2352,7 +2385,7 @@ export class ZeroDO extends DurableObject {
     this.releaseApplicationSqlTurn(session, { pump: false })
     try {
       if (outcome === 'committed') {
-        this.applicationSqlDidCommit(published, session.mutated)
+        this.applicationSqlDidCommit(published, session.changedData)
       }
     } catch (caught) {
       outcome = 'error'

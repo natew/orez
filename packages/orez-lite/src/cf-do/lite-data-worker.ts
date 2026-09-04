@@ -682,8 +682,13 @@ export function createOrezDataWorker<
       )
     }
 
-    protected applicationSqlDidCommit(published: boolean, mutated: boolean): void {
-      if (mutated) this.orezBumpBackupMarker()
+    protected applicationSqlDidCommit(published: boolean, changedData: boolean): void {
+      // only a commit that actually changed data moves the marker. the marker is
+      // the backup fence: an export reads it once and requires every chunk to
+      // observe the same value, so a bump for a statement that matched no rows
+      // tears a scan that was reading an identical database. it is also what the
+      // sweep skips on, so a no-op bump costs a needless export as well.
+      if (changedData) this.orezBumpBackupMarker()
       if (published && options.applicationSqlDidCommit) {
         const notification = Promise.resolve()
           .then(() =>
