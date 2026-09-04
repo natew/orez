@@ -685,10 +685,15 @@ class BrowserSyncHostImpl<
   }
 
   async handlePull(request: Request): Promise<Response> {
+    const pathname = new URL(request.url).pathname
+    let clientGroupID: string | undefined
     try {
       this.#assertAccepting()
       const { authData, claims } = await this.#auth(request)
       const input = await requestObject(request)
+      if (typeof input.clientGroupID === 'string') {
+        clientGroupID = input.clientGroupID
+      }
       return await this.#runQueued('pull', async () => {
         this.#assertAvailable()
         const transformVersion =
@@ -712,7 +717,14 @@ class BrowserSyncHostImpl<
         return json(response)
       })
     } catch (error) {
-      return json({ error: errorMessage(error) }, statusOf(error))
+      const status = statusOf(error)
+      if (status >= 500) {
+        console.error(
+          `[browser-sync-host] ${pathname} pull failed (clientGroupID=${clientGroupID ?? '<unknown>'}):`,
+          error
+        )
+      }
+      return json({ error: errorMessage(error) }, status)
     }
   }
 

@@ -870,3 +870,61 @@ fn membership_departure_reaches_every_client_of_the_group() {
         "second client of the group must replay the entry"
     );
 }
+
+#[test]
+fn int64_column_values_larger_than_safe_integer_pull_without_error() {
+    use ZeroColumnType::*;
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE budget (id TEXT PRIMARY KEY, amountMinor INTEGER)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO budget VALUES (?, ?)",
+        &[
+            SqlValue::Text("b1".into()),
+            SqlValue::Integer(15017516016016000),
+        ],
+    )
+    .unwrap();
+    let tables = Tables::new().with(
+        "budget",
+        TableSpec {
+            columns: vec![
+                ("id".into(), String),
+                ("amountMinor".into(), Number),
+            ],
+            primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
+        },
+    );
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+
+    let body = json!({
+        "clientID": "c1",
+        "clientGroupID": "g1",
+        "cookie": null,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q1",
+                "ast": { "table": "budget" }
+            }]
+        }
+    });
+
+    let res: Value = db
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+        .unwrap();
+
+    let patch = res["rowsPatch"].as_array().unwrap();
+    assert_eq!(patch.len(), 2);
+    assert_eq!(patch[0], json!({ "op": "clear" }));
+    assert_eq!(patch[1]["op"], "put");
+    assert_eq!(patch[1]["value"]["amountMinor"], json!(15017516016016000_i64));
+}
+

@@ -237,7 +237,7 @@ pub fn zero_row(
         let converted = to_zero_value(*ty, &raw);
         if *ty == ZeroColumnType::Number && matches!(converted, Value::String(_)) {
             return Err(crate::error::EngineError::internal(format!(
-                "cannot convert schema-number column {col} value to number: {raw:?}"
+                "cannot convert schema-number column {table}.{col} value to number: {raw:?}"
             )));
         }
         let physical = tables.physical_column(table, col).ok_or_else(|| {
@@ -308,7 +308,7 @@ pub fn zero_pk_id(
         let converted = to_zero_value_json(ty, raw);
         if ty == ZeroColumnType::Number && matches!(converted, Value::String(_)) {
             return Err(crate::error::EngineError::internal(format!(
-                "cannot convert schema-number primary key {col} to number"
+                "cannot convert schema-number primary key {table}.{col} to number"
             )));
         }
         let physical = tables.physical_column(table, col).ok_or_else(|| {
@@ -466,7 +466,7 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("cannot convert schema-number column createdAt")
+                .contains("cannot convert schema-number column record.createdAt")
         );
     }
 }

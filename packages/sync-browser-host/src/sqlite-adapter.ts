@@ -76,6 +76,9 @@ class StatementCache {
     let statement = this.#statements.get(sql)
     if (!statement) {
       statement = this.db.prepare(sql)
+      if (typeof statement.safeIntegers === 'function') {
+        statement.safeIntegers(true)
+      }
       this.#statements.set(sql, statement)
     }
     return statement
@@ -97,9 +100,26 @@ export class BedrockSyncDb implements JsSyncDb {
 
   query(sql: string, params: WireValue[]): WireRow[] {
     assertConsumerSql(sql)
-    const statement = this.#statements.get(sql).raw()
-    const columns = statement.columns().map((column) => column.name)
-    return (statement.all(params.map(decodeBinding)) as unknown[][]).map((values) => ({
+    const statement = this.#statements.get(sql)
+    const bindings = params.map(decodeBinding)
+    if (typeof (statement as unknown as { values?: unknown }).values === 'function') {
+      const columns =
+        (statement as unknown as { columnNames?: string[] }).columnNames ?? []
+      const rawRows = (
+        statement as unknown as { values(params: unknown[]): unknown[][] }
+      ).values(bindings)
+      return rawRows.map((values) => ({
+        columns,
+        values: values.map(encodeResult),
+      }))
+    }
+    const rawStatement = typeof statement.raw === 'function' ? statement.raw() : statement
+    const columns =
+      typeof rawStatement.columns === 'function'
+        ? rawStatement.columns().map((column) => column.name)
+        : []
+    const rawRows = rawStatement.all(bindings) as unknown[][]
+    return rawRows.map((values) => ({
       columns,
       values: values.map(encodeResult),
     }))
@@ -120,15 +140,22 @@ export class BedrockDirectSql implements SyncSql {
       this.db.exec(sql)
       const statement = this.db.prepare('SELECT changes() AS changes')
       try {
-        const result = statement.get() as { changes: number }
-        return { changes: result.changes }
+        if (typeof statement.safeIntegers === 'function') {
+          statement.safeIntegers(true)
+        }
+        const result = statement.get() as { changes: number | bigint }
+        return { changes: Number(result.changes) }
       } finally {
         statement.finalize()
       }
     }
     const statement = this.db.prepare(sql)
     try {
-      return { changes: statement.run([...params]).changes }
+      if (typeof statement.safeIntegers === 'function') {
+        statement.safeIntegers(true)
+      }
+      const res = statement.run([...params]) as { changes?: number | bigint }
+      return { changes: Number(res.changes ?? 0) }
     } finally {
       statement.finalize()
     }
@@ -141,6 +168,9 @@ export class BedrockDirectSql implements SyncSql {
     assertConsumerSql(sql)
     const statement = this.db.prepare(sql)
     try {
+      if (typeof statement.safeIntegers === 'function') {
+        statement.safeIntegers(true)
+      }
       return statement.all([...params]) as Row[]
     } finally {
       statement.finalize()

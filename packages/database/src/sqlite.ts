@@ -152,19 +152,33 @@ export function createBunSQLiteExecutor({
 }: CreateBunSQLiteExecutorOptions): SQLiteTransactionExecutor {
   return {
     exec(sql, params = []) {
-      const result = database.prepare(sql).run(...bunBindings(params))
-      return { changes: result.changes }
+      const statement = database.prepare(sql)
+      if (typeof statement.safeIntegers === 'function') {
+        statement.safeIntegers(true)
+      }
+      const result = statement.run(...bunBindings(params))
+      return { changes: Number(result.changes) }
     },
     execMany(statements) {
-      return statements.map(({ sql, params = [] }) => ({
-        changes: database.prepare(sql).run(...bunBindings(params)).changes,
-      }))
+      return statements.map(({ sql, params = [] }) => {
+        const statement = database.prepare(sql)
+        if (typeof statement.safeIntegers === 'function') {
+          statement.safeIntegers(true)
+        }
+        return {
+          changes: Number(statement.run(...bunBindings(params)).changes),
+        }
+      })
     },
     query<Row extends Record<string, unknown>>(
       sql: string,
       params: readonly unknown[] = []
     ): Row[] {
-      return database.prepare<Row, SQLQueryBindings[]>(sql).all(...bunBindings(params))
+      const statement = database.prepare<Row, SQLQueryBindings[]>(sql)
+      if (typeof statement.safeIntegers === 'function') {
+        statement.safeIntegers(true)
+      }
+      return statement.all(...bunBindings(params))
     },
     queryAst,
   }
