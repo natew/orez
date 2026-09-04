@@ -67,6 +67,14 @@ function encodeResult(value: unknown): WireValue {
   return encodeSqlValue(value)
 }
 
+function enableSafeIntegers(statement: unknown): void {
+  if (
+    typeof (statement as { safeIntegers?: unknown })?.safeIntegers === 'function'
+  ) {
+    (statement as { safeIntegers(toggle?: boolean): unknown }).safeIntegers(true)
+  }
+}
+
 class StatementCache {
   readonly #statements = new Map<string, Statement>()
 
@@ -76,9 +84,7 @@ class StatementCache {
     let statement = this.#statements.get(sql)
     if (!statement) {
       statement = this.db.prepare(sql)
-      if (typeof statement.safeIntegers === 'function') {
-        statement.safeIntegers(true)
-      }
+      enableSafeIntegers(statement)
       this.#statements.set(sql, statement)
     }
     return statement
@@ -140,9 +146,7 @@ export class BedrockDirectSql implements SyncSql {
       this.db.exec(sql)
       const statement = this.db.prepare('SELECT changes() AS changes')
       try {
-        if (typeof statement.safeIntegers === 'function') {
-          statement.safeIntegers(true)
-        }
+        enableSafeIntegers(statement)
         const result = statement.get() as { changes: number | bigint }
         return { changes: Number(result.changes) }
       } finally {
@@ -151,9 +155,7 @@ export class BedrockDirectSql implements SyncSql {
     }
     const statement = this.db.prepare(sql)
     try {
-      if (typeof statement.safeIntegers === 'function') {
-        statement.safeIntegers(true)
-      }
+      enableSafeIntegers(statement)
       const res = statement.run([...params]) as { changes?: number | bigint }
       return { changes: Number(res.changes ?? 0) }
     } finally {
@@ -168,9 +170,7 @@ export class BedrockDirectSql implements SyncSql {
     assertConsumerSql(sql)
     const statement = this.db.prepare(sql)
     try {
-      if (typeof statement.safeIntegers === 'function') {
-        statement.safeIntegers(true)
-      }
+      enableSafeIntegers(statement)
       return statement.all([...params]) as Row[]
     } finally {
       statement.finalize()

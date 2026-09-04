@@ -146,6 +146,14 @@ export type CreateBunSQLiteExecutorOptions = {
   ): Result | Promise<Result>
 }
 
+function enableSafeIntegers(statement: unknown): void {
+  if (
+    typeof (statement as { safeIntegers?: unknown })?.safeIntegers === 'function'
+  ) {
+    (statement as { safeIntegers(toggle?: boolean): unknown }).safeIntegers(true)
+  }
+}
+
 export function createBunSQLiteExecutor({
   database,
   queryAst,
@@ -153,18 +161,14 @@ export function createBunSQLiteExecutor({
   return {
     exec(sql, params = []) {
       const statement = database.prepare(sql)
-      if (typeof statement.safeIntegers === 'function') {
-        statement.safeIntegers(true)
-      }
+      enableSafeIntegers(statement)
       const result = statement.run(...bunBindings(params))
       return { changes: Number(result.changes) }
     },
     execMany(statements) {
       return statements.map(({ sql, params = [] }) => {
         const statement = database.prepare(sql)
-        if (typeof statement.safeIntegers === 'function') {
-          statement.safeIntegers(true)
-        }
+        enableSafeIntegers(statement)
         return {
           changes: Number(statement.run(...bunBindings(params)).changes),
         }
@@ -175,9 +179,7 @@ export function createBunSQLiteExecutor({
       params: readonly unknown[] = []
     ): Row[] {
       const statement = database.prepare<Row, SQLQueryBindings[]>(sql)
-      if (typeof statement.safeIntegers === 'function') {
-        statement.safeIntegers(true)
-      }
+      enableSafeIntegers(statement)
       return statement.all(...bunBindings(params))
     },
     queryAst,
