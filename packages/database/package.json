@@ -1,6 +1,6 @@
 {
   "name": "@o/database",
-  "version": "0.16.15",
+  "version": "0.16.16",
   "description": "SQLite database helpers for Orez hosts: Drizzle over a host-owned transaction, a Better Auth adapter with read and write lanes, seed application, and private-table marking.",
   "license": "MIT",
   "repository": {
