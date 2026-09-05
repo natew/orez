@@ -128,9 +128,7 @@ describe('backup marker', () => {
     core.sql.exec(`INSERT INTO todo VALUES ('t1', 'first')`)
 
     await runSession(core, 'no-op-update', async (session) => {
-      const result = await session.exec(
-        `UPDATE todo SET title = 'x' WHERE id = 'absent'`
-      )
+      const result = await session.exec(`UPDATE todo SET title = 'x' WHERE id = 'absent'`)
       // the premise: SQLite really did change nothing. without this the
       // assertion below could pass for the wrong reason.
       expect(result.changes).toBe(0)

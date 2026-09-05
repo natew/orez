@@ -68,10 +68,8 @@ function encodeResult(value: unknown): WireValue {
 }
 
 function enableSafeIntegers(statement: unknown): void {
-  if (
-    typeof (statement as { safeIntegers?: unknown })?.safeIntegers === 'function'
-  ) {
-    (statement as { safeIntegers(toggle?: boolean): unknown }).safeIntegers(true)
+  if (typeof (statement as { safeIntegers?: unknown })?.safeIntegers === 'function') {
+    ;(statement as { safeIntegers(toggle?: boolean): unknown }).safeIntegers(true)
   }
 }
 
