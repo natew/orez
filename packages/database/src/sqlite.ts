@@ -144,31 +144,34 @@ export type CreateBunSQLiteExecutorOptions = {
     format: SQLiteQueryFormat,
     queryName?: string
   ): Result | Promise<Result>
+  safeIntegers?: boolean
 }
 
-function enableSafeIntegers(statement: unknown): void {
+function enableSafeIntegers(statement: unknown, enabled = false): void {
   if (
+    enabled &&
     typeof (statement as { safeIntegers?: unknown })?.safeIntegers === 'function'
   ) {
-    (statement as { safeIntegers(toggle?: boolean): unknown }).safeIntegers(true)
+    ;(statement as { safeIntegers(toggle?: boolean): unknown }).safeIntegers(true)
   }
 }
 
 export function createBunSQLiteExecutor({
   database,
   queryAst,
+  safeIntegers = false,
 }: CreateBunSQLiteExecutorOptions): SQLiteTransactionExecutor {
   return {
     exec(sql, params = []) {
       const statement = database.prepare(sql)
-      enableSafeIntegers(statement)
+      enableSafeIntegers(statement, safeIntegers)
       const result = statement.run(...bunBindings(params))
       return { changes: Number(result.changes) }
     },
     execMany(statements) {
       return statements.map(({ sql, params = [] }) => {
         const statement = database.prepare(sql)
-        enableSafeIntegers(statement)
+        enableSafeIntegers(statement, safeIntegers)
         return {
           changes: Number(statement.run(...bunBindings(params)).changes),
         }
@@ -179,7 +182,7 @@ export function createBunSQLiteExecutor({
       params: readonly unknown[] = []
     ): Row[] {
       const statement = database.prepare<Row, SQLQueryBindings[]>(sql)
-      enableSafeIntegers(statement)
+      enableSafeIntegers(statement, safeIntegers)
       return statement.all(...bunBindings(params))
     },
     queryAst,
@@ -196,8 +199,9 @@ export type CreateBunSQLiteTransactionProviderOptions = CreateBunSQLiteExecutorO
 export function createBunSQLiteTransactionProvider({
   database,
   queryAst,
+  safeIntegers,
 }: CreateBunSQLiteTransactionProviderOptions): SQLiteTransactionProvider {
-  const executor = createBunSQLiteExecutor({ database, queryAst })
+  const executor = createBunSQLiteExecutor({ database, queryAst, safeIntegers })
   const transactionContext = new AsyncLocalStorage<boolean>()
   let tail = Promise.resolve()
 

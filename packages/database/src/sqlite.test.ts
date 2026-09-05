@@ -219,4 +219,18 @@ describe('createSQLiteDatabase', () => {
       )
     ).resolves.toBeDefined()
   })
+
+  test('supports safeIntegers option when explicitly enabled', () => {
+    const native = new Database(':memory:')
+    databases.push(native)
+    native.exec('CREATE TABLE counter (id INTEGER PRIMARY KEY, count INTEGER)')
+    const executor = createBunSQLiteExecutor({
+      database: native,
+      queryAst: unavailableQueryAst,
+      safeIntegers: true,
+    })
+    executor.exec('INSERT INTO counter VALUES (1, 100)')
+    const rows = executor.query<{ id: bigint; count: bigint }>('SELECT * FROM counter')
+    expect(rows).toEqual([{ id: 1n, count: 100n }])
+  })
 })
