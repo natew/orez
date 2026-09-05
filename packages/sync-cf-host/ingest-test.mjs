@@ -147,11 +147,11 @@ try {
     callbacks: restoreNotificationStatus.attempts,
   }
   assert.deepEqual(restoreCost, {
-    totalChanges: 19,
-    rowsRead: 2_821,
-    rowsWritten: 29,
+    totalChanges: 17,
+    rowsRead: 2_819,
+    rowsWritten: 27,
     sessions: 9,
-    statements: 164,
+    statements: 160,
     callbacks: 0,
   })
   assert.deepEqual(
