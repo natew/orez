@@ -1,22 +1,3 @@
-/**
- * The backup marker is the fence a namespace export runs behind: the export
- * reads it once and requires every chunk of the scan to observe the same value,
- * abandoning the whole dump when it moves. It is also what the scheduled sweep
- * skips a namespace on.
- *
- * Both readings mean "the data changed". The marker used to be bumped for any
- * statement that COULD write, which is a different question and the one the
- * transaction journal asks before a statement runs. Production's control plane
- * was taking a marker bump roughly every five seconds from statements that
- * changed nothing, so its export tore on every attempt and it went 22 hours with
- * no backup while its contents were sitting still (2026-09-04: three consecutive
- * scans torn at markers 767255, 767256 and 767257, one increment apiece, against
- * sampled commits reporting rowsChanged=0).
- *
- * Runs against real SQLite. `changes` is the whole point here, and a mocked SQL
- * layer would be free to report whatever makes the test pass.
- */
-
 // @ts-expect-error - CJS module
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
@@ -185,5 +166,120 @@ describe('backup marker', () => {
     })
 
     expect(core.changedData).toEqual([false])
+  })
+})
+
+describe('physical backup snapshots', () => {
+  it('copies the rolled-back state and recovers after failed cleanup admission', async () => {
+    const core = await createWorkerCore()
+    core.nativeDb.exec(
+      "CREATE TABLE item (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO item VALUES (1, 'before')"
+    )
+    const setup = await core.zero.applicationSqlSession('register-item')
+    await setup.begin()
+    await setup.registerTables([{ table: 'item', publicTable: 'item' }])
+    await setup.commit()
+    const writer = await core.zero.applicationSqlSession('rollback-writer')
+    await writer.begin()
+    await writer.exec("UPDATE item SET value = 'dirty' WHERE id = 1")
+    const pending = core.zero.backupSnapshot({
+      markerTable: 'missing_marker',
+      excludedTables: [],
+    })
+    // admission has to queue before rollback: early copying would retain dirty.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(core.zero.applicationSqlQueue).toHaveLength(1)
+    await writer.rollback()
+    const first = await pending
+    expect(
+      core.nativeDb.prepare(`SELECT c1 AS value FROM "_orez_bk_${first.id}_item"`).get()
+    ).toEqual({ value: 'before' })
+    const admission = vi
+      .spyOn(core.zero, 'withLocalApplicationSqlSession')
+      .mockRejectedValueOnce(new Error('turn timeout'))
+    await expect(core.zero.backupSnapshotDrop(first.id)).rejects.toThrow('turn timeout')
+    admission.mockRestore()
+    const second = await core.zero.backupSnapshot({
+      markerTable: 'missing_marker',
+      excludedTables: [],
+    })
+    expect(second.id).not.toBe(first.id)
+    expect(() =>
+      core.nativeDb.prepare(`SELECT * FROM "_orez_bk_${first.id}_item"`)
+    ).toThrow('no such table')
+    await core.zero.backupSnapshotDrop(first.id)
+    expect(
+      core.nativeDb.prepare(`SELECT c1 AS value FROM "_orez_bk_${second.id}_item"`).get()
+    ).toEqual({ value: 'before' })
+    await core.zero.backupSnapshotDrop(second.id)
+    core.nativeDb.close()
+  })
+
+  it('waits for writer commit, preserves copied rows, and does not advance the marker', async () => {
+    const core = await createWorkerCore()
+    core.nativeDb.exec(
+      "CREATE TABLE item (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO item VALUES (1, 'before'); CREATE TABLE marker (id INTEGER, write_seq INTEGER); INSERT INTO marker VALUES (1, 7)"
+    )
+    const writer = await core.zero.applicationSqlSession('open-writer')
+    await writer.begin()
+    await writer.exec("UPDATE item SET value = 'committed' WHERE id = 1")
+    expect(core.nativeDb.prepare('SELECT value FROM item').get()).toEqual({
+      value: 'committed',
+    })
+    let finished = false
+    const pending = core.zero
+      .backupSnapshot({
+        markerTable: 'marker',
+        excludedTables: ['marker'],
+      })
+      .then((snapshot: unknown) => {
+        finished = true
+        return snapshot
+      })
+    await Promise.resolve()
+    expect(finished).toBe(false)
+    await writer.commit()
+    const commitsBefore = core.changedData.filter(Boolean).length
+    const snapshot: any = await pending
+    expect(snapshot).toMatchObject({
+      marker: 7,
+      tables: expect.arrayContaining(['item']),
+    })
+    expect(
+      core.nativeDb
+        .prepare(`SELECT c1 AS value FROM "_orez_bk_${snapshot.id}_item"`)
+        .get()
+    ).toEqual({
+      value: 'committed',
+    })
+    expect(
+      core.nativeDb
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name GLOB '_orez_bk_*_item'"
+        )
+        .all()
+    ).toEqual([])
+    await expect(
+      core.zero.backupSnapshot({
+        markerTable: 'marker',
+        excludedTables: [],
+      })
+    ).rejects.toThrow('already active')
+    await core.zero.backupSnapshotDrop('wrong-export')
+    expect(
+      core.nativeDb
+        .prepare(`SELECT c1 AS value FROM "_orez_bk_${snapshot.id}_item"`)
+        .get()
+    ).toEqual({
+      value: 'committed',
+    })
+    await core.zero.backupSnapshotDrop(snapshot.id)
+    expect(core.changedData.filter(Boolean)).toHaveLength(commitsBefore)
+    expect(
+      core.nativeDb
+        .prepare("SELECT name FROM sqlite_master WHERE name GLOB '_orez_bk_*'")
+        .all()
+    ).toEqual([])
+    core.nativeDb.close()
   })
 })

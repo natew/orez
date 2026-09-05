@@ -110,28 +110,23 @@ Cloudflare namespace backup summaries also include `tableRows`, the row count
 observed for every exported table during the existing streaming scan. Consumers
 can persist fleet profiles without issuing a second set of table reads.
 
-`backupManager.exportNamespace(env, namespace)` scans in short read sessions
-rather than one session over the whole database. Each chunk reads the backup
-marker (`write_seq`) and its pages inside the same session, and every chunk has
-to observe the marker the schema read did, so the dump is still one state the
-database actually had. Multipart uploads happen between chunks with no session
-open, and are only awaited once `maxInflightParts` are outstanding, so a writer
-never waits behind R2 and no single writer can end the export. A writer that
-preempts one chunk costs that chunk; a transaction that commits mid-scan costs
-one scan, retried up to `scanAttempts` times before the export reports
-`outcome: 'preempted'` and leaves the work for the next run.
+`backupManager.exportNamespace(env, namespace)` copies exportable tables into
+physical `_orez_bk_*` snapshot tables in one synchronous storage transaction,
+admitted through the application writer queue. The snapshot captures source
+schema and the committed write marker together. It does not advance the marker,
+fire CDC triggers, or charge the application write-budget window; physical copy
+rows remain visible in billing telemetry.
 
-An export with a strict freshness deadline can use normal admission for a
-bounded local scan:
-
-```ts
-backupManager.exportNamespace(env, namespace, {
-  priority: 'normal',
-  scanChunkBytes: 32 * 1024 * 1024,
-})
-```
-
-Normal chunks keep their queue turn until the SQLite reads finish. R2 uploads
-still happen after each chunk closes, so request writes never wait behind R2.
-Set the per-export byte bound from a measured dump size and monitor its growth;
-the returned rows are buffered until the chunk closes.
+Snapshot columns use temporary `c0`, `c1`, … names so source `rowid`, `_rowid_`,
+`oid`, and cursor-shaped columns cannot interfere with paging. The export maps
+these back to source names and pages immutable rowid tables in bounded background
+read sessions.
+Writers may preempt a chunk, which is retried up to `chunkAttempts` times. Live
+commits never invalidate the snapshot, and R2 uploads run outside read sessions.
+Dumps keep their existing source table names, CREATE statements, and format.
+Each copy has generation-specific table names so restarting the object cannot
+substitute a new snapshot into an older scan. Exports release ownership before
+cleanup admission; a failed cleanup is reclaimed by the next export. An RPC
+lease also releases ownership when disposed, and boot removes stale snapshots.
+Concurrent exports cannot overwrite each other's snapshots. Schema discovery and restore
+exclude the reserved `_orez_bk_*` prefix.

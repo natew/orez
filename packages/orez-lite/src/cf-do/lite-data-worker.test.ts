@@ -412,7 +412,7 @@ describe('createOrezDataWorker', () => {
     expect(new TextDecoder().decode(result.body)).toBe('committed')
   })
 
-  it('runs a namespace backup through one read-only application SQL session', async () => {
+  it('copies and drops a snapshot around background scan sessions', async () => {
     const rowsFor = (sql: string) =>
       sql.includes('SELECT write_seq') ? [{ write_seq: 7 }] : []
     const session = {
@@ -472,19 +472,42 @@ describe('createOrezDataWorker', () => {
         },
       },
     })
+    const backupSnapshot = vi.fn(async () => ({
+      id: 'snapshot',
+      lease: { [Symbol.dispose]() {} },
+      marker: 7,
+      tables: ['item'],
+      columns: { item: ['id'] },
+      schema: [
+        {
+          name: 'item',
+          tbl_name: 'item',
+          type: 'table',
+          sql: 'CREATE TABLE item (id INTEGER)',
+        },
+      ],
+    }))
+    const backupSnapshotDrop = vi.fn(async () => {})
     const env = {
       ZERO_SQL_DO: {
         idFromName: (name: string) => name,
-        get: () => ({ applicationSqlSession, applicationSqlQuery }),
+        get: () => ({
+          applicationSqlSession,
+          applicationSqlQuery,
+          backupSnapshot,
+          backupSnapshotDrop,
+        }),
       },
     }
 
     await runtime.backupManager!.exportNamespace(env as any, 'singleton')
 
+    expect(backupSnapshot).toHaveBeenCalledOnce()
+    expect(backupSnapshotDrop).toHaveBeenCalledWith(expect.any(String))
     expect(applicationSqlSession).toHaveBeenCalledOnce()
     expect(applicationSqlQuery).not.toHaveBeenCalled()
     expect(session.begin).toHaveBeenCalledOnce()
-    expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
+    expect(session.queryPreemptible).toHaveBeenCalledTimes(1)
     expect(session.query).not.toHaveBeenCalled()
     expect(session.commitPreemptible).toHaveBeenCalledOnce()
     expect(session.commit).not.toHaveBeenCalled()
@@ -503,8 +526,8 @@ describe('createOrezDataWorker', () => {
       readOnly: true,
       priority: 'normal',
     })
-    expect(session.queryPreemptible).toHaveBeenCalledTimes(2)
-    expect(session.query).toHaveBeenCalledTimes(2)
+    expect(session.queryPreemptible).toHaveBeenCalledTimes(1)
+    expect(session.query).toHaveBeenCalledTimes(1)
     expect(session.commitPreemptible).toHaveBeenCalledOnce()
     expect(session.commit).toHaveBeenCalledOnce()
   })

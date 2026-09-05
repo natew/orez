@@ -106,6 +106,7 @@ function isInternalObject(name: string): boolean {
   return (
     INTERNAL_TABLES.has(name) ||
     name.startsWith('_orez_tx_') ||
+    name.startsWith('_orez_bk_') ||
     name.startsWith('sqlite_')
   )
 }
@@ -902,7 +903,7 @@ export function snapshotSideEffectWriteTables(
   const relations = sql
     .exec(
       "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') " +
-        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY name"
+        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '_orez_bk_*' ORDER BY name"
     )
     .toArray()
     .map((row) => ({ name: String(row.name ?? ''), type: String(row.type ?? '') }))

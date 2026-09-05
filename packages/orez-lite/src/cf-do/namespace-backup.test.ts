@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ApplicationSqlSessionPreemptedError } from './application-sql.js'
 import {
   createNamespaceBackupManager,
+  isNamespaceBackupTableExcluded,
   type NamespaceBackupBucket,
   type NamespaceBackupStatement,
 } from './namespace-backup.js'
@@ -129,8 +130,7 @@ function writableBucket() {
 
 const BetterSqlite3 = BedrockSqlite.Database
 
-// every export read runs in one session. these tests exercise the scan itself,
-// so the session is a pass-through over the same query callback.
+// restore fixtures do not open export sessions; scan fixtures use real SQLite.
 function backupManager<Env>(options: any) {
   return createNamespaceBackupManager<Env>({
     readSession: (env: any, namespace: string, work: any) =>
@@ -141,6 +141,72 @@ function backupManager<Env>(options: any) {
   })
 }
 
+function sqliteSnapshotCallbacks(db: InstanceType<typeof BetterSqlite3>) {
+  return {
+    snapshot: async (
+      _env: unknown,
+      _namespace: string,
+      options: { markerTable: string; excludedTables: readonly string[] }
+    ) => {
+      db.exec('BEGIN')
+      try {
+        const schema = db
+          .prepare(
+            "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+          )
+          .all()
+          .filter(
+            (row: any) =>
+              !isNamespaceBackupTableExcluded(
+                row.name,
+                new Set(options.excludedTables)
+              ) &&
+              !isNamespaceBackupTableExcluded(
+                row.tbl_name,
+                new Set(options.excludedTables)
+              )
+          )
+        const tables = schema
+          .filter((row: any) => row.type === 'table')
+          .map((row: any) => row.name)
+        const id = crypto.randomUUID()
+        const columns: Record<string, string[]> = {}
+        for (const name of tables) {
+          columns[name] = db
+            .prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" LIMIT 0`)
+            .columns()
+            .map((column: any) => column.name)
+          const projection = columns[name]!.map(
+            (column, index) => `"${column.replaceAll('"', '""')}" AS c${index}`
+          ).join(', ')
+          db.exec(
+            `CREATE TABLE "_orez_bk_${id}_${name.replaceAll('"', '""')}" AS SELECT ${projection} FROM "${name.replaceAll('"', '""')}"`
+          )
+        }
+        const marker =
+          Number(
+            db
+              .prepare(`SELECT write_seq FROM "${options.markerTable}" WHERE id = 1`)
+              .get()?.write_seq
+          ) || 0
+        db.exec('COMMIT')
+        return { id, marker, tables, schema, columns, lease: { [Symbol.dispose]() {} } }
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+    },
+    dropSnapshot: async () => {
+      for (const { name } of db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '_orez_bk_*'"
+        )
+        .all())
+        db.exec(`DROP TABLE "${name.replaceAll('"', '""')}"`)
+    },
+  }
+}
+
 function realSqliteManager(
   db: InstanceType<typeof BetterSqlite3>,
   bucket: NamespaceBackupBucket,
@@ -148,6 +214,7 @@ function realSqliteManager(
   metrics?: { queries: string[]; rowsRead: number }
 ) {
   return backupManager({
+    ...sqliteSnapshotCallbacks(db),
     format: 'test-v3',
     markerTable: '_test_backup_meta',
     excludedTables: ['_test_backup_meta'],
@@ -181,153 +248,36 @@ function realSqliteManager(
 }
 
 describe('namespace backup export', () => {
-  it('records per-table row counts in the durable summary without another scan', async () => {
+  it('records empty and populated table counts in the durable summary', async () => {
+    const db = ledgerDatabase(1)
+    db.exec('CREATE TABLE empty (id TEXT)')
     const stored = writableBucket()
-    const manager = backupManager({
-      format: 'test-v3',
-      markerTable: '_test_backup_meta',
-      files: () => stored.bucket,
-      query: async (_env, _namespace, sql, params) => {
-        if (sql.includes('SELECT write_seq')) return [{ write_seq: 9 }]
-        if (sql.includes('sqlite_master')) {
-          return [
-            { name: 'empty', sql: 'CREATE TABLE empty (id TEXT)', type: 'table' },
-            { name: 'message', sql: 'CREATE TABLE message (id TEXT)', type: 'table' },
-          ]
-        }
-        if (sql.includes('FROM "empty"')) return []
-        if (sql.includes('FROM "message"')) {
-          return Number(params[0]) === 0 ? [{ __orez_backup_rowid: 1, id: 'one' }] : []
-        }
-        throw new Error(`unexpected export query: ${sql}`)
-      },
-      batch: async () => {},
-      listNamespaces: async () => ['singleton'],
-    })
-
-    const summary = await exportedSummary(manager.exportNamespace({}, 'singleton'))
-
-    expect(summary).toMatchObject({
-      marker: 9,
-      tables: 2,
-      rows: 1,
-      tableRows: { empty: 0, message: 1 },
-    })
-    expect(
-      JSON.parse(stored.pointers.get('backups/singleton/latest.json') ?? '{}').tableRows
-    ).toEqual({ empty: 0, message: 1 })
-  })
-
-  it('does not publish a backup after its background read session is preempted', async () => {
-    const stored = writableBucket()
-    const query = async (_env: unknown, _namespace: string, sql: string) => {
-      if (sql.includes('SELECT write_seq')) return [{ write_seq: 9 }]
-      if (sql.includes('sqlite_master')) {
-        return [{ name: 'message', sql: 'CREATE TABLE message (id TEXT)', type: 'table' }]
-      }
-      if (sql.includes('FROM "message"')) return []
-      throw new Error(`unexpected export query: ${sql}`)
-    }
-    const manager = backupManager({
-      format: 'test-v3',
-      markerTable: '_test_backup_meta',
-      excludedTables: ['_test_backup_meta'],
-      files: () => stored.bucket,
-      query,
-      readSession: async (env: unknown, namespace: string, work: any) => {
-        await work((sql: string, params: readonly unknown[] = []) =>
-          query(env, namespace, sql, params)
-        )
-        throw new ApplicationSqlSessionPreemptedError()
-      },
-      batch: async () => {},
-      listNamespaces: async () => ['singleton'],
-    })
-
-    await expect(manager.exportNamespace({}, 'singleton')).resolves.toEqual({
-      outcome: 'preempted',
-      namespace: 'singleton',
-    })
-    expect(stored.pointers.has('backups/singleton/latest.json')).toBe(false)
-  })
-
-  it('still rejects a genuine export failure', async () => {
-    const stored = writableBucket()
-    const manager = backupManager({
-      format: 'test-v3',
-      markerTable: '_test_backup_meta',
-      files: () => stored.bucket,
-      query: async () => [],
-      readSession: async () => {
-        throw new Error('R2 unavailable')
-      },
-      batch: async () => {},
-      listNamespaces: async () => ['singleton'],
-    })
-
-    await expect(manager.exportNamespace({}, 'singleton')).rejects.toThrow(
-      'R2 unavailable'
+    const summary = await exportedSummary(
+      realSqliteManager(db, stored.bucket).exportNamespace({}, 'singleton')
     )
+    expect(summary.tableRows).toEqual({ account: 1, ledger: 1, empty: 0 })
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE name GLOB '_orez_bk_*'").all()
+    ).toEqual([])
+    db.close()
   })
 
-  it('pages a WITHOUT ROWID table by its composite primary key', async () => {
+  it('preserves rowid names and cursor-shaped source columns', async () => {
+    const db = ledgerDatabase(0)
+    db.exec(
+      'CREATE TABLE shadow (rowid INTEGER PRIMARY KEY, _rowid_ TEXT, oid TEXT, __orez_backup_rowid TEXT) WITHOUT ROWID'
+    )
+    db.exec(
+      "INSERT INTO shadow VALUES (-2, 'a', 'b', 'c'), (0, 'd', 'e', 'f'), (3, 'g', 'h', 'i')"
+    )
     const stored = writableBucket()
-    const rows = Array.from({ length: 201 }, (_, index) => ({
-      tenant: 'tenant-one',
-      id: `message-${String(index).padStart(3, '0')}`,
-      body: `body-${index}`,
-    }))
-    const pageQueries: Array<{ sql: string; params: readonly unknown[] }> = []
-    const manager = backupManager({
-      format: 'test-v3',
-      markerTable: '_test_backup_meta',
-      files: () => stored.bucket,
-      query: async (_env, _namespace, sql, params) => {
-        if (sql.includes('SELECT write_seq')) return [{ write_seq: 4 }]
-        if (sql.includes('sqlite_master')) {
-          return [
-            {
-              name: 'message',
-              sql: 'CREATE TABLE message (tenant TEXT, id TEXT, body TEXT, PRIMARY KEY (tenant, id)) WITHOUT ROWID',
-              type: 'table',
-            },
-          ]
-        }
-        if (sql.startsWith('PRAGMA table_info')) {
-          return [
-            { name: 'tenant', pk: 1 },
-            { name: 'id', pk: 2 },
-            { name: 'body', pk: 0 },
-          ]
-        }
-        if (sql.includes('FROM "message"')) {
-          pageQueries.push({ sql, params })
-          return params.length === 1 ? rows.slice(0, 200) : rows.slice(200)
-        }
-        throw new Error(`unexpected export query: ${sql}`)
-      },
-      batch: async () => {},
-      listNamespaces: async () => ['singleton'],
-    })
-
-    const summary = await exportedSummary(manager.exportNamespace({}, 'singleton'))
-
-    expect(summary).toMatchObject({
-      marker: 4,
-      tables: 1,
-      rows: 201,
-      tableRows: { message: 201 },
-    })
-    expect(pageQueries).toEqual([
-      {
-        sql: 'SELECT * FROM "message" ORDER BY "tenant", "id" LIMIT ?',
-        params: [200],
-      },
-      {
-        sql: 'SELECT * FROM "message" WHERE ("tenant", "id") > (?, ?) ORDER BY "tenant", "id" LIMIT ?',
-        params: ['tenant-one', 'message-199', 1000],
-      },
-    ])
+    await exportedSummary(
+      realSqliteManager(db, stored.bucket).exportNamespace({}, 'singleton')
+    )
+    expect(dumped(stored).rowsOf('shadow')).toEqual(
+      db.prepare('SELECT * FROM shadow ORDER BY rowid').all()
+    )
+    db.close()
   })
 
   it('pages every composite WITHOUT ROWID key against real SQLite', async () => {
@@ -365,98 +315,6 @@ describe('namespace backup export', () => {
     expect(summary).toMatchObject({ marker: 7, rows: 1_201 })
     expect(exported).toEqual(expected)
     db.close()
-  })
-})
-
-describe('namespace backup export consistency', () => {
-  it('dumps a state that some transaction actually produced', async () => {
-    const db = new BetterSqlite3(':memory:')
-    db.exec(
-      'CREATE TABLE account (id TEXT PRIMARY KEY, balance INTEGER NOT NULL);' +
-        'CREATE TABLE ledger (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id), amount INTEGER NOT NULL);' +
-        'CREATE TABLE _test_backup_meta (id INTEGER PRIMARY KEY, write_seq INTEGER)'
-    )
-    db.exec('INSERT INTO _test_backup_meta VALUES (1, 1)')
-    db.exec("INSERT INTO account VALUES ('a1', 0)")
-
-    // The same scan at its default chunk size, where the whole namespace fits
-    // in one chunk. A deposit that arrives during it is admitted the moment
-    // that chunk's session closes, so the dump has to hold either both halves
-    // of the transaction or neither; a scan that opens a session per statement
-    // holds one of them.
-    let readersOpen = 0
-    const queuedWrites: Array<() => void> = []
-    const admitWrites = () => {
-      while (readersOpen === 0 && queuedWrites.length > 0) queuedWrites.shift()!()
-    }
-    let depositRequested = false
-    const requestDepositOnce = (sql: string) => {
-      if (depositRequested || !sql.includes('FROM "ledger"')) return
-      depositRequested = true
-      // one transaction, so sum(ledger.amount) always equals account.balance
-      queuedWrites.push(() => {
-        db.exec('BEGIN')
-        db.exec("UPDATE account SET balance = balance + 100 WHERE id = 'a1'")
-        db.exec("INSERT INTO ledger VALUES ('l1', 'a1', 100)")
-        db.exec('COMMIT')
-        db.exec('UPDATE _test_backup_meta SET write_seq = write_seq + 1 WHERE id = 1')
-      })
-      admitWrites()
-    }
-    const run = (sql: string, params: readonly unknown[]) => {
-      requestDepositOnce(sql)
-      const statement = db.prepare(sql)
-      const rows = statement.reader
-        ? statement.all(...params)
-        : (statement.run(...params), [])
-      admitWrites()
-      return rows
-    }
-
-    const stored = writableBucket()
-    const manager = createNamespaceBackupManager({
-      format: 'test-v3',
-      markerTable: '_test_backup_meta',
-      excludedTables: ['_test_backup_meta'],
-      files: () => stored.bucket,
-      query: async (_env, _namespace, sql, params) => run(sql, params),
-      readSession: async (_env, _namespace, work) => {
-        readersOpen++
-        try {
-          return await work(async (sql, params = []) => run(sql, params))
-        } finally {
-          readersOpen--
-          admitWrites()
-        }
-      },
-      batch: async () => {},
-      listNamespaces: async () => ['singleton'],
-    })
-
-    await manager.exportNamespace({}, 'singleton')
-
-    const pointer = JSON.parse(
-      stored.pointers.get('backups/singleton/latest.json') ?? '{}'
-    )
-    const dumped = (stored.pointers.get(String(pointer.key)) ?? '')
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line))
-      .filter((line) => line.kind === 'rows')
-    const rowsOf = (table: string) =>
-      dumped.filter((line) => line.table === table).flatMap((line) => line.rows)
-    const balance = Number(rowsOf('account').find((row: any) => row.id === 'a1')?.balance)
-    const ledgerTotal = rowsOf('ledger').reduce(
-      (total: number, row: any) => total + Number(row.amount),
-      0
-    )
-
-    expect(depositRequested).toBe(true)
-    expect(ledgerTotal).toBe(balance)
-    // the deposit is delayed by the scan, never dropped
-    expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
-      balance: 100,
-    })
   })
 })
 
@@ -662,6 +520,7 @@ describe('namespace backup export under a live writer', () => {
       },
     })
     const manager = createNamespaceBackupManager<unknown>({
+      ...sqliteSnapshotCallbacks(db),
       format: 'test-v3',
       markerTable: '_test_backup_meta',
       excludedTables: ['_test_backup_meta'],
@@ -678,6 +537,29 @@ describe('namespace backup export under a live writer', () => {
     return { manager, object, stored, multipartUploads: () => multipartUploads }
   }
 
+  it('exports the pre-write snapshot and carries the committed write in the next export', async () => {
+    const db = ledgerDatabase(600)
+    let deposits = 0
+    const { manager, stored } = scenario(db, (self, sql) => {
+      if (deposits || !/FROM "_orez_bk_[^"]+_ledger"/.test(sql)) return
+      deposits++
+      self.writeBetweenChunks(deposit(db, 'new-deposit', 100))
+    })
+    await exportedSummary(manager.exportNamespace({}, 'singleton'))
+    expect(deposits).toBe(1)
+    const first = dumped(stored)
+    expect(first.pointer.marker).toBe(1)
+    expect(first.balance()).toBe(0)
+    expect(first.rowsOf('ledger')).toHaveLength(600)
+    await exportedSummary(manager.exportNamespace({}, 'singleton'))
+    const second = dumped(stored)
+    expect(second.pointer.marker).toBe(2)
+    expect(second.balance()).toBe(100)
+    expect(second.ledgerTotal()).toBe(100)
+    expect(second.rowsOf('ledger')).toHaveLength(601)
+    db.close()
+  })
+
   /**
    * The failure this replaces: the export owned one read session for its whole
    * length, so any writer admitted during it killed the export outright. On the
@@ -689,14 +571,12 @@ describe('namespace backup export under a live writer', () => {
     const db = ledgerDatabase(600)
     let deposits = 0
     const { manager, object, stored } = scenario(db, (self, sql) => {
-      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+      if (deposits > 0 || !/FROM "_orez_bk_[^"]+_ledger"/.test(sql)) return
       deposits++
       self.writeNow(deposit(db, 'l1', 100))
     })
 
-    const { value, events } = await backupEvents(() =>
-      manager.exportNamespace({}, 'singleton')
-    )
+    const { value } = await backupEvents(() => manager.exportNamespace({}, 'singleton'))
 
     expect(deposits).toBe(1)
     expect(value.outcome).toBe('exported')
@@ -704,11 +584,10 @@ describe('namespace backup export under a live writer', () => {
     expect(dump.published).toBe(true)
     // the dump is one state the database actually had
     expect(dump.ledgerTotal()).toBe(dump.balance())
-    expect(dump.rowsOf('ledger')).toHaveLength(601)
+    expect(dump.rowsOf('ledger')).toHaveLength(600)
     // and the scan never held the database across an upload
     expect(object.sessions()).toBeGreaterThan(1)
     expect(object.uploadsWithSessionOpen()).toBe(0)
-    expect(events.filter((event) => event.outcome === 'torn')).not.toHaveLength(0)
     // the writer was never made to wait: its deposit is live before the export
     // returns, not replayed after it
     expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
@@ -721,7 +600,7 @@ describe('namespace backup export under a live writer', () => {
     const db = ledgerDatabase(600)
     let deposits = 0
     const { manager, object, stored } = scenario(db, (self, sql) => {
-      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+      if (deposits > 0 || !/FROM "_orez_bk_[^"]+_ledger"/.test(sql)) return
       deposits++
       self.writeNow(deposit(db, 'l1', 100))
     })
@@ -736,7 +615,7 @@ describe('namespace backup export under a live writer', () => {
     const dump = dumped(stored)
     expect(dump.balance()).toBe(0)
     expect(dump.ledgerTotal()).toBe(0)
-    expect(object.sessions()).toBe(2)
+    expect(object.sessions()).toBe(1)
     expect(object.uploadsWithSessionOpen()).toBe(0)
     expect(db.prepare("SELECT balance FROM account WHERE id = 'a1'").get()).toEqual({
       balance: 100,
@@ -756,11 +635,11 @@ describe('namespace backup export under a live writer', () => {
     const { manager, object, stored } = scenario(
       db,
       (self, sql) => {
-        if (deposits > 0 || !sql.includes('FROM "ledger"')) return
+        if (deposits > 0 || !/FROM "_orez_bk_[^"]+_ledger"/.test(sql)) return
         deposits++
         self.writeNow(deposit(db, 'l1', 100))
       },
-      { scanChunkBytes: Number.MAX_SAFE_INTEGER, chunkAttempts: 1, scanAttempts: 1 }
+      { scanChunkBytes: Number.MAX_SAFE_INTEGER, chunkAttempts: 1 }
     )
 
     const value = await manager.exportNamespace({}, 'singleton')
@@ -768,61 +647,8 @@ describe('namespace backup export under a live writer', () => {
     expect(deposits).toBe(1)
     expect(value).toEqual({ outcome: 'preempted', namespace: 'singleton' })
     expect(stored.pointers.get('backups/singleton/latest.json')).toBeUndefined()
-    // the schema read plus the one session that was supposed to carry the scan
-    expect(object.sessions()).toBe(2)
-    db.close()
-  })
-
-  it('restarts rather than publishing a dump torn by a write between chunks', async () => {
-    const db = ledgerDatabase(600)
-    let deposits = 0
-    const { manager, object, stored, multipartUploads } = scenario(db, (self, sql) => {
-      if (deposits > 0 || !sql.includes('FROM "ledger"')) return
-      deposits++
-      // queued behind the open session, so it lands after the chunk closes and
-      // preempts nothing. only the marker can catch it.
-      self.writeBetweenChunks(deposit(db, 'l1', 100))
-    })
-
-    const { value, events } = await backupEvents(() =>
-      manager.exportNamespace({}, 'singleton')
-    )
-
-    expect(value.outcome).toBe('exported')
-    const torn = events.filter((event) => event.outcome === 'torn')
-    expect(torn).toHaveLength(1)
-    expect(torn[0]).toMatchObject({ marker: 1, observedMarker: 2 })
-    expect(multipartUploads()).toBe(2)
-    const dump = dumped(stored)
-    expect(dump.ledgerTotal()).toBe(dump.balance())
-    expect(dump.balance()).toBe(100)
-    expect(dump.pointer.marker).toBe(2)
-    expect(object.uploadsWithSessionOpen()).toBe(0)
-    db.close()
-  })
-
-  /**
-   * The control that shows the marker fence is doing the work: the same write,
-   * with no scan left to retry with, abandons the export instead of publishing
-   * the half-old dump the pages already collected would have made.
-   */
-  it('publishes nothing when the only scan it is allowed is torn', async () => {
-    const db = ledgerDatabase(600)
-    let deposits = 0
-    const { manager, stored } = scenario(
-      db,
-      (self, sql) => {
-        if (deposits > 0 || !sql.includes('FROM "ledger"')) return
-        deposits++
-        self.writeBetweenChunks(deposit(db, 'l1', 100))
-      },
-      { scanAttempts: 1 }
-    )
-
-    const value = await manager.exportNamespace({}, 'singleton')
-
-    expect(value).toEqual({ outcome: 'preempted', namespace: 'singleton' })
-    expect(stored.pointers.get('backups/singleton/latest.json')).toBeUndefined()
+    // one failed scan session; snapshot copying is a separate operation
+    expect(object.sessions()).toBe(1)
     db.close()
   })
 
@@ -830,20 +656,17 @@ describe('namespace backup export under a live writer', () => {
     const db = ledgerDatabase(600)
     let interruptions = 0
     const { manager, object, stored, multipartUploads } = scenario(db, (self, sql) => {
-      if (interruptions > 0 || !sql.includes('FROM "ledger"')) return
+      if (interruptions > 0 || !/FROM "_orez_bk_[^"]+_ledger"/.test(sql)) return
       interruptions++
       // admitted, took the turn, changed nothing: `applicationSqlDidCommit`
       // does not bump the marker for a session that never mutated
       self.writeNow(() => {}, false)
     })
 
-    const { value, events } = await backupEvents(() =>
-      manager.exportNamespace({}, 'singleton')
-    )
+    const { value } = await backupEvents(() => manager.exportNamespace({}, 'singleton'))
 
     expect(interruptions).toBe(1)
     expect(value.outcome).toBe('exported')
-    expect(events.filter((event) => event.outcome === 'torn')).toHaveLength(0)
     // one scan, one multipart upload: the interruption cost a page, not a dump
     expect(multipartUploads()).toBe(1)
     expect(dumped(stored).rowsOf('ledger')).toHaveLength(600)
@@ -868,6 +691,7 @@ describe('namespace backup export under a live writer', () => {
       if (outstanding > 0) readsWhileUploading++
     })
     const manager = createNamespaceBackupManager<unknown>({
+      ...sqliteSnapshotCallbacks(db),
       format: 'test-v3',
       markerTable: '_test_backup_meta',
       excludedTables: ['_test_backup_meta'],
@@ -908,33 +732,58 @@ describe('namespace backup export under a live writer', () => {
     db.close()
   })
 
-  it('gives up after a bounded number of scans instead of spinning', async () => {
+  it('finishes one snapshot despite a commit between every chunk', async () => {
     const db = ledgerDatabase(600)
     let deposits = 0
     const { manager, stored, multipartUploads } = scenario(db, (self, sql) => {
-      if (!sql.includes('FROM "ledger"')) return
+      if (!/FROM "_orez_bk_[^"]+_ledger"/.test(sql)) return
       deposits++
       self.writeBetweenChunks(deposit(db, `l${deposits}`, 1))
     })
 
-    const { value, events } = await backupEvents(() =>
-      manager.exportNamespace({}, 'singleton')
-    )
+    const { value } = await backupEvents(() => manager.exportNamespace({}, 'singleton'))
 
-    expect(value).toEqual({ outcome: 'preempted', namespace: 'singleton' })
-    expect(multipartUploads()).toBe(3)
-    expect(events.filter((event) => event.outcome === 'torn')).toHaveLength(3)
-    expect(events.at(-1)).toMatchObject({
-      phase: 'export',
-      outcome: 'preempted',
-      torn: 3,
-    })
-    expect(stored.pointers.get('backups/singleton/latest.json')).toBeUndefined()
+    expect(value.outcome).toBe('exported')
+    expect(deposits).toBeGreaterThan(1)
+    expect(multipartUploads()).toBe(1)
+    expect(dumped(stored).pointer.marker).toBe(1)
+    expect(dumped(stored).balance()).toBe(0)
+    expect(dumped(stored).rowsOf('ledger')).toHaveLength(600)
     db.close()
   })
 })
 
 describe('namespace backup restore', () => {
+  it('skips snapshot tables and rows in a restore input', async () => {
+    const db = ledgerDatabase(0)
+    const key = 'backups/snapshot-input.ndjson'
+    const stored = bucketWith(
+      key,
+      dump([
+        { kind: 'header', format: 'test-v3', ns: 'source', orderedTables: true },
+        {
+          kind: 'table',
+          name: '_orez_bk_private',
+          sql: 'CREATE TABLE _orez_bk_private (id INTEGER)',
+          indexes: [],
+        },
+        { kind: 'rows', table: '_orez_bk_private', rows: [{ id: 1 }] },
+        { kind: 'footer', rows: 1 },
+      ])
+    )
+    const summary = await realSqliteManager(db, stored.bucket).importNamespace(
+      {},
+      'target',
+      key,
+      { allowNonEmpty: true }
+    )
+    expect(summary.rows).toBe(0)
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE name GLOB '_orez_bk_*'").all()
+    ).toEqual([])
+    db.close()
+  })
+
   it('validates the complete dump before mutating the namespace', async () => {
     const key = 'backups/singleton/truncated.ndjson'
     const stored = bucketWith(

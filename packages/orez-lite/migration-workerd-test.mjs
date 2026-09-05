@@ -64,7 +64,9 @@ const dataWorker = createOrezDataWorker({
   },
 })
 
-export const ZeroDO = dataWorker.ZeroDO
+export class ZeroDO extends dataWorker.ZeroDO {
+  resetForProof() { this.ctx.abort('snapshot restart proof') }
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -72,6 +74,57 @@ export default {
     const [action, namespace] = url.pathname.slice(1).split('/')
     if (!namespace) return new Response('missing namespace', { status: 400 })
     const instance = namespace.startsWith('ns:') ? namespace : 'ns:' + namespace
+    if (action === 'backup-proof') {
+      const client = dataWorker.applicationSqlClient(env, namespace)
+      const stub = env.ZERO_SQL_DO.get(env.ZERO_SQL_DO.idFromName(instance))
+      await client.exec('CREATE TABLE payload (id INTEGER PRIMARY KEY, body TEXT)')
+      await client.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 8192) INSERT INTO payload SELECT i, printf('%4096s', 'x') FROM n")
+      const markerQuery = 'SELECT write_seq FROM _orez_backup_meta WHERE id = 1'
+      const beforeMarker = await client.query(markerQuery)
+      const budget = () => stub.fetch(new Request('https://fixture.invalid/_orez/write-budget')).then(r => r.json())
+      const before = await budget()
+      const started = performance.now()
+      const snapshot = await env.ZERO_SQL_DO.get(env.ZERO_SQL_DO.idFromName(instance)).backupSnapshot({ markerTable: '_orez_backup_meta', excludedTables: ['_orez_backup_meta'] })
+      const copyMs = performance.now() - started
+      const after = await budget()
+      const afterMarker = await client.query(markerQuery)
+      await client.exec("UPDATE payload SET body = 'changed' WHERE id = 1")
+      const copied = await client.query('SELECT count(*) AS rows, sum(length(c1)) AS bytes FROM "_orez_bk_' + snapshot.id + '_payload"')
+      const triggers = await client.query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name GLOB '_orez_bk_*_payload'")
+      await stub.backupSnapshotDrop(snapshot.id)
+      snapshot.lease[Symbol.dispose]()
+      const dropped = await client.query("SELECT name FROM sqlite_master WHERE name GLOB '_orez_bk_*'")
+      const abandoned = await stub.backupSnapshot({ markerTable: '_orez_backup_meta', excludedTables: ['_orez_backup_meta'] })
+      abandoned.lease[Symbol.dispose]()
+      let residue = []
+      const disposalDeadline = Date.now() + 5000
+      do {
+        residue = await client.query("SELECT name FROM sqlite_master WHERE name GLOB '_orez_bk_*'")
+        if (!residue.length) break
+        await new Promise(resolve => setTimeout(resolve, 10))
+      } while (Date.now() < disposalDeadline)
+      if (residue.length) throw new Error('disposed backup lease left snapshot tables behind')
+      const old = await stub.backupSnapshot({ markerTable: '_orez_backup_meta', excludedTables: ['_orez_backup_meta'] })
+      try { await stub.resetForProof() } catch {}
+      const fresh = env.ZERO_SQL_DO.get(env.ZERO_SQL_DO.idFromName(instance))
+      const freshClient = dataWorker.applicationSqlClient(env, namespace)
+      const newer = await fresh.backupSnapshot({ markerTable: '_orez_backup_meta', excludedTables: ['_orez_backup_meta'] })
+      if (old.id === newer.id) throw new Error('restart reused a snapshot identity')
+      let oldReadRejected = false
+      try { await freshClient.query('SELECT * FROM "_orez_bk_' + old.id + '_payload" LIMIT 1') } catch (error) {
+        if (!String(error).includes('no such table: _orez_bk_' + old.id + '_payload')) throw error
+        oldReadRejected = true
+      }
+      if (!oldReadRejected) throw new Error('old snapshot read survived restart')
+      await fresh.backupSnapshotDrop(old.id)
+      const newerRows = await freshClient.query('SELECT count(*) AS rows FROM "_orez_bk_' + newer.id + '_payload"')
+      if (newerRows[0].rows !== 8192) throw new Error('old cleanup removed the new snapshot')
+      await fresh.backupSnapshotDrop(newer.id)
+      try { old.lease[Symbol.dispose]() } catch {}
+      newer.lease[Symbol.dispose]()
+
+      return Response.json({ copyMs, beforeMarker, afterMarker, before, after, copied, triggers, dropped })
+    }
     if (action === 'seed') {
       const client = dataWorker.applicationSqlClient(env, namespace)
       await client.transaction(
@@ -221,6 +274,29 @@ try {
     statements: 81,
     callbacks: 0,
   })
+  const proofResponse = await fetch(
+    `${base}/backup-proof/proj-backup-${crypto.randomUUID()}`,
+    { method: 'POST' }
+  )
+  assert.equal(proofResponse.status, 200, await proofResponse.clone().text())
+  const proof = await proofResponse.json()
+  assert.deepEqual(proof.copied, [{ rows: 8192, bytes: 32 * 1024 * 1024 }])
+  assert.deepEqual(proof.triggers, [])
+  assert.deepEqual(proof.dropped, [])
+  assert.deepEqual(proof.beforeMarker, proof.afterMarker)
+  assert.equal(proof.before.windowRows, proof.after.windowRows)
+  assert.ok(proof.copyMs < 5000, `32 MiB copy took ${proof.copyMs}ms`)
+  console.log(
+    JSON.stringify({
+      event: 'backup_snapshot_copy',
+      bytes: proof.copied[0].bytes,
+      copyMs: proof.copyMs,
+      windowRowsBefore: proof.before.windowRows,
+      windowRowsAfter: proof.after.windowRows,
+      markerBefore: proof.beforeMarker,
+      markerAfter: proof.afterMarker,
+    })
+  )
 } finally {
   server.kill()
   await server.exited

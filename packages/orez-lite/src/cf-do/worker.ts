@@ -28,6 +28,11 @@ import {
   type CdcTableRegistration,
 } from './cdc.js'
 import {
+  isNamespaceBackupTableExcluded,
+  type NamespaceBackupSnapshot,
+  type NamespaceBackupSnapshotOptions,
+} from './namespace-backup.js'
+import {
   appendPendingChange,
   deletePendingChanges,
   ensurePendingChangesTable,
@@ -402,6 +407,20 @@ const APPLICATION_SQL_COMMIT_PREEMPTIBLE = Symbol('applicationSqlCommitPreemptib
 const APPLICATION_SQL_ROLLBACK = Symbol('applicationSqlRollback')
 const APPLICATION_SQL_DISPOSE = Symbol('applicationSqlDispose')
 
+const BACKUP_SNAPSHOT_DISPOSE = Symbol('backupSnapshotDispose')
+
+class BackupSnapshotLease extends RpcTarget {
+  constructor(
+    readonly owner: ZeroDO,
+    readonly id: string
+  ) {
+    super()
+  }
+  [Symbol.dispose](): void {
+    this.owner[BACKUP_SNAPSHOT_DISPOSE](this.id)
+  }
+}
+
 class ApplicationSqlSessionTarget extends RpcTarget {
   state: ApplicationSqlSessionState = 'created'
   mutated = false
@@ -529,6 +548,8 @@ export class ZeroDO extends DurableObject {
   private pendingChangesSchemaReady = false
   private applicationSqlWriter: ApplicationSqlSessionTarget | null = null
   private applicationSqlReaders = new Set<ApplicationSqlSessionTarget>()
+  private backupSnapshotID: string | null = null
+  private backupMaintenance = false
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
   protected applicationSqlDidCommit(_published: boolean, _changedData: boolean): void {}
 
@@ -762,8 +783,10 @@ export class ZeroDO extends DurableObject {
     this.sql.exec = (statement: string, ...params: unknown[]) => {
       this.requestsSinceBoot.sqlStatements++
       const mutation = isSqlMutation(statement)
-      if (mutation && !this.writeBudgetDisabled) this.writeBudget.assertOpen()
+      if (mutation && !this.writeBudgetDisabled && !this.backupMaintenance)
+        this.writeBudget.assertOpen()
       const cursor = rawExec(statement, ...params)
+      const chargeWriteBudget = !this.backupMaintenance
       const measurement: SqlWriteMeasurement | undefined = mutation
         ? { sql: statement, rowsWritten: 0 }
         : undefined
@@ -779,7 +802,8 @@ export class ZeroDO extends DurableObject {
           try {
             this.activeAttribution?.recordPhysical(statement, rows)
           } catch {}
-          if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows, measurement)
+          if (!this.writeBudgetDisabled && chargeWriteBudget)
+            this.recordWriteBudgetRows(rows, measurement)
         },
         (rows) => {
           this.sqlBillingSinceBoot.rowsRead += rows
@@ -806,6 +830,7 @@ export class ZeroDO extends DurableObject {
       // residual triggers from a pre-cleanup schema snapshot, and before the
       // trip restore, so the one-time drops run against a fresh write budget.
       this.dropZeroHttpJournalResidue()
+      this.dropBackupSnapshotTables()
       if (!this.writeBudgetDisabled) {
         const persisted = await ctx.storage.get<number | PersistedWriteBudgetTrip>(
           WRITE_BUDGET_TRIPPED_KEY
@@ -893,6 +918,121 @@ export class ZeroDO extends DurableObject {
       )
       this.cdc.reload()
     }
+  }
+
+  private dropBackupSnapshotTables(id?: string): void {
+    this.backupMaintenance = true
+    try {
+      this.ctx.storage.transactionSync(() => {
+        const tables = this.sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '_orez_bk_*'"
+          )
+          .toArray()
+        for (const { name } of tables) {
+          if (id !== undefined && !name.startsWith(`_orez_bk_${id}_`)) continue
+          this.sql.exec(`DROP TABLE "${String(name).replaceAll('"', '""')}"`).toArray()
+        }
+      })
+    } finally {
+      this.backupMaintenance = false
+    }
+  }
+
+  async backupSnapshot(
+    options: NamespaceBackupSnapshotOptions
+  ): Promise<NamespaceBackupSnapshot> {
+    return this.withLocalApplicationSqlSession(false, () => {
+      // a second exporter must never replace tables an earlier exporter is reading.
+      if (this.backupSnapshotID != null)
+        throw new Error('namespace backup snapshot already active')
+      // previous failed cleanup cannot wedge later exports or accumulate copies.
+      this.dropBackupSnapshotTables()
+      const id = crypto.randomUUID()
+      this.backupMaintenance = true
+      try {
+        const result = this.ctx.storage.transactionSync(() => {
+          const excluded = new Set(options.excludedTables)
+          const schema = this.sql
+            .exec(
+              "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name"
+            )
+            .toArray()
+            .filter(
+              (row) =>
+                !isNamespaceBackupTableExcluded(row.name, excluded) &&
+                !isNamespaceBackupTableExcluded(row.tbl_name, excluded)
+            )
+          const tables = schema
+            .filter((row) => row.type === 'table')
+            .map((row) => row.name)
+          const columns: Record<string, string[]> = {}
+          for (const name of tables) {
+            // neutral physical names keep source rowid and cursor names from
+            // shadowing the snapshot's paging columns. the dump restores names.
+            const source = this.sql.exec(
+              `SELECT * FROM "${name.replaceAll('"', '""')}" LIMIT 0`
+            )
+            columns[name] = source.columnNames
+            source.toArray()
+            const projection = columns[name]
+              .map((column, index) => `"${column.replaceAll('"', '""')}" AS c${index}`)
+              .join(', ')
+            const target = `_orez_bk_${id}_${name}`.replaceAll('"', '""')
+            this.sql.exec(`DROP TABLE IF EXISTS "${target}"`).toArray()
+            this.sql
+              .exec(
+                `CREATE TABLE "${target}" AS SELECT ${projection} FROM "${name.replaceAll('"', '""')}"`
+              )
+              .toArray()
+          }
+          let marker = 0
+          try {
+            marker =
+              Number(
+                this.sql
+                  .exec(
+                    `SELECT write_seq FROM "${options.markerTable.replaceAll('"', '""')}" WHERE id = 1`
+                  )
+                  .toArray()[0]?.write_seq
+              ) || 0
+          } catch (error) {
+            if (!/no such table/i.test(String(error))) throw error
+          }
+          return { id, marker, tables, schema, columns }
+        })
+        this.backupSnapshotID = id
+        return { ...result, lease: new BackupSnapshotLease(this, id) }
+      } finally {
+        this.backupMaintenance = false
+      }
+    })
+  }
+
+  [BACKUP_SNAPSHOT_DISPOSE](id: string): void {
+    if (this.backupSnapshotID !== id) return
+    // rpc disposal releases ownership even without an explicit drop.
+    this.ctx.waitUntil(
+      this.backupSnapshotDrop(id).catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: 'orez_backup',
+            phase: 'snapshot_dispose',
+            outcome: 'error',
+            error: String(error),
+          })
+        )
+      })
+    )
+  }
+
+  async backupSnapshotDrop(id: string): Promise<void> {
+    // release ownership before admission: even a timed-out cleanup must allow
+    // the next export to reclaim stale tables. generation names protect new copies.
+    if (this.backupSnapshotID === id) this.backupSnapshotID = null
+    return this.withLocalApplicationSqlSession(false, () => {
+      this.dropBackupSnapshotTables(id)
+    })
   }
 
   async fetch(request: Request): Promise<Response> {

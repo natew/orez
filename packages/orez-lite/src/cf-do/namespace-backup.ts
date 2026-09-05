@@ -67,6 +67,42 @@ export interface NamespaceRestoreSummary {
   counts: Record<string, number>
 }
 
+export interface NamespaceBackupSnapshotOptions {
+  markerTable: string
+  excludedTables: readonly string[]
+}
+
+export interface NamespaceBackupSchemaRow {
+  name: string
+  sql: string
+  type: string
+  tbl_name: string
+}
+
+export interface NamespaceBackupSnapshot {
+  id: string
+  lease: { [Symbol.dispose](): void }
+  marker: number
+  tables: string[]
+  columns: Record<string, string[]>
+  schema: NamespaceBackupSchemaRow[]
+}
+
+export function isNamespaceBackupTableExcluded(
+  name: string,
+  excludedTables: ReadonlySet<string>
+): boolean {
+  return (
+    name.startsWith('sqlite_') ||
+    name.startsWith('_cf_') ||
+    name.startsWith('_orez_tx_') ||
+    name.startsWith('_orez_bk_') ||
+    /^[A-Za-z0-9_]+_0\.(?:clients|mutations)$/.test(name) ||
+    excludedTables.has(name) ||
+    REPLICATION_BOOKKEEPING_TABLES.has(name)
+  )
+}
+
 export interface NamespaceBackupOptions<Env> {
   format: string
   /** Older on-disk formats accepted for restore but never emitted. */
@@ -79,11 +115,13 @@ export interface NamespaceBackupOptions<Env> {
     sql: string,
     params: readonly unknown[]
   ): Promise<Record<string, any>[]>
-  /**
-   * Run one bounded scan chunk in a consistent read session. The supplied
-   * priority decides whether a writer may preempt that chunk; the export's
-   * marker fence owns consistency between chunks.
-   */
+  snapshot(
+    env: Env,
+    namespace: string,
+    options: NamespaceBackupSnapshotOptions
+  ): Promise<NamespaceBackupSnapshot>
+  dropSnapshot(env: Env, namespace: string, id: string): Promise<void>
+  /** run one bounded snapshot chunk; a writer may preempt its read session. */
   readSession<Value>(
     env: Env,
     namespace: string,
@@ -111,21 +149,13 @@ export interface NamespaceBackupOptions<Env> {
   partBytes?: number
   chunkTargetBytes?: number
   /**
-   * Output one read session of the export scan produces before it closes and
-   * lets the marker be re-checked. Larger chunks cost fewer marker reads;
-   * smaller ones hold the database for less time per session.
+   * output produced per read session; smaller chunks yield to writers sooner.
    */
   scanChunkBytes?: number
   /**
-   * Multipart uploads allowed to be outstanding while the scan continues. The
-   * scan never awaits one below this count, which is what keeps R2 out of the
-   * window the marker fences; past it, an upload blocks the next chunk. Raising
-   * it trades worker memory (`partBytes` per outstanding part) for a shorter
-   * fenced window.
+   * multipart uploads allowed to remain outstanding; bounded by worker memory.
    */
   maxInflightParts?: number
-  /** Scans attempted before the export gives up and waits for a quieter run. */
-  scanAttempts?: number
   /** Times one chunk is re-read after a writer preempts its session. */
   chunkAttempts?: number
 }
@@ -328,24 +358,14 @@ export function createNamespaceBackupManager<Env>(
   const runBudgetMs = options.runBudgetMs ?? 10 * 60 * 1000
   const configuredScanChunkBytes = options.scanChunkBytes ?? partBytes
   const maxInflightParts = Math.max(1, options.maxInflightParts ?? 4)
-  const scanAttempts = Math.max(1, options.scanAttempts ?? 3)
   const chunkAttempts = Math.max(1, options.chunkAttempts ?? 3)
   const excludedTables = new Set(options.excludedTables ?? [])
   const acceptedFormats = new Set([options.format, ...(options.acceptedFormats ?? [])])
   const backupPrefix =
     options.prefix ?? ((namespace: string) => `backups/${namespace.replace(':', '/')}/`)
 
-  const isExcluded = (name: unknown) => {
-    const table = String(name)
-    return (
-      table.startsWith('sqlite_') ||
-      table.startsWith('_cf_') ||
-      table.startsWith('_orez_tx_') ||
-      /^[A-Za-z0-9_]+_0\.(?:clients|mutations)$/.test(table) ||
-      excludedTables.has(table) ||
-      REPLICATION_BOOKKEEPING_TABLES.has(table)
-    )
-  }
+  const isExcluded = (name: unknown) =>
+    isNamespaceBackupTableExcluded(String(name), excludedTables)
 
   const log = (fields: Record<string, unknown>) => {
     console.log(
@@ -378,8 +398,8 @@ export function createNamespaceBackupManager<Env>(
     name: string
     sql: string
     indexes: string[]
-    withoutRowid: boolean
-    primaryKeyColumns: string[]
+    columns: string[]
+    snapshotName: string
   }
 
   /** Where the scan stands, so a chunk that has to be re-read can resume. */
@@ -387,7 +407,6 @@ export function createNamespaceBackupManager<Env>(
     tableIndex: number
     tableOpened: boolean
     rowidCursor: unknown
-    primaryKeyCursor: unknown[] | null
     limit: number
   }
 
@@ -426,21 +445,16 @@ export function createNamespaceBackupManager<Env>(
     return { outcome: 'preempted' }
   }
 
-  /**
-   * Read the schema, the write marker, and the primary key of every WITHOUT
-   * ROWID table in one session, so the scan below knows what to page and what
-   * marker every one of its chunks has to agree with.
-   */
-  const readScanSchema = async (read: SessionQuery) => {
-    // Read before scanning. A concurrent write then leaves the live marker
-    // ahead of latest.json and guarantees another backup.
-    const marker = await readMarkerWith(read)
-    const master = await read(
-      "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name",
-      []
-    )
+  const readScanSchema = ({
+    id,
+    marker,
+    schema: master,
+    columns,
+    tables: snapshotTables,
+  }: NamespaceBackupSnapshot) => {
+    const included = new Set(snapshotTables)
     const unorderedTables = master.filter(
-      (row) => row.type === 'table' && !isExcluded(row.name)
+      (row) => row.type === 'table' && included.has(row.name)
     )
     const tableNames = unorderedTables.map((row) => String(row.name))
     const tableNamesBySqlIdentity = tableIdentities(tableNames)
@@ -464,48 +478,23 @@ export function createNamespaceBackupManager<Env>(
     for (const name of orderedNames) {
       const row = tableByName.get(name)!
       const sql = String(row.sql)
-      const withoutRowid = /\bWITHOUT\s+ROWID\b/i.test(sql)
-      const primaryKeyColumns = withoutRowid
-        ? (await read(`PRAGMA table_info("${quoteIdentifier(name)}")`, []))
-            .filter((column) => Number(column.pk) > 0)
-            .sort((left, right) => Number(left.pk) - Number(right.pk))
-            .map((column) => String(column.name))
-        : []
-      if (withoutRowid && primaryKeyColumns.length === 0) {
-        throw new Error(`WITHOUT ROWID table ${name} has no primary key`)
-      }
       tables.push({
         name,
         sql,
+        columns: columns[name]!,
+        snapshotName: `_orez_bk_${id}_${name}`,
         indexes: indexes
           .filter((index) => index.tbl_name === name)
           .map((index) => String(index.sql)),
-        withoutRowid,
-        primaryKeyColumns,
       })
     }
     return { marker, tables }
   }
 
-  /**
-   * Page rows until this chunk has produced `scanChunkBytes`, inside one
-   * session that also reads the marker.
-   *
-   * No writer is admitted while the session is open, so the marker and the rows
-   * describe the same committed state. A marker that no longer matches the one
-   * the schema read observed means a transaction landed since the scan started
-   * and the pages already collected are from a state that no longer exists.
-   */
+  /** page immutable snapshot rows in bounded, preemptible read sessions. */
   const readScanChunk =
-    (
-      fenceMarker: number,
-      tables: readonly ExportTable[],
-      cursor: ScanCursor,
-      scanChunkBytes: number
-    ) =>
+    (tables: readonly ExportTable[], cursor: ScanCursor, scanChunkBytes: number) =>
     async (read: SessionQuery) => {
-      const marker = await readMarkerWith(read)
-      if (marker !== fenceMarker) return { torn: true, marker } as const
       const lines: ScanLine[] = []
       const tableRows: Record<string, number> = {}
       const next: ScanCursor = { ...cursor }
@@ -514,7 +503,6 @@ export function createNamespaceBackupManager<Env>(
         next.tableIndex++
         next.tableOpened = false
         next.rowidCursor = 0
-        next.primaryKeyCursor = null
         next.limit = 200
       }
       while (next.tableIndex < tables.length && produced < scanChunkBytes) {
@@ -531,33 +519,22 @@ export function createNamespaceBackupManager<Env>(
           next.tableOpened = true
           tableRows[table.name] = tableRows[table.name] ?? 0
         }
-        const quotedPrimaryKey = table.primaryKeyColumns
-          .map((column) => `"${quoteIdentifier(column)}"`)
-          .join(', ')
         const usedLimit = next.limit
-        const rows: Record<string, unknown>[] = table.withoutRowid
-          ? await read(
-              next.primaryKeyCursor
-                ? `SELECT * FROM "${quoteIdentifier(table.name)}" WHERE (${quotedPrimaryKey}) > (${table.primaryKeyColumns.map(() => '?').join(', ')}) ORDER BY ${quotedPrimaryKey} LIMIT ?`
-                : `SELECT * FROM "${quoteIdentifier(table.name)}" ORDER BY ${quotedPrimaryKey} LIMIT ?`,
-              next.primaryKeyCursor ? [...next.primaryKeyCursor, usedLimit] : [usedLimit]
-            )
-          : await read(
-              `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.name)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
-              [next.rowidCursor, usedLimit]
-            )
+        const rows = await read(
+          `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.snapshotName)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+          [next.rowidCursor, usedLimit]
+        )
         if (rows.length === 0) {
           openNextTable()
           continue
         }
-        if (table.withoutRowid) {
-          const last = rows.at(-1)!
-          next.primaryKeyCursor = table.primaryKeyColumns.map((column) => last[column])
-        } else {
-          next.rowidCursor = rows.at(-1)?.__orez_backup_rowid
-          for (const row of rows) delete row.__orez_backup_rowid
-        }
-        const line = encodeLine({ kind: 'rows', table: table.name, rows })
+        next.rowidCursor = rows.at(-1)?.__orez_backup_rowid
+        const sourceRows = rows.map((row) =>
+          Object.fromEntries(
+            table.columns.map((column, index) => [column, row[`c${index}`]])
+          )
+        )
+        const line = encodeLine({ kind: 'rows', table: table.name, rows: sourceRows })
         lines.push(line)
         produced += line.bytes.byteLength
         tableRows[table.name] = (tableRows[table.name] ?? 0) + rows.length
@@ -565,39 +542,10 @@ export function createNamespaceBackupManager<Env>(
         next.limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
         if (rows.length < usedLimit) openNextTable()
       }
-      return { torn: false, lines, tableRows, next } as const
+      return { lines, tableRows, next } as const
     }
 
-  /**
-   * Scan a namespace in short read sessions fenced by the write marker.
-   *
-   * A single session covering the whole scan has to stay open across every R2
-   * upload, and an arriving writer preempts it, so on a busy namespace the
-   * export cannot finish: production's control plane lost roughly twenty
-   * consecutive attempts that way while every quiet project namespace exported
-   * normally.
-   *
-   * The dump only has to be one state the database actually had, and
-   * `write_seq` answers that directly: it advances on every commit that changed
-   * data, which is the same invariant `runScheduledBackups` already trusts when
-   * it skips a namespace whose marker has not moved. So each chunk reads the
-   * marker and its pages inside one short session, and every chunk has to
-   * observe the marker the schema read did. Equal markers at both ends of a
-   * monotonic counter means nothing changed in between, which is the same
-   * guarantee the single session bought, without holding the database across
-   * the network.
-   *
-   * "changed data" is load-bearing and narrower than "ran a mutating
-   * statement". The marker used to move for any statement that could write, so
-   * an UPDATE matching no rows tore a scan reading a database that had not
-   * moved. Production's control plane took such a bump roughly every five
-   * seconds and went 22 hours with no backup, every attempt torn by exactly one
-   * increment. See `applicationSqlChangedData` in worker.ts.
-   *
-   * Uploads happen between chunks with no session open, and are not awaited
-   * until the scan finishes or `maxInflightParts` are outstanding, so R2 stays
-   * off the fenced window entirely for a dump that fits in the in-flight bound.
-   */
+  /** copy once under writer admission, then stream without fencing live writes. */
   const runScanAttempt = async (
     env: Env,
     namespace: string,
@@ -615,135 +563,153 @@ export function createNamespaceBackupManager<Env>(
         bytes: number
         parts: number
       }
-    | { outcome: 'torn'; marker: number; observed: number }
     | { outcome: 'preempted' }
   > => {
     const files = options.files(env)
-    const schemaChunk = await readChunk(env, namespace, readScanSchema, readOptions)
-    if (schemaChunk.outcome === 'preempted') return { outcome: 'preempted' }
-    const { marker, tables } = schemaChunk.value
-
-    const upload = await files.createMultipartUpload(key)
-    const partUploads: Promise<unknown>[] = []
-    let chunks: Uint8Array[] = []
-    let bufferedBytes = 0
-    let totalBytes = 0
-    let rowTotal = 0
-    const tableRows: Record<string, number> = {}
-    const digest = sha256.create()
-
-    // an abort that races an in-flight uploadPart can leave the part behind, and
-    // this bucket already carries thousands of orphans. settle first, always.
-    const abortUpload = async () => {
-      await Promise.allSettled(partUploads)
-      await upload.abort().catch(() => {})
-    }
-
-    const sendPart = async (value: Uint8Array) => {
-      const pending = upload.uploadPart(partUploads.length + 1, value)
-      // Nothing awaits this until the scan is done, so keep workerd from
-      // reporting a rejection that the final Promise.all will surface anyway.
-      void pending.catch(() => {})
-      partUploads.push(pending)
-      const bound = partUploads.length - maxInflightParts
-      if (bound >= 0) await partUploads[bound]
-    }
-
-    const flushParts = async (final: boolean) => {
-      if (!final && bufferedBytes < partBytes) return
-      let merged = new Uint8Array(bufferedBytes)
-      let offset = 0
-      for (const chunk of chunks) {
-        merged.set(chunk, offset)
-        offset += chunk.byteLength
-      }
-      while (merged.byteLength >= partBytes) {
-        await sendPart(merged.slice(0, partBytes))
-        merged = merged.slice(partBytes)
-      }
-      if (final && (merged.byteLength > 0 || partUploads.length === 0)) {
-        await sendPart(merged)
-        merged = new Uint8Array(0)
-      }
-      chunks = merged.byteLength ? [merged] : []
-      bufferedBytes = merged.byteLength
-    }
-
-    const appendLine = (line: ScanLine) => {
-      if (line.digested) digest.update(line.bytes)
-      chunks.push(line.bytes)
-      bufferedBytes += line.bytes.byteLength
-      totalBytes += line.bytes.byteLength
-    }
-
+    const snapshotStarted = performance.now()
+    const snapshot = await options.snapshot(env, namespace, {
+      markerTable: options.markerTable,
+      excludedTables: [...excludedTables],
+    })
+    log({
+      phase: 'snapshot',
+      outcome: 'success',
+      namespace,
+      rpcDurationMs: performance.now() - snapshotStarted,
+    })
     try {
-      appendLine(
-        encodeLine({
-          kind: 'header',
-          format: options.format,
-          integrity: 'sha256',
-          ns: namespace,
-          exportedAt,
-          marker,
-          orderedTables: true,
-        })
-      )
-      let cursor: ScanCursor = {
-        tableIndex: 0,
-        tableOpened: false,
-        rowidCursor: 0,
-        primaryKeyCursor: null,
-        limit: 200,
-      }
-      while (cursor.tableIndex < tables.length) {
-        const chunk = await readChunk(
-          env,
-          namespace,
-          readScanChunk(marker, tables, cursor, scanChunkBytes),
-          readOptions
-        )
-        if (chunk.outcome === 'preempted') {
-          await abortUpload()
-          return { outcome: 'preempted' }
-        }
-        if (chunk.value.torn) {
-          await abortUpload()
-          return { outcome: 'torn', marker, observed: chunk.value.marker }
-        }
-        for (const line of chunk.value.lines) appendLine(line)
-        for (const [table, count] of Object.entries(chunk.value.tableRows)) {
-          tableRows[table] = (tableRows[table] ?? 0) + count
-          rowTotal += count
-        }
-        cursor = chunk.value.next
-        await flushParts(false)
-      }
-      appendLine(
-        encodeLine(
-          {
-            kind: 'footer',
-            tables: tables.length,
-            rows: rowTotal,
-            sha256: hex(digest.digest()),
-          },
-          false
-        )
-      )
-      await flushParts(true)
-      await upload.complete(await Promise.all(partUploads))
-    } catch (error) {
-      await abortUpload()
-      throw error
-    }
+      const { marker, tables } = readScanSchema(snapshot)
 
-    return {
-      outcome: 'scanned',
-      marker,
-      tables: tables.length,
-      rows: rowTotal,
-      tableRows,
-      bytes: totalBytes,
-      parts: partUploads.length,
+      const upload = await files.createMultipartUpload(key)
+      const partUploads: Promise<unknown>[] = []
+      let chunks: Uint8Array[] = []
+      let bufferedBytes = 0
+      let totalBytes = 0
+      let rowTotal = 0
+      const tableRows: Record<string, number> = {}
+      const digest = sha256.create()
+
+      // an abort that races an in-flight uploadPart can leave the part behind, and
+      // this bucket already carries thousands of orphans. settle first, always.
+      const abortUpload = async () => {
+        await Promise.allSettled(partUploads)
+        await upload.abort().catch(() => {})
+      }
+
+      const sendPart = async (value: Uint8Array) => {
+        const pending = upload.uploadPart(partUploads.length + 1, value)
+        // Nothing awaits this until the scan is done, so keep workerd from
+        // reporting a rejection that the final Promise.all will surface anyway.
+        void pending.catch(() => {})
+        partUploads.push(pending)
+        const bound = partUploads.length - maxInflightParts
+        if (bound >= 0) await partUploads[bound]
+      }
+
+      const flushParts = async (final: boolean) => {
+        if (!final && bufferedBytes < partBytes) return
+        let merged = new Uint8Array(bufferedBytes)
+        let offset = 0
+        for (const chunk of chunks) {
+          merged.set(chunk, offset)
+          offset += chunk.byteLength
+        }
+        while (merged.byteLength >= partBytes) {
+          await sendPart(merged.slice(0, partBytes))
+          merged = merged.slice(partBytes)
+        }
+        if (final && (merged.byteLength > 0 || partUploads.length === 0)) {
+          await sendPart(merged)
+          merged = new Uint8Array(0)
+        }
+        chunks = merged.byteLength ? [merged] : []
+        bufferedBytes = merged.byteLength
+      }
+
+      const appendLine = (line: ScanLine) => {
+        if (line.digested) digest.update(line.bytes)
+        chunks.push(line.bytes)
+        bufferedBytes += line.bytes.byteLength
+        totalBytes += line.bytes.byteLength
+      }
+
+      try {
+        appendLine(
+          encodeLine({
+            kind: 'header',
+            format: options.format,
+            integrity: 'sha256',
+            ns: namespace,
+            exportedAt,
+            marker,
+            orderedTables: true,
+          })
+        )
+        let cursor: ScanCursor = {
+          tableIndex: 0,
+          tableOpened: false,
+          rowidCursor: 0,
+          limit: 200,
+        }
+        while (cursor.tableIndex < tables.length) {
+          const chunk = await readChunk(
+            env,
+            namespace,
+            readScanChunk(tables, cursor, scanChunkBytes),
+            readOptions
+          )
+          if (chunk.outcome === 'preempted') {
+            await abortUpload()
+            return { outcome: 'preempted' }
+          }
+          for (const line of chunk.value.lines) appendLine(line)
+          for (const [table, count] of Object.entries(chunk.value.tableRows)) {
+            tableRows[table] = (tableRows[table] ?? 0) + count
+            rowTotal += count
+          }
+          cursor = chunk.value.next
+          await flushParts(false)
+        }
+        appendLine(
+          encodeLine(
+            {
+              kind: 'footer',
+              tables: tables.length,
+              rows: rowTotal,
+              sha256: hex(digest.digest()),
+            },
+            false
+          )
+        )
+        await flushParts(true)
+        await upload.complete(await Promise.all(partUploads))
+      } catch (error) {
+        await abortUpload()
+        throw error
+      }
+
+      return {
+        outcome: 'scanned',
+        marker,
+        tables: tables.length,
+        rows: rowTotal,
+        tableRows,
+        bytes: totalBytes,
+        parts: partUploads.length,
+      }
+    } finally {
+      try {
+        await options.dropSnapshot(env, namespace, snapshot.id)
+      } catch (error) {
+        log({
+          phase: 'snapshot_drop',
+          outcome: 'error',
+          namespace,
+          error: errorMessage(error),
+        })
+      } finally {
+        snapshot.lease[Symbol.dispose]()
+      }
     }
   }
 
@@ -761,112 +727,81 @@ export function createNamespaceBackupManager<Env>(
     }
     const readOptions = { priority } satisfies NamespaceBackupReadOptions
     const files = options.files(env)
-    let torn = 0
-    for (let attempt = 0; attempt < scanAttempts; attempt++) {
-      const exportedAt = new Date().toISOString()
-      const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
-      let scan: Awaited<ReturnType<typeof runScanAttempt>>
-      try {
-        scan = await runScanAttempt(
-          env,
-          namespace,
-          key,
-          exportedAt,
-          readOptions,
-          requestedScanChunkBytes
-        )
-      } catch (error) {
-        log({
-          phase: 'export_upload',
-          outcome: 'error',
-          namespace,
-          priority,
-          scanChunkBytes: requestedScanChunkBytes,
-          durationMs: Date.now() - startedAt,
-          error: errorMessage(error),
-        })
-        throw error
-      }
-      if (scan.outcome === 'preempted') {
-        log({
-          phase: 'export',
-          outcome: 'preempted',
-          namespace,
-          priority,
-          scanChunkBytes: requestedScanChunkBytes,
-          reason: 'session_preempted',
-          torn,
-          durationMs: Date.now() - startedAt,
-        })
-        return { outcome: 'preempted', namespace }
-      }
-      if (scan.outcome === 'torn') {
-        torn++
-        log({
-          phase: 'export_scan',
-          outcome: 'torn',
-          namespace,
-          priority,
-          scanChunkBytes: requestedScanChunkBytes,
-          marker: scan.marker,
-          observedMarker: scan.observed,
-          attempt: attempt + 1,
-          durationMs: Date.now() - startedAt,
-        })
-        continue
-      }
-
-      const summary = {
-        ns: namespace,
+    const exportedAt = new Date().toISOString()
+    const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
+    let scan: Awaited<ReturnType<typeof runScanAttempt>>
+    try {
+      scan = await runScanAttempt(
+        env,
+        namespace,
         key,
         exportedAt,
-        marker: scan.marker,
-        tables: scan.tables,
-        rows: scan.rows,
-        tableRows: scan.tableRows,
-        bytes: scan.bytes,
-        parts: scan.parts,
-      }
-      let keepPreviousLatest = false
-      if (scan.rows === 0) {
-        try {
-          const previous = await files.get(`${backupPrefix(namespace)}latest.json`)
-          if (previous) {
-            const previousSummary = (await previous.json()) as { rows?: unknown }
-            keepPreviousLatest = Number(previousSummary.rows) > 0
-          }
-        } catch {
-          // A missing/corrupt pointer must not prevent a new valid backup.
-        }
-      }
-      if (!keepPreviousLatest) {
-        await files.put(`${backupPrefix(namespace)}latest.json`, JSON.stringify(summary))
-      }
+        readOptions,
+        requestedScanChunkBytes
+      )
+    } catch (error) {
       log({
-        phase: 'export',
-        outcome: 'success',
+        phase: 'export_upload',
+        outcome: 'error',
         namespace,
         priority,
         scanChunkBytes: requestedScanChunkBytes,
         durationMs: Date.now() - startedAt,
-        rows: summary.rows,
-        bytes: summary.bytes,
-        parts: summary.parts,
-        torn,
+        error: errorMessage(error),
       })
-      return { outcome: 'exported', summary }
+      throw error
+    }
+    if (scan.outcome === 'preempted') {
+      log({
+        phase: 'export',
+        outcome: 'preempted',
+        namespace,
+        priority,
+        scanChunkBytes: requestedScanChunkBytes,
+        reason: 'session_preempted',
+        durationMs: Date.now() - startedAt,
+      })
+      return { outcome: 'preempted', namespace }
+    }
+
+    const summary = {
+      ns: namespace,
+      key,
+      exportedAt,
+      marker: scan.marker,
+      tables: scan.tables,
+      rows: scan.rows,
+      tableRows: scan.tableRows,
+      bytes: scan.bytes,
+      parts: scan.parts,
+    }
+    let keepPreviousLatest = false
+    if (scan.rows === 0) {
+      try {
+        const previous = await files.get(`${backupPrefix(namespace)}latest.json`)
+        if (previous) {
+          const previousSummary = (await previous.json()) as { rows?: unknown }
+          keepPreviousLatest = Number(previousSummary.rows) > 0
+        }
+      } catch {
+        // A missing/corrupt pointer must not prevent a new valid backup.
+      }
+    }
+    if (!keepPreviousLatest) {
+      await files.put(`${backupPrefix(namespace)}latest.json`, JSON.stringify(summary))
     }
     log({
       phase: 'export',
-      outcome: 'preempted',
+      outcome: 'success',
       namespace,
       priority,
       scanChunkBytes: requestedScanChunkBytes,
-      reason: 'torn',
-      torn,
       durationMs: Date.now() - startedAt,
+      rows: summary.rows,
+      bytes: summary.bytes,
+      parts: summary.parts,
     })
-    return { outcome: 'preempted', namespace }
+    return { outcome: 'exported', summary }
   }
 
   const importNamespace = async (

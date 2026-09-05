@@ -8,6 +8,8 @@ import {
   type NamespaceBackupManager,
   type NamespaceBackupOptions,
   type NamespaceBackupStatement,
+  type NamespaceBackupSnapshot,
+  type NamespaceBackupSnapshotOptions,
 } from './namespace-backup.js'
 import { ZeroDO as OrezZeroDO } from './worker.js'
 
@@ -55,6 +57,10 @@ export interface OrezDurableObjectId {
 }
 
 export interface OrezDataWorkerStub extends ApplicationSqlRpc {
+  backupSnapshot(
+    options: NamespaceBackupSnapshotOptions
+  ): Promise<NamespaceBackupSnapshot>
+  backupSnapshotDrop(id: string): Promise<void>
   fetch(request: Request): Promise<Response>
   orezApplicationPush(input: unknown): Promise<OrezApplicationPushResponse>
   orezApplicationSchemaStatus(version: string): Promise<OrezSchemaStatus>
@@ -150,7 +156,6 @@ export interface OrezBackupConfig<Env extends OrezDataWorkerEnv> extends Partial
     | 'partBytes'
     | 'prefix'
     | 'runBudgetMs'
-    | 'scanAttempts'
     | 'scanChunkBytes'
   >
 > {
@@ -1001,6 +1006,18 @@ export function createOrezDataWorker<
         markerTable: backupMarkerTable,
         files: options.backup.bucket,
         query: queryNamespace,
+        snapshot: async (env, namespace, snapshotOptions) => {
+          const owner = env.ZERO_SQL_DO.get(
+            env.ZERO_SQL_DO.idFromName(canonical(namespace))
+          )
+          const snapshot = await owner.backupSnapshot(snapshotOptions)
+          // retain the parent RPC stub for the entire snapshot lease lifetime.
+          return { ...snapshot, owner }
+        },
+        dropSnapshot: (env, namespace, id) =>
+          env.ZERO_SQL_DO.get(
+            env.ZERO_SQL_DO.idFromName(canonical(namespace))
+          ).backupSnapshotDrop(id),
         readSession: (env, namespace, work, readOptions) =>
           createApplicationSqlClient(env.ZERO_SQL_DO, canonical(namespace), {
             priority: readOptions.priority,
@@ -1050,7 +1067,6 @@ export function createOrezDataWorker<
               'partBytes',
               'prefix',
               'runBudgetMs',
-              'scanAttempts',
               'scanChunkBytes',
             ].includes(key)
           )

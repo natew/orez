@@ -354,14 +354,13 @@ list-append --consistency-models serializable`, failing the job on `false`,
    defect: the export read one page per application-SQL session, and because the
    durable object admits a write session the moment the reader set drains
    (`worker.ts` `canAdmitApplicationSqlSession`), a commit landed between two
-   pages and the dump held a state no transaction produced, with a parent row
-   read before the write next to child rows read after it. The scan now uses
-   marker-fenced read sessions, and
-   `namespace backup export consistency > dumps a state that some transaction
-actually produced` pins it (red proof: with per-statement reads the dump
-   carries `balance 0` against a ledger summing to `100`). A second race test
-   proves that an explicitly bounded normal chunk completes while a writer
-   waits, then releases the database before multipart upload. The remaining
+   pages and the dump held a state no transaction produced. The scan now reads
+   physical snapshots. The pre-write/next-export regression pins both sides of
+   a mid-scan commit; continuous commits cannot force a restart. The real worker
+   test proves writer admission, and the migration workerd script measures a
+   32 MiB copy, unchanged marker and budget, trigger-free tables, and cleanup.
+   Background chunk preemption remains bounded and R2 stays outside the read
+   session. The remaining
    gap is that the durable object's own maintenance writes (transaction
    rollback, recovery) run outside the admission queue, so a read session is
    writer exclusion and not snapshot isolation (`application-sql.ts`,

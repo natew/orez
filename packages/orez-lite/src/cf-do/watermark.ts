@@ -106,7 +106,7 @@ export class DurableWatermarkState {
   private watermarkSequenceTables(): string[] {
     return this.sql
       .exec(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%zero_watermark%'"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%zero_watermark%' AND name NOT GLOB '_orez_bk_*'"
       )
       .toArray()
       .map((row) => String(row.name || ''))

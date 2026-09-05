@@ -63,6 +63,9 @@ export type {
   NamespaceBackupReadOptions,
   NamespaceBackupReadPriority,
   NamespaceBackupStatement,
+  NamespaceBackupSnapshot,
+  NamespaceBackupSnapshotOptions,
+  NamespaceBackupSchemaRow,
   NamespaceBackupSummary,
   NamespaceRestoreSummary,
 } from './cf-do/namespace-backup.js'

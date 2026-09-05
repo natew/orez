@@ -247,6 +247,7 @@ async function readLiveColumns(tx) {
     'SELECT m.name AS tableName, p.name AS columnName, p.type AS columnType,' +
       ' p."notnull" AS columnNotNull, p.pk AS columnPk' +
       " FROM sqlite_master m JOIN pragma_table_info(m.name) p WHERE m.type = 'table'" +
+      " AND m.name NOT GLOB '_orez_bk_*'" +
       " AND m.name NOT LIKE '^_cf^_%' ESCAPE '^'" +
       " AND m.name NOT LIKE 'sqlite^_%' ESCAPE '^'",
   )
@@ -631,7 +632,7 @@ const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigratio
 async function reconcilePhantomLedger(tx, applied) {
   if (applied.size === 0) return
   const schemaRows = await tx.query(
-    "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index')",
+    "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT GLOB '_orez_bk_*'",
   )
   const tables = new Set()
   const indexes = new Map()
@@ -1099,6 +1100,7 @@ async function liveSchemaSummary(client) {
     }, async (tx) => {
       const rows = await tx.query(
         "SELECT name FROM sqlite_master WHERE type = 'table'" +
+          " AND name NOT GLOB '_orez_bk_*'" +
           " AND name NOT LIKE '^_cf^_%' ESCAPE '^'" +
           " AND name NOT LIKE 'sqlite^_%' ESCAPE '^' ORDER BY name",
       )
