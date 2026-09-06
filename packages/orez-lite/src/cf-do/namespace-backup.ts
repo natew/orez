@@ -1,7 +1,5 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 
-import { ApplicationSqlSessionPreemptedError } from './application-sql.js'
-
 export interface NamespaceBackupStatement {
   sql: string
   params?: readonly unknown[]
@@ -40,21 +38,9 @@ export interface NamespaceBackupSummary {
   parts: number
 }
 
-export type NamespaceBackupExportResult =
-  | { outcome: 'exported'; summary: NamespaceBackupSummary }
-  | { outcome: 'preempted'; namespace: string }
-
-export type NamespaceBackupReadPriority = 'background' | 'normal'
-
-export interface NamespaceBackupExportOptions {
-  /** Keep each bounded scan chunk's queue turn instead of yielding it to writers. */
-  priority?: NamespaceBackupReadPriority
-  /** Override the configured chunk bound for this export. */
-  scanChunkBytes?: number
-}
-
-export interface NamespaceBackupReadOptions {
-  priority: NamespaceBackupReadPriority
+export type NamespaceBackupExportResult = {
+  outcome: 'exported'
+  summary: NamespaceBackupSummary
 }
 
 export interface NamespaceRestoreSummary {
@@ -109,6 +95,11 @@ export interface NamespaceBackupOptions<Env> {
   acceptedFormats?: readonly string[]
   markerTable: string
   files(env: Env): NamespaceBackupBucket
+  /**
+   * one statement in its own admitted turn. the export pages its immutable
+   * snapshot through this, so no read session is ever held across a network
+   * hop and an arriving writer waits for one synchronous statement at most.
+   */
   query(
     env: Env,
     namespace: string,
@@ -121,15 +112,6 @@ export interface NamespaceBackupOptions<Env> {
     options: NamespaceBackupSnapshotOptions
   ): Promise<NamespaceBackupSnapshot>
   dropSnapshot(env: Env, namespace: string, id: string): Promise<void>
-  /** run one bounded snapshot chunk; a writer may preempt its read session. */
-  readSession<Value>(
-    env: Env,
-    namespace: string,
-    work: (
-      query: (sql: string, params?: readonly unknown[]) => Promise<Record<string, any>[]>
-    ) => Promise<Value>,
-    options: NamespaceBackupReadOptions
-  ): Promise<Value>
   batch(
     env: Env,
     namespace: string,
@@ -149,25 +131,15 @@ export interface NamespaceBackupOptions<Env> {
   partBytes?: number
   chunkTargetBytes?: number
   /**
-   * output produced per read session; smaller chunks yield to writers sooner.
-   */
-  scanChunkBytes?: number
-  /**
    * multipart uploads allowed to remain outstanding; bounded by worker memory.
    */
   maxInflightParts?: number
-  /** Times one chunk is re-read after a writer preempts its session. */
-  chunkAttempts?: number
 }
 
 export interface NamespaceBackupManager<Env> {
   backupPrefix(namespace: string): string
   readMarker(env: Env, namespace: string): Promise<number>
-  exportNamespace(
-    env: Env,
-    namespace: string,
-    options?: NamespaceBackupExportOptions
-  ): Promise<NamespaceBackupExportResult>
+  exportNamespace(env: Env, namespace: string): Promise<NamespaceBackupExportResult>
   importNamespace(
     env: Env,
     namespace: string,
@@ -177,7 +149,6 @@ export interface NamespaceBackupManager<Env> {
   pruneBackups(env: Env, namespace: string): Promise<void>
   runScheduledBackups(env: Env): Promise<{
     exported: number
-    preempted: number
     skipped: number
     failed: number
   }>
@@ -356,9 +327,7 @@ export function createNamespaceBackupManager<Env>(
   const keepControlPlane = options.keepControlPlane ?? 30
   const controlPlaneNamespace = options.controlPlaneNamespace ?? 'singleton'
   const runBudgetMs = options.runBudgetMs ?? 10 * 60 * 1000
-  const configuredScanChunkBytes = options.scanChunkBytes ?? partBytes
   const maxInflightParts = Math.max(1, options.maxInflightParts ?? 4)
-  const chunkAttempts = Math.max(1, options.chunkAttempts ?? 3)
   const excludedTables = new Set(options.excludedTables ?? [])
   const acceptedFormats = new Set([options.format, ...(options.acceptedFormats ?? [])])
   const backupPrefix =
@@ -402,14 +371,6 @@ export function createNamespaceBackupManager<Env>(
     snapshotName: string
   }
 
-  /** Where the scan stands, so a chunk that has to be re-read can resume. */
-  type ScanCursor = {
-    tableIndex: number
-    tableOpened: boolean
-    rowidCursor: unknown
-    limit: number
-  }
-
   type ScanLine = { bytes: Uint8Array; digested: boolean }
 
   const encoder = new TextEncoder()
@@ -418,32 +379,6 @@ export function createNamespaceBackupManager<Env>(
     bytes: encoder.encode(`${JSON.stringify(value)}\n`),
     digested,
   })
-
-  /**
-   * Run one bounded piece of the scan in its own read session, retrying it when
-   * a writer preempts the session.
-   *
-   * `work` re-runs from the start on a retry, so it must return everything it
-   * produced rather than publish it, and the caller commits that only once.
-   */
-  const readChunk = async <Value>(
-    env: Env,
-    namespace: string,
-    work: (read: SessionQuery) => Promise<Value>,
-    readOptions: NamespaceBackupReadOptions
-  ): Promise<{ outcome: 'read'; value: Value } | { outcome: 'preempted' }> => {
-    for (let attempt = 0; attempt < chunkAttempts; attempt++) {
-      try {
-        return {
-          outcome: 'read',
-          value: await options.readSession(env, namespace, work, readOptions),
-        }
-      } catch (error) {
-        if (!(error instanceof ApplicationSqlSessionPreemptedError)) throw error
-      }
-    }
-    return { outcome: 'preempted' }
-  }
 
   const readScanSchema = ({
     id,
@@ -491,80 +426,25 @@ export function createNamespaceBackupManager<Env>(
     return { marker, tables }
   }
 
-  /** page immutable snapshot rows in bounded, preemptible read sessions. */
-  const readScanChunk =
-    (tables: readonly ExportTable[], cursor: ScanCursor, scanChunkBytes: number) =>
-    async (read: SessionQuery) => {
-      const lines: ScanLine[] = []
-      const tableRows: Record<string, number> = {}
-      const next: ScanCursor = { ...cursor }
-      let produced = 0
-      const openNextTable = () => {
-        next.tableIndex++
-        next.tableOpened = false
-        next.rowidCursor = 0
-        next.limit = 200
-      }
-      while (next.tableIndex < tables.length && produced < scanChunkBytes) {
-        const table = tables[next.tableIndex]!
-        if (!next.tableOpened) {
-          const line = encodeLine({
-            kind: 'table',
-            name: table.name,
-            sql: table.sql,
-            indexes: table.indexes,
-          })
-          lines.push(line)
-          produced += line.bytes.byteLength
-          next.tableOpened = true
-          tableRows[table.name] = tableRows[table.name] ?? 0
-        }
-        const usedLimit = next.limit
-        const rows = await read(
-          `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.snapshotName)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
-          [next.rowidCursor, usedLimit]
-        )
-        if (rows.length === 0) {
-          openNextTable()
-          continue
-        }
-        next.rowidCursor = rows.at(-1)?.__orez_backup_rowid
-        const sourceRows = rows.map((row) =>
-          Object.fromEntries(
-            table.columns.map((column, index) => [column, row[`c${index}`]])
-          )
-        )
-        const line = encodeLine({ kind: 'rows', table: table.name, rows: sourceRows })
-        lines.push(line)
-        produced += line.bytes.byteLength
-        tableRows[table.name] = (tableRows[table.name] ?? 0) + rows.length
-        const perRow = Math.max(1, Math.ceil(line.bytes.byteLength / rows.length))
-        next.limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
-        if (rows.length < usedLimit) openNextTable()
-      }
-      return { lines, tableRows, next } as const
-    }
-
-  /** copy once under writer admission, then stream without fencing live writes. */
-  const runScanAttempt = async (
+  /**
+   * copy once under writer admission, then page the copy without fencing live
+   * writes. every page is one single-statement read in its own admitted turn,
+   * so there is no session for a writer to evict and nothing to retry: the
+   * snapshot cannot change, and the export finishes at the pace of its pages.
+   */
+  const runScan = async (
     env: Env,
     namespace: string,
     key: string,
-    exportedAt: string,
-    readOptions: NamespaceBackupReadOptions,
-    scanChunkBytes: number
-  ): Promise<
-    | {
-        outcome: 'scanned'
-        marker: number
-        tables: number
-        rows: number
-        tableRows: Record<string, number>
-        bytes: number
-        parts: number
-      }
-    | { outcome: 'preempted' }
-  > => {
+    exportedAt: string
+  ): Promise<{
+    marker: number
+    tables: number
+    rows: number
+    tableRows: Record<string, number>
+    bytes: number
+    parts: number
+  }> => {
     const files = options.files(env)
     const snapshotStarted = performance.now()
     const snapshot = await options.snapshot(env, namespace, {
@@ -645,30 +525,44 @@ export function createNamespaceBackupManager<Env>(
             orderedTables: true,
           })
         )
-        let cursor: ScanCursor = {
-          tableIndex: 0,
-          tableOpened: false,
-          rowidCursor: 0,
-          limit: 200,
-        }
-        while (cursor.tableIndex < tables.length) {
-          const chunk = await readChunk(
-            env,
-            namespace,
-            readScanChunk(tables, cursor, scanChunkBytes),
-            readOptions
+        for (const table of tables) {
+          appendLine(
+            encodeLine({
+              kind: 'table',
+              name: table.name,
+              sql: table.sql,
+              indexes: table.indexes,
+            })
           )
-          if (chunk.outcome === 'preempted') {
-            await abortUpload()
-            return { outcome: 'preempted' }
+          tableRows[table.name] = 0
+          let rowidCursor: unknown = 0
+          let limit = 200
+          while (true) {
+            const rows = await options.query(
+              env,
+              namespace,
+              `SELECT rowid AS __orez_backup_rowid, * FROM "${quoteIdentifier(table.snapshotName)}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+              [rowidCursor, limit]
+            )
+            if (rows.length === 0) break
+            rowidCursor = rows.at(-1)?.__orez_backup_rowid
+            const line = encodeLine({
+              kind: 'rows',
+              table: table.name,
+              rows: rows.map((row) =>
+                Object.fromEntries(
+                  table.columns.map((column, index) => [column, row[`c${index}`]])
+                )
+              ),
+            })
+            appendLine(line)
+            tableRows[table.name] += rows.length
+            rowTotal += rows.length
+            await flushParts(false)
+            if (rows.length < limit) break
+            const perRow = Math.max(1, Math.ceil(line.bytes.byteLength / rows.length))
+            limit = Math.max(20, Math.min(1000, Math.floor(chunkTargetBytes / perRow)))
           }
-          for (const line of chunk.value.lines) appendLine(line)
-          for (const [table, count] of Object.entries(chunk.value.tableRows)) {
-            tableRows[table] = (tableRows[table] ?? 0) + count
-            rowTotal += count
-          }
-          cursor = chunk.value.next
-          await flushParts(false)
         }
         appendLine(
           encodeLine(
@@ -689,7 +583,6 @@ export function createNamespaceBackupManager<Env>(
       }
 
       return {
-        outcome: 'scanned',
         marker,
         tables: tables.length,
         rows: rowTotal,
@@ -715,53 +608,24 @@ export function createNamespaceBackupManager<Env>(
 
   const exportNamespace = async (
     env: Env,
-    namespace: string,
-    exportOptions: NamespaceBackupExportOptions = {}
+    namespace: string
   ): Promise<NamespaceBackupExportResult> => {
     const startedAt = Date.now()
-    const priority = exportOptions.priority ?? 'background'
-    const requestedScanChunkBytes =
-      exportOptions.scanChunkBytes ?? configuredScanChunkBytes
-    if (!Number.isSafeInteger(requestedScanChunkBytes) || requestedScanChunkBytes < 1) {
-      throw new TypeError('backup scanChunkBytes must be a positive safe integer')
-    }
-    const readOptions = { priority } satisfies NamespaceBackupReadOptions
     const files = options.files(env)
     const exportedAt = new Date().toISOString()
     const key = `${backupPrefix(namespace)}${Date.now()}.ndjson`
-    let scan: Awaited<ReturnType<typeof runScanAttempt>>
+    let scan: Awaited<ReturnType<typeof runScan>>
     try {
-      scan = await runScanAttempt(
-        env,
-        namespace,
-        key,
-        exportedAt,
-        readOptions,
-        requestedScanChunkBytes
-      )
+      scan = await runScan(env, namespace, key, exportedAt)
     } catch (error) {
       log({
         phase: 'export_upload',
         outcome: 'error',
         namespace,
-        priority,
-        scanChunkBytes: requestedScanChunkBytes,
         durationMs: Date.now() - startedAt,
         error: errorMessage(error),
       })
       throw error
-    }
-    if (scan.outcome === 'preempted') {
-      log({
-        phase: 'export',
-        outcome: 'preempted',
-        namespace,
-        priority,
-        scanChunkBytes: requestedScanChunkBytes,
-        reason: 'session_preempted',
-        durationMs: Date.now() - startedAt,
-      })
-      return { outcome: 'preempted', namespace }
     }
 
     const summary = {
@@ -794,8 +658,6 @@ export function createNamespaceBackupManager<Env>(
       phase: 'export',
       outcome: 'success',
       namespace,
-      priority,
-      scanChunkBytes: requestedScanChunkBytes,
       durationMs: Date.now() - startedAt,
       rows: summary.rows,
       bytes: summary.bytes,
@@ -1119,7 +981,6 @@ export function createNamespaceBackupManager<Env>(
       ;[namespaces[index], namespaces[other]] = [namespaces[other], namespaces[index]]
     }
     let exported = 0
-    let preempted = 0
     let skipped = 0
     let failed = 0
     for (const namespace of namespaces) {
@@ -1144,15 +1005,6 @@ export function createNamespaceBackupManager<Env>(
           }
         }
         const result = await exportNamespace(env, namespace)
-        if (result.outcome === 'preempted') {
-          preempted++
-          log({
-            phase: 'scheduled_namespace',
-            outcome: 'preempted',
-            namespace,
-          })
-          continue
-        }
         await pruneBackups(env, namespace)
         exported++
         log({
@@ -1176,12 +1028,11 @@ export function createNamespaceBackupManager<Env>(
       phase: 'scheduled',
       outcome: failed > 0 ? 'partial' : 'success',
       exported,
-      preempted,
       skipped,
       failed,
       durationMs: Date.now() - started,
     })
-    return { exported, preempted, skipped, failed }
+    return { exported, skipped, failed }
   }
 
   return {

@@ -119,10 +119,10 @@ rows remain visible in billing telemetry.
 
 Snapshot columns use temporary `c0`, `c1`, … names so source `rowid`, `_rowid_`,
 `oid`, and cursor-shaped columns cannot interfere with paging. The export maps
-these back to source names and pages immutable rowid tables in bounded background
-read sessions.
-Writers may preempt a chunk, which is retried up to `chunkAttempts` times. Live
-commits never invalidate the snapshot, and R2 uploads run outside read sessions.
+these back to source names and pages the immutable rowid tables one single-statement
+read at a time, each in its own admitted turn, so no read session is held across a
+network hop and a writer waits for one synchronous statement at most. Live commits
+never invalidate the snapshot, and R2 uploads never hold the database.
 Dumps keep their existing source table names, CREATE statements, and format.
 Each copy has generation-specific table names so restarting the object cannot
 substitute a new snapshot into an older scan. Exports release ownership before

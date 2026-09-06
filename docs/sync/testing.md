@@ -359,8 +359,8 @@ list-append --consistency-models serializable`, failing the job on `false`,
    a mid-scan commit; continuous commits cannot force a restart. The real worker
    test proves writer admission, and the migration workerd script measures a
    32 MiB copy, unchanged marker and budget, trigger-free tables, and cleanup.
-   Background chunk preemption remains bounded and R2 stays outside the read
-   session. The remaining
+   Pages are single-statement reads, so a writer can never evict the scan and
+   R2 never holds the database. The remaining
    gap is that the durable object's own maintenance writes (transaction
    rollback, recovery) run outside the admission queue, so a read session is
    writer exclusion and not snapshot isolation (`application-sql.ts`,

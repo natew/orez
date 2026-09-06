@@ -55,13 +55,10 @@ export type {
 export { createNamespaceBackupManager } from './cf-do/namespace-backup.js'
 export type {
   NamespaceBackupBucket,
-  NamespaceBackupExportOptions,
   NamespaceBackupExportResult,
   NamespaceBackupManager,
   NamespaceBackupObject,
   NamespaceBackupOptions,
-  NamespaceBackupReadOptions,
-  NamespaceBackupReadPriority,
   NamespaceBackupStatement,
   NamespaceBackupSnapshot,
   NamespaceBackupSnapshotOptions,

@@ -146,7 +146,6 @@ export interface OrezBackupConfig<Env extends OrezDataWorkerEnv> extends Partial
   Pick<
     NamespaceBackupOptions<Env>,
     | 'acceptedFormats'
-    | 'chunkAttempts'
     | 'chunkTargetBytes'
     | 'controlPlaneNamespace'
     | 'excludedTables'
@@ -156,7 +155,6 @@ export interface OrezBackupConfig<Env extends OrezDataWorkerEnv> extends Partial
     | 'partBytes'
     | 'prefix'
     | 'runBudgetMs'
-    | 'scanChunkBytes'
   >
 > {
   bucket(env: Env): NamespaceBackupBucket
@@ -1030,15 +1028,6 @@ export function createOrezDataWorker<
           env.ZERO_SQL_DO.get(
             env.ZERO_SQL_DO.idFromName(canonical(namespace))
           ).backupSnapshotDrop(id),
-        readSession: (env, namespace, work, readOptions) =>
-          createApplicationSqlClient(env.ZERO_SQL_DO, canonical(namespace), {
-            priority: readOptions.priority,
-          }).readTransaction(
-            () => {
-              throw new Error('backup export does not compile ZQL')
-            },
-            (tx) => work((sql, params = []) => tx.query(sql, params))
-          ),
         batch: async (env, namespace, statements) => {
           const instance = canonical(namespace)
           const id = env.ZERO_SQL_DO.idFromName(instance)
@@ -1070,7 +1059,6 @@ export function createOrezDataWorker<
           Object.entries(options.backup).filter(([key]) =>
             [
               'acceptedFormats',
-              'chunkAttempts',
               'chunkTargetBytes',
               'controlPlaneNamespace',
               'keep',
@@ -1079,7 +1067,6 @@ export function createOrezDataWorker<
               'partBytes',
               'prefix',
               'runBudgetMs',
-              'scanChunkBytes',
             ].includes(key)
           )
         ),
@@ -1296,12 +1283,6 @@ export function createOrezDataWorker<
             try {
               if (action === 'export') {
                 const result = await backupManager.exportNamespace(env, resolved.instance)
-                if (result.outcome === 'preempted') {
-                  return Response.json(
-                    { ok: false, outcome: 'preempted', ns: resolved.instance },
-                    { status: 409 }
-                  )
-                }
                 await backupManager.pruneBackups(env, resolved.instance)
                 return Response.json({
                   ok: true,
