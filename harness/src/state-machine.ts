@@ -419,6 +419,12 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
         recovery?: Promise<void>
       }
     | undefined
+  // the kill fault whose restart has not completed yet, from the moment it is
+  // armed until either its recovery finishes or it resolves not-fired. an
+  // armed kill fires on whichever push or pull reaches the engine first, which
+  // can be a background pull landing between operations, so this is what tells
+  // a transport failure caused by an injected kill apart from a real one.
+  let unrecoveredKill: typeof pendingFault
   // second fault class: when engaged, this client's pulls fail at the fetch
   // seam, modeling a one-client transport outage. verification is suspended
   // while paused because a paused view cannot observe server progress.
@@ -483,6 +489,9 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
       transportTally.overlapped++
     }
     if (pendingFault === fault) pendingFault = undefined
+    // a kill cancelled before it fired never took the target down, so it can
+    // no longer explain a failing request.
+    if (status === 'not-fired' && unrecoveredKill === fault) unrecoveredKill = undefined
     fault.resolve(status)
   }
 
@@ -550,6 +559,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
       return
     fault.recovery ??= target.restart(50)
     await fault.recovery
+    if (unrecoveredKill === fault) unrecoveredKill = undefined
   }
 
   const recoverObservedKill = async () => {
@@ -568,15 +578,38 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
 
   const operationFaults = new Map<string, NonNullable<typeof pendingFault>>()
 
+  // every request that needs a live engine and is not already inside a
+  // recoverObservedKill retry loop goes through here. an armed kill exits the
+  // engine process on a background pull, so it can take the target down while
+  // this request is in flight, before the post-operation recovery runs. wait
+  // for that kill's receipt, finish its restart, then re-issue the same
+  // request. gated on a kill receipt that actually resolved as fired: with no
+  // unrecovered kill behind it, the original failure is rethrown untouched.
+  const throughEngineKill = async <T>(request: () => Promise<T>, label: string) => {
+    try {
+      return await request()
+    } catch (error) {
+      const kill = unrecoveredKill
+      if (!kill) throw error
+      const resolution = await withTimeout(
+        kill.resolution,
+        `${label} kill receipt`,
+        5_000
+      ).catch(() => undefined)
+      if (resolution !== 'fired') throw error
+      await recoverKill(kill)
+      return request()
+    }
+  }
+
   const completeMutation = async (
     request: { client: Promise<unknown>; server: Promise<unknown> },
     label: string
   ) => {
-    const kill =
-      pendingFault?.receipt.arm.kind === 'kill' &&
-      pendingFault.receipt.arm.point.startsWith('push_')
-        ? pendingFault
-        : undefined
+    // any unrecovered kill, at a push or a pull boundary, takes the engine
+    // process down with this push still in flight, so the server outcome only
+    // lands after the restart. a pull kill does that from a background pull.
+    const kill = unrecoveredKill
     await withTimeout(request.client, `client ${label}`)
     const server = withTimeout(
       assertServerOutcome(request.server, 'success', label),
@@ -669,7 +702,10 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           break
         }
         case 'responseLoss': {
-          await target.dropNextPushResponse()
+          await throughEngineKill(
+            () => target.dropNextPushResponse(),
+            `lost-response ${operation.id} arm`
+          )
           const request = client.mutate(
             mutators.task.create({
               id: operation.id,
@@ -680,8 +716,11 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
             })
           )
           await completeMutation(request, `lost-response ${operation.id}`)
-          const rows = await target.oracle(
-            `SELECT id FROM task WHERE id = '${operation.id}'`
+          // exactly-once oracle: the read is re-issued after a kill restart,
+          // never the assertion, so a genuine duplicate still fails the run.
+          const rows = await throughEngineKill(
+            () => target.oracle(`SELECT id FROM task WHERE id = '${operation.id}'`),
+            `lost-response ${operation.id} oracle`
           )
           if (rows.length !== 1)
             throw new Error(
@@ -690,32 +729,12 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           break
         }
         case 'prune': {
-          const pullKill =
-            pendingFault?.receipt.arm.kind === 'kill' &&
-            pendingFault.receipt.arm.point.startsWith('pull_')
-              ? pendingFault
-              : undefined
-          const throughPullKill = async <T>(request: () => Promise<T>, label: string) => {
-            try {
-              return await request()
-            } catch (error) {
-              if (!pullKill) throw error
-              const resolution = await withTimeout(
-                pullKill.resolution,
-                `${label} pull-kill receipt`,
-                5_000
-              ).catch(() => undefined)
-              if (resolution !== 'fired') throw error
-              await recoverKill(pullKill)
-              return request()
-            }
-          }
           for (let index = 0; index < 16; index++) {
             const id = `sm-prune-${seed}-${operation.epoch}-${index}`
             // A background pull can consume an armed kill while this admin
             // request is in flight. The response is then ambiguous, so make
             // the setup write idempotent before retrying it after recovery.
-            await throughPullKill(
+            await throughEngineKill(
               () =>
                 target.sql(
                   `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt") VALUES ('${id}', 'p0', '${id}', ${index}, 0, NULL, NULL) ON CONFLICT (id) DO NOTHING`
@@ -725,7 +744,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           }
           // Make pruning self-contained so removing surrounding operations
           // during shrinking cannot create a dependency-only false failure.
-          await throughPullKill(() => target.pull(), 'prune pull')
+          await throughEngineKill(() => target.pull(), 'prune pull')
           break
         }
         case 'fullPruneRestart': {
@@ -739,11 +758,18 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
               'not-fired',
               'full prune + restart before fault fired'
             )
-          const before = await servedWatermark(`before-${step}`)
-          const response = await fetch(`${target.origin}/admin/prune-to-head`, {
-            method: 'POST',
-            headers: { 'x-admin-key': target.adminKey },
-          })
+          const before = await throughEngineKill(
+            () => servedWatermark(`before-${step}`),
+            `full prune watermark at step ${step}`
+          )
+          const response = await throughEngineKill(
+            () =>
+              fetch(`${target.origin}/admin/prune-to-head`, {
+                method: 'POST',
+                headers: { 'x-admin-key': target.adminKey },
+              }),
+            `prune-to-head at step ${step}`
+          )
           if (!response.ok) throw new Error(`prune-to-head failed ${response.status}`)
           await response.arrayBuffer()
           await target.restart(50)
@@ -759,14 +785,21 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
             throw new Error('armEngineFault requires the rust-local admin route')
           if (pendingFault)
             resolveFault(pendingFault, 'not-fired', 'replaced by a later fault arm')
-          const response = await fetch(`${target.origin}/admin/fault`, {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'x-admin-key': target.adminKey,
-            },
-            body: JSON.stringify({ point: operation.point, kind: operation.faultKind }),
-          })
+          const response = await throughEngineKill(
+            () =>
+              fetch(`${target.origin}/admin/fault`, {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                  'x-admin-key': target.adminKey,
+                },
+                body: JSON.stringify({
+                  point: operation.point,
+                  kind: operation.faultKind,
+                }),
+              }),
+            `arm ${operation.point}/${operation.faultKind}`
+          )
           if (!response.ok)
             throw new Error(
               `arm ${operation.point}/${operation.faultKind} failed ${response.status}`
@@ -800,6 +833,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           recordedTrace[step]!.faultReceipt = receipt
           operationFaults.set(receipt.id, fault)
           pendingFault = fault
+          if (operation.faultKind === 'kill') unrecoveredKill = fault
           bumpFault(receipt, 'armed')
           break
         }
@@ -903,8 +937,9 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
       if (operation.kind === 'prune') {
         await eventually(
           async () => {
-            const rows = (await target.oracle(
-              'SELECT floor FROM _zsync_meta WHERE lock = 1'
+            const rows = (await throughEngineKill(
+              () => target.oracle('SELECT floor FROM _zsync_meta WHERE lock = 1'),
+              `retention floor at step ${step}`
             )) as { floor: number | string }[]
             if (Number(rows[0]?.floor) <= 0)
               throw new Error('retention floor did not advance')
