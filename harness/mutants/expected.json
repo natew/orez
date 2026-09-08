@@ -10,7 +10,7 @@
     "M3-swallow-rollback": true,
     "L1-prune-no-floor": true,
     "O1-nondurable-watermark": true,
-    "H1-backup-scan-without-read-session": true,
+    "H1-backup-pages-read-live-source": true,
     "H2-admit-writer-with-reader-open": true,
     "H3-skip-pending-change-promotion": true
   }

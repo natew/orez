@@ -1,0 +1,19 @@
+diff --git a/packages/orez-lite/src/cf-do/worker.ts b/packages/orez-lite/src/cf-do/worker.ts
+--- a/packages/orez-lite/src/cf-do/worker.ts
++++ b/packages/orez-lite/src/cf-do/worker.ts
+@@ -1060,10 +1060,13 @@
+       throw new TypeError('backup page limit must be an integer from 1 through 1000')
+     }
+     // the committed copy is immutable; live application journal sessions cannot change it.
+-    const physicalTable = `_orez_bk_${id}_${table}`.replaceAll('"', '""')
++    const physicalTable = table.replaceAll('"', '""')
++    const projection = this.sql.exec(`PRAGMA table_info("${physicalTable}")`).toArray()
++      .map((column, index) => `"${String(column.name).replaceAll('"', '""')}" AS c${index}`)
++      .join(', ')
+     return this.sql
+       .exec(
+-        `SELECT rowid AS __orez_backup_rowid, * FROM "${physicalTable}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
++        `SELECT rowid AS __orez_backup_rowid, ${projection} FROM "${physicalTable}" WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+         afterRowid,
+         limit
+       )
