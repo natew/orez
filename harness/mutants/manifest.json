@@ -73,11 +73,11 @@
       "expectedLanes": ["cargo-sync-core", "eviction"]
     },
     {
-      "id": "H1-backup-scan-without-read-session",
+      "id": "H1-backup-pages-read-live-source",
       "target": "typescript-host",
       "property": "backup-consistency",
-      "file": "packages/orez-lite/src/cf-do/lite-data-worker.ts",
-      "description": "namespace backup pages bypass the shared read session, so a writer can commit between pages and produce a torn dump",
+      "file": "packages/orez-lite/src/cf-do/worker.ts",
+      "description": "snapshot lease pages read the live source instead of immutable copies, so a committed write between pages produces a torn dump",
       "expectedLanes": ["orez-lite-host"]
     },
     {

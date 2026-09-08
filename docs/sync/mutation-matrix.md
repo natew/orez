@@ -12,21 +12,28 @@ reverts patches in place.
 
 ## Current TypeScript host matrix
 
-Run `host-matrix-final` on 2026-08-19 started from a green
-`packages/orez-lite/src/cf-do` baseline. All three host patches compiled and
-were caught by `orez-lite-host`.
+Run `host-r22691-final` on 2026-09-08 started from a green
+`packages/orez-lite/src/cf-do` baseline of 261 tests. All three host patches
+compiled and were caught by `orez-lite-host`.
 
-| mutant                                     | host lane | failure that catches it                                                        |
-| ------------------------------------------ | --------- | ------------------------------------------------------------------------------ |
-| H1 backup scan bypasses its read session   | CAUGHT    | production worker wiring no longer opens one read-only application SQL session |
-| H2 writer admitted while readers are open  | CAUGHT    | the queued writer resolves before the active reader set drains                 |
-| H3 commit skips pending-change publication | CAUGHT    | committed CDC rows never reach `_zero_changes`                                 |
+| mutant                                     | host lane | failure that catches it                                                   |
+| ------------------------------------------ | --------- | ------------------------------------------------------------------------- |
+| H1 lease pages read the live source        | CAUGHT    | paged rows carry a writer's committed change instead of the copied values |
+| H2 writer admitted while readers are open  | CAUGHT    | the queued writer resolves before the active reader set drains            |
+| H3 commit skips pending-change publication | CAUGHT    | committed CDC rows never reach `_zero_changes`                            |
 
-H1 first ran against the complete host suite before its production wiring test
-existed. The lane stayed green, so the matrix reported **NOTHING** and the gate
-failed. The added `createOrezDataWorker` backup test closed that gap. The same
-patch now turns the lane red, while the lower-level account and ledger race
-proves why one session matters.
+H1 used to delete the backup export's shared application read session, and it
+first ran against the complete host suite before the production wiring test
+that catches that existed. The lane stayed green, so the matrix reported
+**NOTHING** and the gate failed, until a `createOrezDataWorker` backup test
+closed the gap.
+
+cfe61c5f then replaced that read session with immutable per-generation snapshot
+copies, so the old patch no longer applied anywhere. The mutant now makes the
+lease's page read select from the live source table, keeping the same neutral
+column projection so only the rows differ, and a writer committing between
+pages produces a torn dump. Two existing physical-snapshot lease tests turn red
+on it, so this retarget needed no new test.
 
 The pull-request `test` job runs these three host patches and uploads the
 matrix artifact. Nightly CI runs the complete Rust and host corpus.

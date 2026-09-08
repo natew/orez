@@ -58,7 +58,7 @@ jobs:
       - name: TypeScript host mutation matrix
         run: >-
           cd harness && bun scripts/mutation-matrix.ts
-          --mutants H1-backup-scan-without-read-session,H2-admit-writer-with-reader-open,H3-skip-pending-change-promotion
+          --mutants H1-backup-pages-read-live-source,H2-admit-writer-with-reader-open,H3-skip-pending-change-promotion
           --lanes orez-lite-host
           --gate
           --run-id host-${{ github.run_id }}
