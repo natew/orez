@@ -22,4 +22,7 @@ build starts, so a stale expectation cannot silently disappear from the gate.
 
 Patches are unified diffs against the named source file and will go stale as
 the implementation moves. `git apply` failing on a patch means it needs
-regenerating, not skipping: re-derive the same defect at the same site.
+regenerating, never skipping: re-derive the same defect at the site that now
+owns the property, and update the manifest file and description to match. When
+the old site is gone entirely, retarget the mutant to whatever code now
+owns that property.
