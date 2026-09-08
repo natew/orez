@@ -25,6 +25,23 @@ describe('trackedChangeRow', () => {
 })
 
 describe('RollingRowWriteBudget', () => {
+  it('charges maintenance while retaining the exact sticky trip and ordinary refusal', () => {
+    const meter = new RollingRowWriteBudget({
+      budgetRows: 10,
+      windowMs: 1000,
+      now: () => 100,
+    })
+    expect(() => meter.recordMaintenanceBillable(1)).toThrow('closed write circuit')
+    meter.recordBillable(3)
+    meter.forceTrip()
+    const trip = structuredClone(meter.trip())
+    meter.recordMaintenanceBillable(20)
+    expect(meter.status().billableRows).toBe(23)
+    expect(meter.trip()).toEqual(trip)
+    expect(() => meter.recordBillable(1)).toThrow(WriteBudgetExceededError)
+    expect(meter.status().billableRows).toBe(23)
+  })
+
   it('counts a true rolling window with an injected deterministic clock', () => {
     let now = 1_000
     const meter = new RollingRowWriteBudget({

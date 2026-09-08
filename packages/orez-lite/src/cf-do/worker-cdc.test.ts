@@ -3,7 +3,11 @@ import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
 import { TransactionalCdc } from './cdc.js'
-import { rollbackTxJournal } from './tx-journal.js'
+import {
+  rollbackTxJournal,
+  snapshotTxSchema,
+  upgradeToTableSnapshot,
+} from './tx-journal.js'
 import { DurableWatermarkState } from './watermark.js'
 
 vi.mock('cloudflare:workers', () => ({
@@ -417,39 +421,54 @@ describe('ZeroDO transactional CDC integration', () => {
     expect(committed).not.toHaveBeenCalled()
   })
 
-  it('defers the application schema snapshot until the session changes schema', async () => {
-    const { sql, zero } = await createWorkerCore()
-    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+  it.each(['"item"', 'main."item"', '"main"."item"'])(
+    'defers the application schema snapshot and restores failed DDL on %s',
+    async (target) => {
+      const { sql, zero } = await createWorkerCore()
+      sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+      sql.exec("INSERT INTO item VALUES ('kept', 'original')")
 
-    const session = await zero.applicationSqlSession('application-schema-only')
-    await session.begin()
-    await session.query('SELECT * FROM item')
-    await session.exec('CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, body TEXT)')
-    await session.registerTables([{ table: 'item', publicTable: 'public.item' }])
+      const session = await zero.applicationSqlSession('application-schema-only')
+      await session.begin()
+      await session.query('SELECT * FROM item')
+      await session.exec(
+        'CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, body TEXT)'
+      )
+      await session.registerTables([{ table: 'item', publicTable: 'public.item' }])
 
-    expect(
-      sql
-        .exec(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_orez_tx_schema'"
-        )
-        .toArray()
-    ).toEqual([])
+      expect(
+        sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_orez_tx_schema'"
+          )
+          .toArray()
+      ).toEqual([])
 
-    await session.exec('ALTER TABLE item ADD COLUMN extra TEXT')
-    expect(
-      sql
-        .exec("SELECT name FROM _orez_tx_schema WHERE tx_id = 'application-schema-only'")
-        .toArray().length
-    ).toBeGreaterThan(0)
+      await session.exec(`ALTER TABLE ${target} ADD COLUMN extra TEXT`)
+      await session.exec("UPDATE item SET extra = 'scratch'")
+      await expect(
+        session.exec(`ALTER TABLE ${target} DROP COLUMN absent`)
+      ).rejects.toThrow()
+      expect(
+        sql
+          .exec(
+            "SELECT name FROM _orez_tx_schema WHERE tx_id = 'application-schema-only'"
+          )
+          .toArray().length
+      ).toBeGreaterThan(0)
 
-    await session.rollback()
-    expect(
-      sql
-        .exec('PRAGMA table_info(item)')
-        .toArray()
-        .map((column) => column.name)
-    ).toEqual(['id', 'body'])
-  })
+      await session.rollback()
+      expect(
+        sql
+          .exec('PRAGMA table_info(item)')
+          .toArray()
+          .map((column) => column.name)
+      ).toEqual(['id', 'body'])
+      expect(sql.exec('SELECT rowid, * FROM item').toArray()).toEqual([
+        { rowid: 1, id: 'kept', body: 'original' },
+      ])
+    }
+  )
 
   it('does not rewrite identical application table registrations after a cold start', async () => {
     const { sql, zero } = await createWorkerCore()
@@ -823,7 +842,7 @@ describe('ZeroDO cache state across an aborted storage transaction', () => {
 })
 
 describe('ZeroDO tracked writes on a table CDC cannot undo', () => {
-  it('upgrades the row-journal marker to a real table snapshot', async () => {
+  it('refuses a write whose hidden identity cannot be captured', async () => {
     const { sql, zero } = await createWorkerCore()
     const { TX_MANIFEST_DDL, TX_MANIFEST_TABLE, rollbackTxJournal } =
       await import('./tx-journal.js')
@@ -843,29 +862,291 @@ describe('ZeroDO tracked writes on a table CDC cannot undo', () => {
       ''
     )
 
-    zero.executeSQL(
-      "INSERT INTO weird VALUES ('r4', 'r5', 'r6', 'written')",
-      [],
-      {
-        physicalTableName: 'weird',
-        tableName: 'public.weird',
-        operation: 'INSERT',
-        rowColumns: ['body'],
-      },
-      'tx-weird'
-    )
-    expect(sql.exec('SELECT count(*) AS c FROM weird').one()).toEqual({ c: 2 })
+    const before = sql.exec('SELECT * FROM weird').toArray()
+    const objects = sql
+      .exec('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name')
+      .toArray()
+    await expect(
+      zero.atomically(() =>
+        zero.executeSQL(
+          "INSERT INTO weird VALUES ('r4', 'r5', 'r6', 'written')",
+          [],
+          {
+            physicalTableName: 'weird',
+            tableName: 'public.weird',
+            operation: 'INSERT',
+            rowColumns: ['body'],
+          },
+          'tx-weird'
+        )
+      )
+    ).rejects.toThrow('cannot snapshot inaccessible row identity: weird')
+    expect(sql.exec('SELECT * FROM weird').toArray()).toEqual(before)
+    expect(
+      sql.exec('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name').toArray()
+    ).toEqual(objects)
 
-    // The empty marker promised a row-level rollback nothing can perform, so
-    // the worker took the table copy the journal would otherwise have taken.
+    // no first-copy image can promise the inaccessible hidden identity.
     const manifest = sql
       .exec(`SELECT snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = 'tx-weird'`)
       .toArray()
     expect(manifest).toHaveLength(1)
-    expect(String(manifest[0].snapshot)).not.toBe('')
+    expect(manifest[0].snapshot).toBe('')
 
     rollbackTxJournal(zero.sql, 'tx-weird')
     expect(sql.exec('SELECT body FROM weird').toArray()).toEqual([{ body: 'before' }])
+  })
+})
+
+describe('versioned table snapshot identity and allocator restoration', () => {
+  for (const consumer of ['schema', 'ordinary']) {
+    it.each([
+      [
+        'text key',
+        'id TEXT PRIMARY KEY, body TEXT',
+        "INSERT INTO target (_rowid_,id,body) VALUES (7,'a','before'),(41,'b','before')",
+      ],
+      [
+        'keyless',
+        'body TEXT',
+        "INSERT INTO target (_rowid_,body) VALUES (7,'before'),(41,'before')",
+      ],
+      [
+        'integer key',
+        'id INTEGER PRIMARY KEY, body TEXT',
+        "INSERT INTO target VALUES (7,'before')",
+      ],
+      [
+        'quoted allocator word',
+        'id INTEGER PRIMARY KEY, body TEXT DEFAULT \'AUTOINCREMENT\', "AUTOINCREMENT" TEXT',
+        "INSERT INTO target (id,body) VALUES (7,'before')",
+      ],
+      [
+        'commented allocator word',
+        'id INTEGER PRIMARY KEY /* AUTOINCREMENT */, body TEXT',
+        "INSERT INTO target VALUES (7,'before')",
+      ],
+      [
+        'descending integer key',
+        'id INTEGER PRIMARY KEY DESC, body TEXT',
+        "INSERT INTO target (_rowid_,id,body) VALUES (7,31,'before')",
+      ],
+      [
+        'int key',
+        'id INT PRIMARY KEY, body TEXT',
+        "INSERT INTO target (_rowid_,id,body) VALUES (7,31,'before')",
+      ],
+      [
+        'shadowed integer key',
+        'id INTEGER PRIMARY KEY, body TEXT, _rowid_ TEXT, rowid TEXT, oid TEXT',
+        "INSERT INTO target VALUES (7,'before','shadow1','shadow2','shadow3')",
+      ],
+      [
+        'partial shadow',
+        'id TEXT PRIMARY KEY, body TEXT, _ROWID_ TEXT, RowID TEXT',
+        "INSERT INTO target (oid,id,body,_ROWID_,RowID) VALUES (7,'a','before','shadow1','shadow2')",
+      ],
+      [
+        'generated',
+        'id TEXT PRIMARY KEY, body TEXT, computed TEXT GENERATED ALWAYS AS (body || id) STORED',
+        "INSERT INTO target (_rowid_,id,body) VALUES (7,'a','before')",
+      ],
+      [
+        'int64',
+        'id TEXT PRIMARY KEY, body TEXT',
+        "INSERT INTO target (_rowid_,id,body) VALUES (-9223372036854775808,'min','before'),(9007199254740993,'wide','before'),(9223372036854775807,'max','before')",
+      ],
+      [
+        'without rowid',
+        'id TEXT PRIMARY KEY, body TEXT',
+        "INSERT INTO target VALUES ('a','before')",
+      ],
+      [
+        'deleted allocator',
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT',
+        "INSERT INTO target VALUES (7,'before'),(99,'deleted')",
+      ],
+    ])(`preserves %s through ${consumer} rollback`, async (name, columns, seed) => {
+      const { sql, nativeDb } = await createWorkerCore()
+      sql.exec(
+        `CREATE TABLE target (${columns})${name === 'without rowid' ? ' WITHOUT ROWID' : ''}`
+      )
+      sql.exec(seed)
+      if (name === 'deleted allocator') sql.exec('DELETE FROM target WHERE id=99')
+      const { tableIdentity } = await import('./cdc.js')
+      const identity = tableIdentity(sql, 'target')!
+      const alias = identity.rowidAlias ?? identity.rowidColumn
+      const projection = [
+        ...(alias ? [`CAST("${alias}" AS TEXT) AS __identity`] : []),
+        ...identity.columns.map((c) => `quote("${c}") AS "${c}"`),
+      ].join(',')
+      const dump = () => sql.exec(`SELECT ${projection} FROM target`).toArray()
+      const before = dump()
+      const sequence = () =>
+        sql
+          .exec(
+            "SELECT CAST(seq AS TEXT) AS seq FROM sqlite_sequence WHERE name='target'"
+          )
+          .toArray()
+      const beforeSequence = name === 'deleted allocator' ? sequence() : null
+      const objects = sql
+        .exec(
+          "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='target' ORDER BY name"
+        )
+        .toArray()
+      if (consumer === 'schema') {
+        snapshotTxSchema(sql, 'identity', 'application', ['target'])
+        sql.exec('ALTER TABLE target ADD COLUMN scratch INTEGER')
+      } else upgradeToTableSnapshot(sql, 'identity', 'target', 'application')
+      const metadata = sql
+        .exec(
+          "SELECT snapshot,snapshot_state FROM _orez_tx_manifest WHERE original='target'"
+        )
+        .one()
+      expect(JSON.parse(String(metadata.snapshot_state))).toEqual({
+        version: 2,
+        table: 'target',
+        rowid: identity.rowidColumn || identity.withoutRowid ? null : identity.rowidAlias,
+        sequence: name === 'deleted allocator' ? 'i99' : false,
+      })
+      sql.exec("UPDATE target SET body='after'")
+      nativeDb.exec('BEGIN')
+      try {
+        rollbackTxJournal(sql, 'identity')
+        nativeDb.exec('COMMIT')
+      } catch (error) {
+        nativeDb.exec('ROLLBACK')
+        throw error
+      }
+      expect(dump()).toEqual(before)
+      expect(
+        sql
+          .exec(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='target' ORDER BY name"
+          )
+          .toArray()
+      ).toEqual(objects)
+      expect(sql.exec('SELECT * FROM _orez_tx_manifest').toArray()).toEqual([])
+      if (beforeSequence) {
+        expect(sequence()).toEqual(beforeSequence)
+        sql.exec("INSERT INTO target (body) VALUES ('next')")
+        expect(sql.exec("SELECT id FROM target WHERE body='next'").one()).toEqual({
+          id: 100,
+        })
+      }
+    })
+
+    it.each([
+      ['json', "snapshot_state = '{'", /JSON/],
+      ['missing state', 'snapshot_state = NULL', /metadata does not match/],
+      [
+        'version',
+        "snapshot_state = json_set(snapshot_state, '$.version', 3)",
+        /identity metadata is corrupt/,
+      ],
+      [
+        'table',
+        "snapshot_state = json_set(snapshot_state, '$.table', 'wrong')",
+        /identity metadata is corrupt/,
+      ],
+      [
+        'rowid',
+        "snapshot_state = json_set(snapshot_state, '$.rowid', NULL)",
+        /identity metadata is corrupt/,
+      ],
+      [
+        'allocator',
+        "snapshot_state = json_set(snapshot_state, '$.sequence', 'i99')",
+        /allocator does not match/,
+      ],
+      ['name', "snapshot = '_orez_tx_undo_v3_1'", /version\/name/],
+    ])(
+      `retains all persisted state when ${consumer} metadata has corrupt %s`,
+      async (_name, corruption, expected) => {
+        const { sql, zero } = await createWorkerCore()
+        sql.exec('CREATE TABLE target (id TEXT PRIMARY KEY, body TEXT)')
+        sql.exec("INSERT INTO target (rowid,id,body) VALUES (7,'kept','before')")
+        sql.exec(
+          'CREATE TABLE child (id INTEGER PRIMARY KEY, parent TEXT REFERENCES target(id) ON DELETE CASCADE)'
+        )
+        sql.exec("INSERT INTO child VALUES (11,'kept')")
+        sql.exec('CREATE INDEX child_parent ON child(parent)')
+        zero.cdc.syncTables([{ physicalTableName: 'target', tableName: 'public.target' }])
+        await zero.atomically(() => {
+          if (consumer === 'schema') {
+            snapshotTxSchema(sql, 'corrupt', 'application', ['target'])
+            const suspended = zero.cdc.beginSchemaChange(
+              'ALTER TABLE target ADD COLUMN scratch INTEGER'
+            )
+            sql.exec('ALTER TABLE target ADD COLUMN scratch INTEGER')
+            zero.cdc.finishSchemaChange(suspended)
+          } else upgradeToTableSnapshot(sql, 'corrupt', 'target', 'application')
+          sql.exec("UPDATE target SET body='pending'")
+          sql.exec(`UPDATE _orez_tx_manifest SET ${corruption} WHERE original='target'`)
+        })
+        const dump = () => {
+          const objects = sql
+            .exec('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')
+            .toArray()
+          const tables = objects.filter((o) => o.type === 'table')
+          return {
+            objects,
+            rows: tables.map((table) => ({
+              table: table.name,
+              rows: sql
+                .exec(
+                  `SELECT rowid AS __saved_rowid,* FROM "${String(table.name).replaceAll('"', '""')}" ORDER BY rowid`
+                )
+                .toArray(),
+            })),
+          }
+        }
+        const before = dump()
+        await expect(
+          zero.atomically(() => rollbackTxJournal(sql, 'corrupt'))
+        ).rejects.toThrow(expected)
+        expect(dump()).toEqual(before)
+      }
+    )
+  }
+
+  it('upgrades a populated legacy manifest once without rewriting its existing image', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec(
+      "CREATE TABLE _orez_tx_manifest (seq INTEGER PRIMARY KEY AUTOINCREMENT,tx_id TEXT NOT NULL,owner TEXT NOT NULL DEFAULT 'default',original TEXT NOT NULL,snapshot TEXT)"
+    )
+    sql.exec('CREATE TABLE older (id INTEGER PRIMARY KEY,body TEXT)')
+    sql.exec("INSERT INTO older VALUES (7,'older')")
+    sql.exec('CREATE TABLE _orez_tx_legacy AS SELECT * FROM older')
+    sql.exec(
+      "INSERT INTO _orez_tx_manifest (tx_id,owner,original,snapshot) VALUES ('older-tx','application','older','_orez_tx_legacy')"
+    )
+    sql.exec('CREATE TABLE target (id INTEGER PRIMARY KEY,body TEXT)')
+    sql.exec("INSERT INTO target VALUES (11,'new')")
+    const oldManifest = sql
+      .exec("SELECT * FROM _orez_tx_manifest WHERE tx_id='older-tx'")
+      .one()
+    const oldImage = sql.exec('SELECT rowid,* FROM _orez_tx_legacy').toArray()
+    const changesBeforeCopy = Number(sql.exec('SELECT total_changes() AS n').one().n)
+    await zero.atomically(() =>
+      upgradeToTableSnapshot(sql, 'new-tx', 'target', 'application')
+    )
+    const changesAfterCopy = Number(sql.exec('SELECT total_changes() AS n').one().n)
+    expect(changesAfterCopy).toBeGreaterThan(changesBeforeCopy)
+    expect(
+      sql.exec("SELECT * FROM _orez_tx_manifest WHERE tx_id='older-tx'").one()
+    ).toEqual({
+      ...oldManifest,
+      snapshot_state: null,
+    })
+    expect(sql.exec('SELECT rowid,* FROM _orez_tx_legacy').toArray()).toEqual(oldImage)
+    upgradeToTableSnapshot(sql, 'new-tx', 'target', 'application')
+    expect(Number(sql.exec('SELECT total_changes() AS n').one().n)).toBe(changesAfterCopy)
+    await zero.atomically(() => rollbackTxJournal(sql, 'new-tx'))
+    expect(sql.exec('SELECT * FROM target').toArray()).toEqual([{ id: 11, body: 'new' }])
+    await zero.atomically(() => rollbackTxJournal(sql, 'older-tx'))
+    expect(sql.exec('SELECT * FROM older').toArray()).toEqual([{ id: 7, body: 'older' }])
+    expect(sql.exec('SELECT * FROM _orez_tx_manifest').toArray()).toEqual([])
   })
 })
 

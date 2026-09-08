@@ -583,6 +583,12 @@ export class ZeroDO extends DurableObject {
   private applicationSqlWriter: ApplicationSqlSessionTarget | null = null
   private applicationSqlReaders = new Set<ApplicationSqlSessionTarget>()
   private backupSnapshotID: string | null = null
+  private recoveryFailure: { transactionId: string | null; reason: string } | null = null
+  private restoringForeignKeys = false
+  private diagnosticSql = false
+  private maintenanceSession: ApplicationSqlSessionTarget | null = null
+  private maintenanceSql = false
+  private writeBudgetReopening = false
   private backupMaintenance = false
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
   private applicationSqlTurns: ApplicationSqlTurn[] = []
@@ -702,6 +708,10 @@ export class ZeroDO extends DurableObject {
   }
 
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
+    if (this.maintenanceSql) {
+      this.writeBudget.recordMaintenanceBillable(rows)
+      return
+    }
     const wasTripped = this.writeBudget.status().tripped
     try {
       this.writeBudget.recordBillable(rows)
@@ -824,7 +834,21 @@ export class ZeroDO extends DurableObject {
     this.sql.exec = (statement: string, ...params: unknown[]) => {
       this.requestsSinceBoot.sqlStatements++
       const mutation = isSqlMutation(statement)
-      if (mutation && !this.writeBudgetDisabled && !this.backupMaintenance)
+      if (this.restoringForeignKeys && statement !== 'PRAGMA foreign_keys = ON')
+        throw new Error('foreign-key restoration permits only its owned pragma')
+      if (this.diagnosticSql && mutation)
+        throw new Error('diagnostic SQLite inspection must be read-only')
+      if (this.recoveryFailure && !this.diagnosticSql && !this.restoringForeignKeys)
+        throw new Error(
+          'application SQLite recovery failed; administrative inspection required'
+        )
+      if (
+        mutation &&
+        !this.writeBudgetDisabled &&
+        !this.backupMaintenance &&
+        !this.maintenanceSql &&
+        !this.restoringForeignKeys
+      )
         this.writeBudget.assertOpen()
       const cursor = rawExec(statement, ...params)
       const chargeWriteBudget = !this.backupMaintenance
@@ -854,24 +878,34 @@ export class ZeroDO extends DurableObject {
     this.cdc = new TransactionalCdc(this.sql)
     this.watermarks = new DurableWatermarkState(this.sql)
     ctx.blockConcurrencyWhile(async () => {
-      const recovered = this.rollbackAtomicallyWithoutForeignKeys(() => {
-        const transactionIDs = recoverTxJournal(
-          this.sql,
-          'application',
-          (transactionID) => {
-            this.rollbackPendingTrackedChanges(transactionID)
-          }
-        )
-        for (const transactionID of transactionIDs)
-          this.deletePendingTrackedChanges(transactionID)
-        return transactionIDs
-      })
-      if (recovered.length) this.invalidateSchemaCaches()
-      // after recovery, which may still restore journal rows or re-create the
-      // residual triggers from a pre-cleanup schema snapshot, and before the
-      // trip restore, so the one-time drops run against a fresh write budget.
-      this.dropZeroHttpJournalResidue()
-      this.dropBackupSnapshotTables()
+      let recoveringTransactionId: string | null = null
+      try {
+        const recovered = this.rollbackAtomicallyWithoutForeignKeys(() => {
+          const transactionIDs = recoverTxJournal(
+            this.sql,
+            'application',
+            (transactionID) => {
+              recoveringTransactionId = transactionID
+              this.rollbackPendingTrackedChanges(transactionID)
+            }
+          )
+          for (const transactionID of transactionIDs)
+            this.deletePendingTrackedChanges(transactionID)
+          return transactionIDs
+        })
+        if (recovered.length) this.invalidateSchemaCaches()
+      } catch (error) {
+        // transactionSync has restored the whole failed recovery attempt. retain
+        // its durable evidence and keep the object available only for diagnostics.
+        this.recoveryFailure = {
+          transactionId: recoveringTransactionId,
+          reason: error instanceof Error ? error.message : String(error),
+        }
+      }
+      if (!this.recoveryFailure) {
+        this.dropZeroHttpJournalResidue()
+        this.dropBackupSnapshotTables()
+      }
       if (!this.writeBudgetDisabled) {
         const persisted = await ctx.storage.get<number | PersistedWriteBudgetTrip>(
           WRITE_BUDGET_TRIPPED_KEY
@@ -1186,9 +1220,25 @@ export class ZeroDO extends DurableObject {
   private async handleWriteBudgetReopen(request: Request): Promise<Response> {
     if (!this.hasAdminToken(request))
       return Response.json({ error: 'forbidden' }, { status: 403 })
-    await this.ctx.storage.delete(WRITE_BUDGET_TRIPPED_KEY)
-    this.writeBudgetTripStatement = undefined
-    const status = this.writeBudget.reopen()
+    if (this.recoveryFailure)
+      return Response.json(
+        { error: 'application SQLite recovery failed' },
+        { status: 409 }
+      )
+    if (this.maintenanceSession)
+      return Response.json(
+        { error: 'maintenance owns the application SQLite writer' },
+        { status: 409 }
+      )
+    this.writeBudgetReopening = true
+    let status
+    try {
+      await this.ctx.storage.delete(WRITE_BUDGET_TRIPPED_KEY)
+      this.writeBudgetTripStatement = undefined
+      status = this.writeBudget.reopen()
+    } finally {
+      this.writeBudgetReopening = false
+    }
     console.log(
       JSON.stringify({
         event: 'orez_do_write_budget_reopened',
@@ -1935,9 +1985,31 @@ export class ZeroDO extends DurableObject {
    * uncaptured. The readiness flags are the same class: their CREATE TABLE is
    * rolled back while the flag still says the table exists.
    */
-  private async atomically<T>(work: () => T): Promise<T> {
+  private withMaintenanceSql<T>(
+    session: ApplicationSqlSessionTarget | undefined,
+    work: () => T
+  ): T {
+    if (!session || this.maintenanceSession !== session) return work()
+    if (session.state !== 'closed') this.assertApplicationSqlSession(session)
+    this.maintenanceSql = true
     try {
-      return await this.ctx.storage.transaction(work)
+      const result = work()
+      if (result instanceof Promise)
+        throw new Error('maintenance SQL scope must be synchronous')
+      return result
+    } finally {
+      this.maintenanceSql = false
+    }
+  }
+
+  private async atomically<T>(
+    work: () => T,
+    session?: ApplicationSqlSessionTarget
+  ): Promise<T> {
+    try {
+      return await this.ctx.storage.transaction(() =>
+        this.withMaintenanceSql(session, work)
+      )
     } catch (error) {
       this.invalidateSchemaCaches()
       throw error
@@ -2231,6 +2303,7 @@ export class ZeroDO extends DurableObject {
     work: (session: ApplicationSqlSessionTarget) => Value | Promise<Value>,
     priority: ApplicationSqlSessionPriority = 'normal'
   ): Promise<Value> {
+    this.assertApplicationSqlRecovery()
     const session = this.openApplicationSqlSession(crypto.randomUUID(), {
       readOnly,
       priority,
@@ -2300,6 +2373,76 @@ export class ZeroDO extends DurableObject {
     }
   }
 
+  /**
+   * trusted subclass administrative caller; never exposed by the base RPC/fetch.
+   * the subclass owns authentication, fixed transformations and cross-object
+   * maintenance coordination. ordinary SQL remains behind the sticky circuit.
+   */
+  protected async applicationSqlMaintenanceTransaction<Value>(
+    compileQuery: ZeroDOQueryCompiler,
+    work: ApplicationSqlTransactionWork<Value>
+  ): Promise<Value> {
+    if (
+      this.maintenanceSession ||
+      this.writeBudgetReopening ||
+      this.writeBudgetDisabled ||
+      !this.writeBudget.status().tripped
+    ) {
+      throw new Error('maintenance requires an exclusively closed write circuit')
+    }
+    const session = this.openApplicationSqlSession(crypto.randomUUID(), {
+      readOnly: false,
+    })
+    this.maintenanceSession = session
+    try {
+      await session.begin()
+      const persisted = await this.ctx.storage.get(WRITE_BUDGET_TRIPPED_KEY)
+      if (!persisted || !this.writeBudget.status().tripped)
+        throw new Error('maintenance requires a persisted closed write circuit')
+      const value = await work(
+        applicationSqlSessionTransaction(session, false, compileQuery)
+      )
+      await session.commit()
+      return value
+    } catch (error) {
+      await session.rollback()
+      throw error
+    } finally {
+      if (session.state !== 'closed') session[Symbol.dispose]()
+      this.maintenanceSession = null
+    }
+  }
+
+  private assertApplicationSqlRecovery(): void {
+    if (this.recoveryFailure)
+      throw new Error(
+        'application SQLite recovery failed; administrative inspection required'
+      )
+  }
+
+  protected applicationSqlRecoveryStatus(): {
+    transactionId: string | null
+    reason: string
+  } | null {
+    return this.recoveryFailure ? { ...this.recoveryFailure } : null
+  }
+
+  // authentication and the read-only SQL check both precede the synchronous
+  // exemption. no cursor or promise can escape while the exemption is active.
+  protected applicationSqlDiagnosticRead<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(request: Request, statement: string, params: readonly unknown[] = []): Row[] {
+    if (!this.hasAdminToken(request)) throw new Error('forbidden')
+    if (isSqlMutation(statement))
+      throw new Error('diagnostic SQLite inspection must be read-only')
+    this.diagnosticSql = true
+    try {
+      return this.sql.exec(statement, ...params).toArray()
+    } finally {
+      this.diagnosticSql = false
+    }
+  }
+
   private registerApplicationSqlTables(tables: readonly ApplicationSqlTable[]): void {
     for (const table of tables) {
       // registration carries the schema's declared capture set, so its publish
@@ -2336,6 +2479,7 @@ export class ZeroDO extends DurableObject {
     sessionID: string,
     options: ApplicationSqlSessionOptions = {}
   ): Promise<ApplicationSqlSessionTarget> {
+    this.assertApplicationSqlRecovery()
     // a subclass converging its schema here can wait behind this namespace's
     // writer, and the client only sees that as a long open phase. name it by
     // the same session id so the client record joins to the cause.
@@ -2363,6 +2507,7 @@ export class ZeroDO extends DurableObject {
     sessionID: string,
     options: ApplicationSqlSessionOptions = {}
   ): ApplicationSqlSessionTarget {
+    this.assertApplicationSqlRecovery()
     if (!sessionID) throw new TypeError('application SQLite session id is required')
     const priority = options.priority ?? 'normal'
     if (
@@ -2402,6 +2547,7 @@ export class ZeroDO extends DurableObject {
     params: readonly unknown[] = [],
     options: Pick<ApplicationSqlSessionOptions, 'priority'> = {}
   ): Promise<Row[]> {
+    this.assertApplicationSqlRecovery()
     await this.admitApplicationSql()
     return this.withLocalApplicationSqlSession(
       true,
@@ -2498,7 +2644,7 @@ export class ZeroDO extends DurableObject {
         session.changedData = true
       }
       return result.rows as Row[]
-    })
+    }, session)
   }
 
   async [APPLICATION_SQL_QUERY_PREEMPTIBLE]<
@@ -2537,7 +2683,7 @@ export class ZeroDO extends DurableObject {
         session.changedData = true
       }
       return { changes: result.changes }
-    })
+    }, session)
   }
 
   async [APPLICATION_SQL_EXEC_MANY](
@@ -2552,31 +2698,33 @@ export class ZeroDO extends DurableObject {
     // session's own rollback still undoes exactly what earlier calls committed.
     let failure: { failedIndex: number; message: string } | undefined
     try {
-      const results = await this.atomically(() =>
-        statements.map(({ sql, params = [], metadata }, index) => {
-          try {
-            const mutation = this.prepareApplicationSqlMutation(session.sessionID, sql)
-            if (mutation) session.mutated = true
-            session.statements++
-            const result = this.executeSQL(
-              sql,
-              [...params],
-              applicationSqlTrack(metadata),
-              session.sessionID,
-              session.telemetry
-            )
-            if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
-              session.changedData = true
+      const results = await this.atomically(
+        () =>
+          statements.map(({ sql, params = [], metadata }, index) => {
+            try {
+              const mutation = this.prepareApplicationSqlMutation(session.sessionID, sql)
+              if (mutation) session.mutated = true
+              session.statements++
+              const result = this.executeSQL(
+                sql,
+                [...params],
+                applicationSqlTrack(metadata),
+                session.sessionID,
+                session.telemetry
+              )
+              if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
+                session.changedData = true
+              }
+              return { changes: result.changes }
+            } catch (error) {
+              failure = {
+                failedIndex: index,
+                message: error instanceof Error ? error.message : String(error),
+              }
+              throw error
             }
-            return { changes: result.changes }
-          } catch (error) {
-            failure = {
-              failedIndex: index,
-              message: error instanceof Error ? error.message : String(error),
-            }
-            throw error
-          }
-        })
+          }),
+        session
       )
       return { results }
     } catch (error) {
@@ -2647,7 +2795,7 @@ export class ZeroDO extends DurableObject {
     if (session.readOnly) {
       throw new Error('read-only application SQLite session cannot register tables')
     }
-    await this.atomically(() => this.registerApplicationSqlTables(tables))
+    await this.atomically(() => this.registerApplicationSqlTables(tables), session)
   }
 
   async [APPLICATION_SQL_COMMIT](session: ApplicationSqlSessionTarget): Promise<void> {
@@ -2661,7 +2809,7 @@ export class ZeroDO extends DurableObject {
           const committed = this.commitPendingTrackedChanges(session.sessionID)
           commitTxJournal(this.sql, session.sessionID)
           return committed > 0
-        })
+        }, session)
       }
     } catch (caught) {
       outcome = 'error'
@@ -2670,7 +2818,9 @@ export class ZeroDO extends DurableObject {
     this.releaseApplicationSqlTurn(session, { pump: false })
     try {
       if (outcome === 'committed') {
-        this.applicationSqlDidCommit(published, session.changedData)
+        this.withMaintenanceSql(session, () =>
+          this.applicationSqlDidCommit(published, session.changedData)
+        )
       }
     } catch (caught) {
       outcome = 'error'
@@ -2708,11 +2858,13 @@ export class ZeroDO extends DurableObject {
   private closeApplicationSqlSession(session: ApplicationSqlSessionTarget): void {
     if (session.state === 'active' && session.mutated) {
       try {
-        this.rollbackAtomicallyWithoutForeignKeys(() => {
-          this.rollbackPendingTrackedChanges(session.sessionID)
-          rollbackTxJournal(this.sql, session.sessionID)
-          this.deletePendingTrackedChanges(session.sessionID)
-        })
+        this.withMaintenanceSql(session, () =>
+          this.rollbackAtomicallyWithoutForeignKeys(() => {
+            this.rollbackPendingTrackedChanges(session.sessionID)
+            rollbackTxJournal(this.sql, session.sessionID)
+            this.deletePendingTrackedChanges(session.sessionID)
+          })
+        )
         this.invalidateSchemaCaches()
       } finally {
         this.releaseApplicationSqlTurn(session)
@@ -2793,7 +2945,13 @@ export class ZeroDO extends DurableObject {
     if (Number(state?.foreign_keys ?? 0) === 1) return
     void this.ctx
       .blockConcurrencyWhile(async () => {
-        this.sql.exec('PRAGMA foreign_keys = ON').toArray()
+        // only this synchronous internal pragma may finish after recovery refusal.
+        this.restoringForeignKeys = true
+        try {
+          this.sql.exec('PRAGMA foreign_keys = ON').toArray()
+        } finally {
+          this.restoringForeignKeys = false
+        }
       })
       .catch((error: unknown) => {
         console.error(

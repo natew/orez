@@ -203,6 +203,53 @@ row journal, a clean global setup completed at 125,402 rows under the existing
 150k circuit. Keep that circuit as a regression guard; increasing it would hide
 quadratic snapshot amplification rather than fix it.
 
+Table DDL requires an original-shape snapshot before any row-undo images exist
+for that table. Resolve a `main`-qualified table name to its physical name for
+both that snapshot and capture-trigger suspension. A quoted dot inside a table
+name is part of the name. Refuse another schema rather than journal a different
+table. Failed DDL must restore rows, schema and capture triggers, and permit the
+next valid write.
+
+First-copy table images preserve SQLite identity explicitly. A version-2 image
+copies an accessible hidden rowid as an integer column; true INTEGER PRIMARY
+KEY and WITHOUT ROWID tables retain identity in their named columns. The
+existing manifest row stores the image version, physical table, identity column
+and per-table AUTOINCREMENT sequence, including absent sequence state. Restore
+validates that contract and uses one projection for schema and ordinary table
+snapshots. Exact integer values stay in SQLite. Allocator restoration touches
+only the snapshotted table's sequence after inserting its rows, never unrelated
+application or journal sequences. This does not cover row-undo-only allocation.
+
+Populated old images without saved hidden identity and all old AUTOINCREMENT
+images lack enough information for exact recovery. Refuse them without
+consuming the journal or admitting subsequent application writes. Empty
+non-allocator images, ordinary integer keys and WITHOUT ROWID images have
+separate recovery controls. Corrupt version, name, identity or allocator
+metadata also refuses atomically, including failure after earlier restoration
+work. A rollout requires an approved legacy-journal policy and recovery
+evidence; an older reader cannot safely restore new-format images.
+
+The identity projection and metadata add bytes to existing rows. First copy
+has no extra billed row writes on measured current manifests; old manifests
+gain one nullable column at their next copy. Identity validation scans the
+saved rows during recovery. A saved allocator adds bounded per-table state and
+restoration writes, with no descendant copies. Keep exact row, schema, ledger,
+sequence and next-generated-ID checks across actual worker restarts.
+
+Capture-cache reload only reads and validates persisted registrations. Schema
+initialization belongs to construction and the existing registration mutators.
+Even an otherwise no-op schema write during failure cleanup can prevent the
+foreign-key setting from changing before journal restoration drops a parent.
+Prove startup recovery separately from request rollback with persisted data.
+
+Migration reconciliation compares an index with its latest applied, applicable
+definition. An older definition replaced by a later migration, or an explicitly
+superseded statement, no longer owns a live schema effect. A pending or skipped
+replacement cannot excuse a missing current index. Use the already-read schema
+and ledger sets for this decision; add no per-statement database queries.
+Stable replay must preserve the ledger and incur zero billable row writes after
+initial registration. Schema checks do not prove historical data backfills.
+
 ## Cookie domain and cutovers
 
 The cookie a client stores is the engine's change-log watermark, and a Zero

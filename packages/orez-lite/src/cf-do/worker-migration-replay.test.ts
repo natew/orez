@@ -429,6 +429,10 @@ describe('stale namespace migration replay cost', () => {
     )
     const statements = [
       {
+        id: '0000_initial/migration.sql:0',
+        sql: 'CREATE UNIQUE INDEX IF NOT EXISTS widget_active_slug_idx ON widget (slug)',
+      },
+      {
         id: '0001_repair/migration.sql:0',
         sql: 'DROP INDEX IF EXISTS widget_active_slug_idx',
       },
@@ -508,7 +512,14 @@ describe('stale namespace migration replay cost', () => {
     ).toContain("WHERE status <> 'canceled'")
     expect(
       core.sql.exec('SELECT id FROM __contrast_cf_migrations ORDER BY id').toArray()
-    ).toHaveLength(2)
+    ).toHaveLength(3)
+    expect(
+      core.sql
+        .exec(
+          "SELECT applied_at FROM __contrast_cf_migrations WHERE id = '0000_initial/migration.sql:0:seeded'"
+        )
+        .one()
+    ).toEqual({ applied_at: 1 })
     expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(11)
 
     core.start()
@@ -518,7 +529,210 @@ describe('stale namespace migration replay cost', () => {
     })
     core.stop()
     expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(0)
+    for (const state of ['missing', 'wrong columns']) {
+      core.sql.exec('DROP INDEX widget_active_slug_idx')
+      if (state === 'wrong columns') {
+        core.sql.exec('CREATE UNIQUE INDEX widget_active_slug_idx ON widget (status)')
+      }
+      core.start()
+      await migrationModule.orezAppSchema.migrate({
+        client: migrationClient(core),
+        instance: 'ns:index-repair',
+      })
+      core.stop()
+      expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBeGreaterThan(
+        0
+      )
+      expect(
+        core.sql
+          .exec("SELECT sql FROM sqlite_master WHERE name = 'widget_active_slug_idx'")
+          .one()!.sql
+      ).toContain("ON widget (slug) WHERE status <> 'canceled'")
+      expect(
+        core.sql
+          .exec(
+            "SELECT applied_at FROM __contrast_cf_migrations WHERE id = '0000_initial/migration.sql:0:seeded'"
+          )
+          .one()
+      ).toEqual({ applied_at: 1 })
+      const ledger = core.sql
+        .exec('SELECT * FROM __contrast_cf_migrations ORDER BY id')
+        .toArray()
+      core.start()
+      await migrationModule.orezAppSchema.migrate({
+        client: migrationClient(core),
+        instance: 'ns:index-repair',
+      })
+      core.stop()
+      expect(
+        core.sql.exec('SELECT * FROM __contrast_cf_migrations ORDER BY id').toArray()
+      ).toEqual(ledger)
+      expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(0)
+    }
   })
+
+  it.each([
+    'pending replacement',
+    'skipped replacement',
+    'applied removal',
+    'cold removal',
+  ])('reconciles only applicable ledgered index effects: %s', async (state) => {
+    const core = await createWorkerCore()
+    core.sql.exec('CREATE TABLE widget (slug TEXT PRIMARY KEY, status TEXT NOT NULL)')
+    core.sql.exec("INSERT INTO widget VALUES ('kept', 'active')")
+    core.sql.exec(TX_MANIFEST_DDL)
+    core.sql.exec(
+      'CREATE TABLE __contrast_cf_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)'
+    )
+    const original = {
+      id: '0000_initial/migration.sql:0',
+      sql: 'CREATE INDEX IF NOT EXISTS widget_slug_idx ON widget (slug)',
+    }
+    const replacement =
+      state === 'pending replacement'
+        ? [
+            {
+              id: '0001_replace/migration.sql:0',
+              sql: 'SELECT slug FROM widget INDEXED BY widget_slug_idx',
+            },
+            { id: '0001_replace/migration.sql:1', sql: 'DROP INDEX widget_slug_idx' },
+            {
+              id: '0001_replace/migration.sql:2',
+              sql: 'CREATE INDEX widget_slug_idx ON widget (status)',
+            },
+          ]
+        : state === 'skipped replacement'
+          ? [
+              {
+                id: '0001_replace/migration.sql:0',
+                sql: 'CREATE INDEX widget_slug_idx ON widget (absent)',
+                skipIfColumnMissing: { table: 'widget', column: 'absent' },
+              },
+            ]
+          : [{ id: '0001_replace/migration.sql:0', sql: 'DROP INDEX widget_slug_idx' }]
+    const statements = [original, ...replacement]
+    for (const statement of state === 'pending replacement' ? [original] : statements) {
+      core.sql.exec(
+        'INSERT INTO __contrast_cf_migrations VALUES (?, 1)',
+        statement.id + ':seeded'
+      )
+    }
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: state,
+        schemaImportSpecifier: 'data:text/javascript,export const schema={tables:{}}',
+        nativeSqlStatements: statements,
+      })
+    )
+    const migrate = () =>
+      migrationModule.orezAppSchema.migrate({
+        client: migrationClient(core),
+        instance: 'ns:index-' + state,
+      })
+    // an already-migrated namespace has published its schema table. retain
+    // the cold variant to measure that initialization separately from replay.
+    if (state === 'applied removal') {
+      core.sql.exec(
+        'CREATE TABLE _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)'
+      )
+      expect(core.sql.exec('SELECT * FROM _zero_schema_tables').toArray()).toEqual([])
+    }
+    core.start()
+    await migrate()
+    core.stop()
+    const written = core.written.reduce((rows, write) => rows + write.rows, 0)
+    if (state === 'applied removal') expect(written, JSON.stringify(core.written)).toBe(0)
+    else if (state === 'cold removal') {
+      expect(written, JSON.stringify(core.written)).toBe(5)
+      expect(
+        core.written
+          .filter((write) => write.sql.includes('_orez_tx_schema'))
+          .reduce((rows, write) => rows + write.rows, 0)
+      ).toBe(4)
+      expect(
+        core.written
+          .filter((write) => write.sql.includes('_zero_change_state'))
+          .reduce((rows, write) => rows + write.rows, 0)
+      ).toBe(1)
+      expect(core.sql.exec('SELECT * FROM _zero_schema_tables').toArray()).toEqual([])
+    } else expect(written).toBeGreaterThan(0)
+    const index = core.sql
+      .exec("SELECT sql FROM sqlite_master WHERE name = 'widget_slug_idx'")
+      .toArray()
+    if (state === 'applied removal' || state === 'cold removal') expect(index).toEqual([])
+    else
+      expect(index).toEqual([
+        {
+          sql:
+            state === 'pending replacement'
+              ? 'CREATE INDEX widget_slug_idx ON widget (status)'
+              : 'CREATE INDEX widget_slug_idx ON widget (slug)',
+        },
+      ])
+    expect(core.sql.exec('SELECT * FROM widget').toArray()).toEqual([
+      { slug: 'kept', status: 'active' },
+    ])
+    const ledger = core.sql
+      .exec('SELECT * FROM __contrast_cf_migrations ORDER BY id')
+      .toArray()
+    core.start()
+    await migrate()
+    core.stop()
+    expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(0)
+    expect(
+      core.sql.exec('SELECT * FROM __contrast_cf_migrations ORDER BY id').toArray()
+    ).toEqual(ledger)
+  })
+
+  it.each([undefined, null, 17, '', ' \n '])(
+    'does not retire executable SQL for a non-executable replacement: %j',
+    async (replacementSql) => {
+      const core = await createWorkerCore()
+      core.sql.exec('CREATE TABLE widget (id TEXT PRIMARY KEY, value TEXT)')
+      core.sql.exec("INSERT INTO widget VALUES ('kept', 'before')")
+      const migrationModule = await importJavascriptModule(
+        buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+          mode: 'native',
+          schemaVersion: 'invalid-replacement',
+          schemaImportSpecifier: 'data:text/javascript,export const schema={tables:{}}',
+          nativeSqlStatements: [
+            {
+              id: '0000_original/migration.sql:0',
+              sql: "UPDATE widget SET value = 'after' WHERE id = 'kept'",
+            },
+            {
+              id: '0001_replacement/migration.sql:0',
+              sql: replacementSql,
+              supersedes: ['0000_original/migration.sql:0'],
+            },
+          ],
+        })
+      )
+      const migrate = () =>
+        migrationModule.orezAppSchema.migrate({
+          client: migrationClient(core),
+          instance: 'ns:invalid-replacement',
+        })
+      await migrate()
+      expect(core.sql.exec('SELECT * FROM widget').toArray()).toEqual([
+        { id: 'kept', value: 'after' },
+      ])
+      const ledger = core.sql
+        .exec('SELECT * FROM __contrast_cf_migrations ORDER BY id')
+        .toArray()
+      expect(
+        ledger.map((row) => String(row.id).split(':').slice(0, 2).join(':'))
+      ).toEqual(['0000_original/migration.sql:0'])
+      core.start()
+      await migrate()
+      core.stop()
+      expect(core.written).toEqual([])
+      expect(
+        core.sql.exec('SELECT * FROM __contrast_cf_migrations ORDER BY id').toArray()
+      ).toEqual(ledger)
+    }
+  )
 
   it('measures where the billable rows of one replay go', async () => {
     const core = await createWorkerCore()
@@ -570,51 +784,87 @@ describe('stale namespace migration replay cost', () => {
   // per sqlite_master object) can be killed by the deploy that ships the JSON
   // encoding, and the new code recovers it on the next boot. losing that read
   // path wedges the namespace exactly the way the journal exists to prevent.
-  it('recovers a legacy per-object schema snapshot written before the deploy', async () => {
-    const core = await createWorkerCore()
-    core.sql.exec('CREATE TABLE widget (id TEXT PRIMARY KEY, label TEXT)')
-    core.sql.exec("INSERT INTO widget VALUES ('w1', 'before')")
-    core.sql.exec(TX_MANIFEST_DDL)
-    core.sql.exec(TX_SCHEMA_DDL)
+  it.each(['hidden-rowid', 'integer-key', 'without-rowid', 'allocator-empty'])(
+    'recovers only provable legacy per-object identity: %s',
+    async (shape) => {
+      const core = await createWorkerCore()
+      core.sql.exec(
+        `CREATE TABLE widget (id ${shape === 'integer-key' || shape === 'allocator-empty' ? 'INTEGER' : 'TEXT'} PRIMARY KEY${shape === 'allocator-empty' ? ' AUTOINCREMENT' : ''}, label TEXT)${shape === 'without-rowid' ? ' WITHOUT ROWID' : ''}`
+      )
+      if (shape !== 'allocator-empty')
+        core.sql.exec("INSERT INTO widget VALUES (7, 'before')")
+      else {
+        core.sql.exec("INSERT INTO widget VALUES (99, 'deleted high water')")
+        core.sql.exec('DELETE FROM widget')
+      }
+      core.sql.exec(TX_MANIFEST_DDL)
+      core.sql.exec(TX_SCHEMA_DDL)
 
-    // the legacy snapshot rows exactly as the previous version wrote them
-    const originalWidgetSql = String(
-      core.sql
-        .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'widget'")
-        .one()!.sql
-    )
-    core.sql.exec(
-      `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES ('legacy-tx', 'application', 'marker', '', '', NULL)`
-    )
-    core.sql.exec(
-      `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES ('legacy-tx', 'application', 'table', 'widget', 'widget', ?)`,
-      originalWidgetSql
-    )
+      // the legacy snapshot rows exactly as the previous version wrote them
+      const originalWidgetSql = String(
+        core.sql
+          .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'widget'")
+          .one()!.sql
+      )
+      core.sql.exec(
+        `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES ('legacy-tx', 'application', 'marker', '', '', NULL)`
+      )
+      core.sql.exec(
+        `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES ('legacy-tx', 'application', 'table', 'widget', 'widget', ?)`,
+        originalWidgetSql
+      )
 
-    // a schema-owned table restores wholesale from its pre-transaction snapshot
-    core.sql.exec('CREATE TABLE "_orez_tx_legacy" AS SELECT * FROM widget')
-    core.sql.exec(
-      `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES ('legacy-tx', 'application', 'widget', '_orez_tx_legacy')`
-    )
-    // the mid-transaction DDL the kill left behind
-    core.sql.exec('ALTER TABLE widget ADD COLUMN extra TEXT')
-    core.sql.exec("UPDATE widget SET label = 'after'")
-    core.sql.exec('CREATE TABLE scratch (id TEXT PRIMARY KEY)')
+      // a schema-owned table restores wholesale from its pre-transaction snapshot
+      core.sql.exec('CREATE TABLE "_orez_tx_legacy" AS SELECT * FROM widget')
+      core.sql.exec(
+        `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES ('legacy-tx', 'application', 'widget', '_orez_tx_legacy')`
+      )
+      // the mid-transaction DDL the kill left behind
+      core.sql.exec('ALTER TABLE widget ADD COLUMN extra TEXT')
+      core.sql.exec("UPDATE widget SET label = 'after'")
+      core.sql.exec('CREATE TABLE scratch (id TEXT PRIMARY KEY)')
 
-    rollbackTxJournal(core.sql, 'legacy-tx')
+      const dump = () => ({
+        rows: core.sql.exec('SELECT * FROM widget').toArray(),
+        objects: core.sql
+          .exec('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name')
+          .toArray(),
+        schema: core.sql.exec(`SELECT * FROM "${TX_SCHEMA_TABLE}"`).toArray(),
+        manifest: core.sql.exec(`SELECT * FROM "${TX_MANIFEST_TABLE}"`).toArray(),
+        image: core.sql.exec('SELECT * FROM _orez_tx_legacy').toArray(),
+        sequence: core.sql.exec('SELECT * FROM sqlite_sequence ORDER BY name').toArray(),
+      })
+      if (shape === 'hidden-rowid' || shape === 'allocator-empty') {
+        const before = dump()
+        expect(() =>
+          core.zero.ctx.storage.transactionSync(() =>
+            rollbackTxJournal(core.sql, 'legacy-tx')
+          )
+        ).toThrow(
+          shape === 'hidden-rowid' ? 'lacks hidden row identity' : 'lacks allocator state'
+        )
+        expect(dump()).toEqual(before)
+        return
+      }
+      core.zero.ctx.storage.transactionSync(() =>
+        rollbackTxJournal(core.sql, 'legacy-tx')
+      )
 
-    const restoredSql = String(
-      core.sql
-        .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'widget'")
-        .one()!.sql
-    )
-    expect(restoredSql).toBe(originalWidgetSql)
-    expect(
-      core.sql.exec("SELECT 1 AS ok FROM sqlite_master WHERE name = 'scratch'").toArray()
-    ).toHaveLength(0)
-    expect(core.sql.exec('SELECT label FROM widget').one()!.label).toBe('before')
-    expect(
-      core.sql.exec(`SELECT 1 AS ok FROM "${TX_SCHEMA_TABLE}"`).toArray()
-    ).toHaveLength(0)
-  })
+      const restoredSql = String(
+        core.sql
+          .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'widget'")
+          .one()!.sql
+      )
+      expect(restoredSql).toBe(originalWidgetSql)
+      expect(
+        core.sql
+          .exec("SELECT 1 AS ok FROM sqlite_master WHERE name = 'scratch'")
+          .toArray()
+      ).toHaveLength(0)
+      expect(core.sql.exec('SELECT label FROM widget').one()!.label).toBe('before')
+      expect(
+        core.sql.exec(`SELECT 1 AS ok FROM "${TX_SCHEMA_TABLE}"`).toArray()
+      ).toHaveLength(0)
+    }
+  )
 })

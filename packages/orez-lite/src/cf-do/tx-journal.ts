@@ -29,7 +29,12 @@
  * embed-local backend's transactionSync().
  */
 
-import { restoreTriggers, suspendTriggers, writableColumns } from './cdc.js'
+import {
+  journalValueSqlBinding,
+  restoreTriggers,
+  suspendTriggers,
+  tableIdentity,
+} from './cdc.js'
 
 import type { DurableSqlStorage } from './watermark.js'
 
@@ -42,7 +47,7 @@ export const TX_MANIFEST_DDL =
   'tx_id TEXT NOT NULL, ' +
   "owner TEXT NOT NULL DEFAULT 'default', " +
   'original TEXT NOT NULL, ' +
-  'snapshot TEXT)'
+  'snapshot TEXT, snapshot_state TEXT)'
 
 export const TX_SCHEMA_DDL =
   `CREATE TABLE IF NOT EXISTS "${TX_SCHEMA_TABLE}" (` +
@@ -105,6 +110,7 @@ const INTERNAL_TABLES = new Set([
 function isInternalObject(name: string): boolean {
   return (
     INTERNAL_TABLES.has(name) ||
+    name.startsWith('_cf_') ||
     name.startsWith('_orez_tx_') ||
     name.startsWith('_orez_bk_') ||
     name.startsWith('sqlite_')
@@ -120,6 +126,7 @@ interface ManifestRow {
   txId: string
   original: string
   snapshot: string | null
+  state: unknown
 }
 
 function manifestTableExists(sql: DurableSqlStorage): boolean {
@@ -250,11 +257,8 @@ function readSchemaSnapshot(sql: DurableSqlStorage, txID: string): ParsedSchemaS
 }
 
 function manifestRows(sql: DurableSqlStorage, txID: string): ManifestRow[] {
-  return sql
-    .exec(
-      `SELECT seq, tx_id, original, snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY seq`,
-      txID
-    )
+  const rows = sql
+    .exec(`SELECT * FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY seq`, txID)
     .toArray()
     .map((row) => ({
       seq: Number(row.seq),
@@ -262,11 +266,163 @@ function manifestRows(sql: DurableSqlStorage, txID: string): ManifestRow[] {
       original: String(row.original),
       snapshot:
         row.snapshot === null || row.snapshot === undefined ? null : String(row.snapshot),
+      state: row.snapshot_state,
     }))
+  const tables = new Set<string>()
+  for (const row of rows) {
+    if (tables.has(row.original))
+      throw new Error(
+        `transaction snapshot has duplicate manifest table: ${row.original}`
+      )
+    tables.add(row.original)
+  }
+  return rows
 }
 
 function dropTable(sql: DurableSqlStorage, table: string): void {
   sql.exec(`DROP TABLE IF EXISTS ${quoteIdent(table)}`)
+}
+
+interface TableSnapshotRestore {
+  row: ManifestRow
+  columnList: string
+  sequence: false | null | ReturnType<typeof journalValueSqlBinding>
+}
+
+// both consumers validate the original table shape and stored identity before
+// restoring rows. legacy hidden identities and allocators cannot be inferred.
+function prepareTableSnapshotRestore(
+  sql: DurableSqlStorage,
+  row: ManifestRow
+): TableSnapshotRestore {
+  const identity = tableIdentity(sql, row.original)
+  if (
+    !identity ||
+    (!identity.withoutRowid && !identity.rowidColumn && !identity.rowidAlias)
+  ) {
+    throw new Error(`transaction snapshot has inaccessible row identity: ${row.original}`)
+  }
+  const hidden =
+    !identity.withoutRowid && !identity.rowidColumn ? identity.rowidAlias : null
+  const versioned =
+    row.snapshot === `_orez_tx_undo_v2_${row.seq}` &&
+    Number.isSafeInteger(row.seq) &&
+    row.seq > 0
+  if (!versioned && row.snapshot?.startsWith('_orez_tx_undo_v')) {
+    throw new Error(
+      `transaction snapshot version/name does not match manifest: ${row.original}`
+    )
+  }
+  let sequence: TableSnapshotRestore['sequence'] = false
+  if (versioned) {
+    if (typeof row.state !== 'string') {
+      throw new Error(
+        `transaction snapshot metadata does not match manifest: ${row.original}`
+      )
+    }
+    const saved: unknown = JSON.parse(row.state)
+    if (
+      !saved ||
+      typeof saved !== 'object' ||
+      Array.isArray(saved) ||
+      !('version' in saved) ||
+      saved.version !== 2 ||
+      !('table' in saved) ||
+      saved.table !== row.original ||
+      !('rowid' in saved) ||
+      saved.rowid !== hidden ||
+      !('sequence' in saved) ||
+      Object.keys(saved).length !== 4
+    ) {
+      throw new Error(
+        `transaction snapshot identity metadata is corrupt: ${row.original}`
+      )
+    }
+    if (identity.autoIncrement) {
+      if (saved.sequence === null) sequence = null
+      else if (typeof saved.sequence === 'string' && saved.sequence.startsWith('i')) {
+        sequence = journalValueSqlBinding(saved.sequence)
+      } else
+        throw new Error(
+          `transaction snapshot allocator metadata is corrupt: ${row.original}`
+        )
+    } else if (saved.sequence !== false) {
+      throw new Error(
+        `transaction snapshot allocator does not match table: ${row.original}`
+      )
+    }
+  } else {
+    if (row.state !== null && row.state !== undefined)
+      throw new Error(
+        `legacy transaction snapshot has versioned metadata: ${row.original}`
+      )
+    if (identity.autoIncrement) {
+      throw new Error(
+        `legacy transaction snapshot lacks allocator state: ${row.original}`
+      )
+    }
+    if (
+      hidden &&
+      sql.exec(`SELECT 1 FROM ${quoteIdent(row.snapshot!)} LIMIT 1`).toArray().length
+    ) {
+      throw new Error(
+        `legacy transaction snapshot lacks hidden row identity: ${row.original}`
+      )
+    }
+  }
+  const copiedColumns = sql
+    .exec(`PRAGMA table_xinfo(${quoteIdent(row.snapshot!)})`)
+    .toArray()
+    .map((column) => column.name)
+  const expectedColumns =
+    versioned && hidden ? [hidden, ...identity.columns] : identity.columns
+  if (
+    copiedColumns.length !== expectedColumns.length ||
+    copiedColumns.some((column, index) => column !== expectedColumns[index])
+  ) {
+    throw new Error(
+      `transaction snapshot columns do not match original table: ${row.original}`
+    )
+  }
+  const integerColumn = versioned
+    ? (hidden ?? identity.rowidColumn)
+    : identity.rowidColumn
+  if (
+    integerColumn &&
+    sql
+      .exec(
+        `SELECT 1 FROM ${quoteIdent(row.snapshot!)} WHERE typeof(${quoteIdent(integerColumn)}) != 'integer' LIMIT 1`
+      )
+      .toArray().length
+  ) {
+    throw new Error(
+      `transaction snapshot row identity is not an integer: ${row.original}`
+    )
+  }
+  const columns =
+    versioned && hidden ? [hidden, ...identity.writableColumns] : identity.writableColumns
+  return { row, columnList: columns.map(quoteIdent).join(', '), sequence }
+}
+
+function restoreTableSnapshot(
+  sql: DurableSqlStorage,
+  restore: TableSnapshotRestore
+): void {
+  const { row, columnList, sequence } = restore
+  sql.exec(
+    `INSERT INTO ${quoteIdent(row.original)} (${columnList}) SELECT ${columnList} FROM ${quoteIdent(row.snapshot!)}`
+  )
+  if (sequence !== false) {
+    // only this table's allocator belongs to its image. journal allocators and
+    // unrelated application sequences remain owned by their own transactions.
+    sql.exec('DELETE FROM sqlite_sequence WHERE name = ?', row.original)
+    if (sequence !== null)
+      sql.exec(
+        `INSERT INTO sqlite_sequence (name, seq) VALUES (?, ${sequence.expr})`,
+        row.original,
+        ...sequence.params
+      )
+  }
 }
 
 /** Parent snapshots must restore before children so FK cascades cannot erase a restored child. */
@@ -500,7 +656,7 @@ function restoreSchemaSnapshot(
     }))
     .filter((row) => row.name && !isInternalObject(row.name))
 
-  const original = snapshot.objects
+  const original = snapshot.objects.filter((row) => !isInternalObject(row.name))
   const key = (row: { type: string; name: string }) => `${row.type}\0${row.name}`
   const originalByKey = new Map(original.map((row) => [key(row), row]))
   const currentByKey = new Map(current.map((row) => [key(row), row]))
@@ -516,9 +672,7 @@ function restoreSchemaSnapshot(
   )
   const tablesToDrop = new Set([...changedOriginalTables, ...createdTables])
   const snapshotByTable = new Map(
-    manifest
-      .filter((row) => row.snapshot)
-      .map((row) => [row.original, row.snapshot!] as const)
+    manifest.filter((row) => row.snapshot).map((row) => [row.original, row] as const)
   )
   for (const table of changedOriginalTables) {
     if (!snapshotByTable.has(table)) {
@@ -561,19 +715,10 @@ function restoreSchemaSnapshot(
   const tables = originalTables.filter((row) => changedOriginalTables.has(row.name))
   for (const row of tables) sql.exec(row.sql!)
 
-  for (const row of tables) {
-    const snapshot = snapshotByTable.get(row.name)!
-    const hasRows =
-      sql.exec(`SELECT 1 AS ok FROM ${quoteIdent(snapshot)} LIMIT 1`).toArray().length > 0
-    if (!hasRows) continue
-    const columns = writableColumns(sql, row.name)
-    if (columns.length > 0) {
-      const columnList = columns.map(quoteIdent).join(', ')
-      sql.exec(
-        `INSERT INTO ${quoteIdent(row.name)} (${columnList}) SELECT ${columnList} FROM ${quoteIdent(snapshot)}`
-      )
-    }
-  }
+  const restores = tables.map((table) =>
+    prepareTableSnapshotRestore(sql, snapshotByTable.get(table.name)!)
+  )
+  for (const restore of restores) restoreTableSnapshot(sql, restore)
 
   // Restore secondary objects only after all table rows are back. This keeps
   // business triggers from firing while the snapshot data is inserted.
@@ -620,7 +765,7 @@ function restoreSchemaSnapshot(
   if (manifestTableExists(sql)) {
     for (const table of changedOriginalTables) {
       const snapshot = snapshotByTable.get(table)
-      if (snapshot) dropTable(sql, snapshot)
+      if (snapshot) dropTable(sql, snapshot.snapshot!)
       sql.exec(
         `DELETE FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? AND original = ?`,
         txID,
@@ -682,6 +827,9 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
     (row) => row.snapshot !== null && row.snapshot !== ''
   )
   const restorableRows = allSnapshotRows.filter((row) => tableExists(sql, row.original))
+  const restores = new Map(
+    restorableRows.map((row) => [row.original, prepareTableSnapshotRestore(sql, row)])
+  )
   const restoredTables = restorableRows.map((row) => row.original)
   const triggers = suspendTriggers(sql, restoredTables)
   // Defer constraint checks across the whole atomic restore. Delete every
@@ -694,15 +842,7 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
     sql.exec(`DELETE FROM ${quoteIdent(row.original)}`)
   }
   for (const row of snapshotRows) {
-    const quotedTable = quoteIdent(row.original)
-    const quotedSnapshot = quoteIdent(row.snapshot!)
-    // `SELECT *` also selects generated columns, which SQLite refuses to let
-    // any INSERT name, so restore the writable columns explicitly.
-    const columns = writableColumns(sql, row.original)
-    const columnList = columns.map(quoteIdent).join(', ')
-    sql.exec(
-      `INSERT OR REPLACE INTO ${quotedTable} (${columnList}) SELECT ${columnList} FROM ${quotedSnapshot}`
-    )
+    restoreTableSnapshot(sql, restores.get(row.original)!)
   }
   // Drop every snapshot table, including those whose original was gone: the
   // snapshot is dead weight once the tx is being rolled back either way.
@@ -749,6 +889,8 @@ export function upgradeToTableSnapshot(
       table
     )
     .toArray()
+  if (existing.length > 1)
+    throw new Error(`cannot snapshot duplicate manifest table: ${table}`)
   // A snapshot is only a pre-transaction image if this transaction has not
   // already written the table. Row-undo images prove it has: the copy would
   // contain those writes, and `rollbackTxJournal` restores it AFTER row undo
@@ -765,6 +907,33 @@ export function upgradeToTableSnapshot(
     (row) => row.snapshot === null || String(row.snapshot ?? '') !== ''
   )
   if (snapshotted) return
+
+  const identity = tableIdentity(sql, table)
+  if (
+    !identity ||
+    (!identity.withoutRowid && !identity.rowidColumn && !identity.rowidAlias)
+  ) {
+    throw new Error(`cannot snapshot inaccessible row identity: ${table}`)
+  }
+  const hidden =
+    !identity.withoutRowid && !identity.rowidColumn ? identity.rowidAlias : null
+  let sequence: false | null | string = false
+  if (identity.autoIncrement) {
+    const rows = sql
+      .exec(
+        'SELECT typeof(seq) AS kind, CAST(seq AS TEXT) AS value FROM sqlite_sequence WHERE name = ?',
+        table
+      )
+      .toArray()
+    if (
+      rows.length > 1 ||
+      (rows.length === 1 &&
+        (rows[0].kind !== 'integer' || typeof rows[0].value !== 'string'))
+    ) {
+      throw new Error(`cannot snapshot corrupt allocator state: ${table}`)
+    }
+    sequence = rows.length === 0 ? null : 'i' + rows[0].value
+  }
 
   // Name the snapshot after the manifest row's seq, which is an AUTOINCREMENT
   // primary key and therefore unique. Deriving the name from the table instead
@@ -785,10 +954,28 @@ export function upgradeToTableSnapshot(
             )
             .toArray()[0]?.seq
         )
-  const snapshot = `_orez_tx_undo_${seq}`
-  sql.exec(`DROP TABLE IF EXISTS ${quoteIdent(snapshot)}`)
-  sql.exec(`CREATE TABLE ${quoteIdent(snapshot)} AS SELECT * FROM ${quoteIdent(table)}`)
-  sql.exec(`UPDATE "${TX_MANIFEST_TABLE}" SET snapshot = ? WHERE seq = ?`, snapshot, seq)
+  if (!Number.isSafeInteger(seq) || seq < 1)
+    throw new Error('transaction snapshot manifest sequence is invalid')
+  const snapshot = `_orez_tx_undo_v2_${seq}`
+  // populated manifests from older workers gain only an optional metadata
+  // column. old image names keep their explicit legacy restoration rules.
+  if (
+    !sql
+      .exec(`PRAGMA table_info("${TX_MANIFEST_TABLE}")`)
+      .toArray()
+      .some((row) => row.name === 'snapshot_state')
+  ) {
+    sql.exec(`ALTER TABLE "${TX_MANIFEST_TABLE}" ADD COLUMN snapshot_state TEXT`)
+  }
+  sql.exec(
+    `CREATE TABLE ${quoteIdent(snapshot)} AS SELECT ${hidden ? quoteIdent(hidden) + ' AS ' + quoteIdent(hidden) + ', ' : ''}* FROM ${quoteIdent(table)}`
+  )
+  sql.exec(
+    `UPDATE "${TX_MANIFEST_TABLE}" SET snapshot = ?, snapshot_state = ? WHERE seq = ?`,
+    snapshot,
+    JSON.stringify({ version: 2, table, rowid: hidden, sequence }),
+    seq
+  )
 }
 
 const TRIGGER_WRITE =

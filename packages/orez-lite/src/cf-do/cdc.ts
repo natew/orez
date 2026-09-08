@@ -63,10 +63,12 @@ export interface SuspendedCdcTable {
 
 /** Stable-identity and writability metadata read from the live SQLite schema. */
 export interface TableIdentity {
-  /** rowid alias usable in SQL, or null for a WITHOUT ROWID table. */
+  /** rowid alias usable in SQL, or null when absent or shadowed. */
   rowidAlias: string | null
   /** The INTEGER PRIMARY KEY column, which *is* the rowid, when one exists. */
   rowidColumn: string | null
+  withoutRowid: boolean
+  autoIncrement: boolean
   /** Declared primary-key columns in key order. */
   keyColumns: string[]
   /** Columns undo may write. Excludes generated columns. */
@@ -306,6 +308,19 @@ export function tableIdentity(
     .filter(Boolean)
 
   const rowidAlias = detectRowidAlias(sql, table, columns)
+  let withoutRowid = false
+  if (!rowidAlias) {
+    const tables = sql.exec(`PRAGMA table_list(${quoteIdent(table)})`).toArray()
+    const metadata = tables.filter((row) => row.schema === 'main' && row.name === table)
+    if (
+      metadata.length !== 1 ||
+      metadata[0].type !== 'table' ||
+      (metadata[0].wr !== 0 && metadata[0].wr !== 1)
+    )
+      return null
+    withoutRowid = metadata[0].wr === 1
+  }
+  if (info.some((row) => Number(row.hidden ?? 0) === 1)) return null
   // A primary key that IS the rowid needs no restoring of its own: writing the
   // column back puts the row at its original rowid.
   //
@@ -315,12 +330,30 @@ export function tableIdentity(
   // index for every primary key EXCEPT a rowid alias, so the absence of an
   // origin='pk' index is the exact test.
   const rowidColumn =
-    rowidAlias && keyColumns.length === 1 && !hasPrimaryKeyIndex(sql, table)
+    !withoutRowid && keyColumns.length === 1 && !hasPrimaryKeyIndex(sql, table)
       ? keyColumns[0]
       : null
 
   if (!rowidAlias && keyColumns.length === 0) return null
-  return { rowidAlias, rowidColumn, keyColumns, writableColumns, columns }
+  let autoIncrement = false
+  if (rowidColumn) {
+    const definition = sql
+      .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table)
+      .toArray()
+    if (definition.length !== 1 || typeof definition[0].sql !== 'string') return null
+    autoIncrement = /\bAUTOINCREMENT\b/i.test(
+      definition[0].sql.replace(SQL_QUOTED_OR_COMMENT_RE, ' ')
+    )
+  }
+  return {
+    rowidAlias,
+    rowidColumn,
+    withoutRowid,
+    autoIncrement,
+    keyColumns,
+    writableColumns,
+    columns,
+  }
 }
 
 function hasPrimaryKeyIndex(sql: DurableSqlStorage, table: string): boolean {
@@ -473,12 +506,15 @@ function unquoteSqlIdentifier(identifier: string): string {
 }
 
 const SCHEMA_CHANGE_GATE_RE = /\b(?:ALTER|CREATE|DROP)\b/i
-const SQL_IDENTIFIER = '("(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[[^\\]]+\\]|[^\\s;(]+)'
+const SQL_QUOTED_OR_COMMENT_RE =
+  /"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|'(?:[^']|'')*'|--[^\r\n]*|\/\*[\s\S]*?\*\/|;/g
+const SQL_IDENTIFIER = '(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[[^\\]]+\\]|[^\\s;(.]+)'
+const SQL_TABLE_NAME = `(${SQL_IDENTIFIER})(?:\\s*\\.\\s*(${SQL_IDENTIFIER}))?`
 const SCHEMA_CHANGE_PATTERNS = [
-  new RegExp(`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${SQL_IDENTIFIER}`, 'gi'),
+  new RegExp(`^\\s*ALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${SQL_TABLE_NAME}`, 'i'),
   new RegExp(
-    `\\b(?:CREATE|DROP)\\s+TABLE\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?${SQL_IDENTIFIER}`,
-    'gi'
+    `^\\s*(?:CREATE|DROP)\\s+TABLE\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?${SQL_TABLE_NAME}`,
+    'i'
   ),
 ] as const
 
@@ -490,10 +526,34 @@ const SCHEMA_CHANGE_PATTERNS = [
  */
 export function schemaChangeTargets(sql: string): string[] {
   if (!SCHEMA_CHANGE_GATE_RE.test(sql)) return []
+  // split only outside quoted values/identifiers and strip comments. a value
+  // containing DDL is application data, never a schema target or schema error.
+  const statements: string[] = []
+  let statement = ''
+  let offset = 0
+  for (const match of sql.matchAll(SQL_QUOTED_OR_COMMENT_RE)) {
+    statement += sql.slice(offset, match.index)
+    const token = match[0]
+    if (token === ';') {
+      statements.push(statement)
+      statement = ''
+    } else {
+      statement += token.startsWith('--') || token.startsWith('/*') ? ' ' : token
+    }
+    offset = match.index + token.length
+  }
+  statements.push(statement + sql.slice(offset))
   const targets = new Set<string>()
-  for (const pattern of SCHEMA_CHANGE_PATTERNS) {
-    for (const match of sql.matchAll(pattern)) {
-      const name = match[1]
+  for (const statement of statements) {
+    for (const pattern of SCHEMA_CHANGE_PATTERNS) {
+      const match = pattern.exec(statement)
+      if (!match) continue
+      // DO SQLite has one application schema. never snapshot a main-schema
+      // table on behalf of a statement addressing another database.
+      if (match[2] && unquoteSqlIdentifier(match[1]).toLowerCase() !== 'main') {
+        throw new Error('unsupported SQLite schema in table mutation: ' + match[1])
+      }
+      const name = match[2] ?? match[1]
       if (name) targets.add(unquoteSqlIdentifier(name))
     }
   }
@@ -527,6 +587,7 @@ export class TransactionalCdc {
   #verified = new Set<string>()
 
   constructor(private readonly sql: DurableSqlStorage) {
+    if (this.tableExists(CDC_TABLES)) this.ensureTables()
     this.#registrations = this.loadRegistrations()
     this.#active = this.#registrations.size > 0
   }
@@ -559,14 +620,9 @@ export class TransactionalCdc {
   }
 
   private loadRegistrations(): Map<string, Registration> {
-    const table = this.sql
-      .exec(
-        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-        CDC_TABLES
-      )
-      .toArray()
-    if (table.length === 0) return new Map()
-    this.ensureTables()
+    // reload runs before journal rollback; even no-op schema writes can prevent
+    // workerd from disabling foreign keys around parent-table restoration.
+    if (!this.tableExists(CDC_TABLES)) return new Map()
     const rows = this.sql
       .exec(
         `SELECT physical_table, table_name, columns_json, publish, schema_version FROM ${quoteIdent(CDC_TABLES)}`

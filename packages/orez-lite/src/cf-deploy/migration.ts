@@ -83,6 +83,11 @@ function quoteIdentifier(value) {
   return '"' + String(value).replaceAll('"', '""') + '"'
 }
 
+const supersededStatementIds = new Set(nativeSqlStatements.flatMap((item) =>
+  item && typeof item === 'object' && typeof item.sql === 'string' && item.sql.trim() && Array.isArray(item.supersedes)
+    ? item.supersedes : [],
+))
+
 function schemaMetadataStatements() {
   return Object.values(schema.tables || {})
     .filter((table) => table && typeof table.name === 'string')
@@ -604,9 +609,8 @@ const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigratio
 // what this does NOT detect, stated plainly rather than as a reassurance:
 //   - DML. a backfill re-runs only when its target table is gone entirely (the
 //     same pass recreates it first). undone on a surviving table it is
-//     invisible in schema and stays skipped, unlogged. the current set holds 50
-//     UPDATE, 10 INSERT INTO and 6 DELETE FROM statements. this cannot wedge a
-//     namespace, it leaves stale data behind a correct-looking schema.
+//     invisible in schema and stays skipped, unlogged. audit the assembled
+//     application's DML separately; schema reconciliation cannot prove its data.
 //   - an EXTRA column. assertExpectedSchema catches a missing table, a missing
 //     column, a type change and a NOT NULL change, but not a surplus one, so a
 //     ledgered ALTER TABLE ... DROP COLUMN whose effect rolled back is neither
@@ -616,12 +620,8 @@ const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigratio
 //     from a deliberately retained surplus index. required CREATE INDEX DDL is
 //     checked and repaired; removal of an index that is no longer expected is
 //     not.
-//   - a column a later statement in the SAME file renames away. the
-//     x__rebuild scratch columns in 20260723140000_declare_epoch_ms_integer
-//     are added, copied, then renamed over the original, so the ADD COLUMN rule
-//     always reads them as missing and re-adds them on a perfectly healthy
-//     namespace. surplus columns, so assertExpectedSchema stays quiet. this
-//     predates the block work and is not fixed here.
+//   - an unguarded scratch column later renamed away. use a live-type or
+//     column condition so the final shape explicitly skips its retired effect.
 //   - a rebuild block that changes only nullability, defaults or foreign keys
 //     or declared types without changing the column SET. its rollback leaves a
 //     table this pass reads as landed. migrateIfColumnType controls whether the
@@ -629,8 +629,32 @@ const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigratio
 //     it does not silently pass: assertExpectedSchema fails the run on the
 //     shape difference, so the namespace reports loudly instead of
 //     self-repairing.
+function skippedByLiveSchema(item, tables, liveColumns) {
+  if (item.skipIfTableMissing && !tables.has(item.skipIfTableMissing)) return true
+  if (item.migrateIfColumnType) {
+    const condition = item.migrateIfColumnType
+    const column = (liveColumns.get(condition.table) || []).find(
+      (candidate) => candidate.name === condition.column,
+    )
+    if (!column || !columnTypeMatches(column.type, condition)) return true
+  }
+  const condition = item.skipIfColumnExists || item.skipIfColumnMissing
+  return condition ? shouldSkipForColumnCondition(item,
+    (liveColumns.get(condition.table) || []).some((column) => column.name === condition.column),
+  ) : false
+}
+
 async function reconcilePhantomLedger(tx, applied) {
   if (applied.size === 0) return
+  // retired statements retain their identities, but no longer own an effect
+  // that reconciliation may resurrect, including their rebuild metadata.
+  const activeStatements = nativeSqlStatements.flatMap((statement, index) => {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement } : statement
+    if (!item || typeof item.sql !== 'string') return []
+    const id = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    return supersededStatementIds.has(id) ? [] : [{ ...item, id }]
+  })
   const schemaRows = await tx.query(
     "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT GLOB '_orez_bk_*'",
   )
@@ -641,6 +665,15 @@ async function reconcilePhantomLedger(tx, applied) {
     else indexes.set(row.name, row.sql)
   }
   const liveColumns = await readLiveColumns(tx)
+  // only the last applied, applicable index operation owns its current DDL.
+  // an unapplied successor is not evidence that an older effect was replaced.
+  // use the existing schema snapshot; this adds no per-statement database reads.
+  const latestIndexStatements = new Map()
+  for (const item of activeStatements) {
+    if (!appliedHasStatement(applied, item.id) || skippedByLiveSchema(item, tables, liveColumns)) continue
+    const match = /^(?:CREATE (?:UNIQUE )?INDEX|DROP INDEX)\\s+(?:IF (?:NOT )?EXISTS\\s+)?["\\x60]?(\\w+)/i.exec(item.sql.trim())
+    if (match) latestIndexStatements.set(match[1], item.id)
+  }
   // a drizzle rebuild block (CREATE __new_<t> / INSERT..SELECT / DROP <t> /
   // RENAME) is ONE unit. its statements are individually meaningless, so they
   // resurrect together or not at all — including the DROP, which is the only
@@ -650,7 +683,7 @@ async function reconcilePhantomLedger(tx, applied) {
   // namespace as healthy and silently repairs nothing.
   const blockKey = (item) => item.id.split(':')[0] + '::' + item.rebuildTarget
   const blockLanded = new Map()
-  for (const statement of nativeSqlStatements) {
+  for (const statement of activeStatements) {
     if (!statement || typeof statement !== 'object') continue
     if (!statement.rebuildTarget || !statement.rebuildColumns) continue
     const key = blockKey(statement)
@@ -669,7 +702,7 @@ async function reconcilePhantomLedger(tx, applied) {
   }
   // the tables a resurrecting block will DROP and recreate this pass.
   const rebuiltTables = new Set()
-  for (const statement of nativeSqlStatements) {
+  for (const statement of activeStatements) {
     if (!statement || typeof statement !== 'object' || !statement.rebuildTarget) continue
     if (blockLanded.get(blockKey(statement)) === false) {
       rebuiltTables.add(statement.rebuildTarget)
@@ -677,7 +710,7 @@ async function reconcilePhantomLedger(tx, applied) {
   }
   const resurrect = new Set()
   const replayWholeFiles = new Set()
-  for (const [index, statement] of nativeSqlStatements.entries()) {
+  for (const [index, statement] of activeStatements.entries()) {
     const item = typeof statement === 'string'
       ? { id: 'statement-' + index, sql: statement }
       : statement
@@ -704,20 +737,7 @@ async function reconcilePhantomLedger(tx, applied) {
     // deletes and immediately rewrites the same ledger row on every run (for
     // example, an index guarded by a column that the live schema does not
     // have). Apply the exact execution predicate before effect inference.
-    if (item.skipIfTableMissing && !tables.has(item.skipIfTableMissing)) continue
-    if (item.migrateIfColumnType) {
-      const condition = item.migrateIfColumnType
-      const column = (liveColumns.get(condition.table) || []).find(
-        (candidate) => candidate.name === condition.column,
-      )
-      if (!column || !columnTypeMatches(column.type, condition)) continue
-    }
-    const condition = item.skipIfColumnExists || item.skipIfColumnMissing
-    if (condition) {
-      const columns = liveColumns.get(condition.table) || []
-      const hasColumn = columns.some((column) => column.name === condition.column)
-      if (shouldSkipForColumnCondition(item, hasColumn)) continue
-    }
+    if (skippedByLiveSchema(item, tables, liveColumns)) continue
     let match
     let missing = false
     if ((match = /^CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(sql))) {
@@ -729,6 +749,7 @@ async function reconcilePhantomLedger(tx, applied) {
       // trailing CREATE INDEXes stay ledgered, leaving the rebuilt table
       // bare. that silently removed the UNIQUE index invite redemption's
       // ON CONFLICT target needs.
+      if (latestIndexStatements.get(match[1]) !== baseId) continue
       const actualDdl = indexes.get(match[1])
       const ddlMismatch =
         actualDdl !== undefined &&
@@ -759,7 +780,7 @@ async function reconcilePhantomLedger(tx, applied) {
   // one of those effects is verifiably absent, the file transaction rolled
   // back, so clear every applied sibling and replay it in order.
   if (replayWholeFiles.size > 0) {
-    for (const [index, statement] of nativeSqlStatements.entries()) {
+    for (const [index, statement] of activeStatements.entries()) {
       const item = typeof statement === 'string'
         ? { id: 'statement-' + index, sql: statement }
         : statement
@@ -779,7 +800,7 @@ async function reconcilePhantomLedger(tx, applied) {
   const resurrectedFiles = new Set(
     [...resurrect].map((baseId) => baseId.split(':')[0]),
   )
-  for (const [index, statement] of nativeSqlStatements.entries()) {
+  for (const [index, statement] of activeStatements.entries()) {
     const item = typeof statement === 'string'
       ? { id: 'statement-' + index, sql: statement }
       : statement
@@ -837,17 +858,6 @@ async function applyNativeSchema(tx, instance, {
   // this is a no-op beyond creating the cdc bookkeeping tables early.
   if (prepare) await tx.registerTables(publicTables())
   const appliedStatementIds = new Set(applied)
-  const supersededStatementIds = new Set()
-  for (const [index, statement] of nativeSqlStatements.entries()) {
-    const item = typeof statement === 'string'
-      ? { id: 'statement-' + index, sql: statement }
-      : statement
-    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
-    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
-    for (const id of Array.isArray(item.supersedes) ? item.supersedes : []) {
-      supersededStatementIds.add(id)
-    }
-  }
   const pendingMigrationFiles = []
   for (const [index, statement] of nativeSqlStatements.entries()) {
     const item = typeof statement === 'string'

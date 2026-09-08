@@ -36,6 +36,51 @@ function createSqliteStorage() {
 }
 
 describe('TransactionalCdc', () => {
+  it.each(['absent', 'current', 'legacy'])(
+    'reloads %s metadata without attempting a storage mutation',
+    (state) => {
+      const { nativeDb, sql } = createSqliteStorage()
+      sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+      if (state === 'current') {
+        new TransactionalCdc(sql).syncTables([
+          { physicalTableName: 'item', tableName: 'public.item' },
+        ])
+      } else if (state === 'legacy') {
+        sql.exec(
+          'CREATE TABLE _orez_cdc_tables (physical_table TEXT PRIMARY KEY, table_name TEXT NOT NULL, columns_json TEXT NOT NULL)'
+        )
+        sql.exec(
+          `INSERT INTO _orez_cdc_tables VALUES ('item', 'public.item', '["id","body"]')`
+        )
+      }
+      const cdc = new TransactionalCdc(sql)
+      const before = nativeDb.prepare('SELECT total_changes() AS n').get().n
+      const objects = sql.exec('SELECT * FROM sqlite_master ORDER BY name').toArray()
+      const exec = sql.exec.bind(sql)
+      sql.exec = (statement, ...params) => {
+        if (!nativeDb.prepare(statement).reader) {
+          throw new Error('reload attempted a mutation: ' + statement)
+        }
+        return exec(statement, ...params)
+      }
+      try {
+        cdc.reload()
+        expect(cdc.active).toBe(state !== 'absent')
+        expect(sql.exec('SELECT * FROM sqlite_master ORDER BY name').toArray()).toEqual(
+          objects
+        )
+        expect(nativeDb.prepare('SELECT total_changes() AS n').get().n).toBe(before)
+      } finally {
+        sql.exec = exec
+      }
+      cdc.ensureTable({ physicalTableName: 'item', tableName: 'public.item' })
+      sql.exec("INSERT INTO item VALUES (7, 'captured after reload')")
+      expect(cdc.drain()).toMatchObject([
+        { op: 'INSERT', rowData: { id: 7, body: 'captured after reload' } },
+      ])
+    }
+  )
+
   it('captures full CRUD images, including both identities of a primary-key update', () => {
     const { sql } = createSqliteStorage()
     sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT, payload BLOB)')
@@ -403,30 +448,80 @@ describe('TransactionalCdc', () => {
     ])
   })
 
-  it('suspends row-shape triggers while a captured column is dropped', () => {
-    const { sql } = createSqliteStorage()
-    sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, removed TEXT, kept TEXT)')
-    const cdc = new TransactionalCdc(sql)
-    const registration = {
-      physicalTableName: 'item',
-      tableName: 'public.item',
+  it.each([
+    ['"item"', 'item'],
+    ['main."item"', 'item'],
+    ['"main"."item"', 'item'],
+    ['[main] . [item]', 'item'],
+    ['`main`.`item`', 'item'],
+    ['/* qualifier */ main."item"', 'item'],
+    ['"main.item"', 'main.item'],
+    ['"main"."odd""item"', 'odd"item'],
+  ])(
+    'suspends row-shape triggers while a captured column is dropped from %s',
+    (target, physicalTable) => {
+      const { sql } = createSqliteStorage()
+      const quotedTable = '"' + physicalTable.replaceAll('"', '""') + '"'
+      sql.exec(
+        `CREATE TABLE ${quotedTable} (id INTEGER PRIMARY KEY, removed TEXT, kept TEXT)`
+      )
+      const cdc = new TransactionalCdc(sql)
+      const registration = {
+        physicalTableName: physicalTable,
+        tableName: 'public.item',
+      }
+      cdc.syncTables([registration])
+
+      const ddl = `ALTER TABLE ${target} DROP COLUMN "removed"`
+      expect(cdc.capturesSchemaChange(ddl)).toBe(true)
+      const suspended = cdc.beginSchemaChange(ddl)
+      expect(suspended.map((entry) => entry.physicalTableName)).toEqual([physicalTable])
+      expect(
+        sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+            physicalTable
+          )
+          .toArray()
+      ).toEqual([])
+      sql.exec(ddl)
+      cdc.finishSchemaChange(suspended)
+      expect(
+        sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+            physicalTable
+          )
+          .toArray()
+      ).toHaveLength(3)
+      sql.exec(`INSERT INTO ${quotedTable} VALUES (1, 'still here')`)
+
+      expect(cdc.drain()).toMatchObject([
+        {
+          physicalTableName: physicalTable,
+          tableName: 'public.item',
+          op: 'INSERT',
+          rowData: { id: 1, kept: 'still here' },
+          oldData: null,
+        },
+      ])
     }
-    cdc.syncTables([registration])
+  )
 
-    const ddl = 'ALTER TABLE "item" DROP COLUMN "removed"'
-    expect(cdc.capturesSchemaChange(ddl)).toBe(true)
-    const suspended = cdc.beginSchemaChange(ddl)
-    sql.exec(ddl)
-    cdc.finishSchemaChange(suspended)
-    sql.exec("INSERT INTO item VALUES (1, 'still here')")
-
+  it('keeps capture active when row values or comments contain qualified DDL text', () => {
+    const { sql } = createSqliteStorage()
+    sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+    const cdc = new TransactionalCdc(sql)
+    cdc.syncTables([{ physicalTableName: 'item', tableName: 'public.item' }])
+    const statement =
+      "/* ALTER TABLE other.item DROP COLUMN body */ INSERT INTO item VALUES (1, '; ALTER TABLE other.item DROP COLUMN body')"
+    expect(cdc.capturesSchemaChange(statement)).toBe(false)
+    expect(cdc.beginSchemaChange(statement)).toEqual([])
+    sql.exec(statement)
     expect(cdc.drain()).toMatchObject([
       {
-        physicalTableName: 'item',
-        tableName: 'public.item',
         op: 'INSERT',
-        rowData: { id: 1, kept: 'still here' },
-        oldData: null,
+        rowData: { id: 1, body: '; ALTER TABLE other.item DROP COLUMN body' },
       },
     ])
   })

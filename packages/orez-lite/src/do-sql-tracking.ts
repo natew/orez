@@ -167,12 +167,23 @@ export class RollingRowWriteBudget {
 
   recordBillable(rowsWritten: unknown): RowWriteBudgetStatus {
     this.assertOpen()
+    return this.#chargeBillable(rowsWritten, false)
+  }
+
+  // trusted maintenance retains the sticky trip while charging actual work.
+  recordMaintenanceBillable(rowsWritten: unknown): RowWriteBudgetStatus {
+    if (this.#trip === null)
+      throw new Error('maintenance requires a closed write circuit')
+    return this.#chargeBillable(rowsWritten, true)
+  }
+
+  #chargeBillable(rowsWritten: unknown, maintenance: boolean): RowWriteBudgetStatus {
     const rows = Number(rowsWritten)
     if (!Number.isSafeInteger(rows) || rows <= 0) return this.status()
     const sample = this.#sample()
     sample.billableRows += rows
     this.#billableRows += rows
-    if (this.#billableRows > this.#budgetRows) {
+    if (!maintenance && this.#billableRows > this.#budgetRows) {
       this.#trip = {
         at: this.#now(),
         windowRows: this.#billableRows,
