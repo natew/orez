@@ -12,21 +12,24 @@ reverts patches in place.
 
 ## Current TypeScript host matrix
 
-Run `host-matrix-final` on 2026-08-19 started from a green
+Run `local-host-verify` on 2026-09-09 started from a green
 `packages/orez-lite/src/cf-do` baseline. All three host patches compiled and
 were caught by `orez-lite-host`.
 
-| mutant                                     | host lane | failure that catches it                                                        |
-| ------------------------------------------ | --------- | ------------------------------------------------------------------------------ |
-| H1 backup scan bypasses its read session   | CAUGHT    | production worker wiring no longer opens one read-only application SQL session |
-| H2 writer admitted while readers are open  | CAUGHT    | the queued writer resolves before the active reader set drains                 |
-| H3 commit skips pending-change publication | CAUGHT    | committed CDC rows never reach `_zero_changes`                                 |
+| mutant                                     | host lane | failure that catches it                                                                   |
+| ------------------------------------------ | --------- | ----------------------------------------------------------------------------------------- |
+| H1 backup scan bypasses its snapshot lease | CAUGHT    | pages read the live tables, so the dump drops rows and WITHOUT ROWID tables have no rowid |
+| H2 writer admitted while readers are open  | CAUGHT    | the queued writer resolves before the active reader set drains                            |
+| H3 commit skips pending-change publication | CAUGHT    | committed CDC rows never reach `_zero_changes`                                            |
 
-H1 first ran against the complete host suite before its production wiring test
-existed. The lane stayed green, so the matrix reported **NOTHING** and the gate
-failed. The added `createOrezDataWorker` backup test closed that gap. The same
-patch now turns the lane red, while the lower-level account and ledger race
-proves why one session matters.
+H1 follows the code that owns the property. The host once handed the backup
+manager a `readSession` callback and the mutant removed it, so the patch lived in
+`lite-data-worker.ts`. The export now takes a snapshot lease over committed
+`_orez_bk_*` copies, so the mutant reads scan pages straight from the live tables
+instead of the lease, and the patch lives in `namespace-backup.ts`. Ten tests go
+red across both host test files, including the dump-content assertions in
+`preserves rowid names and cursor-shaped source columns`, which is the catch that
+shows a bypassed lease as corrupted output rather than as changed wiring.
 
 The pull-request `test` job runs these three host patches and uploads the
 matrix artifact. Nightly CI runs the complete Rust and host corpus.
@@ -51,6 +54,13 @@ against `rust-local`.
 
 Full-matrix run `2026-07-17T08-01-29-065Z`: every cell evaluated, all retained
 lanes green at baseline, every retained mutant caught by at least one lane.
+
+L1 was re-verified on 2026-09-09 (run `local-l1-verify`) after its patch was
+regenerated for the current `store::prune`, which now reports whether the floor
+advanced. `cargo test -p sync-core` was green at baseline and red under the
+mutant, on the client-group collection tests and, once those stop aborting the
+run, on `cookie_below_floor_snapshots_recent_cookies_still_diff` and
+`pull_prunes_upstream_churn_before_unchanged`.
 
 | mutant                           | cargo  | smoke  | state-machine | metamorphic | eviction | sweep  | atomic-vis | exactly-once | permissions |
 | -------------------------------- | ------ | ------ | ------------- | ----------- | -------- | ------ | ---------- | ------------ | ----------- |
@@ -124,4 +134,6 @@ actual violation output.
 - A new lane earns a column by going red on at least one mutant here.
 - A new engine invariant earns a mutant that violates it.
 - Re-run after material engine changes; stale patches (`git apply` failure)
-  are regenerated at the same site, never skipped.
+  are regenerated, never skipped. Regenerate at the same site when the site
+  still exists, and follow the property to its new home when a refactor moved
+  it, keeping the mutant's defect and its expected lanes intact.

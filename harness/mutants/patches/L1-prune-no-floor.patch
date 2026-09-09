@@ -1,14 +1,14 @@
 diff --git a/crates/sync-core/src/store.rs b/crates/sync-core/src/store.rs
 --- a/crates/sync-core/src/store.rs
 +++ b/crates/sync-core/src/store.rs
-@@ -61,10 +61,6 @@ pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), Engi
-     let cutoff = watermark(db)? - retain_changes;
-     if cutoff > floor(db)? {
-         ledger::prune(db, cutoff)?;
--        db.exec(
--            "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
--            &[counter(cutoff)],
--        )?;
+@@ -68,10 +68,6 @@ pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<bool, En
+         return Ok(false);
      }
-     Ok(())
+     ledger::prune(db, cutoff)?;
+-    db.exec(
+-        "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
+-        &[counter(cutoff)],
+-    )?;
+     Ok(true)
  }
+ 

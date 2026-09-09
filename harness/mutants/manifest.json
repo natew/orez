@@ -76,8 +76,8 @@
       "id": "H1-backup-scan-without-read-session",
       "target": "typescript-host",
       "property": "backup-consistency",
-      "file": "packages/orez-lite/src/cf-do/lite-data-worker.ts",
-      "description": "namespace backup pages bypass the shared read session, so a writer can commit between pages and produce a torn dump",
+      "file": "packages/orez-lite/src/cf-do/namespace-backup.ts",
+      "description": "namespace backup pages bypass the snapshot lease, so a writer can commit between pages and produce a torn dump",
       "expectedLanes": ["orez-lite-host"]
     },
     {
