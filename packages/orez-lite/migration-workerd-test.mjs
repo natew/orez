@@ -123,7 +123,27 @@ export default {
       try { old.lease[Symbol.dispose]() } catch {}
       newer.lease[Symbol.dispose]()
 
-      return Response.json({ copyMs, beforeMarker, afterMarker, before, after, copied, triggers, dropped })
+      // a restore import is namespace maintenance like the export copy: its
+      // rows never meter, and a tripped circuit stops application writes but
+      // not the restore that recovers the object.
+      const freshBudget = () => fresh.fetch(new Request('https://fixture.invalid/_orez/write-budget')).then(r => r.json())
+      const admin = { 'x-orez-admin-token': env.OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN }
+      const importBefore = await freshBudget()
+      await fresh.orezImportBatch([
+        { sql: 'CREATE TABLE imported (id INTEGER PRIMARY KEY, body TEXT)' },
+        { sql: "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2048) INSERT INTO imported SELECT i, 'restored' FROM n" },
+      ])
+      const importAfter = await freshBudget()
+      const trip = await fresh.fetch(new Request('https://fixture.invalid/_orez/write-budget/trip', { method: 'POST', headers: admin }))
+      if (!trip.ok) throw new Error('force trip failed: ' + trip.status)
+      await fresh.orezImportBatch([{ sql: "INSERT INTO imported (id, body) VALUES (0, 'restored while tripped')" }])
+      let trippedApplicationWrite = null
+      try { await freshClient.exec("INSERT INTO imported (id, body) VALUES (-1, 'application')") } catch (error) { trippedApplicationWrite = String(error) }
+      const reopen = await fresh.fetch(new Request('https://fixture.invalid/_orez/write-budget/reopen', { method: 'POST', headers: admin }))
+      if (!reopen.ok) throw new Error('reopen failed: ' + reopen.status)
+      const imported = await freshClient.query('SELECT count(*) AS rows FROM imported')
+
+      return Response.json({ copyMs, beforeMarker, afterMarker, before, after, copied, triggers, dropped, importBefore, importAfter, trippedApplicationWrite, imported })
     }
     if (action === 'seed') {
       // a namespace with ledger history but no reconciled schema. application
@@ -300,6 +320,10 @@ try {
   assert.deepEqual(proof.dropped, [])
   assert.deepEqual(proof.beforeMarker, proof.afterMarker)
   assert.equal(proof.before.windowRows, proof.after.windowRows)
+  assert.equal(proof.importBefore.windowRows, proof.importAfter.windowRows)
+  assert.equal(proof.importAfter.tripped, false)
+  assert.match(proof.trippedApplicationWrite, /write budget/i)
+  assert.deepEqual(proof.imported, [{ rows: 2049 }])
   assert.ok(proof.copyMs < 5000, `32 MiB copy took ${proof.copyMs}ms`)
   console.log(
     JSON.stringify({

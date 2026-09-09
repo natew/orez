@@ -31,6 +31,7 @@ import {
   isNamespaceBackupTableExcluded,
   type NamespaceBackupSnapshot,
   type NamespaceBackupSnapshotOptions,
+  type NamespaceBackupStatement,
 } from './namespace-backup.js'
 import {
   appendPendingChange,
@@ -1012,6 +1013,40 @@ export class ZeroDO extends DurableObject {
     } finally {
       this.backupMaintenance = false
     }
+  }
+
+  /**
+   * apply one batch of a namespace restore.
+   *
+   * the dump's tables and rows arrive through the application write path so
+   * the ledger and cdc see them, but they are namespace maintenance, the same
+   * as the copy an export makes: a rolling budget sized for application
+   * traffic trips on any real dump, and a tripped circuit must not stop the
+   * restore that recovers the object. the schema run a restore finishes with
+   * is application work and stays metered, which is what lets a deploy
+   * rehearsal read the migration's own write cost off `/_orez/write-budget`.
+   */
+  protected async importBackupBatch(
+    statements: readonly NamespaceBackupStatement[]
+  ): Promise<void> {
+    if (statements.length === 0) return
+    await this.runApplicationTransaction(
+      () => {
+        throw new Error('backup imports do not compile query ASTs')
+      },
+      async (tx) => {
+        // set inside the storage transaction, whose input gate keeps other
+        // requests from writing while it is up
+        this.backupMaintenance = true
+        try {
+          for (const statement of statements) {
+            await tx.exec(statement.sql, statement.params ?? [])
+          }
+        } finally {
+          this.backupMaintenance = false
+        }
+      }
+    )
   }
 
   async backupSnapshot(

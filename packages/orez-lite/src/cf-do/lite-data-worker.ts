@@ -764,17 +764,7 @@ export function createOrezDataWorker<
     async orezImportBatch(
       statements: readonly NamespaceBackupStatement[]
     ): Promise<void> {
-      if (statements.length === 0) return
-      await this.runApplicationTransaction(
-        () => {
-          throw new Error('backup imports do not compile query ASTs')
-        },
-        async (tx) => {
-          for (const statement of statements) {
-            await tx.exec(statement.sql, statement.params ?? [])
-          }
-        }
-      )
+      await this.importBackupBatch(statements)
     }
 
     // application sql used to reach a namespace whose schema had never been

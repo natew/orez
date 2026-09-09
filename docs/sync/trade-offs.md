@@ -150,6 +150,9 @@ so a failure in one does not disable the others.
    so an eviction cannot quietly reopen it, and a `POST /_orez/write-budget/reopen`
    with the admin token clears it. The 150k default sits below Contrast's external
    200k-per-five-minute alert.
+   Backup exports and restore imports are namespace maintenance and are not
+   metered, and a tripped circuit does not stop a restore; the schema run that
+   finishes a restore is application work and is metered like any other.
 2. **Sync-host ingest breaker** (`packages/sync-cf-host/src/host.ts`). One
    breaker catches two signatures: more than `ingestBudgetRows` billable rows in
    the window, and a non-advancing upstream cursor while pages keep arriving
