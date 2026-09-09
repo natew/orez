@@ -19,6 +19,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: mutant patch applicability
+        run: |
+          for patch in harness/mutants/patches/*.patch; do
+            target=$(sed -n 's|^+++ b/||p' "$patch")
+            if ! git apply --check "$patch"; then
+              echo "stale mutant patch: $patch targets $target" >&2
+              exit 1
+            fi
+          done
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
