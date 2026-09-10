@@ -1447,6 +1447,56 @@ describe('Orez HTTP transport', () => {
     ).toHaveLength(1)
   })
 
+  test('a socket built on time still opens when a blocked event loop delays open()', async () => {
+    vi.useFakeTimers()
+    const lifecycle: HttpPullLifecycleEvent[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      lifecycle: (event) => lifecycle.push(event),
+    })
+    transports.push(transport)
+
+    // the socket is constructed well inside Zero's connect deadline, then the
+    // runtime stalls past it before the setTimeout(0) that opens the socket
+    // gets to run — a mobile launch materializing its first queries blocks the
+    // only thread for seconds. reading the clock inside open() cannot tell that
+    // apart from a slow connection, and aborting there left Zero holding a
+    // socket it never abandoned and never replaced.
+    const baseNow = performance.now.bind(performance)
+    let stallMs = 0
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => baseNow() + stallMs)
+    let opened = false
+    let closed = 0
+    try {
+      const socket = openRawSocketWithMessages({
+        wsid: 'stalled-open',
+        attemptStartedAt: performance.now() - 200,
+      })
+      socket.socket.addEventListener('open', () => {
+        opened = true
+      })
+      socket.socket.addEventListener('close', () => {
+        closed++
+      })
+      stallMs = 11_000
+      await vi.advanceTimersByTimeAsync(1)
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(opened).toBe(true)
+    expect(closed).toBe(0)
+    expect(lifecycle.some((event) => event.type === 'aborted')).toBe(false)
+    expect(lifecycle.filter((event) => event.type === 'open')).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(lifecycle.some((event) => event.type === 'pull')).toBe(true)
+  })
+
   test('a replacement socket supersedes stale open and connected events for the same client', async () => {
     vi.useFakeTimers()
     const lifecycle: HttpPullLifecycleEvent[] = []

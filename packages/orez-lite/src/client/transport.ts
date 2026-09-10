@@ -587,6 +587,7 @@ class ZeroHttpSocket {
   private readonly connectionAttemptID: string
   private readonly socketID: string
   private readonly attemptStartedAt: number | undefined
+  private readonly attemptAgeAtConstructionMs: number | undefined
   private settled = false
 
   constructor(
@@ -630,10 +631,24 @@ class ZeroHttpSocket {
     this.queueDesiredQueries(decoded.initConnectionMessage?.[1])
     this.queueDeletedClients(decoded.initConnectionMessage?.[1]?.deleted)
 
+    // an attempt Zero already timed out is measured HERE, at construction, not
+    // in open(). construction is the only async step orez controls, so it is
+    // the only one whose overrun means Zero abandoned the attempt. open() runs
+    // from a setTimeout(0), and on a single-threaded runtime a long stall (a
+    // mobile launch materializing its first queries takes seconds) makes that
+    // callback arbitrarily late through no fault of the connection. re-reading
+    // the clock there aborted sockets that were built on time, and because
+    // Zero's own connect deadline is a timer on the same blocked loop and is
+    // scheduled LATER, this abort always won the race and closed an attempt
+    // Zero had not abandoned — leaving that Zero instance with no socket and
+    // nothing to reconnect.
+    this.attemptAgeAtConstructionMs = this.getAttemptAgeMs()
+
     this.state.sockets.add(this)
-    // open on the next task so Zero can attach its listeners. open() checks the
-    // attempt timestamp first, so async socket construction that outlived Zero's
-    // deadline closes without delivering an event to abandoned state.
+    // open on the next task so Zero can attach its listeners. open() honors the
+    // construction-time verdict above, so async socket construction that
+    // outlived Zero's deadline closes without delivering an event to abandoned
+    // state.
     this.openTimer = setTimeout(() => this.open(), 0)
   }
 
@@ -776,7 +791,7 @@ class ZeroHttpSocket {
 
   private open() {
     if (this.readyState !== this.CONNECTING) return
-    const attemptAgeMs = this.getAttemptAgeMs()
+    const attemptAgeMs = this.attemptAgeAtConstructionMs
     if (attemptAgeMs !== undefined && attemptAgeMs >= ZERO_CONNECT_TIMEOUT_MS) {
       const reason = `Orez HTTP connection attempt ${this.wsid} expired after ${Math.round(
         attemptAgeMs
