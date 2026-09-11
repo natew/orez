@@ -1469,7 +1469,9 @@ describe('Orez HTTP transport', () => {
     // socket it never abandoned and never replaced.
     const baseNow = performance.now.bind(performance)
     let stallMs = 0
-    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => baseNow() + stallMs)
+    const nowSpy = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => baseNow() + stallMs)
     let opened = false
     let closed = 0
     try {
