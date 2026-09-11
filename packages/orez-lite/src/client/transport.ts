@@ -469,7 +469,7 @@ export function ensureHttpPullTransport(
     origin: key,
     pullOrigin: trimTrailingSlash(new URL(opts.pullOrigin ?? opts.origin).toString()),
     pushOrigin: trimTrailingSlash(new URL(opts.pushOrigin ?? opts.origin).toString()),
-    fetch: opts.fetch ?? globalThis.fetch,
+    fetch: opts.fetch,
     pullIntervalMs: opts.pullIntervalMs,
     wake: typeof opts.wake === 'object' ? opts.wake.getToken : (opts.wake ?? false),
     queryTransform: opts.queryTransform,

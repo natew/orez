@@ -1708,6 +1708,25 @@ describe('Orez HTTP transport', () => {
     first.uninstall()
   })
 
+  test('default fetch survives a global wrapper and module reload without changing transport ownership', async () => {
+    const origin = 'http://127.0.0.1:65505'
+    const originalFetch = globalThis.fetch
+    const first = createZeroClientTransport().install(origin)
+    transports.push(first)
+    try {
+      globalThis.fetch = (input, init) => originalFetch(input, init)
+      expect(globalThis.fetch).not.toBe(originalFetch)
+      vi.resetModules()
+      const reloaded = await import('./transport.js')
+      expect(reloaded.createZeroClientTransport().install(origin)).toBe(first)
+      expect(() =>
+        reloaded.createZeroClientTransport({ fetch: globalThis.fetch }).install(origin)
+      ).toThrow('already installed with different fetch')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test('createZeroClientTransport installs the shared transport for a Zero server', () => {
     const origin = 'http://127.0.0.1:65503'
     const fetch = vi.fn()
