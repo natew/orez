@@ -16,6 +16,7 @@ import {
   generateTypesFile,
   parseColumnType,
   parseTypeString,
+  renderDrizzleZeroSqliteSchemaModule,
   shouldSkipObjectKey,
 } from './generate-helpers'
 import { discoverDataLayout, namespaceImportPath } from './generate-layout'
@@ -24,7 +25,7 @@ import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate
 import type { DataLayout } from './generate-layout'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
-const GENERATOR_CACHE_VERSION = '6'
+const GENERATOR_CACHE_VERSION = '7'
 
 const isGeneratorSourceFile = (name: string) =>
   name.endsWith('.ts') &&
@@ -1019,6 +1020,8 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   // saveCache), the outputs are already current — skip the typescript-program
   // build entirely and return the cached counts. the configureServer watcher
   // still re-runs generate on real model/query edits.
+  const databaseSchemaPath = resolve(dirname(baseDir), 'database/schema.ts')
+  const needsSqliteZeroSchema = existsSync(databaseSchemaPath)
   const inputHash = hash(
     `${hashInputTree(layout.sourceRoots, generatedDir)}\0${metadataHash}`
   )
@@ -1026,7 +1029,8 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     !force &&
     generateCache.__generatorVersion === GENERATOR_CACHE_VERSION &&
     generateCache.__inputHash === inputHash &&
-    existsSync(resolve(generatedDir, 'models.ts'))
+    existsSync(resolve(generatedDir, 'models.ts')) &&
+    (!needsSqliteZeroSchema || existsSync(resolve(generatedDir, 'schema.ts')))
   ) {
     let counts: Partial<GenerateResult> = {}
     try {
@@ -1080,6 +1084,24 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   ]
 
   let filesChanged = writeResults.filter(Boolean).length
+  if (needsSqliteZeroSchema) {
+    const membership = dataMembershipFromLayout(layout)
+    const drizzleSchema = await generateDrizzleSchemaInputFile({
+      dir: baseDir,
+      schemaImportPath: '../../database/schema',
+      config,
+    })
+    const sqliteSchema = renderDrizzleZeroSqliteSchemaModule({
+      importPath: './drizzleSchema',
+      tableNames: membership.allTables,
+    })
+    if (writeFileIfChanged(resolve(generatedDir, 'drizzleSchema.ts'), drizzleSchema)) {
+      filesChanged++
+    }
+    if (writeFileIfChanged(resolve(generatedDir, 'schema.ts'), sqliteSchema)) {
+      filesChanged++
+    }
+  }
   let queryCount = 0
   let mutationCount = 0
 

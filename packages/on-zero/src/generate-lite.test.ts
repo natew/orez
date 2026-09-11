@@ -510,4 +510,53 @@ describe('generateLite', () => {
     // an explicit `{ crud: true }` is the same as omitting the options object
     expect(run(true).files['syncedMutations.ts']).toBe(validators)
   })
+
+  test('writes drizzle-zero sqlite schema from database/schema.ts', () => {
+    const files = {
+      [`${DIR}/post.ts`]: `export const posts = () => zql.post`,
+      ['/proj/src/database/schema.ts']: `export const post = sqliteTable('post', { id: text('id') })`,
+      ['/proj/src/database/relations.ts']: `export const relations = defineRelations(schema, (r) => ({ post: { comments: r.many.comment({}) } }))`,
+    }
+    const empty = { mutations: [], queries: [] }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/post.ts`]: {
+          mutations: [],
+          queries: [
+            {
+              name: 'posts',
+              rootTable: 'post',
+              paramTypeText: null,
+              relatedPaths: [],
+            },
+          ],
+        },
+        ['/proj/src/database/schema.ts']: {
+          ...empty,
+          tables: [{ name: 'post', columns: ['id'] }],
+        },
+        ['/proj/src/database/relations.ts']: {
+          ...empty,
+          relations: [
+            {
+              sourceTable: 'post',
+              name: 'comments',
+              targetTable: 'comment',
+              sourceText: 'comments: r.many.comment({})',
+            },
+          ],
+        },
+      }),
+    })
+    expect(result.files['drizzleSchema.ts']).toContain(
+      'export { post } from "../../database/schema"'
+    )
+    expect(result.files['schema.ts']).toContain(
+      'import * as drizzleSchema from "./drizzleSchema"'
+    )
+    expect(result.files['schema.ts']).toContain('export type Post =')
+    expect(result.files['drizzleSchema.ts']).not.toContain('comments:')
+  })
 })

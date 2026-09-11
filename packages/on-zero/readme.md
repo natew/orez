@@ -453,45 +453,18 @@ the generator:
    imports, aliases, and cross-file references)
 7. generates `syncedMutations.ts` with valibot validators for mutation args
 
-when using drizzle-zero integration, `schema.ts` is generated from your drizzle
-schema using `generateDrizzleSchemaFile()` — it produces `table()` +
-`relationships()` + `createSchema()` calls with full type inference.
+when `database/schema.ts` sits next to the data directory, `on-zero generate`
+also writes `generated/drizzleSchema.ts` (membership-filtered drizzle tables
+and relations) and `generated/schema.ts` (the drizzle-zero-sqlite Zero schema).
+do not keep a project-local `generate-zero-schema.ts` wrapper.
 
 exports named `permission` are automatically skipped during query generation.
 
 ### drizzle-zero integration
 
-on-zero can derive your zero schema (tables + relationships) from a drizzle
-schema via [drizzle-zero](https://github.com/rocicorp/drizzle-zero). this
-eliminates duplicate column definitions — drizzle is the single source of truth.
-
-```ts
-// generate-schema.ts (run at build/dev time)
-import { drizzleZeroConfig } from 'drizzle-zero'
-import {
-  deriveDataMembership,
-  generateDrizzleSchemaFile,
-  generateDrizzleSchemaInputFile,
-} from 'on-zero/generate'
-import * as drizzleSchema from './data/generated/drizzleSchema'
-
-const { allTables } = await deriveDataMembership({ dir: 'src/data' })
-writeFileSync(
-  'src/data/generated/drizzleSchema.ts',
-  await generateDrizzleSchemaInputFile({
-    dir: 'src/data',
-    schemaImportPath: '../../database/schema',
-  })
-)
-const dzSchema = drizzleZeroConfig(drizzleSchema, {
-  tables: Object.fromEntries(allTables.map((table) => [table, true])),
-  suppressDefaultsWarning: true,
-})
-
-// generates a typed schema.ts with createSchema() + relationships()
-const output = generateDrizzleSchemaFile(dzSchema)
-writeFileSync('src/data/generated/schema.ts', output)
-```
+on-zero derives the Zero schema from your drizzle sqlite tables. drizzle remains
+the single source of truth. `on-zero generate` writes both generated files;
+`database/schema.ts` and `database/relations.ts` are the inputs.
 
 `allTables` includes synced tables plus fileless tables reached through static
 `tx.mutate.<table>` and `tx.query.<table>` accesses in mutation modules and their

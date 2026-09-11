@@ -87,6 +87,38 @@ describe('generate', () => {
     expect(existsSync(syncedQueriesPath)).toBe(true)
   })
 
+  test('writes drizzle-zero sqlite schema from database/schema.ts', async () => {
+    const dataDir = join(testDir, 'src/data')
+    writeFileSync(join(dataDir, 'post.ts'), `export const posts = () => zql.post`)
+    writeFileSync(
+      join(testDir, 'src/database/schema.ts'),
+      `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core'
+export const post = sqliteTable('post', { id: text('id').primaryKey() })
+`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/relations.ts'),
+      `
+export const relations = defineRelations(schema, (r) => ({
+  post: { comments: r.many.comment({}) },
+}))
+`
+    )
+
+    await generate({ dir: dataDir, silent: true })
+
+    expect(readFileSync(join(dataDir, 'generated/drizzleSchema.ts'), 'utf8')).toContain(
+      'export { post } from "../../database/schema"'
+    )
+    expect(readFileSync(join(dataDir, 'generated/schema.ts'), 'utf8')).toContain(
+      'import * as drizzleSchema from "./drizzleSchema"'
+    )
+    expect(readFileSync(join(dataDir, 'generated/schema.ts'), 'utf8')).toContain(
+      'export type Post ='
+    )
+  })
+
   test('generates every crud slot for a default table registration', async () => {
     writeFileSync(
       join(testDir, 'post/mutations.ts'),

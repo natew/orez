@@ -27,6 +27,8 @@ import {
   generateTypesFile,
   parseColumnType,
   parseTypeString,
+  renderDrizzleSchemaInputModule,
+  renderDrizzleZeroSqliteSchemaModule,
 } from './generate-helpers'
 
 import type { ModelMutations, SchemaColumn } from './generate-helpers'
@@ -91,6 +93,8 @@ export type LiteRelationInfo = {
   sourceTable: string
   name: string
   targetTable: string
+  // original property text from defineRelations, used to emit drizzleSchema.ts
+  sourceText?: string
 }
 
 export type LiteTableInfo = {
@@ -468,6 +472,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     aggregateTables.set(namespace.name, [...new Set(parsed.aggregateTables ?? [])])
   }
   const relations = new Map<string, Map<string, string>>()
+  const drizzleRelations: LiteRelationInfo[] = []
   const tableColumns = new Map<string, Set<string>>()
   for (const path of Object.keys(files).filter(
     (path) =>
@@ -479,6 +484,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
       const tableRelations = relations.get(relation.sourceTable) ?? new Map()
       tableRelations.set(relation.name, relation.targetTable)
       relations.set(relation.sourceTable, tableRelations)
+      drizzleRelations.push(relation)
     }
     for (const table of parsed.tables ?? []) {
       tableColumns.set(table.name, new Set(table.columns))
@@ -826,6 +832,44 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         importPath: `../${relativePath(baseDir, namespace.aggregatePath).replace(/\.ts$/, '')}`,
       }))
     )
+  }
+
+  const allTables = [
+    ...new Set(
+      instances.flatMap((instance) => [
+        ...(syncTables.get(instance.name) ?? []),
+        ...(supportTables.get(instance.name) ?? []),
+      ])
+    ),
+  ].sort()
+  const hasDatabaseSchema = Object.keys(files).some((path) =>
+    /\/database\/schema\.ts$/.test(path)
+  )
+  if (hasDatabaseSchema && allTables.length > 0) {
+    const included = new Set(allTables)
+    const relationTables = new Map<string, string[]>()
+    for (const relation of drizzleRelations) {
+      if (!included.has(relation.sourceTable) || !included.has(relation.targetTable)) {
+        continue
+      }
+      const properties = relationTables.get(relation.sourceTable) ?? []
+      properties.push(
+        relation.sourceText ?? `${relation.name}: r.many.${relation.targetTable}({})`
+      )
+      relationTables.set(relation.sourceTable, properties)
+    }
+    out['drizzleSchema.ts'] = renderDrizzleSchemaInputModule({
+      schemaImportPath: '../../database/schema',
+      tableNames: allTables,
+      relationTables: [...relationTables.entries()].map(([key, properties]) => ({
+        key,
+        properties,
+      })),
+    })
+    out['schema.ts'] = renderDrizzleZeroSqliteSchemaModule({
+      importPath: './drizzleSchema',
+      tableNames: allTables,
+    })
   }
 
   // count mutations the same way `generate()` does: one per generated crud slot
