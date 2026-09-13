@@ -101,11 +101,13 @@
     }
   },
   "dependencies": {
+    "@babel/parser": "7.29.7",
     "@rocicorp/logger": "6.2.0",
     "chokidar": "^4.0.3",
     "citty": "^0.1.6",
     "dequal": "^2.0.3",
     "orez-lite": "workspace:*",
+    "typescript": "7.0.2",
     "valibot": "^1.1.0"
   },
   "peerDependencies": {
@@ -136,7 +138,6 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-native": "*",
-    "typescript": "^5.9.3",
     "vitest": "^3.1.1"
   }
 }

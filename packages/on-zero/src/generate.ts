@@ -2,6 +2,16 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
 
+import * as ts from 'typescript/unstable/ast'
+import {
+  ObjectFlags,
+  SymbolFlags,
+  TypeFlags,
+  type Project,
+  type Symbol,
+  type Type,
+} from 'typescript/unstable/async'
+
 import {
   CRUD_MUTATION_NAMES,
   formatObjectKey,
@@ -20,6 +30,11 @@ import {
   shouldSkipObjectKey,
 } from './generate-helpers'
 import { discoverDataLayout, namespaceImportPath } from './generate-layout'
+import {
+  collectTypeScriptSourcePaths,
+  createNativeTypeScriptProject,
+  type NativeTypeScriptProject,
+} from './native-typescript'
 
 import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate-helpers'
 import type { DataLayout } from './generate-layout'
@@ -120,91 +135,33 @@ function writeFileIfChanged(filePath: string, content: string): boolean {
 // file-content emitters and valibot helpers are imported from ./generate-helpers
 // so they can be shared with the browser-safe generate-lite entry point.
 
-// creates a TypeChecker that can resolve type references across files
-function createTypeResolver(
-  ts: typeof import('typescript'),
-  files: Array<{ path: string; content: string }>,
-  dir: string
-) {
-  // find tsconfig if it exists for path alias resolution
-  const configPath = ts.findConfigFile(dir, ts.sys.fileExists, 'tsconfig.json')
-  let compilerOptions: import('typescript').CompilerOptions = {
-    target: ts.ScriptTarget.Latest,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    strict: false,
-    skipLibCheck: true,
-    noEmit: true,
-  }
-
-  if (configPath) {
-    const configFile = ts.readConfigFile(configPath, ts.sys.readFile)
-    if (configFile.config) {
-      // use tsconfig's directory as base for path resolution (not the models dir)
-      const parsed = ts.parseJsonConfigFileContent(
-        configFile.config,
-        ts.sys,
-        dirname(configPath)
-      )
-      compilerOptions = { ...compilerOptions, ...parsed.options }
-    }
-  }
-
-  // create a virtual file system host backed by real files + our content map
-  const fileMap = new Map<string, string>()
-  for (const f of files) {
-    fileMap.set(f.path, f.content)
-  }
-
-  const host = ts.createCompilerHost(compilerOptions)
-  const originalGetSourceFile = host.getSourceFile.bind(host)
-  host.getSourceFile = (fileName, languageVersion, onError) => {
-    const content = fileMap.get(fileName)
-    if (content !== undefined) {
-      return ts.createSourceFile(fileName, content, languageVersion, true)
-    }
-    return originalGetSourceFile(fileName, languageVersion, onError)
-  }
-  host.fileExists = (fileName) => fileMap.has(fileName) || ts.sys.fileExists(fileName)
-  host.readFile = (fileName) => fileMap.get(fileName) ?? ts.sys.readFile(fileName)
-
-  const program = ts.createProgram(
-    files.map((f) => f.path),
-    compilerOptions,
-    host
-  )
-  const checker = program.getTypeChecker()
-
+function createTypeResolver(project: Project) {
   return {
-    program,
-    checker,
-    // resolve a type annotation node to a ts.Type
-    resolveType(node: import('typescript').TypeNode): import('typescript').Type | null {
+    project,
+    async resolveType(node: ts.TypeNode): Promise<Type | null> {
       try {
-        return checker.getTypeFromTypeNode(node)
+        return (await project.checker.getTypeFromTypeNode(node)) ?? null
       } catch {
         return null
       }
     },
-    // convert a resolved type to valibot code
-    typeToValibot(type: import('typescript').Type): string {
-      return tsTypeToValibot(ts, checker, type)
+    async typeToValibot(type: Type): Promise<string> {
+      return tsTypeToValibot(project, type)
     },
   }
 }
 
 // find a specific exported arrow function's Nth parameter type in a checker-owned source file
-function resolveParamType(
-  ts: typeof import('typescript'),
+async function resolveParamType(
   resolver: ReturnType<typeof createTypeResolver>,
-  sourceFile: import('typescript').SourceFile,
+  sourceFile: ts.SourceFile,
   exportName: string,
   paramIndex: number
-): import('typescript').Type | null {
-  let result: import('typescript').Type | null = null
+): Promise<Type | null> {
+  let typeNode: ts.TypeNode | null = null
 
-  ts.forEachChild(sourceFile, (node) => {
-    if (result) return
+  sourceFile.forEachChild((node) => {
+    if (typeNode) return
     if (!ts.isVariableStatement(node)) return
     if (!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return
 
@@ -215,12 +172,12 @@ function resolveParamType(
     if (decl.initializer && ts.isArrowFunction(decl.initializer)) {
       const param = decl.initializer.parameters[paramIndex]
       if (param?.type) {
-        result = resolver.resolveType(param.type)
+        typeNode = param.type
       }
     }
   })
 
-  return result
+  return typeNode ? resolver.resolveType(typeNode) : null
 }
 
 // positional shape of a `mutations(...)` call, matching the runtime overloads:
@@ -230,13 +187,10 @@ function resolveParamType(
 //   mutations(table, permissions, handlers, { crud: false })
 // arg 1 is always permissions and arg 3 is always options, so neither may ever
 // be read as the handlers object.
-function readMutationsCall(
-  ts: typeof import('typescript'),
-  call: import('typescript').CallExpression
-): {
+function readMutationsCall(call: ts.CallExpression): {
   hasTable: boolean
   crud: boolean
-  handlersArg: import('typescript').ObjectLiteralExpression | null
+  handlersArg: ts.ObjectLiteralExpression | null
 } {
   const args = call.arguments
 
@@ -276,14 +230,13 @@ function readMutationsCall(
 
 // find mutation handler param types in a resolver-owned source file
 // walks `export const mutate = mutations(..., { handlerName: async (ctx, param: Type) => ... })`
-function resolveMutationParamTypes(
-  ts: typeof import('typescript'),
+async function resolveMutationParamTypes(
   resolver: ReturnType<typeof createTypeResolver>,
-  sourceFile: import('typescript').SourceFile
-): Map<string, import('typescript').Type> {
-  const resolved = new Map<string, import('typescript').Type>()
+  sourceFile: ts.SourceFile
+): Promise<Map<string, Type>> {
+  const nodes = new Map<string, ts.TypeNode>()
 
-  ts.forEachChild(sourceFile, (node) => {
+  sourceFile.forEachChild((node) => {
     if (!ts.isVariableStatement(node)) return
     if (!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return
 
@@ -293,7 +246,7 @@ function resolveMutationParamTypes(
 
     if (!decl.initializer || !ts.isCallExpression(decl.initializer)) return
 
-    const { handlersArg } = readMutationsCall(ts, decl.initializer)
+    const { handlersArg } = readMutationsCall(decl.initializer)
     if (!handlersArg) return
 
     for (const prop of handlersArg.properties) {
@@ -301,9 +254,7 @@ function resolveMutationParamTypes(
       const name = prop.name?.getText(sourceFile)
       if (!name) continue
 
-      let params:
-        | import('typescript').NodeArray<import('typescript').ParameterDeclaration>
-        | null = null
+      let params: ts.NodeArray<ts.ParameterDeclaration> | null = null
       if (ts.isPropertyAssignment(prop)) {
         const init = prop.initializer
         if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
@@ -317,30 +268,30 @@ function resolveMutationParamTypes(
       const typeNode = params[1]!.type
       if (!typeNode) continue
 
-      const expanded = resolver.resolveType(typeNode)
-      if (expanded) {
-        resolved.set(name, expanded)
-      }
+      nodes.set(name, typeNode)
     }
   })
 
+  const resolved = new Map<string, Type>()
+  for (const [name, node] of nodes) {
+    const expanded = await resolver.resolveType(node)
+    if (expanded) resolved.set(name, expanded)
+  }
   return resolved
 }
 
 function extractMutationsFromModel(
-  ts: typeof import('typescript'),
-  sourceFile: ReturnType<typeof ts.createSourceFile>,
+  sourceFile: ts.SourceFile,
   content: string,
   fileName: string,
   silent: boolean,
   typeToValibot: (typeString: string) => string | null,
-  resolvedTypes?: Map<string, import('typescript').Type>,
-  resolvedTypeToValibot?: (type: import('typescript').Type) => string
+  resolvedValibot?: Map<string, string>
 ): ModelMutations | null {
-  let mutateNode: import('typescript').CallExpression | null = null
+  let mutateNode: ts.CallExpression | null = null
 
   // find `export const mutate = mutations(...)`
-  ts.forEachChild(sourceFile, (node) => {
+  sourceFile.forEachChild((node) => {
     if (!ts.isVariableStatement(node)) return
     if (!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return
     const decl = node.declarationList.declarations[0]
@@ -361,11 +312,11 @@ function extractMutationsFromModel(
     }
   }
 
-  const call = mutateNode as import('typescript').CallExpression
+  const call = mutateNode as ts.CallExpression
 
   // string-named and table-builder registrations behave identically at runtime:
   // any 2+ arg call registers permissions and generates crud unless it opted out
-  const { hasTable, crud, handlersArg } = readMutationsCall(ts, call)
+  const { hasTable, crud, handlersArg } = readMutationsCall(call)
   const hasCRUD = hasTable && crud
 
   // extract schema columns for CRUD generation
@@ -374,7 +325,7 @@ function extractMutationsFromModel(
 
   if (hasCRUD) {
     // parse schema columns from file content
-    extractSchemaColumns(ts, sourceFile, columns, primaryKeys)
+    extractSchemaColumns(sourceFile, columns, primaryKeys)
   }
 
   // extract custom mutation param types
@@ -388,9 +339,7 @@ function extractMutationsFromModel(
       if (!name) continue
 
       // find the arrow function or method
-      let params:
-        | import('typescript').NodeArray<import('typescript').ParameterDeclaration>
-        | null = null
+      let params: ts.NodeArray<ts.ParameterDeclaration> | null = null
 
       if (ts.isPropertyAssignment(prop)) {
         const init = prop.initializer
@@ -420,11 +369,8 @@ function extractMutationsFromModel(
       let valibotCode = typeToValibot(paramType)
 
       // if direct parse failed (unresolved reference), use checker-resolved types
-      if (!valibotCode && resolvedTypes && resolvedTypeToValibot) {
-        const resolvedType = resolvedTypes.get(name)
-        if (resolvedType) {
-          valibotCode = resolvedTypeToValibot(resolvedType)
-        }
+      if (!valibotCode && resolvedValibot) {
+        valibotCode = resolvedValibot.get(name) ?? null
       }
 
       custom.push({
@@ -445,13 +391,12 @@ function extractMutationsFromModel(
 }
 
 function extractSchemaColumns(
-  ts: typeof import('typescript'),
-  sourceFile: ReturnType<typeof ts.createSourceFile>,
+  sourceFile: ts.SourceFile,
   columns: Record<string, SchemaColumn>,
   primaryKeys: string[]
 ) {
   // walk AST to find table(...).columns({...}).primaryKey(...)
-  function visit(node: import('typescript').Node) {
+  function visit(node: ts.Node) {
     if (ts.isCallExpression(node)) {
       const text = node.expression.getText(sourceFile)
 
@@ -480,87 +425,71 @@ function extractSchemaColumns(
         }
       }
     }
-    ts.forEachChild(node, visit)
+    node.forEachChild(visit)
   }
   visit(sourceFile)
 }
 
-function getInstantiatedPropertyType(
-  checker: import('typescript').TypeChecker,
-  parent: import('typescript').Type,
-  name: string
-) {
-  const resolveProperty: unknown = Reflect.get(checker, 'getTypeOfPropertyOfType')
-  if (typeof resolveProperty !== 'function') return undefined
-  // typescript exposes this runtime method but omits it from TypeChecker.
-  return Reflect.apply(resolveProperty, checker, [parent, name]) as
-    | import('typescript').Type
-    | undefined
-}
-
 // convert a ts.Type to valibot code by walking the type checker AST
-function tsTypeToValibot(
-  ts: typeof import('typescript'),
-  checker: import('typescript').TypeChecker,
-  type: import('typescript').Type,
-  seen?: Set<import('typescript').Type>
-): string {
+async function tsTypeToValibot(
+  project: Project,
+  type: Type,
+  seen = new Set<number>()
+): Promise<string> {
+  const checker = project.checker
   // prevent infinite recursion on circular types
   // only track structured types (objects, intersections) — not primitives/unions
-  if (!seen) seen = new Set()
-  const flags = type.getFlags()
-  if (flags & (ts.TypeFlags.Object | ts.TypeFlags.Intersection)) {
-    if (seen.has(type)) return 'v.unknown()'
-    seen.add(type)
+  const flags = type.flags
+  if (flags & (TypeFlags.Object | TypeFlags.Intersection)) {
+    if (seen.has(type.id)) return 'v.unknown()'
+    seen.add(type.id)
   }
 
-  const recurse = (t: import('typescript').Type) => tsTypeToValibot(ts, checker, t, seen)
+  const recurse = (value: Type) => tsTypeToValibot(project, value, seen)
 
   // primitives
-  if (flags & ts.TypeFlags.String) return 'v.string()'
-  if (flags & ts.TypeFlags.Number) return 'v.number()'
-  if (flags & ts.TypeFlags.Boolean) return 'v.boolean()'
-  if (flags & ts.TypeFlags.Void || flags & ts.TypeFlags.Undefined) return 'v.void_()'
-  if (flags & ts.TypeFlags.Null) return 'v.null_()'
-  if (flags & ts.TypeFlags.Any || flags & ts.TypeFlags.Unknown) return 'v.unknown()'
-  if (flags & ts.TypeFlags.Never) return 'v.never()'
-  if (flags & ts.TypeFlags.TemplateLiteral) return 'v.string()'
-  if (
-    flags & ts.TypeFlags.Object &&
-    (checker.isArrayType?.(type) || checker.isArrayLikeType?.(type))
-  ) {
-    const typeArgs =
-      checker.getTypeArguments?.(type as import('typescript').TypeReference) ?? []
-    const elementType = typeArgs.length === 1 ? typeArgs[0] : type.getNumberIndexType?.()
-    return `v.array(${elementType ? recurse(elementType) : 'v.unknown()'})`
+  if (flags & TypeFlags.String) return 'v.string()'
+  if (flags & TypeFlags.Number) return 'v.number()'
+  if (flags & TypeFlags.Boolean) return 'v.boolean()'
+  if (flags & TypeFlags.Void || flags & TypeFlags.Undefined) return 'v.void_()'
+  if (flags & TypeFlags.Null) return 'v.null_()'
+  if (flags & TypeFlags.Any || flags & TypeFlags.Unknown) return 'v.unknown()'
+  if (flags & TypeFlags.Never) return 'v.never()'
+  if (flags & TypeFlags.TemplateLiteral) return 'v.string()'
+  if (flags & TypeFlags.Object && (await checker.isArrayLikeType(type))) {
+    const typeArgs = type.isTypeReference() ? await checker.getTypeArguments(type) : []
+    const indexInfo = (await checker.getIndexInfosOfType(type)).find((info) =>
+      Boolean(info.keyType.flags & TypeFlags.Number)
+    )
+    const elementType = typeArgs.length === 1 ? typeArgs[0] : indexInfo?.valueType
+    return `v.array(${elementType ? await recurse(elementType) : 'v.unknown()'})`
   }
 
   // string/number/boolean literals
-  if (flags & ts.TypeFlags.StringLiteral) {
-    return `v.literal(${JSON.stringify((type as import('typescript').StringLiteralType).value)})`
+  if (type.isStringLiteralType()) {
+    return `v.literal(${JSON.stringify(type.value)})`
   }
-  if (flags & ts.TypeFlags.NumberLiteral) {
-    return `v.literal(${(type as import('typescript').NumberLiteralType).value})`
+  if (type.isNumberLiteralType()) {
+    return `v.literal(${type.value})`
   }
-  if (flags & ts.TypeFlags.BooleanLiteral) {
-    const name = (type as any).intrinsicName
-    return `v.literal(${name === 'true'})`
+  if (type.isBooleanLiteralType()) {
+    return `v.literal(${type.value})`
   }
 
   // union
-  if (type.isUnion()) {
-    const members = type.types
-    const hasNull = members.some((t) => t.getFlags() & ts.TypeFlags.Null)
+  if (type.isUnionType()) {
+    const members = await type.getTypes()
+    const hasNull = members.some((member) => member.flags & TypeFlags.Null)
     const hasUndefined = members.some(
-      (t) => t.getFlags() & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)
+      (member) => member.flags & (TypeFlags.Undefined | TypeFlags.Void)
     )
     const rest = members.filter(
-      (t) =>
-        !(t.getFlags() & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void))
+      (member) =>
+        !(member.flags & (TypeFlags.Null | TypeFlags.Undefined | TypeFlags.Void))
     )
     if (
       rest.length === 2 &&
-      rest.every((t) => t.getFlags() & ts.TypeFlags.BooleanLiteral)
+      rest.every((member) => member.flags & TypeFlags.BooleanLiteral)
     ) {
       let inner = 'v.boolean()'
       if (hasNull) inner = `v.nullable(${inner})`
@@ -572,41 +501,32 @@ function tsTypeToValibot(
 
     let inner =
       rest.length === 1
-        ? recurse(rest[0]!)
-        : `v.union([${rest.map((t) => recurse(t)).join(', ')}])`
+        ? await recurse(rest[0]!)
+        : `v.union([${(await Promise.all(rest.map(recurse))).join(', ')}])`
 
     if (hasNull) inner = `v.nullable(${inner})`
     if (hasUndefined) inner = `v.optional(${inner})`
     return inner
   }
 
-  // resolve symbol property type with fallbacks
-  const resolveSymbolType = (
-    parent: import('typescript').Type,
-    prop: import('typescript').Symbol
-  ) => {
-    // mapped and conditional types can expose transient symbols with no
-    // declaration, so resolve each property against its concrete parent.
-    const instantiated = getInstantiatedPropertyType(checker, parent, prop.getName())
-    if (instantiated) return instantiated
-    if (prop.valueDeclaration)
-      return checker.getTypeOfSymbolAtLocation(prop, prop.valueDeclaration)
-    if ((prop as any).declarations?.[0])
-      return checker.getTypeOfSymbolAtLocation(prop, (prop as any).declarations[0])
-    return checker.getDeclaredTypeOfSymbol(prop)
+  const resolveSymbolType = async (property: Symbol) => {
+    const symbolType = await checker.getTypeOfSymbol(property)
+    if (symbolType && !symbolType.isErrorType()) return symbolType
+    const declaration = property.valueDeclaration ?? property.declarations[0]
+    const node = declaration ? await declaration.resolve(project) : undefined
+    if (node) return checker.getTypeOfSymbolAtLocation(property, node)
+    return checker.getDeclaredTypeOfSymbol(property)
   }
 
-  // intersection - use checker's merged properties directly
-  if (type.isIntersection()) {
-    const props = type.getProperties()
+  const objectToValibot = async (props: readonly Symbol[]) => {
     if (props.length === 0) return 'v.object({})'
     const entries: string[] = []
     for (const prop of props) {
-      const name = prop.getName()
+      const name = prop.name
       if (shouldSkipObjectKey(name)) continue
-      const propType = resolveSymbolType(type, prop)
-      const isOptional = !!(prop.getFlags() & ts.SymbolFlags.Optional)
-      let val = recurse(propType)
+      const propType = await resolveSymbolType(prop)
+      const isOptional = Boolean(prop.flags & SymbolFlags.Optional)
+      let val = await recurse(propType)
       if (isOptional && !val.startsWith('v.optional(')) {
         val = `v.optional(${val})`
       }
@@ -616,59 +536,39 @@ function tsTypeToValibot(
     return `v.object({\n    ${entries.join(',\n    ')},\n  })`
   }
 
-  // object type with properties
-  const props = type.getProperties()
-  if (
-    props.length > 0 &&
-    (type.getFlags() & ts.TypeFlags.Object || (type as any).objectFlags)
-  ) {
-    const objectFlags = (type as import('typescript').ObjectType).objectFlags ?? 0
+  // intersection - use checker's merged properties directly
+  if (type.isIntersectionType()) {
+    return objectToValibot(await checker.getPropertiesOfType(type))
+  }
 
-    // array
-    if (objectFlags & ts.ObjectFlags.Reference) {
-      const typeRef = type as import('typescript').TypeReference
-      const symbol = type.getSymbol()
-      const name = symbol?.getName()
+  if (type.isTupleType()) {
+    const typeArgs = await checker.getTypeArguments(type)
+    return `v.tuple([${(await Promise.all(typeArgs.map(recurse))).join(', ')}])`
+  }
+
+  if (type.isObjectType()) {
+    if (type.objectFlags & ObjectFlags.Reference && type.isTypeReference()) {
+      const symbol = await type.getSymbol()
+      const typeArgs = await checker.getTypeArguments(type)
       if (
-        (name === 'Array' || name === 'ReadonlyArray') &&
-        typeRef.typeArguments?.length === 1
+        (symbol?.name === 'Array' || symbol?.name === 'ReadonlyArray') &&
+        typeArgs.length === 1
       ) {
-        return `v.array(${recurse(typeRef.typeArguments[0]!)})`
+        return `v.array(${await recurse(typeArgs[0]!)})`
       }
     }
-
-    // tuple
-    if (objectFlags & ts.ObjectFlags.Tuple) {
-      const typeRef = type as import('typescript').TypeReference
-      const typeArgs = typeRef.typeArguments || []
-      return `v.tuple([${typeArgs.map((t) => recurse(t)).join(', ')}])`
-    }
-
-    // regular object
-    const entries: string[] = []
-    for (const prop of props) {
-      const name = prop.getName()
-      if (shouldSkipObjectKey(name)) continue
-      const propType = resolveSymbolType(type, prop)
-      const isOptional = !!(prop.getFlags() & ts.SymbolFlags.Optional)
-      let val = recurse(propType)
-      if (isOptional && !val.startsWith('v.optional(')) {
-        val = `v.optional(${val})`
-      }
-      entries.push(`${formatObjectKey(name)}: ${val}`)
-    }
-    if (entries.length === 0) return 'v.object({})'
-    return `v.object({\n    ${entries.join(',\n    ')},\n  })`
+    const props = await checker.getPropertiesOfType(type)
+    if (props.length > 0) return objectToValibot(props)
   }
 
   // index signature / Record type
-  const stringIndex = type.getStringIndexType()
-  if (stringIndex) {
-    return `v.record(v.string(), ${recurse(stringIndex)})`
-  }
-  const numberIndex = type.getNumberIndexType()
-  if (numberIndex) {
-    return `v.record(v.number(), ${recurse(numberIndex)})`
+  for (const indexInfo of await checker.getIndexInfosOfType(type)) {
+    if (indexInfo.keyType.flags & TypeFlags.String) {
+      return `v.record(v.string(), ${await recurse(indexInfo.valueType)})`
+    }
+    if (indexInfo.keyType.flags & TypeFlags.Number) {
+      return `v.record(v.number(), ${await recurse(indexInfo.valueType)})`
+    }
   }
 
   return 'v.unknown()'
@@ -889,17 +789,30 @@ function dataMembershipFromLayout(layout: DataLayout): DataMembership {
   }
 }
 
+async function loadGeneratorProject(baseDir: string): Promise<NativeTypeScriptProject> {
+  const sourcePaths = collectTypeScriptSourcePaths([
+    baseDir,
+    resolve(dirname(baseDir), 'database'),
+  ])
+  return createNativeTypeScriptProject(baseDir, sourcePaths)
+}
+
 export async function deriveDataMembership(options: {
   dir: string
   config?: string
 }): Promise<DataMembership> {
-  const ts = await import('typescript')
-  const layout = discoverDataLayout(
-    ts,
-    resolve(options.dir),
-    options.config ? resolve(options.config) : undefined
-  )
-  return dataMembershipFromLayout(layout)
+  const baseDir = resolve(options.dir)
+  const project = await loadGeneratorProject(baseDir)
+  try {
+    const layout = discoverDataLayout(
+      project,
+      baseDir,
+      options.config ? resolve(options.config) : undefined
+    )
+    return dataMembershipFromLayout(layout)
+  } finally {
+    await project.close()
+  }
 }
 
 export async function generateDrizzleSchemaInputFile(options: {
@@ -907,10 +820,22 @@ export async function generateDrizzleSchemaInputFile(options: {
   schemaImportPath: string
   config?: string
 }): Promise<string> {
-  const ts = await import('typescript')
+  const baseDir = resolve(options.dir)
+  const project = await loadGeneratorProject(baseDir)
+  try {
+    return generateDrizzleSchemaInputFileWithProject(options, project)
+  } finally {
+    await project.close()
+  }
+}
+
+async function generateDrizzleSchemaInputFileWithProject(
+  options: { dir: string; schemaImportPath: string; config?: string },
+  project: NativeTypeScriptProject
+): Promise<string> {
   const baseDir = resolve(options.dir)
   const layout = discoverDataLayout(
-    ts,
+    project,
     baseDir,
     options.config ? resolve(options.config) : undefined
   )
@@ -924,19 +849,14 @@ export async function generateDrizzleSchemaInputFile(options: {
   const relationEntries: string[] = []
 
   if (relationsPath) {
-    const source = ts.createSourceFile(
-      relationsPath,
-      readFileSync(relationsPath, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true
-    )
+    const source = project.sourceFile(relationsPath)
     const included = new Set(tableNames)
-    const visit = (node: import('typescript').Node) => {
+    const visit = (node: ts.Node) => {
       if (
         !ts.isCallExpression(node) ||
         node.expression.getText(source) !== 'defineRelations'
       ) {
-        ts.forEachChild(node, visit)
+        node.forEachChild(visit)
         return
       }
       const factory = node.arguments[1]
@@ -995,6 +915,18 @@ export async function generateDrizzleSchemaInputFile(options: {
 }
 
 export async function generate(options: GenerateOptions): Promise<GenerateResult> {
+  const project = await loadGeneratorProject(resolve(options.dir))
+  try {
+    return await generateWithProject(options, project)
+  } finally {
+    await project.close()
+  }
+}
+
+async function generateWithProject(
+  options: GenerateOptions,
+  project: NativeTypeScriptProject
+): Promise<GenerateResult> {
   const { dir, after, silent, force, config } = options
   const baseDir = resolve(dir)
   const generatedDir = resolve(baseDir, 'generated')
@@ -1007,8 +939,11 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
   // the layout pass is intentionally first: config, filenames, and related()
   // calls determine schema membership before any type program exists.
-  const ts = await import('typescript')
-  const layout = discoverDataLayout(ts, baseDir, config ? resolve(config) : undefined)
+  const layout = discoverDataLayout(
+    project,
+    baseDir,
+    config ? resolve(config) : undefined
+  )
   const metadataHash = hash(
     layout.metadataPaths
       .map((path) => `${path}\0${readFileSync(path, 'utf8')}`)
@@ -1086,11 +1021,14 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   let filesChanged = writeResults.filter(Boolean).length
   if (needsSqliteZeroSchema) {
     const membership = dataMembershipFromLayout(layout)
-    const drizzleSchema = await generateDrizzleSchemaInputFile({
-      dir: baseDir,
-      schemaImportPath: '../../database/schema',
-      config,
-    })
+    const drizzleSchema = await generateDrizzleSchemaInputFileWithProject(
+      {
+        dir: baseDir,
+        schemaImportPath: '../../database/schema',
+        config,
+      },
+      project
+    )
     const sqliteSchema = renderDrizzleZeroSqliteSchemaModule({
       importPath: './drizzleSchema',
       tableNames: membership.allTables,
@@ -1124,17 +1062,6 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     importPath: string
   }> = []
 
-  let queryResolver: ReturnType<typeof createTypeResolver> | null = null
-  const getQueryResolver = () => {
-    if (!queryResolver) {
-      const allFiles = [
-        ...new Set(layout.namespaces.flatMap((namespace) => namespace.sourcePaths)),
-      ].map((path) => ({ path, content: readFileSync(path, 'utf-8') }))
-      queryResolver = createTypeResolver(ts, allFiles, baseDir)
-    }
-    return queryResolver
-  }
-
   for (const namespace of layout.namespaces.filter(
     (namespace): namespace is typeof namespace & { queryPath: string } =>
       namespace.queryPath !== null
@@ -1142,15 +1069,14 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     const filePath = namespace.queryPath
 
     try {
-      const content = readFileSync(filePath, 'utf-8')
-      const sourceFile = ts.createSourceFile(
-        filePath,
-        content,
-        ts.ScriptTarget.Latest,
-        true
-      )
+      const sourceFile = project.sourceFile(filePath)
+      const candidates: Array<{
+        name: string
+        paramType: string
+        typeNode: ts.TypeNode | null
+      }> = []
 
-      ts.forEachChild(sourceFile, (node) => {
+      sourceFile.forEachChild((node) => {
         if (ts.isVariableStatement(node)) {
           const exportModifier = node.modifiers?.find(
             (m) => m.kind === ts.SyntaxKind.ExportKeyword
@@ -1171,41 +1097,37 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
               const param = params[0]!
               paramType = param.type?.getText(sourceFile) || 'unknown'
             }
-
-            let valibotCode = typeToValibot(paramType)
-
-            // if direct parse failed (unresolved reference), use TypeChecker
-            if (!valibotCode && params.length > 0 && params[0]!.type) {
-              const resolver = getQueryResolver()
-              const resolverSourceFile = resolver.program.getSourceFile(filePath)
-              if (resolverSourceFile) {
-                const resolvedType = resolveParamType(
-                  ts,
-                  resolver,
-                  resolverSourceFile,
-                  name,
-                  0
-                )
-                if (resolvedType) {
-                  valibotCode = resolver.typeToValibot(resolvedType)
-                }
-              }
-            }
-
-            if (valibotCode) {
-              allQueries.push({
-                name,
-                params: paramType,
-                valibotCode,
-                sourceFile: namespace.name,
-                importPath: namespaceImportPath(baseDir, filePath),
-              })
-            } else if (!silent && paramType !== 'void') {
-              console.error(`✗ ${name}: could not resolve type "${paramType}"`)
-            }
+            candidates.push({ name, paramType, typeNode: params[0]?.type ?? null })
           }
         }
       })
+
+      const resolver = createTypeResolver(project.projectForFile(filePath))
+      for (const candidate of candidates) {
+        let valibotCode = typeToValibot(candidate.paramType)
+        if (!valibotCode && candidate.typeNode) {
+          const resolvedType = await resolveParamType(
+            resolver,
+            sourceFile,
+            candidate.name,
+            0
+          )
+          if (resolvedType) valibotCode = await resolver.typeToValibot(resolvedType)
+        }
+        if (valibotCode) {
+          allQueries.push({
+            name: candidate.name,
+            params: candidate.paramType,
+            valibotCode,
+            sourceFile: namespace.name,
+            importPath: namespaceImportPath(baseDir, filePath),
+          })
+        } else if (!silent && candidate.paramType !== 'void') {
+          console.error(
+            `✗ ${candidate.name}: could not resolve type "${candidate.paramType}"`
+          )
+        }
+      }
     } catch (err) {
       if (!silent) console.error(`Error processing ${filePath}:`, err)
     }
@@ -1266,7 +1188,6 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   const allModelMutations: ModelMutations[] = []
 
   // first pass: extract mutations, note which have unresolved types
-  const mutationFiles: Array<{ path: string; content: string; baseName: string }> = []
   const unresolvedModels: Array<{ baseName: string; filePath: string }> = []
 
   for (const namespace of modelNamespaces) {
@@ -1276,16 +1197,8 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     try {
       const content = readFileSync(filePath, 'utf-8')
 
-      mutationFiles.push({ path: filePath, content, baseName: fileBaseName })
-
-      const sourceFile = ts.createSourceFile(
-        filePath,
-        content,
-        ts.ScriptTarget.Latest,
-        true
-      )
+      const sourceFile = project.sourceFile(filePath)
       const result = extractMutationsFromModel(
-        ts,
         sourceFile,
         content,
         filePath,
@@ -1312,57 +1225,25 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
   // second pass: resolve imported types using TypeChecker
   if (unresolvedModels.length > 0) {
-    // build resolver with all ts files under baseDir for full import resolution
-    // (model files may import types from generated files, shared types, etc)
-    const collectTsFiles = (dir: string): Array<{ path: string; content: string }> => {
-      const results: Array<{ path: string; content: string }> = []
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const fullPath = resolve(dir, entry.name)
-        if (entry.isDirectory() && entry.name !== 'node_modules') {
-          results.push(...collectTsFiles(fullPath))
-        } else if (entry.isFile() && isGeneratorSourceFile(entry.name)) {
-          results.push({ path: fullPath, content: readFileSync(fullPath, 'utf-8') })
-        }
-      }
-      return results
-    }
-    const allFiles = [
-      ...new Map(
-        layout.sourceRoots
-          .flatMap(collectTsFiles)
-          .map((file) => [file.path, file] as const)
-      ).values(),
-    ]
-    const modelResolver = createTypeResolver(ts, allFiles, baseDir)
-
     for (const { baseName, filePath } of unresolvedModels) {
-      const resolverSourceFile = modelResolver.program.getSourceFile(filePath)
-      if (!resolverSourceFile) continue
-
-      const resolvedTypes = resolveMutationParamTypes(
-        ts,
-        modelResolver,
-        resolverSourceFile
-      )
+      const sourceFile = project.sourceFile(filePath)
+      const modelResolver = createTypeResolver(project.projectForFile(filePath))
+      const resolvedTypes = await resolveMutationParamTypes(modelResolver, sourceFile)
       if (resolvedTypes.size === 0) continue
+      const resolvedValibot = new Map<string, string>()
+      for (const [name, type] of resolvedTypes) {
+        resolvedValibot.set(name, await modelResolver.typeToValibot(type))
+      }
 
       // re-extract with resolved types
       const content = readFileSync(filePath, 'utf-8')
-      const sourceFile = ts.createSourceFile(
-        filePath,
-        content,
-        ts.ScriptTarget.Latest,
-        true
-      )
       const result = extractMutationsFromModel(
-        ts,
         sourceFile,
         content,
         filePath,
         !!silent,
         typeToValibot,
-        resolvedTypes,
-        modelResolver.typeToValibot
+        resolvedValibot
       )
 
       if (result) {
@@ -1451,12 +1332,17 @@ export async function watch(options: WatchOptions) {
   }
 
   const databaseDir = resolve(dirname(baseDir), 'database')
-  const ts = await import('typescript')
-  const layout = discoverDataLayout(
-    ts,
-    baseDir,
-    options.config ? resolve(options.config) : undefined
-  )
+  const project = await loadGeneratorProject(baseDir)
+  let layout: DataLayout
+  try {
+    layout = discoverDataLayout(
+      project,
+      baseDir,
+      options.config ? resolve(options.config) : undefined
+    )
+  } finally {
+    await project.close()
+  }
   const watcher = chokidar.watch(
     [
       ...new Set([

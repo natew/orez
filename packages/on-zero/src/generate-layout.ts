@@ -1,7 +1,9 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { basename, dirname, relative, resolve, sep } from 'node:path'
 
-import type ts from 'typescript'
+import * as ts from 'typescript/unstable/ast'
+
+import type { NativeTypeScriptProject } from './native-typescript'
 
 export type DataNamespace = {
   name: string
@@ -53,10 +55,7 @@ type ParsedInstanceConfig = {
   supportTables: string[]
 }
 
-function propertyName(
-  ts: typeof import('typescript'),
-  name: ts.PropertyName
-): string | null {
+function propertyName(name: ts.PropertyName): string | null {
   if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
     return name.text
   }
@@ -64,7 +63,7 @@ function propertyName(
 }
 
 function readDataConfig(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   baseDir: string,
   configPath: string | undefined
 ): { path: string; instances: ParsedInstanceConfig[] } | null {
@@ -76,13 +75,8 @@ function readDataConfig(
   if (dirname(path) !== baseDir) {
     throw new Error(`[on-zero] ${path} must be at the data root ${baseDir}`)
   }
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(path, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true
-  )
-  if (hasParseErrors(source)) throw new Error(`[on-zero] unable to parse ${path}`)
+  const source = project.sourceFile(path)
+  if (project.hasParseErrors(path)) throw new Error(`[on-zero] unable to parse ${path}`)
 
   let config: ts.ObjectLiteralExpression | null = null
   for (const statement of source.statements) {
@@ -108,7 +102,7 @@ function readDataConfig(
     if (!ts.isPropertyAssignment(option)) {
       throw new Error(`[on-zero] ${path} options must use explicit property assignments`)
     }
-    const name = propertyName(ts, option.name)
+    const name = propertyName(option.name)
     if (!name) throw new Error(`[on-zero] ${path} has an unsupported option name`)
     if (rootOptions.has(name))
       throw new Error(`[on-zero] ${path} repeats option '${name}'`)
@@ -130,7 +124,7 @@ function readDataConfig(
         `[on-zero] ${path} instances must use explicit property assignments`
       )
     }
-    const name = propertyName(ts, property.name)
+    const name = propertyName(property.name)
     if (!name) throw new Error(`[on-zero] ${path} has an unsupported instance name`)
     if (!ts.isObjectLiteralExpression(property.initializer)) {
       throw new Error(`[on-zero] instance '${name}' must be an object`)
@@ -146,7 +140,7 @@ function readDataConfig(
       if (!ts.isPropertyAssignment(option)) {
         throw new Error(`[on-zero] instance '${name}' options must be assignments`)
       }
-      const optionName = propertyName(ts, option.name)
+      const optionName = propertyName(option.name)
       if (!optionName)
         throw new Error(`[on-zero] instance '${name}' has an invalid option`)
       if (seen.has(optionName)) {
@@ -215,18 +209,6 @@ function readDataConfig(
   return { path, instances }
 }
 
-function hasParseErrors(source: ts.SourceFile): boolean {
-  // typescript keeps syntax diagnostics on SourceFile but does not expose them
-  // in its public type.
-  return Boolean(
-    (
-      source as unknown as {
-        parseDiagnostics?: readonly unknown[]
-      }
-    ).parseDiagnostics?.length
-  )
-}
-
 /**
  * Which kinds of data exports a single-file namespace declares.
  *
@@ -241,18 +223,13 @@ function hasParseErrors(source: ts.SourceFile): boolean {
 type NamespaceExportKinds = { model: boolean; query: boolean }
 
 function namespaceExportKinds(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   baseDir: string,
   path: string
 ): NamespaceExportKinds {
   const none: NamespaceExportKinds = { model: false, query: false }
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(path, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true
-  )
-  if (hasParseErrors(source)) {
+  const source = project.sourceFile(path)
+  if (project.hasParseErrors(path)) {
     const displayPath = relative(dirname(baseDir), path).split(sep).join('/')
     console.warn(`[on-zero] ignoring ${displayPath}: no recognized data exports`)
     return none
@@ -319,7 +296,7 @@ function namespaceExportKinds(
       }
     }
     let found = false
-    ts.forEachChild(node, (child) => {
+    node.forEachChild((child) => {
       if (!found && reachesQuery(child)) found = true
     })
     return found
@@ -330,16 +307,11 @@ function namespaceExportKinds(
 }
 
 function mutationTable(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   path: string,
   namespace: string
 ): string {
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(path, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true
-  )
+  const source = project.sourceFile(path)
   let schemaTable: string | null = null
 
   for (const statement of source.statements) {
@@ -358,7 +330,7 @@ function mutationTable(
         ts.isCallExpression(declaration.initializer)
       ) {
         const firstArgument = declaration.initializer.arguments[0]
-        if (firstArgument && ts.isStringLiteralLike(firstArgument)) {
+        if (firstArgument && ts.isStringLiteral(firstArgument)) {
           return firstArgument.text
         }
       }
@@ -368,12 +340,12 @@ function mutationTable(
           ts.isCallExpression(node) &&
           node.expression.getText(source) === 'table' &&
           node.arguments[0] &&
-          ts.isStringLiteralLike(node.arguments[0])
+          ts.isStringLiteral(node.arguments[0])
         ) {
           schemaTable = node.arguments[0].text
           return
         }
-        ts.forEachChild(node, visit)
+        node.forEachChild(visit)
       }
       visit(declaration.initializer)
     }
@@ -383,7 +355,7 @@ function mutationTable(
 }
 
 function discoverNamespaces(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   baseDir: string,
   instance: DataInstance,
   instanceDirs: Set<string>
@@ -395,7 +367,7 @@ function discoverNamespaces(
     if (entry.isFile()) {
       if (!isSourceFile(entry.name) || entry.name === 'on-zero.config.ts') continue
       const path = resolve(instance.dir, entry.name)
-      const kinds = namespaceExportKinds(ts, baseDir, path)
+      const kinds = namespaceExportKinds(project, baseDir, path)
       if (!kinds.model && !kinds.query) continue
       const name = basename(entry.name, '.ts')
       namespaces.push({
@@ -406,7 +378,7 @@ function discoverNamespaces(
         // missing mutations.ts leaves modelPath null
         modelPath: kinds.model ? path : null,
         aggregatePath: null,
-        table: kinds.model ? mutationTable(ts, path, name) : null,
+        table: kinds.model ? mutationTable(project, path, name) : null,
         sourcePaths: [path],
       })
       continue
@@ -439,7 +411,7 @@ function discoverNamespaces(
       queryPath: hasQueries ? queryPath : null,
       modelPath: hasMutations ? modelPath : null,
       aggregatePath: hasAggregates ? aggregatePath : null,
-      table: hasMutations ? mutationTable(ts, modelPath, entry.name) : null,
+      table: hasMutations ? mutationTable(project, modelPath, entry.name) : null,
       sourcePaths: [
         hasQueries && queryPath,
         hasMutations && modelPath,
@@ -471,23 +443,18 @@ function metadataPaths(baseDir: string): string[] {
 }
 
 function relationTargets(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   paths: string[]
 ): Map<string, Map<string, string>> {
   const relations = new Map<string, Map<string, string>>()
   for (const path of paths.filter((path) => basename(path) === 'relations.ts')) {
-    const source = ts.createSourceFile(
-      path,
-      readFileSync(path, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true
-    )
+    const source = project.sourceFile(path)
     const visit = (node: ts.Node) => {
       if (
         !ts.isCallExpression(node) ||
         node.expression.getText(source) !== 'defineRelations'
       ) {
-        ts.forEachChild(node, visit)
+        node.forEachChild(visit)
         return
       }
       const factory = node.arguments[1]
@@ -527,7 +494,7 @@ function relationTargets(
 }
 
 function tableColumns(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   paths: string[],
   namespaces: DataNamespace[]
 ): Map<string, Set<string>> {
@@ -537,26 +504,21 @@ function tableColumns(
     ...namespaces.flatMap((namespace) => namespace.sourcePaths),
   ])
   for (const path of sources) {
-    const source = ts.createSourceFile(
-      path,
-      readFileSync(path, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true
-    )
+    const source = project.sourceFile(path)
     const visit = (node: ts.Node) => {
       if (
         !ts.isVariableDeclaration(node) ||
         !ts.isIdentifier(node.name) ||
         !node.initializer
       ) {
-        ts.forEachChild(node, visit)
+        node.forEachChild(visit)
         return
       }
       const tableNames = new Set([node.name.text])
       let foundColumns: ts.ObjectLiteralExpression | null = null
       const inspect = (candidate: ts.Node) => {
         if (!ts.isCallExpression(candidate)) {
-          ts.forEachChild(candidate, inspect)
+          candidate.forEachChild(inspect)
           return
         }
         for (const argument of candidate.arguments) {
@@ -574,12 +536,16 @@ function tableColumns(
       if (foundColumns) {
         const names = new Set(
           (foundColumns as ts.ObjectLiteralExpression).properties
-            .map((property) => property.name?.getText(source).replace(/^['"]|['"]$/g, ''))
+            .map((property) =>
+              ts.isSpreadAssignment(property)
+                ? null
+                : property.name?.getText(source).replace(/^['"]|['"]$/g, '')
+            )
             .filter((name): name is string => Boolean(name))
         )
         for (const tableName of tableNames) columns.set(tableName, names)
       }
-      ts.forEachChild(node, visit)
+      node.forEachChild(visit)
     }
     visit(source)
   }
@@ -587,17 +553,12 @@ function tableColumns(
 }
 
 function queriedTables(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   namespace: DataNamespace,
   relations: Map<string, Map<string, string>>
 ): Array<{ table: string; query: string; root: boolean }> {
   if (!namespace.queryPath) return []
-  const source = ts.createSourceFile(
-    namespace.queryPath,
-    readFileSync(namespace.queryPath, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true
-  )
+  const source = project.sourceFile(namespace.queryPath)
   const reached: Array<{ table: string; query: string; root: boolean }> = []
   const functions = new Map<string, ts.ConciseBody>()
   const exported = new Set<string>()
@@ -679,7 +640,7 @@ function queriedTables(
         visiting.delete(key)
       }
     }
-    ts.forEachChild(node, (child) => visit(child, currentTable, query))
+    node.forEachChild((child) => visit(child, currentTable, query))
   }
 
   for (const name of exported) {
@@ -693,16 +654,11 @@ function queriedTables(
 }
 
 function aggregateTables(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   namespace: DataNamespace
 ): string[] {
   if (!namespace.aggregatePath) return []
-  const source = ts.createSourceFile(
-    namespace.aggregatePath,
-    readFileSync(namespace.aggregatePath, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true
-  )
+  const source = project.sourceFile(namespace.aggregatePath)
   const unwrap = (node: ts.Expression): ts.Expression => {
     let current = node
     while (
@@ -754,14 +710,14 @@ function aggregateTables(
           const field = definition.properties.find(
             (candidate): candidate is ts.PropertyAssignment =>
               ts.isPropertyAssignment(candidate) &&
-              propertyName(ts, candidate.name) === fieldName
+              propertyName(candidate.name) === fieldName
           )
-          if (!field || !ts.isStringLiteralLike(unwrap(field.initializer))) {
+          if (!field || !ts.isStringLiteral(unwrap(field.initializer))) {
             throw new Error(
               `[on-zero] ${namespace.aggregatePath} aggregate ${property.name.getText(source)} ${fieldName} must be a string literal`
             )
           }
-          tables.add((unwrap(field.initializer) as ts.StringLiteralLike).text)
+          tables.add((unwrap(field.initializer) as ts.StringLiteral).text)
         }
       }
     }
@@ -770,7 +726,7 @@ function aggregateTables(
 }
 
 function mutationSupportTables(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   baseDir: string,
   sourceRoots: string[],
   namespace: DataNamespace
@@ -782,12 +738,7 @@ function mutationSupportTables(
   const scan = (path: string) => {
     if (visited.has(path)) return
     visited.add(path)
-    const source = ts.createSourceFile(
-      path,
-      readFileSync(path, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true
-    )
+    const source = project.sourceFile(path)
 
     const visit = (node: ts.Node) => {
       if (
@@ -831,7 +782,7 @@ function mutationSupportTables(
         }
       }
 
-      ts.forEachChild(node, visit)
+      node.forEachChild(visit)
     }
     visit(source)
   }
@@ -861,7 +812,7 @@ function assertNoInstanceFiles(roots: string[]) {
 }
 
 function assertNoUnclaimedNamespaces(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   baseDir: string,
   configPath: string,
   instanceDirs: string[]
@@ -883,7 +834,7 @@ function assertNoUnclaimedNamespaces(
       ) {
         continue
       }
-      const kinds = namespaceExportKinds(ts, baseDir, path)
+      const kinds = namespaceExportKinds(project, baseDir, path)
       if (kinds.model || kinds.query) {
         throw new Error(
           `[on-zero] data namespace ${path} is outside every instance directory declared in ${configPath}`
@@ -895,11 +846,11 @@ function assertNoUnclaimedNamespaces(
 }
 
 export function discoverDataLayout(
-  ts: typeof import('typescript'),
+  project: NativeTypeScriptProject,
   baseDir: string,
   configPath?: string
 ): DataLayout {
-  const config = readDataConfig(ts, baseDir, configPath)
+  const config = readDataConfig(project, baseDir, configPath)
   const configured =
     config?.instances ??
     ([
@@ -911,7 +862,7 @@ export function discoverDataLayout(
   assertNoInstanceFiles(sourceRoots)
   if (config) {
     assertNoUnclaimedNamespaces(
-      ts,
+      project,
       baseDir,
       config.path,
       configured.map((instance) => instance.dir)
@@ -930,7 +881,7 @@ export function discoverDataLayout(
   const instanceDirs = new Set(instances.map((instance) => instance.dir))
 
   for (const instance of instances) {
-    instance.namespaces = discoverNamespaces(ts, baseDir, instance, instanceDirs)
+    instance.namespaces = discoverNamespaces(project, baseDir, instance, instanceDirs)
   }
   const namespaces = instances.flatMap((instance) => instance.namespaces)
   const namespaceOwners = new Map<string, string>()
@@ -956,8 +907,8 @@ export function discoverDataLayout(
   }
 
   const metadata = metadataPaths(baseDir)
-  const relations = relationTargets(ts, metadata)
-  const columns = tableColumns(ts, metadata, namespaces)
+  const relations = relationTargets(project, metadata)
+  const columns = tableColumns(project, metadata, namespaces)
   const relatedOwners = new Map<string, string>()
   for (const instance of instances) {
     const tables = new Set(
@@ -967,7 +918,7 @@ export function discoverDataLayout(
     )
     const syncTables = new Set(tables)
     for (const namespace of instance.namespaces) {
-      for (const table of aggregateTables(ts, namespace)) {
+      for (const table of aggregateTables(project, namespace)) {
         const owner = tableOwners.get(table) ?? relatedOwners.get(table)
         if (owner && owner !== instance.name) {
           throw new Error(
@@ -979,7 +930,7 @@ export function discoverDataLayout(
         tables.add(table)
         syncTables.add(table)
       }
-      for (const reached of queriedTables(ts, namespace, relations)) {
+      for (const reached of queriedTables(project, namespace, relations)) {
         const owner = tableOwners.get(reached.table) ?? relatedOwners.get(reached.table)
         if (owner && owner !== instance.name) {
           throw new Error(
@@ -1012,7 +963,12 @@ export function discoverDataLayout(
     // instance's change log or every later pull throws on it.
     const supportTables = new Set<string>(instance.declaredSupportTables)
     for (const namespace of instance.namespaces) {
-      for (const table of mutationSupportTables(ts, baseDir, sourceRoots, namespace)) {
+      for (const table of mutationSupportTables(
+        project,
+        baseDir,
+        sourceRoots,
+        namespace
+      )) {
         if (tableOwners.has(table) || relatedOwners.has(table)) continue
         if (!instance.syncTables.includes(table)) {
           supportTables.add(table)
