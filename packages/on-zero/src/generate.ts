@@ -979,6 +979,22 @@ async function generateWithProject(
     // either: a checkout, merge or revert leaves every file present and stale.
     // confirm the bytes on disk still match what the cache says it wrote there
     // before skipping the build, or the fast path serves someone else's output.
+    //
+    // a consumer that formats generated output after this runs never hits the
+    // fast path again, because the cache holds the bytes written here and disk
+    // holds the formatted ones. soot does exactly that, `on-zero generate &&
+    // generate-instance-tables && oxfmt src/data/generated/`, and the number is
+    // already taken: 2.50s median before, 3.69s after, four warm runs each in
+    // one checkout with only the pin swapped, so about 1.2 seconds or 47
+    // percent on this step. the full three-command script went 2.65s to 3.14s
+    // with a spread that swallows most of it.
+    //
+    // the shape matters more than the number. this is not a cache that hits
+    // less often, it is a cache that never hits, so the cost does not degrade
+    // gracefully and grows with the generated output rather than staying at
+    // 1.2s. correct and slower beats fast and stale, which is why it is written
+    // this way, but if generate time ever becomes the complaint, record the
+    // hash after the consumer's formatter runs rather than weakening this.
     Object.entries(generateCache).every(([cachedPath, cachedHash]) => {
       if (!cachedPath.startsWith(generatedDir)) return true
       try {
