@@ -121,9 +121,19 @@ function saveCache() {
 
 function writeFileIfChanged(filePath: string, content: string): boolean {
   const contentHash = hash(content)
-  const cachedHash = generateCache[filePath]
 
-  if (cachedHash === contentHash && existsSync(filePath)) {
+  // compare against the bytes actually on disk, never against the cache. the
+  // cache records what this generator last WROTE to a path, and a checkout,
+  // merge, revert or hand edit replaces the file without touching it, so a
+  // cache hit does not mean the file matches. trusting it skipped the write
+  // and left stale generated output that the next build silently consumed.
+  let onDisk: string | null = null
+  try {
+    onDisk = readFileSync(filePath, 'utf-8')
+  } catch {}
+
+  if (onDisk !== null && hash(onDisk) === contentHash) {
+    generateCache[filePath] = contentHash
     return false
   }
 
@@ -964,6 +974,19 @@ async function generateWithProject(
     !force &&
     generateCache.__generatorVersion === GENERATOR_CACHE_VERSION &&
     generateCache.__inputHash === inputHash &&
+    // the input hash deliberately skips the generated directory, so it cannot
+    // notice that the outputs themselves moved. existence is not correctness
+    // either: a checkout, merge or revert leaves every file present and stale.
+    // confirm the bytes on disk still match what the cache says it wrote there
+    // before skipping the build, or the fast path serves someone else's output.
+    Object.entries(generateCache).every(([cachedPath, cachedHash]) => {
+      if (!cachedPath.startsWith(generatedDir)) return true
+      try {
+        return hash(readFileSync(cachedPath, 'utf-8')) === cachedHash
+      } catch {
+        return false
+      }
+    }) &&
     existsSync(resolve(generatedDir, 'models.ts')) &&
     (!needsSqliteZeroSchema || existsSync(resolve(generatedDir, 'schema.ts')))
   ) {
