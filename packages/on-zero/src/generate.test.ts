@@ -87,6 +87,26 @@ describe('generate', () => {
     expect(existsSync(syncedQueriesPath)).toBe(true)
   })
 
+  test('rewrites a generated file whose contents changed underneath it', async () => {
+    writeFileSync(
+      join(testDir, 'post/mutations.ts'),
+      `export const schema = table('post', { id: string() })`
+    )
+    await generate({ dir: testDir, silent: true })
+
+    // a checkout, merge or revert replaces generated output without telling the
+    // cache, which still records the hash this generator last wrote there. the
+    // file exists and the recomputed content is unchanged, so every signal
+    // except the bytes themselves says there is nothing to do.
+    const modelsPath = join(testDir, 'generated/models.ts')
+    const generated = readFileSync(modelsPath, 'utf-8')
+    writeFileSync(modelsPath, '// replaced by a checkout\n')
+
+    await generate({ dir: testDir, silent: true })
+
+    expect(readFileSync(modelsPath, 'utf-8')).toBe(generated)
+  })
+
   test('writes drizzle-zero sqlite schema from database/schema.ts', async () => {
     const dataDir = join(testDir, 'src/data')
     writeFileSync(join(dataDir, 'post.ts'), `export const posts = () => zql.post`)

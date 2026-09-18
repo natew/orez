@@ -178,9 +178,20 @@ export function createMutators<Models extends GenericModels>({
 
     return async (...args: Args): Promise<void> => {
       // args[0] is tx, args[1] is the mutation args
-      // auto-validate with generated valibot schema first
-      // skip validation for null/undefined args (void mutations send null from zero)
-      if (validator && args[1] != null) {
+      // auto-validate with generated valibot schema first.
+      //
+      // the skip is keyed on the SCHEMA, never on the value. skipping whenever
+      // args were null keyed the only shape check at this boundary on something
+      // the caller chooses, so a mutator declaring required args could be
+      // reached unvalidated by sending null, and the handler ran on whatever
+      // was left. the case the skip exists for is a mutation that declares no
+      // args at all, which zero calls with null, so ask whether the validator
+      // declares anything instead: a void schema, or an object with no entries.
+      const declaresNothing =
+        (validator as { type?: string } | undefined)?.type === 'void' ||
+        ((validator as { type?: string } | undefined)?.type === 'object' &&
+          Object.keys((validator as { entries?: object }).entries ?? {}).length === 0)
+      if (validator && !declaresNothing) {
         const valibot = await import('valibot')
         valibot.parse(validator, args[1])
       }

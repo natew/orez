@@ -121,9 +121,19 @@ function saveCache() {
 
 function writeFileIfChanged(filePath: string, content: string): boolean {
   const contentHash = hash(content)
-  const cachedHash = generateCache[filePath]
 
-  if (cachedHash === contentHash && existsSync(filePath)) {
+  // compare against the bytes actually on disk, never against the cache. the
+  // cache records what this generator last WROTE to a path, and a checkout,
+  // merge, revert or hand edit replaces the file without touching it, so a
+  // cache hit does not mean the file matches. trusting it skipped the write
+  // and left stale generated output that the next build silently consumed.
+  let onDisk: string | null = null
+  try {
+    onDisk = readFileSync(filePath, 'utf-8')
+  } catch {}
+
+  if (onDisk !== null && hash(onDisk) === contentHash) {
+    generateCache[filePath] = contentHash
     return false
   }
 
@@ -964,6 +974,35 @@ async function generateWithProject(
     !force &&
     generateCache.__generatorVersion === GENERATOR_CACHE_VERSION &&
     generateCache.__inputHash === inputHash &&
+    // the input hash deliberately skips the generated directory, so it cannot
+    // notice that the outputs themselves moved. existence is not correctness
+    // either: a checkout, merge or revert leaves every file present and stale.
+    // confirm the bytes on disk still match what the cache says it wrote there
+    // before skipping the build, or the fast path serves someone else's output.
+    //
+    // a consumer that formats generated output after this runs never hits the
+    // fast path again, because the cache holds the bytes written here and disk
+    // holds the formatted ones. soot does exactly that, `on-zero generate &&
+    // generate-instance-tables && oxfmt src/data/generated/`, and the number is
+    // already taken: 2.50s median before, 3.69s after, four warm runs each in
+    // one checkout with only the pin swapped, so about 1.2 seconds or 47
+    // percent on this step. the full three-command script went 2.65s to 3.14s
+    // with a spread that swallows most of it.
+    //
+    // the shape matters more than the number. this is not a cache that hits
+    // less often, it is a cache that never hits, so the cost does not degrade
+    // gracefully and grows with the generated output rather than staying at
+    // 1.2s. correct and slower beats fast and stale, which is why it is written
+    // this way, but if generate time ever becomes the complaint, record the
+    // hash after the consumer's formatter runs rather than weakening this.
+    Object.entries(generateCache).every(([cachedPath, cachedHash]) => {
+      if (!cachedPath.startsWith(generatedDir)) return true
+      try {
+        return hash(readFileSync(cachedPath, 'utf-8')) === cachedHash
+      } catch {
+        return false
+      }
+    }) &&
     existsSync(resolve(generatedDir, 'models.ts')) &&
     (!needsSqliteZeroSchema || existsSync(resolve(generatedDir, 'schema.ts')))
   ) {
