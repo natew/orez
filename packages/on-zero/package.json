@@ -1,6 +1,6 @@
 {
   "name": "on-zero",
-  "version": "0.16.17",
+  "version": "0.16.18",
   "description": "A typed layer over @rocicorp/zero with queries, mutations, and permissions",
   "sideEffects": false,
   "files": [
