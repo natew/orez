@@ -332,6 +332,7 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
             query_resolution: Some(QueryResolution { resolve }),
             admin_tx_lease: crate::DEFAULT_ADMIN_TX_LEASE,
             retention,
+            sqlite_tuning: crate::SqliteTuning::default(),
         },
         config.data_dir,
         security,

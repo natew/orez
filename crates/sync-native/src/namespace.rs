@@ -186,7 +186,7 @@ pub(crate) fn rows_changed(conn: &Connection, before: u64) -> u64 {
     }
 }
 
-fn open_connection(path: &Path) -> Result<Connection, String> {
+fn open_connection(path: &Path, tuning: crate::SqliteTuning) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     conn.execute_batch(
         // journal_size_limit truncates the WAL back to at most this size after a
@@ -200,6 +200,13 @@ fn open_connection(path: &Path) -> Result<Connection, String> {
          PRAGMA foreign_keys = OFF;",
     )
     .map_err(|e| e.to_string())?;
+    // cache_size is negative-KiB; mmap_size is a byte ceiling, not a
+    // reservation. both are per-connection, so every namespace worker needs
+    // them (and only here — application SQL cannot set pragmas).
+    conn.pragma_update(None, "cache_size", -tuning.page_cache_kb)
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "mmap_size", tuning.mmap_bytes)
+        .map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -402,13 +409,14 @@ fn spawn(
     path: PathBuf,
     init: InitFn,
     lease: Duration,
+    tuning: crate::SqliteTuning,
 ) -> Result<(Namespace, JoinHandle<()>), String> {
     let (sender, receiver) = std::sync::mpsc::channel::<Job>();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let handle = std::thread::Builder::new()
         .name(format!("ns-{name}"))
         .spawn(move || {
-            let conn = match open_connection(&path) {
+            let conn = match open_connection(&path, tuning) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -476,15 +484,22 @@ pub struct Manager {
     // idle-between-steps budget for an admin transaction before the worker
     // reclaims the namespace (see worker_loop).
     admin_tx_lease: Duration,
+    sqlite_tuning: crate::SqliteTuning,
 }
 
 impl Manager {
-    pub fn new(data_dir: PathBuf, init: InitFn, admin_tx_lease: Duration) -> Self {
+    pub fn new(
+        data_dir: PathBuf,
+        init: InitFn,
+        admin_tx_lease: Duration,
+        sqlite_tuning: crate::SqliteTuning,
+    ) -> Self {
         Self {
             data_dir,
             namespaces: Mutex::new(HashMap::new()),
             init,
             admin_tx_lease,
+            sqlite_tuning,
         }
     }
 
@@ -502,7 +517,13 @@ impl Manager {
             return Ok(entry.ns.clone());
         }
         let path = self.data_dir.join(format!("{key}.sqlite"));
-        let (namespace, handle) = spawn(&key, path, self.init.clone(), self.admin_tx_lease)?;
+        let (namespace, handle) = spawn(
+            &key,
+            path,
+            self.init.clone(),
+            self.admin_tx_lease,
+            self.sqlite_tuning,
+        )?;
         let namespace = Arc::new(namespace);
         map.insert(
             key,
@@ -742,7 +763,8 @@ mod tests {
     fn namespace_with_init(lease: Duration, init: InitFn) -> (tempfile::TempDir, Namespace) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.sqlite");
-        let (ns, _handle) = spawn("test", path, init, lease).unwrap();
+        let (ns, _handle) =
+            spawn("test", path, init, lease, crate::SqliteTuning::default()).unwrap();
         (dir, ns)
     }
 
@@ -752,7 +774,12 @@ mod tests {
             db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)", &[])
                 .map_err(|e| e.0)
         });
-        let manager = Manager::new(dir.path().to_path_buf(), init, Duration::from_secs(5));
+        let manager = Manager::new(
+            dir.path().to_path_buf(),
+            init,
+            Duration::from_secs(5),
+            crate::SqliteTuning::default(),
+        );
         (dir, manager)
     }
 
@@ -804,6 +831,7 @@ mod tests {
                 sync_core::init_schema(db, &init_tables).map_err(|error| error.0)
             }),
             Duration::from_secs(5),
+            crate::SqliteTuning::default(),
         ));
         let start = Arc::new(std::sync::Barrier::new(THREADS));
         let worker_threads = Arc::new(Mutex::new(HashSet::new()));
@@ -1155,6 +1183,50 @@ mod tests {
             Some(SqlValue::Integer(n)) => *n,
             other => panic!("expected integer count, got {other:?}"),
         }
+    }
+
+    async fn pragma_value(ns: &Namespace, pragma: &str) -> i64 {
+        let sql = format!("PRAGMA {pragma}");
+        let column = pragma.to_string();
+        let rows = ns
+            .run(move |c| {
+                let mut db = RusqliteDb::new(c);
+                db.query(&sql, &[]).unwrap()
+            })
+            .await;
+        match rows[0].get(&column) {
+            Some(SqlValue::Integer(n)) => *n,
+            other => panic!("expected integer {pragma}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn namespace_connections_apply_default_sqlite_tuning() {
+        let (_dir, manager) = test_manager();
+        let ns = manager.get("tuned").unwrap();
+        assert_eq!(pragma_value(&ns, "cache_size").await, -65536);
+        assert_eq!(pragma_value(&ns, "mmap_size").await, 268435456);
+    }
+
+    #[tokio::test]
+    async fn namespace_connections_honor_custom_sqlite_tuning() {
+        let dir = tempfile::tempdir().unwrap();
+        let init: InitFn = Arc::new(|db: &mut dyn SyncDb| {
+            db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)", &[])
+                .map_err(|e| e.0)
+        });
+        let manager = Manager::new(
+            dir.path().to_path_buf(),
+            init,
+            Duration::from_secs(5),
+            crate::SqliteTuning {
+                page_cache_kb: 131072,
+                mmap_bytes: 1073741824,
+            },
+        );
+        let ns = manager.get("tuned").unwrap();
+        assert_eq!(pragma_value(&ns, "cache_size").await, -131072);
+        assert_eq!(pragma_value(&ns, "mmap_size").await, 1073741824);
     }
 
     async fn row_count(ns: &Namespace, table: &str) -> i64 {

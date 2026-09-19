@@ -155,6 +155,7 @@ async fn main() {
         // the fixture harness owns short-lived data dirs, so it does not need a
         // background file-deletion policy.
         retention: sync_native::retain::RetentionPolicy::disabled(),
+        sqlite_tuning: sync_native::SqliteTuning::default(),
     };
 
     let mut security = cli

@@ -241,6 +241,30 @@ fn valid_origin(origin: &str) -> bool {
 
 // ---- public config -------------------------------------------------------
 
+/// SQLite page-cache and mmap sizing for namespace replica connections.
+///
+/// The 2 MB SQLite default keeps tiny hosts lean but turns every B-tree
+/// descent into a pread once the store passes a few hundred MB (measured:
+/// thousands of preads per second serving a 336 MB replica). The default
+/// below (64 MB cache, 256 MB mmap ceiling) fits even small hosts and
+/// removes the worst of it; large installs should raise both.
+#[derive(Debug, Clone, Copy)]
+pub struct SqliteTuning {
+    /// Page-cache size in KiB (`PRAGMA cache_size = -<this>`).
+    pub page_cache_kb: i64,
+    /// Mmap ceiling in bytes (`PRAGMA mmap_size = <this>`).
+    pub mmap_bytes: i64,
+}
+
+impl Default for SqliteTuning {
+    fn default() -> Self {
+        Self {
+            page_cache_kb: 65536,
+            mmap_bytes: 268435456,
+        }
+    }
+}
+
 /// Complete configuration for a sync-native host. Populate this with your
 /// schema, DDL/seed, mutators, and auth, then pass it to
 /// `SyncNativeHost::new`.
@@ -310,6 +334,11 @@ pub struct SyncNativeConfig {
     /// only runs when the host is started with [`SyncNativeHost::run`] or
     /// [`SyncNativeHost::run_on`].
     pub retention: retain::RetentionPolicy,
+
+    /// SQLite page-cache and mmap sizing for namespace replicas.
+    /// Defaults fit small hosts; raise both once the store passes a few
+    /// hundred MB. See [`SqliteTuning`].
+    pub sqlite_tuning: SqliteTuning,
 }
 
 // ---- host ----------------------------------------------------------------
@@ -355,7 +384,12 @@ impl SyncNativeHost {
         let init_ctx = ctx.clone();
         let init: namespace::InitFn =
             Arc::new(move |db: &mut dyn sync_core::SyncDb| engine::init_namespace(db, &init_ctx));
-        let manager = Arc::new(Manager::new(data_dir.clone(), init, config.admin_tx_lease));
+        let manager = Arc::new(Manager::new(
+            data_dir.clone(),
+            init,
+            config.admin_tx_lease,
+            config.sqlite_tuning,
+        ));
 
         // startup sweep: no namespaces are open yet, so this is a pure on-disk
         // reclamation with nothing to race. it clears replicas left behind by
