@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table, UpdateNeededReasonType } from '@rocicorp/zero'
 import { act, Suspense, useLayoutEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -135,6 +135,37 @@ test('remint drops local state and reconstructs a fresh instance in place', asyn
   expect(first?.delete).toHaveBeenCalledTimes(1)
   expect(fakeZero.instances.length).toBe(countBefore + 1)
   expect(fakeZero.instances.at(-1)).not.toBe(first)
+})
+
+test('closed headless connection ignores a late update without a recovery error', async () => {
+  const isolated = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'closed-headless-recovery-test',
+  })
+  const connection = isolated.connectHeadless({
+    cacheURL: 'http://127.0.0.1:7777/zero',
+    userID: 'closed-headless-recovery',
+    kvStore: 'mem',
+    storageKey: 'closed-headless-recovery',
+  })
+  const instance = fakeZero.instances.at(-1)
+  expect(instance).toBeDefined()
+  await connection.close()
+
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    instance?.options.onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(consoleError).not.toHaveBeenCalledWith(
+      '[on-zero] recovery could not reload or reconstruct the client'
+    )
+  } finally {
+    consoleError.mockRestore()
+  }
 })
 
 test('provider generation changes with the actual instance during remint', async () => {
