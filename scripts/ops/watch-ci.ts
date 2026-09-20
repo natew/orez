@@ -32,15 +32,23 @@ if (runID && (flag('sha') || workflow)) {
 // `gh run list --commit` matches the full 40-character sha only: an
 // abbreviated one silently returns no runs, which reads as "CI has not started"
 // forever rather than as a bad argument.
-const sha = runID
-  ? ''
-  : new TextDecoder()
-      .decode(
-        await new Response(
-          Bun.spawn(['git', 'rev-parse', flag('sha') ?? 'HEAD']).stdout
-        ).arrayBuffer()
-      )
-      .trim()
+let sha = ''
+if (!runID) {
+  const requestedSha = flag('sha') ?? 'HEAD'
+  const resolveSha = Bun.spawn(
+    ['git', 'rev-parse', '--verify', '--end-of-options', `${requestedSha}^{commit}`],
+    { stderr: 'pipe' }
+  )
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(resolveSha.stdout).text(),
+    new Response(resolveSha.stderr).text(),
+    resolveSha.exited,
+  ])
+  if (exitCode !== 0) {
+    throw new Error(`unknown commit ${requestedSha}: ${stderr.trim()}`)
+  }
+  sha = stdout.trim()
+}
 const intervalMs = Math.max(60, Number(flag('interval') ?? 180)) * 1000
 const deadline = Date.now() + Math.max(60, Number(flag('timeout') ?? 2400)) * 1000
 
