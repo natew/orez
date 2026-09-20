@@ -1235,7 +1235,10 @@ export function createZeroClientInternal<
         // reload. replace the disabled instance directly, then republish the
         // stable module facade and move the connection watcher with it.
         recoverInPlace: async () => {
-          if (closed) return false
+          // an update can arrive after the host intentionally closed this
+          // connection during preview turnover. there is no live client left
+          // to reconstruct, so recovery is already satisfied.
+          if (closed) return true
           const outgoing = activeInstance
           unwatch()
           clearZeroInstanceReferences(outgoing)

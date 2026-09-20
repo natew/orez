@@ -183,6 +183,24 @@ describe('zero recovery', () => {
     expect(reload).toHaveBeenCalledTimes(2)
   })
 
+  test('same-origin sibling documents do not share a recovery guard', async () => {
+    const { deps, reload, events } = setup()
+    const originalUrl = window.location.href
+    try {
+      window.history.replaceState({}, '', '/preview/first')
+      makeZeroRecovery(deps).onClientStateNotFound()
+      await flush()
+      resetRecoveryStateForTests()
+      window.history.replaceState({}, '', '/preview/second')
+      makeZeroRecovery(deps).onClientStateNotFound()
+      await flush()
+    } finally {
+      window.history.replaceState({}, '', originalUrl)
+    }
+    expect(reload).toHaveBeenCalledTimes(2)
+    expect(events.filter((event) => event.type === 'fatal')).toEqual([])
+  })
+
   test('logSink recovers on local-store-lost and forwards to the consumer sink', async () => {
     const { deps, deleteLocalState, reload } = setup()
     const consumer = { log: vi.fn() }

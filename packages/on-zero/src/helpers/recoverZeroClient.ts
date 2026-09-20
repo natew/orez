@@ -123,7 +123,15 @@ function recoveryGuardOpen(
   reasonKey: ZeroRecoveryReasonKey,
   guardStorage: RecoveryGuardStorage | undefined
 ): boolean {
-  const key = `on-zero-recover-${reasonKey}`
+  // sessionStorage is shared by same-origin frames in one top-level tab. scope
+  // its guard to the current document so one preview frame recovering does not
+  // falsely fatal a sibling frame. the URL survives a reload, preserving the
+  // cross-reload loop guard for the document that actually recovered.
+  let documentScope = ''
+  try {
+    documentScope = globalThis.location?.href ?? ''
+  } catch {}
+  const key = `on-zero-recover-${documentScope}-${reasonKey}`
   const now = Date.now()
 
   const memLast = inMemoryGuard.get(key) ?? 0
