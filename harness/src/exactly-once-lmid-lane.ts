@@ -358,9 +358,25 @@ const dropFetch: typeof fetch = async (input, init) => {
   throw new Error('operation-bound post-commit response loss')
 }
 const pullController = createPullQuiescenceFetch(dropFetch)
+let preflightPullsReleased = false
+let releasePreflightPulls!: () => void
+const preflightPullGate = new Promise<void>((resolve) => {
+  releasePreflightPulls = () => {
+    preflightPullsReleased = true
+    resolve()
+  }
+})
 const stockFetch = observedSyncFetch(
   (observation) => protocolObservation('stock-client', observation),
-  pullController.fetch
+  async (input, init) => {
+    const url = new URL(
+      typeof input === 'string' || input instanceof URL ? input : input.url
+    )
+    if (!preflightPullsReleased && url.pathname.endsWith('/pull')) {
+      await preflightPullGate
+    }
+    return pullController.fetch(input, init)
+  }
 )
 const harnessReplayFetch = observedSyncFetch((observation) =>
   protocolObservation('harness-replay', observation)
@@ -431,6 +447,7 @@ try {
     })
   }
   await authority('before')
+  releasePreflightPulls()
 
   const clientProbeStable = {
     type: 'client-probe' as const,
@@ -755,6 +772,7 @@ try {
   throw error
 } finally {
   recordingProtocol = false
+  releasePreflightPulls()
   await client?.close().catch(() => {})
   await observerClient?.close().catch(() => {})
   await target.close()
