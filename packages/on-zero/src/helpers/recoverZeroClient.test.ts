@@ -118,6 +118,38 @@ describe('zero recovery', () => {
     expect(recoverB).toHaveBeenCalledTimes(1)
   })
 
+  test('duplicate native recovery signals remint one client once', async () => {
+    const { deps } = setup()
+    deps.reload = undefined
+    const recoverInPlace = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false)
+    deps.recoverInPlace = recoverInPlace
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const originalLocation = globalThis.location
+    Object.defineProperty(globalThis, 'location', {
+      configurable: true,
+      value: undefined,
+    })
+    try {
+      const recovery = makeZeroRecovery(deps)
+      recovery.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+      recovery.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+      await flush()
+      expect(recoverInPlace).toHaveBeenCalledTimes(1)
+      expect(consoleError).not.toHaveBeenCalledWith(
+        '[on-zero] recovery could not reload or reconstruct the client'
+      )
+    } finally {
+      Object.defineProperty(globalThis, 'location', {
+        configurable: true,
+        value: originalLocation,
+      })
+      consoleError.mockRestore()
+    }
+  })
+
   test('a second trigger in the same page-load adds no extra reload or fatal', async () => {
     const { deps, reload, events } = setup()
     const recovery = makeZeroRecovery(deps)

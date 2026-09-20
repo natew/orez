@@ -246,7 +246,9 @@ function recover(
   if (dropLocalState) {
     pendingDeletes.push(() => Promise.resolve().then(deps.deleteLocalState))
   }
-  if (deps.recoverInPlace) pendingInPlaceRecoveries.push(deps.recoverInPlace)
+  if (deps.recoverInPlace && !pendingInPlaceRecoveries.includes(deps.recoverInPlace)) {
+    pendingInPlaceRecoveries.push(deps.recoverInPlace)
+  }
   // only ONE reload per page-load; a later trigger just contributes its delete.
   if (reloadScheduled) return
   if (!recoveryGuardOpen(reasonKey, deps.guardStorage)) {
