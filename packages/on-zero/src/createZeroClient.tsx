@@ -350,6 +350,8 @@ export function createZeroClientInternal<
     scheduleReload?: (ctx: ScheduleReloadContext) => void
     guardStorage?: RecoveryGuardStorage
     benignLogPatterns?: readonly ZeroLogPattern[]
+    recoverInPlace?: () => Promise<boolean>
+    reload?: () => void | boolean
   }
 
   // build a Zero instance with on-zero's recovery wiring. shared by the
@@ -363,6 +365,8 @@ export function createZeroClientInternal<
     scheduleReload,
     guardStorage,
     benignLogPatterns,
+    recoverInPlace,
+    reload,
   }: ConstructZeroInstanceArgs): ZeroInstance {
     let installedTransport: Pick<HttpPullTransport, 'subscribeLifecycle'> | undefined
     // install before construction so the instance's first connect goes through
@@ -392,7 +396,8 @@ export function createZeroClientInternal<
         ...(benignLogPatterns ?? []),
       ],
       onRecovery: () => mutationLifecycle.fence(),
-      recoverInPlace: () => remint({ dropLocalState: false }),
+      recoverInPlace: recoverInPlace ?? (() => remint({ dropLocalState: false })),
+      reload,
     }
     const recovery = makeZeroRecovery(recoveryDeps)
     const createdInstance = new ZeroClient<Schema, ZeroMutators>({
@@ -1215,28 +1220,59 @@ export function createZeroClientInternal<
     // mutations read auth dynamically through getAuthData(), so this has to be
     // set before the first mutation exactly as the provider sets it in render.
     setAuthData((authData ?? null) as AuthData)
-    const zeroInstance = constructZeroInstance({
-      options,
-      transport,
-      beforeReload,
-      scheduleReload,
-      guardStorage,
-      benignLogPatterns,
-    })
-    publishZeroInstance(zeroInstance)
+    let closed = false
+    let activeInstance: ZeroInstance
+    let unwatch = () => {}
+    const construct = () =>
+      constructZeroInstance({
+        options,
+        transport,
+        beforeReload,
+        scheduleReload,
+        guardStorage,
+        benignLogPatterns,
+        // a headless host has no provider state to bump and no page it owns to
+        // reload. replace the disabled instance directly, then republish the
+        // stable module facade and move the connection watcher with it.
+        recoverInPlace: async () => {
+          if (closed) return false
+          const outgoing = activeInstance
+          unwatch()
+          clearZeroInstanceReferences(outgoing)
+          mutationLifecycle.fence()
+          try {
+            outgoing.close()
+          } catch {}
+          activeInstance = construct()
+          publishZeroInstance(activeInstance)
+          zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
+          unwatch = watchZeroConnection({
+            zeroInstance: activeInstance,
+            auth: options.auth,
+            refreshAuth,
+          })
+          return true
+        },
+        reload: () => false,
+      })
+    activeInstance = construct()
+    publishZeroInstance(activeInstance)
     zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
-    const unwatch = watchZeroConnection({
-      zeroInstance,
+    unwatch = watchZeroConnection({
+      zeroInstance: activeInstance,
       auth: options.auth,
       refreshAuth,
     })
     return {
-      zero: zeroInstance,
+      get zero() {
+        return activeInstance
+      },
       close: async () => {
+        closed = true
         unwatch()
-        clearZeroInstanceReferences(zeroInstance)
+        clearZeroInstanceReferences(activeInstance)
         mutationLifecycle.fence()
-        await zeroInstance.close()
+        await activeInstance.close()
       },
     }
   }

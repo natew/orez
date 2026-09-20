@@ -431,3 +431,27 @@ test('retire tears down on every sign-out, including inside remint guard window'
   expect(second?.delete).toHaveBeenCalledTimes(1)
   expect(fakeZero.instances.at(-1)).not.toBe(second)
 })
+
+test('headless NewClientGroup recovery reconstructs its client without a provider', async () => {
+  const isolated = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'headless-recovery-test',
+  })
+  const connection = isolated.connectHeadless({
+    cacheURL: 'http://127.0.0.1:7777/zero',
+    userID: 'headless-recovery',
+  })
+  const first = fakeZero.instances.at(-1)!
+  const countBefore = fakeZero.instances.length
+
+  first.options.onUpdateNeeded({ type: 'NewClientGroup' })
+
+  await vi.waitFor(() => expect(fakeZero.instances).toHaveLength(countBefore + 1))
+  expect(connection.zero).not.toBe(first)
+  expect(await isolated.waitForZero()).toBe(connection.zero)
+  expect(first.close).toHaveBeenCalledOnce()
+
+  await connection.close()
+})
