@@ -188,6 +188,67 @@ test('provider generation changes with the actual instance during remint', async
   expect(generations[1]?.isCurrent()).toBe(false)
 })
 
+test('remounting a cached client mints a permanently distinct provider generation', async () => {
+  const generationClient = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'provider-remount-generation-test',
+  })
+  const generations: Array<
+    NonNullable<ReturnType<typeof generationClient.useZeroProviderGeneration>>
+  > = []
+
+  function GenerationProbe() {
+    const generation = generationClient.useZeroProviderGeneration()
+    useLayoutEffect(() => {
+      if (generation) generations.push(generation)
+    }, [generation])
+    return null
+  }
+
+  async function renderProvider() {
+    root = createRoot(container)
+    await act(async () => {
+      root?.render(
+        <generationClient.ProvideZero
+          cacheURL="http://127.0.0.1:7777/zero"
+          userID="provider-remount-generation-test"
+        >
+          <GenerationProbe />
+        </generationClient.ProvideZero>
+      )
+      await Promise.resolve()
+    })
+  }
+
+  await renderProvider()
+  const cachedInstance = fakeZero.instances.at(-1)
+  const instanceCount = fakeZero.instances.length
+  const firstGeneration = generations[0]
+  expect(firstGeneration?.isCurrent()).toBe(true)
+
+  act(() => root?.unmount())
+  root = null
+  expect(firstGeneration?.isCurrent()).toBe(false)
+
+  await renderProvider()
+  const secondGeneration = generations[1]
+  expect(fakeZero.instances).toHaveLength(instanceCount)
+  expect(fakeZero.instances.at(-1)).toBe(cachedInstance)
+  expect(secondGeneration).not.toBe(firstGeneration)
+  expect(firstGeneration?.isCurrent()).toBe(false)
+  expect(secondGeneration?.isCurrent()).toBe(true)
+
+  const dispatched: string[] = []
+  const dispatchIfCurrent = (generation: ZeroProviderGeneration, label: string) => {
+    if (generation.isCurrent()) dispatched.push(label)
+  }
+  if (firstGeneration) dispatchIfCurrent(firstGeneration, 'retired')
+  if (secondGeneration) dispatchIfCurrent(secondGeneration, 'current')
+  expect(dispatched).toEqual(['current'])
+})
+
 test('remint with no provider mounted returns false without burning the guard budget', async () => {
   // own client so the shared remint guard state is fresh for this assertion.
   const isolated = createZeroClient({

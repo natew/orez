@@ -303,19 +303,17 @@ export function createZeroClientInternal<
 
   const DisabledContext = createContext<QueryControlMode>(false)
   const ZeroProviderGenerationContext = createContext<ZeroProviderGeneration | null>(null)
-  const zeroProviderGenerations = new WeakMap<object, ZeroProviderGeneration>()
+  let activeZeroProviderGeneration: ZeroProviderGeneration | null = null
 
   function useZeroProviderGeneration(): ZeroProviderGeneration | null {
     return useContext(ZeroProviderGenerationContext)
   }
 
-  function getZeroProviderGeneration(zeroInstance: ZeroInstance): ZeroProviderGeneration {
-    const existing = zeroProviderGenerations.get(zeroInstance)
-    if (existing) return existing
+  function createZeroProviderGeneration(zeroInstance: ZeroInstance): ZeroProviderGeneration {
     const generation = {
-      isCurrent: () => zeroRuntime.zero === zeroInstance,
+      isCurrent: () =>
+        activeZeroProviderGeneration === generation && zeroRuntime.zero === zeroInstance,
     }
-    zeroProviderGenerations.set(zeroInstance, generation)
     return generation
   }
 
@@ -413,7 +411,11 @@ export function createZeroClientInternal<
   // the provider calls this during render (before descendant effects do
   // imperative work) and connectHeadless calls it directly — the `zero` proxy,
   // run(), and waitForZero() resolve identically either way.
-  function publishZeroInstance(zeroInstance: ZeroInstance): boolean {
+  function publishZeroInstance(
+    zeroInstance: ZeroInstance,
+    providerGeneration: ZeroProviderGeneration | null = null
+  ): boolean {
+    activeZeroProviderGeneration = providerGeneration
     if (zeroInstance === zeroRuntime.zero) return false
     // retiring the outgoing client and activating the replacement is one step:
     // a write queued against the client being replaced must not land on its
@@ -692,6 +694,7 @@ export function createZeroClientInternal<
   function unpublishZeroInstance(instanceToInvalidate: ZeroInstance): boolean {
     if (zeroRuntime.zero !== instanceToInvalidate) return false
     zeroRuntime.zero = null
+    activeZeroProviderGeneration = null
     instance.runner = null
     setRunner(null)
     return true
@@ -1057,6 +1060,24 @@ export function createZeroClientInternal<
       liveCacheEntry = activeZero
     }
 
+    // provider authority follows the mounted provider lifetime, not the warm
+    // zero client cache. an actual unmount/remount intentionally reuses the
+    // client but receives a fresh generation, while strict-effects replay on
+    // the same mount keeps this ref and republishes the same generation.
+    const providerGenerationRef = useRef<{
+      zeroInstance: ZeroInstance
+      generation: ZeroProviderGeneration
+    } | null>(null)
+    if (!liveInstance) {
+      providerGenerationRef.current = null
+    } else if (providerGenerationRef.current?.zeroInstance !== liveInstance) {
+      providerGenerationRef.current = {
+        zeroInstance: liveInstance,
+        generation: createZeroProviderGeneration(liveInstance),
+      }
+    }
+    const providerGeneration = providerGenerationRef.current?.generation ?? null
+
     // a disabled provider stops being ready before descendant passive effects
     // run. the instance stays cached — disable is a gate, not a teardown — so
     // flipping back on reuses it. a rotation needs nothing here: the render
@@ -1107,7 +1128,7 @@ export function createZeroClientInternal<
         <DisabledContext.Provider value={liveInstance ? false : 'empty'}>
           <ZeroContext.Provider value={liveInstance ?? (DISABLED_ZERO_STUB as any)}>
             <ZeroProviderGenerationContext.Provider
-              value={liveInstance ? getZeroProviderGeneration(liveInstance) : null}
+              value={providerGeneration}
             >
               {liveInstance ? <SetZeroInstance /> : null}
               {liveInstance ? (
@@ -1135,20 +1156,21 @@ export function createZeroClientInternal<
 
   const SetZeroInstance = () => {
     const zeroInstance = useZero<Schema, ZeroMutators>()
+    const providerGeneration = useZeroProviderGeneration()
 
     // publish before descendant effects perform imperative work.
-    publishZeroInstance(zeroInstance)
+    publishZeroInstance(zeroInstance, providerGeneration)
 
     useLayoutEffect(() => {
       // strict-effects replays cleanup without another render. republish in
       // setup so the provider remains current after that replay, and unpublish
       // the exact instance synchronously when its provider actually leaves.
-      publishZeroInstance(zeroInstance)
+      publishZeroInstance(zeroInstance, providerGeneration)
       return () => {
         if (!unpublishZeroInstance(zeroInstance)) return
         mutationLifecycle.fence()
       }
-    }, [zeroInstance])
+    }, [zeroInstance, providerGeneration])
 
     useEffect(() => {
       zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)

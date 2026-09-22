@@ -117,4 +117,5 @@ SQL read session by default, so an arriving writer preempts the export and the
 result reports `outcome: 'preempted'`. A caller that owns a bounded freshness
 policy can pass `{ priority: 'normal' }`; that scan waits behind already-admitted
 and earlier queued writers, then retains its queue position ahead of later
-writers. Both modes use the same single transaction-consistent scan.
+normal and background writers. Latency-sensitive work can still pass it. Both
+modes use the same single transaction-consistent scan.
