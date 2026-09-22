@@ -33,12 +33,38 @@
       "types": "./dist/seed.d.ts",
       "import": "./dist/seed.js",
       "default": "./dist/seed.js"
+    },
+    "./postgres": {
+      "types": "./dist/takeout/index.d.ts",
+      "import": "./dist/takeout/index.js",
+      "default": "./dist/takeout/index.js"
+    },
+    "./postgres/*": {
+      "types": "./dist/takeout/*.d.ts",
+      "import": "./dist/takeout/*.js",
+      "default": "./dist/takeout/*.js"
+    },
+    "./scripts/*": {
+      "types": "./dist/takeout/scripts/*.d.ts",
+      "import": "./dist/takeout/scripts/*.js",
+      "default": "./dist/takeout/scripts/*.js"
+    },
+    "./postgres/helpers": {
+      "types": "./dist/takeout/index.d.ts",
+      "import": "./dist/takeout/index.js",
+      "default": "./dist/takeout/index.js"
+    },
+    "./*": {
+      "types": "./dist/takeout/*.d.ts",
+      "import": "./dist/takeout/*.js",
+      "default": "./dist/takeout/*.js"
     }
   },
   "files": [
     "dist",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "src/takeout"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
@@ -50,7 +76,9 @@
   },
   "peerDependencies": {
     "better-auth": ">=1.6.0 <2",
-    "drizzle-orm": ">=1.0.0-beta.0 <2"
+    "drizzle-orm": ">=1.0.0-beta.0 <2",
+    "pg": "^8.16.3",
+    "vite": ">=5"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
@@ -58,9 +86,31 @@
     "drizzle-orm": "1.0.0-beta.9-e89174b",
     "oxfmt": "0.28.0",
     "oxlint": "1.43.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "@types/pg": "^8.11.10"
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@o/helpers": "workspace:*",
+    "@types/async-retry": "1.4.9",
+    "async-retry": "^1.3.3",
+    "citty": "^0.1.6",
+    "@aws-sdk/client-s3": "^3.709.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    },
+    "better-auth": {
+      "optional": true
+    },
+    "vite": {
+      "optional": true
+    }
+  },
+  "bin": {
+    "database": "./dist/takeout/cli.js"
   }
 }

@@ -1,0 +1,65 @@
+{
+  "name": "@o/better-auth-utils",
+  "version": "0.16.19",
+  "description": "Better auth utilities and client for React/React Native applications",
+  "sideEffects": false,
+  "type": "module",
+  "source": "src/index.ts",
+  "main": "dist/cjs",
+  "module": "dist/esm",
+  "types": "./src/index.ts",
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tamagui-build --skip-types",
+    "watch": "tamagui-build --skip-types --watch",
+    "test": "vitest run",
+    "lint": "oxlint src",
+    "lint:fix": "oxfmt src && oxlint --fix --fix-suggestions src",
+    "clean": "tamagui-build clean",
+    "clean:build": "tamagui-build clean:build"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "react-native": "./dist/esm/index.native.js",
+      "types": "./src/index.ts",
+      "import": "./dist/esm/index.mjs",
+      "require": "./dist/cjs/index.cjs",
+      "default": "./dist/esm/index.mjs"
+    },
+    "./server": {
+      "types": "./src/server.ts",
+      "import": "./dist/esm/server.mjs",
+      "require": "./dist/cjs/server.cjs",
+      "default": "./dist/esm/server.mjs"
+    }
+  },
+  "dependencies": {
+    "@o/helpers": "workspace:*",
+    "jose": "^6.0.10"
+  },
+  "peerDependencies": {
+    "better-auth": "^1.6.23",
+    "react": "*"
+  },
+  "devDependencies": {
+    "@tamagui/build": "2.3.1",
+    "@types/node": "24.0.3",
+    "@types/react": "^19.0.8",
+    "oxfmt": "^0.16.0",
+    "oxlint": "^1.31.0",
+    "react": "*",
+    "vitest": "4.1.11"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "packages/better-auth-utils"
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "name": "@o/scripts",
+  "version": "0.16.19",
+  "type": "module",
+  "main": "./src/cmd.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/cmd.ts",
+      "default": "./src/cmd.ts"
+    },
+    "./package.json": "./package.json",
+    "./helpers/*": {
+      "types": "./src/helpers/*.ts",
+      "default": "./src/helpers/*.ts"
+    },
+    "./*": {
+      "types": "./src/*.ts",
+      "default": "./src/*.ts"
+    }
+  },
+  "scripts": {
+    "lint": "oxlint src",
+    "lint:fix": "oxfmt src && oxlint --fix --fix-suggestions src",
+    "typecheck": "tko run typecheck"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.8.2",
+    "@o/helpers": "workspace:*",
+    "@o/run": "workspace:*",
+    "picocolors": "^1.1.1",
+    "@aws-sdk/client-s3": "^3.709.0",
+    "fs-extra": "^11.2.0",
+    "p-map": "^7.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "packages/scripts"
+  },
+  "files": [
+    "src"
+  ],
+  "peerDependencies": {
+    "vxrn": ">=1.25.0"
+  },
+  "peerDependenciesMeta": {
+    "vxrn": {
+      "optional": true
+    }
+  }
+}

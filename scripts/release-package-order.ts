@@ -6,6 +6,13 @@ type PackageManifest = {
 
 export const sharedReleasePackageDirectories = [
   'database',
+  'run',
+  'scripts',
+  'better-auth-utils',
+  'hooks',
+  'native',
+  'native-hot-update',
+  'create-takeout',
   'helpers',
   'env',
   'cli',

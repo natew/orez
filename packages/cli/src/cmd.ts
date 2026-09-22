@@ -16,6 +16,17 @@ type RunFn<S extends string> = (
   fn: (ctx: Prettify<{ args: Args<S> } & CmdContext>) => Promise<void> | void
 ) => Promise<void>
 
+type Chainable<S extends string> = {
+  env(vars: Record<string, string>): Chainable<S>
+  run: RunFn<S>
+}
+
+type Command = {
+  env(vars: Record<string, string>): Command
+  args<const S extends string>(spec: S): Chainable<S>
+  run: RunFn<''>
+}
+
 let _interceptCmd: ((info: { description: string; args?: string }) => void) | undefined
 
 export function setInterceptCmd(
@@ -24,7 +35,7 @@ export function setInterceptCmd(
   _interceptCmd = fn
 }
 
-function createCmd(description: string) {
+function createCmd(description: string): Command {
   let argsSpec: string | undefined
   let envVars: Record<string, string> = {}
 
@@ -74,7 +85,7 @@ function createCmd(description: string) {
     }
   }
 
-  function makeChainable<S extends string>(spec: S) {
+  function makeChainable<S extends string>(spec: S): Chainable<S> {
     return {
       env(vars: Record<string, string>) {
         Object.assign(envVars, vars)

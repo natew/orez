@@ -20,6 +20,18 @@
       "react-native": "./dist/index.native.js",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./server-only": {
+      "types": "./dist/server-only.d.ts",
+      "react-native": "./dist/server-only.native.js",
+      "import": "./dist/server-only.js",
+      "default": "./dist/server-only.js"
+    },
+    "./client-only": {
+      "types": "./dist/client-only.d.ts",
+      "react-native": "./dist/client-only.native.js",
+      "import": "./dist/client-only.js",
+      "default": "./dist/client-only.js"
     }
   },
   "files": [
@@ -40,13 +52,17 @@
   },
   "peerDependencies": {
     "react": "*",
-    "react-native": "*"
+    "react-native": "*",
+    "expo-clipboard": "*"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
     },
     "react-native": {
+      "optional": true
+    },
+    "expo-clipboard": {
       "optional": true
     }
   },
@@ -57,7 +73,8 @@
     "oxlint": "1.43.0",
     "react": "^19.0.0",
     "react-native": "*",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "expo-clipboard": "~57.0.1"
   },
   "publishConfig": {
     "access": "public"

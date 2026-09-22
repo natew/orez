@@ -1,0 +1,25 @@
+{
+  "name": "@o/native",
+  "version": "0.16.19",
+  "type": "module",
+  "exports": {
+    "./setup-crypto": {
+      "react-native": "./src/setup-crypto.native.ts",
+      "default": "./src/setup-crypto.ts"
+    }
+  },
+  "peerDependencies": {
+    "expo-crypto": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "packages/native"
+  },
+  "files": [
+    "src"
+  ]
+}

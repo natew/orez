@@ -14,7 +14,9 @@
   "module": "dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "o": "./dist/cli.js"
+    "o": "./dist/cli.js",
+    "tko": "./src/tko/cli.ts",
+    "takeout": "./src/tko/cli.ts"
   },
   "exports": {
     "./package.json": "./package.json",
@@ -22,12 +24,23 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
-    }
+    },
+    "./utils/*": {
+      "types": "./src/tko/utils/*.ts",
+      "default": "./src/tko/utils/*.ts"
+    },
+    "./constants/*": {
+      "types": "./src/tko/constants/*.ts",
+      "default": "./src/tko/constants/*.ts"
+    },
+    "./withOpSqliteStatic": "./src/tko/withOpSqliteStatic.cjs",
+    "./withExpoModulesCoreSwift6Fix": "./src/tko/withExpoModulesCoreSwift6Fix.cjs"
   },
   "files": [
     "dist",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "src/tko"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json && cp src/run-pty.mjs dist/run-pty.mjs && chmod +x dist/cli.js dist/run-pty.mjs",
@@ -40,7 +53,10 @@
   "dependencies": {
     "@clack/prompts": "^0.8.2",
     "@lydell/node-pty": "^1.2.0-beta.3",
-    "picocolors": "^1.1.1"
+    "picocolors": "^1.1.1",
+    "@o/run": "workspace:*",
+    "@o/scripts": "workspace:*",
+    "citty": "^0.1.6"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
@@ -50,5 +66,13 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "peerDependencies": {
+    "@expo/config-plugins": "*"
+  },
+  "peerDependenciesMeta": {
+    "@expo/config-plugins": {
+      "optional": true
+    }
   }
 }

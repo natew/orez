@@ -34,7 +34,19 @@ function writeJson(path: string, value: unknown): void {
 }
 
 function prepareSharedBootstrapPackages(): string[] {
-  const packageDirs = ['packages/helpers', 'packages/env', 'packages/cli']
+  const packageDirs = [
+    'packages/helpers',
+    'packages/env',
+    'packages/cli',
+    'packages/better-auth-utils',
+    'packages/hooks',
+    'packages/native',
+    'packages/native-hot-update',
+    'packages/run',
+    'packages/scripts',
+    'packages/create-takeout',
+    'packages/database',
+  ]
   rmSync(bootstrapDir, { recursive: true, force: true })
 
   return packageDirs.map((sourceDir) => {
@@ -66,7 +78,19 @@ function resolveTarget(): BootstrapTarget {
     return {
       confirmation: 'CLAIM OREZ SHARED PACKAGES',
       errorLabel: 'shared release files',
-      packageNames: ['@o/helpers', '@o/env', '@o/cli'],
+      packageNames: [
+        '@o/helpers',
+        '@o/env',
+        '@o/cli',
+        '@o/better-auth-utils',
+        '@o/hooks',
+        '@o/native',
+        '@o/native-hot-update',
+        '@o/run',
+        '@o/scripts',
+        '@o/create-takeout',
+        '@o/database',
+      ],
       preparePackages: prepareSharedBootstrapPackages,
       relevantPaths: [
         '.github/workflows/release.yml',
@@ -74,9 +98,16 @@ function resolveTarget(): BootstrapTarget {
         'packages/helpers',
         'packages/env',
         'packages/cli',
+        'packages/better-auth-utils',
+        'packages/hooks',
+        'packages/native',
+        'packages/native-hot-update',
+        'packages/run',
+        'packages/scripts',
+        'packages/create-takeout',
+        'packages/database',
       ],
-      successMessage:
-        'All three Orez shared package names and trusted publishers are ready.',
+      successMessage: 'All Orez shared package names and trusted publishers are ready.',
       validateName: (name) => name.startsWith('@o/'),
       workflow: 'release.yml',
       workspaceName: 'orez-shared-bootstrap-workspace',
