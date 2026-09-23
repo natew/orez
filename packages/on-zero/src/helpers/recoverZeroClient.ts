@@ -439,7 +439,7 @@ function participantKey(deps: ZeroRecoveryDeps): object {
 }
 
 function transitionKey(deps: ZeroRecoveryDeps): string {
-  return `${documentScope()} ${deps.clientIdentity ?? ''}`
+  return `${documentScope()}\0${deps.clientIdentity ?? ''}`
 }
 
 function findOpenTransitionParticipant(
@@ -461,7 +461,7 @@ export function isGroupTransitionOpen(): boolean {
 }
 
 function terminalKey(key: string, reasonKey: ZeroRecoveryReasonKey): string {
-  return `${key} ${reasonKey}`
+  return `${key}\0${reasonKey}`
 }
 
 function stampTerminal(

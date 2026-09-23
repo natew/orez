@@ -706,7 +706,9 @@ export function createZeroClientInternal<
   function waitForInstanceConnected(instanceToWatch: ZeroInstance): Promise<boolean> {
     return new Promise((resolve) => {
       let unsubscribe: (() => void) | undefined
+      let done = false
       const check = () => {
+        if (done) return
         let name: string | undefined
         try {
           name = instanceToWatch.connection?.state?.current?.name
@@ -714,6 +716,7 @@ export function createZeroClientInternal<
           name = undefined
         }
         if (name === 'connected') {
+          done = true
           try {
             unsubscribe?.()
           } catch {}
@@ -721,9 +724,11 @@ export function createZeroClientInternal<
         }
       }
       check()
+      if (done) return
       try {
         unsubscribe = instanceToWatch.connection.state.subscribe(check)
       } catch {
+        done = true
         resolve(false)
       }
     })
