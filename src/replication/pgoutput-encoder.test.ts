@@ -317,13 +317,13 @@ describe('pgoutput-encoder', () => {
   })
 
   describe('encodeDelete', () => {
-    it('encodes with key tuple marker', () => {
+    it('encodes with old tuple marker', () => {
       const cols: ColumnInfo[] = [{ name: 'id', typeOid: 25, typeMod: -1 }]
       const buf = encodeDelete(16384, { id: '42' }, cols)
 
       expect(buf[0]).toBe(0x44) // 'D'
       expect(r32(buf, 1)).toBe(16384)
-      expect(buf[5]).toBe(0x4b) // 'K'
+      expect(buf[5]).toBe(0x4f) // 'O'
     })
   })
 
@@ -570,7 +570,8 @@ describe('pgoutput-encoder', () => {
 
       const parsed = parser.parse(encodeDelete(oid, { id: 'gone', val: 'x' }, cols))
       expect(parsed.tag).toBe('delete')
-      expect(parsed.key.id).toBe('gone')
+      expect(parsed.key).toBeNull()
+      expect(parsed.old.id).toBe('gone')
     })
 
     it('full transaction: BEGIN → RELATION → INSERT → COMMIT', () => {

@@ -326,7 +326,7 @@ export function encodeDelete(
   ensureScratch(1 + 4 + 1 + columns.length * 64)
   scratch[0] = 0x44 // 'D'
   writeInt32At(1, tableOid)
-  scratch[5] = 0x4b // 'K' for key tuple
+  scratch[5] = 0x4f // 'O' for old tuple (REPLICA IDENTITY FULL)
   const tupleLen = encodeTupleDataInto(oldRow, columns, 6)
   return scratch.slice(0, 6 + tupleLen)
 }

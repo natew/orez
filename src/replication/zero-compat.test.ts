@@ -523,7 +523,7 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
       tag: 'relation',
       schema: 'public',
       name: 'foo',
-      replicaIdentity: 'default',
+      replicaIdentity: 'full',
     })
 
     const ins = await nextData(q)
@@ -624,9 +624,10 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     }
 
     expect(del.relation.name).toBe('foo')
-    // our proxy sends 'K' key tuple with all column data
-    expect(del.key).not.toBeNull()
-    expect(del.key!.id).toBe('del')
+    // our proxy sends 'O' old tuple with all column data (REPLICA IDENTITY FULL)
+    expect(del.key).toBeNull()
+    expect(del.old).not.toBeNull()
+    expect(del.old!.id).toBe('del')
 
     s.close()
   })

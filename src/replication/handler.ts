@@ -1407,7 +1407,9 @@ async function streamChanges(
 
     // send RELATION if not yet sent
     if (!sentRelations.has(qualifiedKey)) {
-      const relMsg = encodeRelation(tableOid, schema, tableName, 0x64, columns)
+      // use FULL replica identity so DELETE sends complete old row via 'O' tuple
+      // needed for zero-cache's ViewSyncer to compute row diffs for delete operations
+      const relMsg = encodeRelation(tableOid, schema, tableName, 0x66, columns)
       messages.push(encodeWrappedChange(lsn, lsn, ts, relMsg))
       sentRelations.add(qualifiedKey)
     }
