@@ -6,30 +6,65 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 const fakeZero = vi.hoisted(() => {
+  // the client group the next constructed instance joins: tests bump this to
+  // simulate newer code landing (a registry edit) between transitions.
+  const group = { current: 'g1' }
+
   class FakeZero {
     readonly context = {}
-    readonly connection = {
+    readonly connection!: {
       state: {
-        current: { name: 'closed' },
-        subscribe: () => () => {},
-      },
-      connect: vi.fn(),
+        current: { name: string }
+        subscribe: (listener: () => void) => () => void
+      }
+      connect: ReturnType<typeof vi.fn>
     }
     readonly delete = vi.fn(async () => ({ errors: [] }))
     readonly close = vi.fn()
     readonly run = vi.fn(async () => [])
+    readonly mutate = {
+      note: {
+        insert: vi.fn(() => ({
+          client: Promise.resolve({}),
+          server: Promise.resolve({}),
+        })),
+      },
+    }
     readonly preload = vi.fn(() => ({
       cleanup: () => {},
       complete: Promise.resolve(),
     }))
+    readonly clientGroupID: Promise<string>
 
     constructor(readonly options: Record<string, any>) {
       instances.push(this)
+      this.clientGroupID = Promise.resolve(group.current)
+      const listeners = new Set<() => void>()
+      this.connection = {
+        state: {
+          current: { name: 'closed' },
+          subscribe: (listener: () => void) => {
+            listeners.add(listener)
+            return () => {
+              listeners.delete(listener)
+            }
+          },
+        },
+        connect: vi.fn(),
+      }
+      ;(this as any).__connectionListeners = listeners
     }
   }
 
   const instances: FakeZero[] = []
-  return { FakeZero, instances }
+
+  function setConnectionState(instance: FakeZero, name: string) {
+    instance.connection.state.current.name = name
+    const listeners = (instance as any).__connectionListeners as Set<() => void>
+    for (const listener of [...listeners]) listener()
+  }
+
+  return { FakeZero, instances, group, setConnectionState }
 })
 
 vi.mock('@rocicorp/zero', async (importOriginal) => {
@@ -41,7 +76,12 @@ vi.mock('@rocicorp/zero', async (importOriginal) => {
 })
 
 import { createZeroClient } from './createZeroClient'
-import { resetRecoveryStateForTests } from './helpers/recoverZeroClient'
+import {
+  isGroupTransitionOpen,
+  resetRecoveryStateForTests,
+} from './helpers/recoverZeroClient'
+
+import type { ZeroEvent } from './types'
 
 declare global {
   // eslint-disable-next-line no-var
@@ -66,6 +106,7 @@ beforeEach(() => {
   window.sessionStorage.clear()
   resetRecoveryStateForTests()
   fakeZero.instances.length = 0
+  fakeZero.group.current = 'g1'
   container = document.createElement('div')
   root = null
 })
@@ -485,4 +526,326 @@ test('headless NewClientGroup recovery reconstructs its client without a provide
   expect(first.close).toHaveBeenCalledOnce()
 
   await connection.close()
+})
+
+function makeTransitionClient(instanceName: string) {
+  return createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName,
+  })
+}
+
+function collectClientEvents(client: {
+  zeroEvents: { listen: (listener: (event: ZeroEvent | null) => void) => () => void }
+}) {
+  const events: ZeroEvent[] = []
+  const off = client.zeroEvents.listen((event) => {
+    if (event) events.push(event)
+  })
+  return { events, off }
+}
+
+async function mountTransitionClient(
+  client: ReturnType<typeof makeTransitionClient>,
+  userID: string
+) {
+  const el = document.createElement('div')
+  const mountedRoot = createRoot(el)
+  await act(async () => {
+    mountedRoot.render(
+      <client.ProvideZero cacheURL="http://127.0.0.1:7777/zero" userID={userID}>
+        <span>ok</span>
+      </client.ProvideZero>
+    )
+    await Promise.resolve()
+  })
+  return { el, root: mountedRoot, instance: fakeZero.instances.at(-1)! }
+}
+
+async function unmountTransitionClient(mounted: { root: Root }) {
+  await act(async () => {
+    mounted.root.unmount()
+  })
+}
+
+function withoutPageReload() {
+  const originalLocation = globalThis.location
+  Object.defineProperty(globalThis, 'location', {
+    configurable: true,
+    value: undefined,
+  })
+  return () => {
+    Object.defineProperty(globalThis, 'location', {
+      configurable: true,
+      value: originalLocation,
+    })
+  }
+}
+
+test('two providers ride one group transition and keep querying and mutating', async () => {
+  const restoreLocation = withoutPageReload()
+  const clientA = makeTransitionClient('transition-two-a')
+  const clientB = makeTransitionClient('transition-two-b')
+  const collectedA = collectClientEvents(clientA)
+  const collectedB = collectClientEvents(clientB)
+  // siblings of one user ride one transition.
+  const mountedA = await mountTransitionClient(clientA, 'transition-user')
+  const mountedB = await mountTransitionClient(clientB, 'transition-user')
+  const firstA = mountedA.instance
+  const firstB = mountedB.instance
+  const countBefore = fakeZero.instances.length
+  try {
+    // one registry change: both stale instances fire in the same tick.
+    firstA.options.onUpdateNeeded({ type: 'NewClientGroup' })
+    firstB.options.onUpdateNeeded({ type: 'NewClientGroup' })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    // each old instance closed and reminted exactly once.
+    expect(fakeZero.instances).toHaveLength(countBefore + 2)
+    const secondA = fakeZero.instances[countBefore]!
+    const secondB = fakeZero.instances[countBefore + 1]!
+    expect(secondA).not.toBe(firstA)
+    expect(secondB).not.toBe(firstB)
+    expect(firstA.close).toHaveBeenCalledTimes(1)
+    expect(firstB.close).toHaveBeenCalledTimes(1)
+
+    // the transition resolves only when every new group is connected.
+    expect(isGroupTransitionOpen()).toBe(true)
+    await act(async () => {
+      fakeZero.setConnectionState(secondA, 'connected')
+      fakeZero.setConnectionState(secondB, 'connected')
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(isGroupTransitionOpen()).toBe(false))
+
+    // one transition: exactly one recovering across both providers, no fatal.
+    const allEvents = [...collectedA.events, ...collectedB.events]
+    expect(allEvents.filter((event) => event.type === 'recovering')).toHaveLength(1)
+    expect(allEvents.filter((event) => event.type === 'fatal')).toHaveLength(0)
+    // NewClientGroup never deletes IndexedDB.
+    expect(firstA.delete).not.toHaveBeenCalled()
+    expect(firstB.delete).not.toHaveBeenCalled()
+
+    // both providers still query and mutate through their new instances.
+    await clientA.zero.run({} as never)
+    await clientB.zero.run({} as never)
+    expect(secondA.run).toHaveBeenCalled()
+    expect(secondB.run).toHaveBeenCalled()
+    // the fake instance carries an untyped mutate stub: the assertion is that
+    // the facade resolves it on the NEW instance at call time.
+    ;(clientA.zero.mutate as any).note.insert({ id: 'a1' })
+    ;(clientB.zero.mutate as any).note.insert({ id: 'b1' })
+    expect(secondA.mutate.note.insert).toHaveBeenCalledTimes(1)
+    expect(secondB.mutate.note.insert).toHaveBeenCalledTimes(1)
+  } finally {
+    collectedA.off()
+    collectedB.off()
+    await unmountTransitionClient(mountedA)
+    await unmountTransitionClient(mountedB)
+    restoreLocation()
+  }
+})
+
+test('a second registry change after recovery remints again without fatal', async () => {
+  const restoreLocation = withoutPageReload()
+  const clientA = makeTransitionClient('transition-second-a')
+  const clientB = makeTransitionClient('transition-second-b')
+  const collectedA = collectClientEvents(clientA)
+  const collectedB = collectClientEvents(clientB)
+  const mountedA = await mountTransitionClient(clientA, 'transition-second-user')
+  const mountedB = await mountTransitionClient(clientB, 'transition-second-user')
+  try {
+    const fireBoth = (instances: Array<{ options: Record<string, any> }>) => {
+      instances[0]!.options.onUpdateNeeded({ type: 'NewClientGroup' })
+      instances[1]!.options.onUpdateNeeded({ type: 'NewClientGroup' })
+    }
+    const settleRemints = async (countBefore: number) => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+      expect(fakeZero.instances).toHaveLength(countBefore + 2)
+      const next = fakeZero.instances.slice(countBefore)
+      await act(async () => {
+        for (const instance of next) fakeZero.setConnectionState(instance, 'connected')
+        await Promise.resolve()
+      })
+      await vi.waitFor(() => expect(isGroupTransitionOpen()).toBe(false))
+      return next
+    }
+
+    // first change.
+    const countBeforeFirst = fakeZero.instances.length
+    fireBoth(fakeZero.instances.slice(-2))
+    await settleRemints(countBeforeFirst)
+
+    // second change with newer code, well inside the old 12s remint cooldown.
+    fakeZero.group.current = 'g2'
+    const countBefore = fakeZero.instances.length
+    fireBoth(fakeZero.instances.slice(-2))
+    const third = await settleRemints(countBefore)
+
+    const allEvents = [...collectedA.events, ...collectedB.events]
+    expect(allEvents.filter((event) => event.type === 'recovering')).toHaveLength(2)
+    expect(allEvents.filter((event) => event.type === 'fatal')).toHaveLength(0)
+    // the facades resolve to the newest instances.
+    await clientA.zero.run({} as never)
+    await clientB.zero.run({} as never)
+    expect(third[0]!.run).toHaveBeenCalled()
+    expect(third[1]!.run).toHaveBeenCalled()
+  } finally {
+    collectedA.off()
+    collectedB.off()
+    await unmountTransitionClient(mountedA)
+    await unmountTransitionClient(mountedB)
+    restoreLocation()
+  }
+})
+
+test('negative control: an incompatible schema emits exactly one terminal error, never a loop', async () => {
+  const restoreLocation = withoutPageReload()
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const clientA = makeTransitionClient('transition-negative-a')
+  const clientB = makeTransitionClient('transition-negative-b')
+  const collectedA = collectClientEvents(clientA)
+  const collectedB = collectClientEvents(clientB)
+  const mountedA = await mountTransitionClient(clientA, 'transition-negative-user')
+  const mountedB = await mountTransitionClient(clientB, 'transition-negative-user')
+  const firstA = mountedA.instance
+  const firstB = mountedB.instance
+  const countBefore = fakeZero.instances.length
+  try {
+    firstA.options.onUpdateNeeded({ type: 'SchemaVersionNotSupported' })
+    firstB.options.onUpdateNeeded({ type: 'SchemaVersionNotSupported' })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    // schema incompatibility drops the stale stores, then remints once each.
+    expect(firstA.delete).toHaveBeenCalledTimes(1)
+    expect(firstB.delete).toHaveBeenCalledTimes(1)
+    expect(fakeZero.instances).toHaveLength(countBefore + 2)
+    const secondA = fakeZero.instances[countBefore]!
+    const secondB = fakeZero.instances[countBefore + 1]!
+    expect(isGroupTransitionOpen()).toBe(true)
+
+    // the new code still cannot join the server group: same group fires again.
+    secondA.options.onUpdateNeeded({ type: 'SchemaVersionNotSupported' })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    const allEvents = () => [...collectedA.events, ...collectedB.events]
+    expect(allEvents().filter((event) => event.type === 'fatal')).toHaveLength(1)
+    const [fatal] = allEvents().filter((event) => event.type === 'fatal')
+    expect(fatal).toMatchObject({
+      reasonKey: 'SchemaVersionNotSupported',
+      reason: expect.stringContaining('g1'),
+    })
+    expect(consoleError).toHaveBeenCalledTimes(1)
+    expect(consoleError.mock.calls[0]![0]).toContain('g1')
+
+    // every later re-fire stays silent and remints nothing: never a loop.
+    secondB.options.onUpdateNeeded({ type: 'SchemaVersionNotSupported' })
+    secondA.options.onUpdateNeeded({ type: 'SchemaVersionNotSupported' })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(allEvents().filter((event) => event.type === 'fatal')).toHaveLength(1)
+    expect(consoleError).toHaveBeenCalledTimes(1)
+    expect(fakeZero.instances).toHaveLength(countBefore + 2)
+  } finally {
+    collectedA.off()
+    collectedB.off()
+    await unmountTransitionClient(mountedA)
+    await unmountTransitionClient(mountedB)
+    restoreLocation()
+    consoleError.mockRestore()
+  }
+})
+
+test('concurrent update signals across providers schedule a single reload', async () => {
+  const reloadPage = vi.fn()
+  const originalLocation = globalThis.location
+  Object.defineProperty(globalThis, 'location', {
+    configurable: true,
+    value: { href: 'http://localhost/reload-test', reload: reloadPage },
+  })
+  const scheduleA = vi.fn()
+  const scheduleB = vi.fn()
+  const clientA = makeTransitionClient('transition-reload-a')
+  const clientB = makeTransitionClient('transition-reload-b')
+  const collectedA = collectClientEvents(clientA)
+  const collectedB = collectClientEvents(clientB)
+  const elA = document.createElement('div')
+  const elB = document.createElement('div')
+  const rootA = createRoot(elA)
+  const rootB = createRoot(elB)
+  try {
+    await act(async () => {
+      rootA.render(
+        <clientA.ProvideZero
+          cacheURL="http://127.0.0.1:7777/zero"
+          userID="transition-reload-user"
+          scheduleReload={scheduleA}
+        >
+          <span>ok</span>
+        </clientA.ProvideZero>
+      )
+      await Promise.resolve()
+    })
+    await act(async () => {
+      rootB.render(
+        <clientB.ProvideZero
+          cacheURL="http://127.0.0.1:7777/zero"
+          userID="transition-reload-user"
+          scheduleReload={scheduleB}
+        >
+          <span>ok</span>
+        </clientB.ProvideZero>
+      )
+      await Promise.resolve()
+    })
+    const firstA = fakeZero.instances.at(-2)!
+    const firstB = fakeZero.instances.at(-1)!
+
+    firstA.options.onUpdateNeeded({ type: 'NewClientGroup' })
+    firstB.options.onUpdateNeeded({ type: 'NewClientGroup' })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    // one transition drives one deferred reload, however many providers join.
+    expect(scheduleA.mock.calls.length + scheduleB.mock.calls.length).toBe(1)
+    expect(reloadPage).not.toHaveBeenCalled()
+    const allEvents = [...collectedA.events, ...collectedB.events]
+    expect(allEvents.filter((event) => event.type === 'fatal')).toHaveLength(0)
+
+    const ctx = (scheduleA.mock.calls[0] ?? scheduleB.mock.calls[0])![0]
+    await act(async () => {
+      await ctx.performReload()
+    })
+    expect(reloadPage).toHaveBeenCalledTimes(1)
+    expect(isGroupTransitionOpen()).toBe(false)
+    // the reload persisted the recovered-from groups for the next page load.
+    const marker = window.sessionStorage.getItem(
+      'on-zero-recover-http://localhost/reload-test-NewClientGroup'
+    )
+    expect(marker).toContain('g1')
+  } finally {
+    collectedA.off()
+    collectedB.off()
+    await act(async () => {
+      rootA.unmount()
+    })
+    await act(async () => {
+      rootB.unmount()
+    })
+    Object.defineProperty(globalThis, 'location', {
+      configurable: true,
+      value: originalLocation,
+    })
+  }
 })

@@ -6,6 +6,7 @@ import { createEmitter } from './emitter'
 import {
   classifyZeroRecoveryLog,
   composeRecoveryLogSink,
+  isGroupTransitionOpen,
   isRecoverableZeroStalePokeMessage,
   makeZeroRecovery,
   resetRecoveryStateForTests,
@@ -557,5 +558,327 @@ describe('zero recovery', () => {
       )
     ).toBe(true)
     expect(isRecoverableZeroStalePokeMessage('client state not found')).toBe(false)
+  })
+})
+
+describe('group transitions', () => {
+  function setupTransition(opts?: {
+    group?: string
+    identity?: string
+    reload?: () => void | boolean
+    remint?: () => Promise<boolean>
+    connected?: Promise<boolean>
+  }) {
+    const events: ZeroEvent[] = []
+    const zeroEvents = createEmitter<ZeroEvent | null>(
+      `test-transition-${emitterSeq++}`,
+      null
+    )
+    zeroEvents.listen((event) => {
+      if (event) events.push(event)
+    })
+    const deleteLocalState = vi.fn(() => Promise.resolve())
+    const reload = vi.fn(opts?.reload ?? (() => {}))
+    const recoverInPlace = opts?.remint ? vi.fn(opts.remint) : undefined
+    const awaitReconnected = opts?.connected ? vi.fn(() => opts.connected!) : undefined
+    const deps: ZeroRecoveryDeps = {
+      deleteLocalState,
+      zeroEvents,
+      reload,
+      recoverInPlace,
+      awaitReconnected,
+      clientIdentity: opts?.identity,
+      getGroupID: opts?.group === undefined ? undefined : () => opts.group!,
+    }
+    return { deps, deleteLocalState, reload, recoverInPlace, events }
+  }
+
+  function fatals(events: ZeroEvent[]): Extract<ZeroEvent, { type: 'fatal' }>[] {
+    return events.filter(
+      (event): event is Extract<ZeroEvent, { type: 'fatal' }> => event.type === 'fatal'
+    )
+  }
+
+  function recoverings(events: ZeroEvent[]): ZeroEvent[] {
+    return events.filter((event) => event.type === 'recovering')
+  }
+
+  test('concurrent NewClientGroup signals join one transition: one reload, joins silent, no fatal, no IDB delete', async () => {
+    const a = setupTransition({ group: 'g-a' })
+    const b = setupTransition({ group: 'g-b' })
+    // both instances (and their recovery wrappers) exist before either fires,
+    // exactly like two mounted providers meeting one registry change.
+    const recoveryA = makeZeroRecovery(a.deps)
+    const recoveryB = makeZeroRecovery(b.deps)
+    recoveryA.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+    recoveryB.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+    await flush()
+    // one transition: one reload, one recovering (the join stays silent).
+    expect(a.reload.mock.calls.length + b.reload.mock.calls.length).toBe(1)
+    expect(recoverings(a.events)).toHaveLength(1)
+    expect(recoverings(b.events)).toHaveLength(0)
+    expect(fatals([...a.events, ...b.events])).toEqual([])
+    // NewClientGroup never deletes IndexedDB (sibling-tab safe).
+    expect(a.deleteLocalState).not.toHaveBeenCalled()
+    expect(b.deleteLocalState).not.toHaveBeenCalled()
+    expect(isGroupTransitionOpen()).toBe(false)
+  })
+
+  test('a second change with a newer group starts a fresh transition after a reload', async () => {
+    const a = setupTransition({ group: 'g1' })
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+    expect(a.reload).toHaveBeenCalledTimes(1)
+
+    resetRecoveryStateForTests() // simulate the page reload clearing in-memory state
+    const b = setupTransition({ group: 'g2' })
+    makeZeroRecovery(b.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+    // newer code verifiably landed: a fresh transition, not a fatal.
+    expect(b.reload).toHaveBeenCalledTimes(1)
+    expect(recoverings(b.events)).toHaveLength(1)
+    expect(fatals(b.events)).toEqual([])
+  })
+
+  test('an unchanged group after a reload goes terminal once, then silent', async () => {
+    const a = setupTransition({ group: 'g1' })
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+    expect(a.reload).toHaveBeenCalledTimes(1)
+
+    resetRecoveryStateForTests()
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const b = setupTransition({ group: 'g1' })
+      const recovery = makeZeroRecovery(b.deps)
+      recovery.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+      await flush()
+      // the reload did not change the group: one terminal error with the IDs.
+      expect(b.reload).not.toHaveBeenCalled()
+      expect(fatals(b.events)).toHaveLength(1)
+      expect(fatals(b.events)[0]).toMatchObject({
+        reasonKey: 'NewClientGroup',
+        reason: expect.stringContaining('g1'),
+      })
+      expect(consoleError).toHaveBeenCalledTimes(1)
+
+      // re-fires stay silent: never a loop, never a cascade.
+      recovery.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+      const c = setupTransition({ group: 'g1' })
+      makeZeroRecovery(c.deps).onUpdateNeeded({
+        type: UpdateNeededReasonType.NewClientGroup,
+      })
+      await flush()
+      expect(fatals([...b.events, ...c.events])).toHaveLength(1)
+      expect(consoleError).toHaveBeenCalledTimes(1)
+      expect(b.reload).not.toHaveBeenCalled()
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  test('a reminted instance re-firing with an unchanged group fails terminal once', async () => {
+    let releaseConnected: (value: boolean) => void = () => {}
+    const connected = new Promise<boolean>((resolve) => {
+      releaseConnected = resolve
+    })
+    const a = setupTransition({
+      group: 'g1',
+      reload: () => false,
+      remint: () => Promise.resolve(true),
+      connected,
+    })
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.SchemaVersionNotSupported,
+    })
+    await flush()
+    expect(a.recoverInPlace).toHaveBeenCalledTimes(1)
+    expect(isGroupTransitionOpen()).toBe(true)
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      // the replacement instance (built during the transition, same group
+      // because the new code is genuinely incompatible) fires: terminal.
+      const b = setupTransition({ group: 'g1' })
+      const recovery = makeZeroRecovery(b.deps)
+      recovery.onUpdateNeeded({
+        type: UpdateNeededReasonType.SchemaVersionNotSupported,
+      })
+      await flush()
+      expect(fatals(b.events)).toHaveLength(1)
+      expect(fatals(b.events)[0]?.reason).toContain('g1')
+      expect(consoleError).toHaveBeenCalledTimes(1)
+      expect(a.recoverInPlace).toHaveBeenCalledTimes(1)
+      expect(isGroupTransitionOpen()).toBe(false)
+
+      // the failed transition releases its connected wait (no wedged latch)
+      // and every later re-fire stays silent.
+      releaseConnected(true)
+      recovery.onUpdateNeeded({
+        type: UpdateNeededReasonType.SchemaVersionNotSupported,
+      })
+      makeZeroRecovery(a.deps).onUpdateNeeded({
+        type: UpdateNeededReasonType.SchemaVersionNotSupported,
+      })
+      await flush()
+      expect(fatals([...a.events, ...b.events])).toHaveLength(1)
+      expect(consoleError).toHaveBeenCalledTimes(1)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  test('a reminted instance with a changed group supersedes into a fresh transition', async () => {
+    const a = setupTransition({
+      group: 'g1',
+      reload: () => false,
+      remint: () => Promise.resolve(true),
+      connected: new Promise<boolean>(() => {}),
+    })
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+    expect(isGroupTransitionOpen()).toBe(true)
+
+    // an overlapping second edit: the replacement already runs newer code,
+    // so this is a new legitimate transition, not a failure.
+    const b = setupTransition({
+      group: 'g2',
+      reload: () => false,
+      remint: () => Promise.resolve(true),
+    })
+    makeZeroRecovery(b.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+    expect(recoverings(b.events)).toHaveLength(1)
+    expect(fatals([...a.events, ...b.events])).toEqual([])
+    expect(b.recoverInPlace).toHaveBeenCalledTimes(1)
+  })
+
+  test('unreadable groups allow one supersede, then go terminal', async () => {
+    const a = setupTransition({
+      reload: () => false,
+      remint: () => Promise.resolve(true),
+      connected: new Promise<boolean>(() => {}),
+    })
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      // the superseding transition must stay open (blocked on its own
+      // connected wait) so the next unknown signal is judged against it.
+      const b = setupTransition({
+        reload: () => false,
+        remint: () => Promise.resolve(true),
+        connected: new Promise<boolean>(() => {}),
+      })
+      makeZeroRecovery(b.deps).onUpdateNeeded({
+        type: UpdateNeededReasonType.NewClientGroup,
+      })
+      await flush()
+      // first unknown post-transition signal: allowed as a fresh transition.
+      expect(recoverings(b.events)).toHaveLength(1)
+      expect(fatals(b.events)).toEqual([])
+
+      const c = setupTransition({ reload: () => false })
+      makeZeroRecovery(c.deps).onUpdateNeeded({
+        type: UpdateNeededReasonType.NewClientGroup,
+      })
+      await flush()
+      // second one in the window: terminal once, then silent.
+      expect(fatals(c.events)).toHaveLength(1)
+      expect(consoleError).toHaveBeenCalledTimes(1)
+      makeZeroRecovery(c.deps).onUpdateNeeded({
+        type: UpdateNeededReasonType.NewClientGroup,
+      })
+      await flush()
+      expect(fatals(c.events)).toHaveLength(1)
+      expect(consoleError).toHaveBeenCalledTimes(1)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  test('SchemaVersionNotSupported drops the store inside its transition', async () => {
+    const a = setupTransition({
+      group: 'g1',
+      reload: () => false,
+      remint: () => Promise.resolve(true),
+    })
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.SchemaVersionNotSupported,
+    })
+    await flush()
+    expect(a.deleteLocalState).toHaveBeenCalledTimes(1)
+    expect(a.recoverInPlace).toHaveBeenCalledTimes(1)
+    expect(fatals(a.events)).toEqual([])
+  })
+
+  test('different identities ride separate transitions but share the one reload', async () => {
+    const a = setupTransition({ group: 'g-a', identity: 'user-a' })
+    const b = setupTransition({ group: 'g-b', identity: 'user-b' })
+    const recoveryA = makeZeroRecovery(a.deps)
+    const recoveryB = makeZeroRecovery(b.deps)
+    recoveryA.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+    recoveryB.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+    await flush()
+    // one transition per shared identity, but still a single real reload.
+    expect(recoverings(a.events)).toHaveLength(1)
+    expect(recoverings(b.events)).toHaveLength(1)
+    expect(a.reload.mock.calls.length + b.reload.mock.calls.length).toBe(1)
+    expect(fatals([...a.events, ...b.events])).toEqual([])
+  })
+
+  test('a legacy bare-timestamp marker goes terminal once (legacy parity)', async () => {
+    const key = `on-zero-recover-${globalThis.location?.href}-NewClientGroup`
+    window.sessionStorage.setItem(key, String(Date.now()))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const a = setupTransition({ group: 'g1' })
+      const recovery = makeZeroRecovery(a.deps)
+      recovery.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+      await flush()
+      expect(a.reload).not.toHaveBeenCalled()
+      expect(fatals(a.events)).toHaveLength(1)
+      expect(consoleError).toHaveBeenCalledTimes(1)
+      recovery.onUpdateNeeded({ type: UpdateNeededReasonType.NewClientGroup })
+      await flush()
+      expect(fatals(a.events)).toHaveLength(1)
+      expect(consoleError).toHaveBeenCalledTimes(1)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  test('a participant that cannot remint skips without failing the transition', async () => {
+    const a = setupTransition({
+      group: 'g1',
+      reload: () => false,
+      remint: () => Promise.resolve(false),
+    })
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+    // false means "nothing to reconstruct" (unmounted): the transition
+    // resolves, and a later signal starts a fresh one instead of fataling.
+    expect(isGroupTransitionOpen()).toBe(false)
+    makeZeroRecovery(a.deps).onUpdateNeeded({
+      type: UpdateNeededReasonType.NewClientGroup,
+    })
+    await flush()
+    expect(recoverings(a.events)).toHaveLength(2)
+    expect(fatals(a.events)).toEqual([])
   })
 })

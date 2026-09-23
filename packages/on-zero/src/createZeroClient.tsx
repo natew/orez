@@ -39,8 +39,10 @@ import { createMutationLifecycle } from './helpers/mutationLifecycle'
 import { IS_SERVER_RUNTIME } from './helpers/platform'
 import {
   composeRecoveryLogSink,
+  isGroupTransitionOpen,
   isRecoverableZeroStalePokeMessage,
   makeZeroRecovery,
+  primeGroupCache,
   type RecoveryGuardStorage,
   type ScheduleReloadContext,
   type ZeroLogPattern,
@@ -351,6 +353,7 @@ export function createZeroClientInternal<
     guardStorage?: RecoveryGuardStorage
     benignLogPatterns?: readonly ZeroLogPattern[]
     recoverInPlace?: () => Promise<boolean>
+    awaitReconnected?: () => Promise<boolean>
     reload?: () => void | boolean
   }
 
@@ -366,6 +369,7 @@ export function createZeroClientInternal<
     guardStorage,
     benignLogPatterns,
     recoverInPlace,
+    awaitReconnected,
     reload,
   }: ConstructZeroInstanceArgs): ZeroInstance {
     let installedTransport: Pick<HttpPullTransport, 'subscribeLifecycle'> | undefined
@@ -397,7 +401,13 @@ export function createZeroClientInternal<
       ],
       onRecovery: () => mutationLifecycle.fence(),
       recoverInPlace: recoverInPlace ?? (() => remint({ dropLocalState: false })),
+      awaitReconnected: awaitReconnected ?? awaitReconnectedAfterRemint,
       reload,
+      // sibling instances of one user ride one group transition.
+      clientIdentity: typeof options.userID === 'string' ? options.userID : undefined,
+      getGroupID: () =>
+        instanceRef.current?.clientGroupID ??
+        Promise.reject(new Error('[on-zero] no zero instance')),
     }
     const recovery = makeZeroRecovery(recoveryDeps)
     const createdInstance = new ZeroClient<Schema, ZeroMutators>({
@@ -421,6 +431,7 @@ export function createZeroClientInternal<
     })
     instanceRef.current = createdInstance
     if (installedTransport) installedTransports.set(createdInstance, installedTransport)
+    primeGroupCache(recoveryDeps)
     return createdInstance
   }
 
@@ -689,6 +700,62 @@ export function createZeroClientInternal<
   // revives that instance instead of constructing a twin beside it.
   const retiredZero = new Map<string, CachedZeroEntry>()
 
+  // resolve when this instance's connection reports connected. never rejects:
+  // a transition participant that never connects simply never resolves its
+  // transition, and a still-stale instance re-fires into a new one.
+  function waitForInstanceConnected(instanceToWatch: ZeroInstance): Promise<boolean> {
+    return new Promise((resolve) => {
+      let unsubscribe: (() => void) | undefined
+      const check = () => {
+        let name: string | undefined
+        try {
+          name = instanceToWatch.connection?.state?.current?.name
+        } catch {
+          name = undefined
+        }
+        if (name === 'connected') {
+          try {
+            unsubscribe?.()
+          } catch {}
+          resolve(true)
+        }
+      }
+      check()
+      try {
+        unsubscribe = instanceToWatch.connection.state.subscribe(check)
+      } catch {
+        resolve(false)
+      }
+    })
+  }
+
+  // the group transition's connected gate for the provider path: remint()
+  // bumps the mounted provider, the rotate publishes a replacement instance,
+  // and the transition resolves only once that replacement is connected.
+  async function awaitReconnectedAfterRemint(): Promise<boolean> {
+    // the pre-remint instance, captured synchronously when remint() ran:
+    // reading zeroRuntime.zero here would race the rotate (an already-new
+    // instance must not wait for a second rotation that never comes, and a
+    // drop-remint's transient null must wait through instead of resolving).
+    const previous = remintPreviousInstance
+    let current = zeroRuntime.zero
+    if (current === previous || current === null) {
+      // the rotate publishes asynchronously after the bump; the re-check runs
+      // synchronously inside the executor so a publish racing this wait still
+      // resolves instead of dangling the waiter.
+      current = await new Promise<ZeroInstance | null>((resolve) => {
+        const latest = zeroRuntime.zero
+        if (latest !== previous && latest !== null) {
+          resolve(latest)
+          return
+        }
+        zeroRuntime.readyWaiters.add(resolve as (instance: ZeroInstance) => void)
+      })
+    }
+    if (!current) return false
+    return waitForInstanceConnected(current)
+  }
+
   // in-place re-mint: drop the current instance's local state then reconstruct a
   // fresh client WITHOUT a page reload — the native-safe recovery path (a reload
   // may never land on prod native, wedging the module latch). the mounted
@@ -702,6 +769,7 @@ export function createZeroClientInternal<
   const remintControl: { bump: (() => void) | null } = { bump: null }
   let lastRemintAt = 0
   let remintAttempts = 0
+  let remintPreviousInstance: ZeroInstance | null = null
 
   function unpublishZeroInstance(instanceToInvalidate: ZeroInstance): boolean {
     if (zeroRuntime.zero !== instanceToInvalidate) return false
@@ -752,13 +820,22 @@ export function createZeroClientInternal<
     // no mounted provider to reconstruct through — bail BEFORE the guard so an
     // unmounted call doesn't burn an attempt or start the cooldown.
     if (!remintControl.bump) return false
-    const now = Date.now()
-    const sinceLast = now - lastRemintAt
-    if (lastRemintAt > 0 && sinceLast < REMINT_GUARD_MS) return false
-    if (sinceLast > REMINT_ATTEMPT_RESET_MS) remintAttempts = 0
-    if (remintAttempts >= REMINT_MAX_ATTEMPTS) return false
-    lastRemintAt = now
-    remintAttempts += 1
+    // capture the outgoing instance synchronously for the transition's
+    // connected gate (see awaitReconnectedAfterRemint).
+    remintPreviousInstance = zeroRuntime.zero
+    // a group transition in flight owns the retry policy (one remint per
+    // provider per transition, terminal-on-failure): its remints bypass the
+    // cooldown and the attempt budget untouched, so rapid legitimate
+    // transitions all land while lone storms stay guarded.
+    if (!isGroupTransitionOpen()) {
+      const now = Date.now()
+      const sinceLast = now - lastRemintAt
+      if (lastRemintAt > 0 && sinceLast < REMINT_GUARD_MS) return false
+      if (sinceLast > REMINT_ATTEMPT_RESET_MS) remintAttempts = 0
+      if (remintAttempts >= REMINT_MAX_ATTEMPTS) return false
+      lastRemintAt = now
+      remintAttempts += 1
+    }
 
     const { dropLocalState = true } = opts
     if (dropLocalState && zeroRuntime.zero) {
@@ -1234,6 +1311,11 @@ export function createZeroClientInternal<
         // a headless host has no provider state to bump and no page it owns to
         // reload. replace the disabled instance directly, then republish the
         // stable module facade and move the connection watcher with it.
+        // the transition resolves once the replacement connects.
+        awaitReconnected: async () => {
+          if (closed) return true
+          return waitForInstanceConnected(activeInstance)
+        },
         recoverInPlace: async () => {
           // an update can arrive after the host intentionally closed this
           // connection during preview turnover. there is no live client left
