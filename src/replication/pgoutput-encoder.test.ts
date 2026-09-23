@@ -566,7 +566,7 @@ describe('pgoutput-encoder', () => {
         { name: 'val', typeOid: 25, typeMod: -1 },
       ]
       const parser = makeParser()
-      parser.parse(encodeRelation(oid, 'public', 'del_test', 0x64, cols))
+      parser.parse(encodeRelation(oid, 'public', 'del_test', 0x66, cols))
 
       const parsed = parser.parse(encodeDelete(oid, { id: 'gone', val: 'x' }, cols))
       expect(parsed.tag).toBe('delete')
