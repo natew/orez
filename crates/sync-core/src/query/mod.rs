@@ -11,6 +11,7 @@ pub mod membership;
 pub mod opacity;
 pub mod qpull;
 pub mod transaction;
+pub mod wake;
 
 pub use ast::{
     Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef,
@@ -27,3 +28,4 @@ pub use transaction::{
     CompiledQueryNode, CompiledQueryPlan, CompiledRelationship, QueryBinding, QueryColumn,
     QueryFormat, QuerySchema, compile_transaction_query, parse_query_format, parse_query_schema,
 };
+pub use wake::{WakePlan, WakeTargets, plan_query, wake_targets};

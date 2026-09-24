@@ -330,7 +330,7 @@ try {
       clientID: 'commit-reader',
       clientGroupID: 'commit-group',
       cookie: null,
-      desiredQueriesPatch: allItemsQueries,
+      queries: allItemsQueries,
     }),
   })
   assert.equal(activePull.status, 200)

@@ -53,10 +53,11 @@ pub use schema::{TableSpec, Tables, init_schema, trigger_ddl};
 /// change what they would install.
 pub fn schema_revision() -> String {
     format!(
-        "core{version}:s{schema}:q{query}:t{trigger}:l{ledger}",
+        "core{version}:s{schema}:q{query}:w{wake}:t{trigger}:l{ledger}",
         version = env!("CARGO_PKG_VERSION"),
         schema = schema::SCHEMA_VERSION,
         query = query::membership::QUERY_SCHEMA_VERSION,
+        wake = query::wake::WAKE_SCHEMA_VERSION,
         trigger = schema::TRIGGER_VERSION,
         ledger = ledger::LEDGER_FORMAT,
     )

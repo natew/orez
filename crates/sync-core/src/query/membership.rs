@@ -41,7 +41,7 @@ use super::compile::{compile_predicate_probe, compile_related_of};
 use super::{compile, parse_ast};
 
 // bind a pk column (parsed from a canonical pk json) as a sqlite value
-fn json_pk_to_sql(v: Option<&Value>) -> SqlValue {
+pub(crate) fn json_pk_to_sql(v: Option<&Value>) -> SqlValue {
     match v {
         None | Some(Value::Null) => SqlValue::Null,
         Some(Value::Bool(b)) => SqlValue::Integer(if *b { 1 } else { 0 }),
@@ -176,6 +176,9 @@ fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
         "_zsync_query_transform_group",
         "_zsync_query_transform_client",
         "_zsync_query_meta",
+        "_zsync_wake_keys",
+        "_zsync_wake_recipes",
+        "_zsync_wake_meta",
     ] {
         db.exec(&format!("DROP TABLE IF EXISTS {table}"), &[])?;
     }
@@ -297,7 +300,7 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
          WHERE version <> excluded.version",
         &[SqlValue::Integer(QUERY_SCHEMA_VERSION)],
     )?;
-    Ok(())
+    super::wake::init_wake_schema(db)
 }
 
 // register (or replace) a query for a client GROUP by its stable hash. validates
@@ -367,6 +370,7 @@ pub fn register_query(
             "DELETE FROM _zsync_query_state WHERE clientGroupID = ? AND hash = ?",
             &[text(group), text(hash)],
         )?;
+        super::wake::store_plan(db, tables, group, hash, &ast)?;
     }
     Ok(())
 }
@@ -612,6 +616,7 @@ pub(crate) fn prepare_transform_version(
                 "DELETE FROM _zsync_queries WHERE clientGroupID = ?",
                 &[text(group)],
             )?;
+            super::wake::forget_query(db, group, None)?;
             reset_group(db, group)?;
         }
         db.exec(
@@ -1197,6 +1202,7 @@ pub(crate) fn recompute_group_with_rehydrate(
             "DELETE FROM _zsync_queries WHERE clientGroupID = ? AND hash = ?",
             &[text(group), text(hash)],
         )?;
+        super::wake::forget_query(db, group, Some(hash))?;
     }
 
     // apply net deltas; emit a put on 0 -> positive, a del on positive -> 0.

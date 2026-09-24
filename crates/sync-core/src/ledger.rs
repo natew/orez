@@ -439,6 +439,8 @@ pub(crate) fn finalize(
 
 pub(crate) struct ScannedLedger {
     pub changes: BTreeSet<(String, String)>,
+    // a reset transaction after the cookie invalidated every replica
+    pub reset: bool,
 }
 
 pub(crate) fn scan_since(db: &mut dyn SyncDb, cookie: i64) -> Result<ScannedLedger, EngineError> {
@@ -450,6 +452,7 @@ pub(crate) fn scan_since(db: &mut dyn SyncDb, cookie: i64) -> Result<ScannedLedg
         &[SqlValue::Integer(cookie)],
     )?;
     let mut changes = BTreeSet::new();
+    let mut reset = false;
     let mut previous_end: Option<i64> = None;
     for row in rows {
         let start = parse_counter(row.get("startVersion"), "start version")?;
@@ -490,6 +493,7 @@ pub(crate) fn scan_since(db: &mut dyn SyncDb, cookie: i64) -> Result<ScannedLedg
             if version <= cookie {
                 continue;
             }
+            reset |= transaction.reset;
             for (table, key) in transaction.changes {
                 let key = serde_json::to_string(&key)
                     .map_err(|_| EngineError::internal("packed ledger key is invalid"))?;
@@ -503,7 +507,7 @@ pub(crate) fn scan_since(db: &mut dyn SyncDb, cookie: i64) -> Result<ScannedLedg
         }
         previous_end = Some(end);
     }
-    Ok(ScannedLedger { changes })
+    Ok(ScannedLedger { changes, reset })
 }
 
 pub(crate) fn prune(db: &mut dyn SyncDb, cutoff: i64) -> Result<(), EngineError> {

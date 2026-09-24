@@ -201,6 +201,22 @@ with the clients table (`_zsync_clients`) that stores last-mutation-ids and the
 client-group to user binding. The wake socket remains advisory and carries no
 row data.
 
+## Wake targeting
+
+After an ingest applies a batch, the Cloudflare host wakes only the clients whose
+group can see a changed row (`crates/sync-core/src/query/wake.rs`). Waking every
+socket on every commit made arrivals cost the object one pull per connected
+client per commit, nearly all of them empty. Each registered query stores a
+plan: anchor keys for nodes whose predicate pins `column = literal`, and
+shape-level recipes that follow correlations for nodes that do not. A change
+wakes the groups that hold the row, the groups whose anchors its values match,
+and the groups its recipes reach through correlated rows, so the work per ingest
+grows with changed rows rather than with connected groups. A node nothing can
+bound, and everything below a NOT EXISTS, registers its group under `all` for
+its table. The answer must be a superset of the groups whose next pull changes;
+`crates/sync-core/tests/wake_targets.rs` checks that against real pulls. A
+completed snapshot, a reset, or a batch over 512 rows still wakes everyone.
+
 ## Paged upstream resnapshot
 
 The Cloudflare host rebuilds a derived replica through bounded, keyset-ordered

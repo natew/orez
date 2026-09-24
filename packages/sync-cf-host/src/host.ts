@@ -41,6 +41,7 @@ import {
   engine_schema_revision,
   engine_state,
   engine_version,
+  engine_wake_targets,
 } from './wasm.js'
 import {
   IngestBreakerError,
@@ -122,6 +123,9 @@ type UpstreamBatch = {
 type WakeStatus = {
   at: number
   tables: string[]
+  // false when a batch woke every socket: a snapshot, an untargeted wake, or a
+  // targeting failure
+  targeted: boolean
   socketCount: number
   originCount: number
   sent: number
@@ -783,6 +787,7 @@ export function createSyncDurableObject<
     #wakeOrigins = new Set<string>()
     #wakeRecipients = new Set<WebSocket>()
     #wakeTables = new Set<string>()
+    #wakeUntargeted = false
     #wakePromise: Promise<void> | null = null
     #lastWake: WakeStatus | null = null
     // Streaming fields. Null when the namespace configures no manifest, which
@@ -980,6 +985,7 @@ export function createSyncDurableObject<
         this.#wakeOrigins.clear()
         this.#wakeRecipients.clear()
         this.#wakeTables.clear()
+        this.#wakeUntargeted = false
         this.#wakePromise = null
         this.#lastWake = null
         // Real hibernation reconstructs the object, so the hub and every
@@ -1696,7 +1702,10 @@ export function createSyncDurableObject<
           }
         }
         if (snapshotCompleted || total > 0 || endingWatermark !== startingWatermark) {
-          await this.#enqueueWake('__upstream__', changedTables)
+          // a completed snapshot replaced the replica wholesale: every client
+          // re-pulls. otherwise wake only the clients these rows can reach.
+          const targets = snapshotCompleted ? null : this.#wakeTargets(startingWatermark)
+          await this.#enqueueWake('__upstream__', changedTables, targets)
         }
         return total
       })().finally(() => {
@@ -1798,10 +1807,42 @@ export function createSyncDurableObject<
       )
     }
 
-    #enqueueWake(originClientID: string, tables: Iterable<string> = []): Promise<void> {
+    // the clients a batch committed after `since` can reach, or null for every
+    // socket. a wake is advisory, so a targeting failure wakes everyone rather
+    // than failing the ingest that serves the pull waiting on it.
+    #wakeTargets(since: string): ReadonlySet<string> | null {
+      try {
+        const targets = this.ctx.storage.transactionSync(() =>
+          this.#wasm(() => engine_wake_targets(this.#engineDb, config.schema, since))
+        ) as { all: true } | { all: false; clientIDs: string[] }
+        return targets.all ? null : new Set(targets.clientIDs)
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: 'sync_wake_target_error',
+            hostVersion: config.hostVersion,
+            error: errorMessage(error),
+          })
+        )
+        return null
+      }
+    }
+
+    #enqueueWake(
+      originClientID: string,
+      tables: Iterable<string> = [],
+      targets: ReadonlySet<string> | null = null
+    ): Promise<void> {
       this.#wakeOrigins.add(originClientID)
       for (const table of tables) this.#wakeTables.add(table)
-      for (const socket of this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)) {
+      if (targets === null) this.#wakeUntargeted = true
+      const sockets =
+        targets === null
+          ? this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)
+          : [...targets].flatMap((clientID) =>
+              this.ctx.getWebSockets(`client:${clientID}`)
+            )
+      for (const socket of sockets) {
         const attachment = socketAttachment(socket)
         if (
           !attachment ||
@@ -1827,6 +1868,8 @@ export function createSyncDurableObject<
           this.#wakeRecipients = new Set()
           const tables = [...this.#wakeTables].sort()
           this.#wakeTables = new Set()
+          const targeted = !this.#wakeUntargeted
+          this.#wakeUntargeted = false
           this.#counters.wakeBatches++
           let sent = 0
           const sockets = this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)
@@ -1843,6 +1886,7 @@ export function createSyncDurableObject<
           const wakeStatus: WakeStatus = {
             at: Date.now(),
             tables,
+            targeted,
             socketCount: sockets.length,
             originCount: origins.size,
             sent,

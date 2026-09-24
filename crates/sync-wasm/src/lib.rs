@@ -681,6 +681,29 @@ pub fn engine_handle_query_pull(
     .and_then(|value| to_js(&value))
 }
 
+/// The clients a wake after an ingest should reach: every client whose group
+/// can see a row committed after `since`. `{ all: true }` means wake every
+/// socket; otherwise `clientIDs` lists the clients to wake. Call it with a
+/// transaction open, after the ingest that advanced past `since`.
+#[wasm_bindgen]
+pub fn engine_wake_targets(
+    db: &JsSyncDb,
+    schema: JsValue,
+    since: &str,
+) -> Result<JsValue, JsValue> {
+    let tables = tables_from_js(schema)?;
+    let since = parse_counter(since, "wake watermark")?;
+    let targets =
+        sync_core::query::wake_targets(&mut WasmDb(db), &tables, since).map_err(engine_error)?;
+    let wire = match targets {
+        sync_core::query::WakeTargets::All => serde_json::json!({ "all": true }),
+        sync_core::query::WakeTargets::Clients(clients) => {
+            serde_json::json!({ "all": false, "clientIDs": clients })
+        }
+    };
+    to_js(&wire)
+}
+
 /// Authorize a realtime field subscription.
 ///
 /// Answers the one question a host needs before it will stream a row's field to

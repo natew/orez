@@ -58,3 +58,4 @@ export const engine_record_app_error = withWasm(generated.engine_record_app_erro
 export const engine_schema_revision = withWasm(generated.engine_schema_revision)
 export const engine_state = withWasm(generated.engine_state)
 export const engine_version = withWasm(generated.engine_version)
+export const engine_wake_targets = withWasm(generated.engine_wake_targets)
