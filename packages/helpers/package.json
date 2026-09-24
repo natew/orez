@@ -23,13 +23,11 @@
     },
     "./server-only": {
       "types": "./dist/server-only.d.ts",
-      "react-native": "./dist/server-only.native.js",
       "import": "./dist/server-only.js",
       "default": "./dist/server-only.js"
     },
     "./client-only": {
       "types": "./dist/client-only.d.ts",
-      "react-native": "./dist/client-only.native.js",
       "import": "./dist/client-only.js",
       "default": "./dist/client-only.js"
     }
@@ -40,7 +38,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/native-graph.mjs",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "lint": "oxlint src",
