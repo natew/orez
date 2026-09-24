@@ -221,6 +221,17 @@ export const useEmitterSelector = <E extends Emitter<any>, T extends EmitterType
     }
   }
 
+  const prevArgsRef = React.useRef<readonly unknown[] | null>(null)
+  const argsCountRef = React.useRef(0)
+  if (
+    prevArgsRef.current === null ||
+    prevArgsRef.current.length !== args.length ||
+    prevArgsRef.current.some((a, i) => !Object.is(a, args[i]))
+  ) {
+    prevArgsRef.current = [...args]
+    argsCountRef.current++
+  }
+
   useLayoutEffect(() => {
     if (disabled) return
     return emitter.listen((val) => {
@@ -236,7 +247,7 @@ export const useEmitterSelector = <E extends Emitter<any>, T extends EmitterType
       }
     })
     // oxlint-disable-next-line exhaustive-deps
-  }, [disabled, emitter, getSelector, ...args])
+  }, [disabled, emitter, getSelector, argsCountRef.current])
 
   return state
 }
@@ -253,6 +264,17 @@ export const useEmittersSelector = <const E extends readonly Emitter<any>[], R>(
     const values = emitters.map((e) => e.value) as { [K in keyof E]: EmitterType<E[K]> }
     return getSelector()(values)
   })
+
+  const prevEmittersRef = React.useRef<readonly Emitter<any>[] | null>(null)
+  const emittersCountRef = React.useRef(0)
+  if (
+    prevEmittersRef.current === null ||
+    prevEmittersRef.current.length !== emitters.length ||
+    prevEmittersRef.current.some((e, i) => !Object.is(e, emitters[i]))
+  ) {
+    prevEmittersRef.current = [...emitters]
+    emittersCountRef.current++
+  }
 
   useLayoutEffect(() => {
     if (disabled) {
@@ -288,7 +310,7 @@ export const useEmittersSelector = <const E extends readonly Emitter<any>[], R>(
       disposals.forEach((d) => d())
     }
     // oxlint-disable-next-line exhaustive-deps
-  }, [disabled, getSelector, ...emitters])
+  }, [disabled, getSelector, emittersCountRef.current])
 
   return state
 }
