@@ -40,7 +40,9 @@ while (grew) {
 
 const rewrite = (file) =>
   readFileSync(file, 'utf8').replace(specifier, (whole, head, path, tail) =>
-    native.has(resolve(dirname(file), `${path}.js`)) ? `${head}${path}.native.js${tail}` : whole
+    native.has(resolve(dirname(file), `${path}.js`))
+      ? `${head}${path}.native.js${tail}`
+      : whole
   )
 
 // a native source keeps its own body and only has its imports redirected
