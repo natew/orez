@@ -800,7 +800,7 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 // bump when the trigger bodies change shape. versioned names make startup
 // idempotent, and the version feeds schema_revision so hosts re-run the
 // schema pass exactly once when new bodies ship.
-pub const TRIGGER_VERSION: u32 = 4;
+pub const TRIGGER_VERSION: u32 = 5;
 
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();
@@ -840,8 +840,9 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
             FROM _zsync_log_segments
             WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
               AND captureMode = 0
-              AND length(CAST(payload AS BLOB)) >= 786432;",
+              AND length(CAST(payload AS BLOB)) >= {rotate_at};",
             ledger_format = crate::ledger::LEDGER_FORMAT,
+            rotate_at = crate::ledger::ROTATE_AT_BYTES,
         );
         let enforce_limit = "SELECT CASE
                 WHEN (

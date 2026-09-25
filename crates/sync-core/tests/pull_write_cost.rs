@@ -209,3 +209,57 @@ fn a_below_floor_cookie_preserves_unchanged_group_membership() {
     }));
     println!("below-floor unchanged pull wrote {written} rows and sent 1,000 rows");
 }
+
+// Bytes, not rows, are what a native host pays: every row change rewrites the
+// whole active ledger segment, so a steady trickle of single-row writes against
+// a nearly full segment is the worst case. metered as wal growth on a
+// file-backed database with checkpoints off, which counts every page a commit
+// writes.
+#[test]
+fn a_row_change_writes_a_bounded_number_of_bytes() {
+    let mut h = Host::new(true);
+    let path =
+        std::env::temp_dir().join(format!("orez-ledger-bytes-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    h.db.conn = rusqlite::Connection::open(&path).unwrap();
+    h.db.conn
+        .execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE item_record (item_id TEXT PRIMARY KEY, item_label TEXT NOT NULL,
+             sort_rank REAL NOT NULL, is_done INTEGER NOT NULL, metadata_json TEXT)",
+        )
+        .unwrap();
+    h.init();
+    // an active segment just under 1 MiB of history, as a busy namespace
+    // carries between rotations
+    let filler = serde_json::to_string(&json!({
+        "format": 2,
+        "transactions": [{ "version": "1", "changes": [["item", { "id": "x".repeat(700_000) }]] }],
+    }))
+    .unwrap();
+    h.db.conn
+        .execute(
+            "UPDATE _zsync_log_segments SET endVersion = 1, payload = ?",
+            [filler],
+        )
+        .unwrap();
+    h.db.conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+
+    let changes = 200;
+    for i in 0..changes {
+        h.exec(&format!(
+            "INSERT INTO item_record VALUES ('i{i}','label{i}',{i}.0,0,NULL)"
+        ));
+    }
+    let wal = std::fs::metadata(path.with_extension("sqlite-wal"))
+        .unwrap()
+        .len();
+    let _ = std::fs::remove_file(&path);
+    let per_change = wal / changes;
+    assert!(
+        per_change < 48 * 1_024,
+        "one row change wrote {per_change} bytes on average"
+    );
+}

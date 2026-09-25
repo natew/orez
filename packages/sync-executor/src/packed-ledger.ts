@@ -49,7 +49,9 @@ type ActiveSegment = {
   captureMode: number | bigint | string
 }
 
-const ROTATE_AT_BYTES = 768 * 1_024
+// matches ROTATE_AT_BYTES in crates/sync-core/src/ledger.rs and the trigger bodies:
+// every change rewrites the active segment, so this bounds bytes per change.
+const ROTATE_AT_BYTES = 64 * 1_024
 const MAX_PAYLOAD_BYTES = 1_024 * 1_024
 
 function counter(value: unknown, name: string): number {
