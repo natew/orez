@@ -433,6 +433,16 @@ pub(crate) fn store_plan(
     ast: &Ast,
 ) -> Result<(), EngineError> {
     forget_query(db, group, Some(hash))?;
+    insert_plan(db, tables, group, hash, ast)
+}
+
+fn insert_plan(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    group: &str,
+    hash: &str,
+    ast: &Ast,
+) -> Result<(), EngineError> {
     let plan = plan_query(tables, ast);
     for (table, key) in &plan.keys {
         db.exec(
@@ -469,8 +479,14 @@ pub(crate) fn forget_query(
     Ok(())
 }
 
+// rows of _zsync_queries one backfill read carries into the engine
+const PLAN_BACKFILL_PAGE: i64 = 500;
+
 // rebuild every stored plan once per WAKE_SCHEMA_VERSION, so queries
-// registered before this engine (or under an older plan format) are targeted
+// registered before this engine (or under an older plan format) are targeted.
+// the stored ASTs are read a page at a time: a live namespace holds tens of
+// thousands of them, and one read of all of them crosses into the engine's
+// memory at once, which a Durable Object's memory limit does not survive.
 fn ensure_plans(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), EngineError> {
     let current = db
         .query(
@@ -487,16 +503,37 @@ fn ensure_plans(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), EngineError>
     }
     db.exec("DELETE FROM _zsync_wake_keys", &[])?;
     db.exec("DELETE FROM _zsync_wake_recipes", &[])?;
-    let rows = db.query("SELECT clientGroupID, hash, ast FROM _zsync_queries", &[])?;
-    for row in &rows {
-        let (Some(SqlValue::Text(group)), Some(SqlValue::Text(hash)), Some(SqlValue::Text(ast))) =
-            (row.get("clientGroupID"), row.get("hash"), row.get("ast"))
-        else {
-            continue;
-        };
-        let ast: Value = serde_json::from_str(ast)
-            .map_err(|e| EngineError::internal(format!("stored query ast is not json: {e}")))?;
-        store_plan(db, tables, group, hash, &parse_ast(&ast)?)?;
+    let mut after = (String::new(), String::new());
+    loop {
+        let rows = db.query(
+            "SELECT clientGroupID, hash, ast FROM _zsync_queries
+             WHERE (clientGroupID, hash) > (?, ?)
+             ORDER BY clientGroupID, hash
+             LIMIT ?",
+            &[
+                text(&after.0),
+                text(&after.1),
+                SqlValue::Integer(PLAN_BACKFILL_PAGE),
+            ],
+        )?;
+        for row in &rows {
+            let (Some(SqlValue::Text(group)), Some(SqlValue::Text(hash))) =
+                (row.get("clientGroupID"), row.get("hash"))
+            else {
+                continue;
+            };
+            // the cursor moves past every row read, planned or not
+            after = (group.clone(), hash.clone());
+            let Some(SqlValue::Text(ast)) = row.get("ast") else {
+                continue;
+            };
+            let ast: Value = serde_json::from_str(ast)
+                .map_err(|e| EngineError::internal(format!("stored query ast is not json: {e}")))?;
+            insert_plan(db, tables, group, hash, &parse_ast(&ast)?)?;
+        }
+        if (rows.len() as i64) < PLAN_BACKFILL_PAGE {
+            break;
+        }
     }
     db.exec(
         "INSERT INTO _zsync_wake_meta (lock, version) VALUES (1, ?)

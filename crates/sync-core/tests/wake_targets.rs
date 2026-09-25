@@ -6,7 +6,7 @@
 // received rows was not targeted.
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use common::TestDb;
 use serde_json::{Value, json};
@@ -394,19 +394,44 @@ fn global_and_negated_shapes_fall_back_to_their_groups() {
 
 #[test]
 fn plans_registered_before_the_wake_tables_are_rebuilt() {
-    let mut fixture = Fixture::new(3);
-    fixture
+    // enough groups that the stored queries span several backfill pages, and
+    // the rebuild must reproduce every key the registrations stored
+    let mut fixture = Fixture::new(300);
+    let keys = |db: &mut TestDb| {
+        db.query(
+            "SELECT clientGroupID, hash, wakeTable, wakeKey FROM _zsync_wake_keys
+             ORDER BY clientGroupID, hash, wakeTable, wakeKey",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| format!("{row:?}"))
+        .collect::<Vec<_>>()
+    };
+    let queries = match fixture
         .db
-        .exec("DELETE FROM _zsync_wake_keys", &[])
-        .unwrap();
-    fixture
-        .db
-        .exec("DELETE FROM _zsync_wake_recipes", &[])
-        .unwrap();
-    fixture
-        .db
-        .exec("DELETE FROM _zsync_wake_meta", &[])
-        .unwrap();
+        .query("SELECT COUNT(*) AS n FROM _zsync_queries", &[])
+        .unwrap()[0]
+        .get("n")
+    {
+        Some(sync_core::SqlValue::Integer(n)) => *n,
+        _ => 0,
+    };
+    assert!(
+        queries > 1_000,
+        "{queries} stored queries fit one backfill page"
+    );
+    let registered = keys(&mut fixture.db);
+    for table in [
+        "_zsync_wake_keys",
+        "_zsync_wake_recipes",
+        "_zsync_wake_meta",
+    ] {
+        fixture
+            .db
+            .exec(&format!("DELETE FROM {table}"), &[])
+            .unwrap();
+    }
     let since = fixture.watermark();
     fixture
         .db
@@ -419,21 +444,22 @@ fn plans_registered_before_the_wake_tables_are_rebuilt() {
         fixture.targets(since),
         WakeTargets::Clients(BTreeSet::from(["c1".to_string()]))
     );
-    let rebuilt: BTreeMap<String, i64> = [("_zsync_wake_keys", 0), ("_zsync_wake_recipes", 0)]
-        .into_iter()
-        .map(|(table, _)| {
-            let rows = fixture
-                .db
-                .query(&format!("SELECT COUNT(*) AS n FROM {table}"), &[])
-                .unwrap();
-            let n = match rows[0].get("n") {
-                Some(sync_core::SqlValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            (table.to_string(), n)
-        })
-        .collect();
-    assert!(rebuilt.values().all(|n| *n > 0), "{rebuilt:?}");
+    let rebuilt = keys(&mut fixture.db);
+    assert_eq!(rebuilt.len(), registered.len());
+    assert!(
+        rebuilt == registered,
+        "rebuilt keys differ from the registered ones"
+    );
+    let recipes = match fixture
+        .db
+        .query("SELECT COUNT(*) AS n FROM _zsync_wake_recipes", &[])
+        .unwrap()[0]
+        .get("n")
+    {
+        Some(sync_core::SqlValue::Integer(n)) => *n,
+        _ => 0,
+    };
+    assert!(recipes > 0);
 }
 
 // targeting cost is per changed row, never per connected group: the same
