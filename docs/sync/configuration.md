@@ -129,12 +129,12 @@ projecting the full namespace.
 
 ## Retention and lifecycle
 
-| Field                          | Type         | Default           | Meaning                                                                                                                       |
-| ------------------------------ | ------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `retainChanges`                | `number`     | 4096              | Change-log rows kept below the high watermark. A client whose cookie falls below the pruned floor gets a snapshot.            |
-| `idleTeardownMs`               | `number`     | unset (off)       | Test-only eviction model. After this much inactivity the DO resets its in-memory boot state. Leave unset in production.       |
-| `wakeCoalesceMs`               | `number`     | 25                | Batching window for the wake fan-out. A storm of writes produces one pull wave instead of one per write.                      |
-| `authorizeAdmin(request, env)` | `=> boolean` | `ADMIN_KEY` check | Authorizes `/admin/*` routes. The default requires `env.ADMIN_KEY` set and a matching `x-admin-key` header.                   |
+| Field                          | Type         | Default           | Meaning                                                                                                                 |
+| ------------------------------ | ------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `retainChanges`                | `number`     | 4096              | Change-log rows kept below the high watermark. A client whose cookie falls below the pruned floor gets a snapshot.      |
+| `idleTeardownMs`               | `number`     | unset (off)       | Test-only eviction model. After this much inactivity the DO resets its in-memory boot state. Leave unset in production. |
+| `wakeCoalesceMs`               | `number`     | 25                | Batching window for the wake fan-out. A storm of writes produces one pull wave instead of one per write.                |
+| `authorizeAdmin(request, env)` | `=> boolean` | `ADMIN_KEY` check | Authorizes `/admin/*` routes. The default requires `env.ADMIN_KEY` set and a matching `x-admin-key` header.             |
 
 `authorizeWake` and `authorizeNotify` have no permissive default. The standard
 client carries its existing Zero auth token in the wake socket's subprotocol;
