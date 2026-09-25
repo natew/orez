@@ -457,17 +457,36 @@ impl<'a> Compiler<'a> {
     }
 }
 
-// a relevance probe: does a single primary-key row of the root table match the
-// query's predicate (EXISTS conditions included), ignoring order/limit? returns
-// the SQL with the root predicate binds plus a trailing `?` per pk column, and
-// the pk column order the caller binds after the predicate params. touched-pk
-// narrowing (plan optimization: "narrow recomputation using touched primary
-// keys") uses this to skip a query when no touched root row is a member or a
-// match.
-pub fn compile_predicate_probe(
-    ast: &Ast,
-    tables: &Tables,
-) -> Result<(String, Vec<SqlValue>, Vec<String>), EngineError> {
+// a relevance probe: does any of a list of root-table primary-key rows match
+// the query's predicate (EXISTS conditions included), ignoring order/limit?
+// touched-pk narrowing (plan optimization: "narrow recomputation using touched
+// primary keys") uses this to skip a query when no touched root row is a member
+// or a match. one statement probes a whole list of keys, so a pull that saw
+// many changed rows pays per list, not per row.
+pub struct PredicateProbe {
+    // `<table> AS <alias> WHERE <pk> = k.columnN AND <predicate> LIMIT 1`
+    joined: String,
+    pub params: Vec<SqlValue>,
+    pub primary_key: Vec<String>,
+}
+
+impl PredicateProbe {
+    // the probe for `keys` rows. bind each key's primary_key columns in order,
+    // key after key, then `params`. the keys are a VALUES list CROSS JOINed as
+    // the outer loop, which SQLite never reorders, so every key is a primary-key
+    // lookup: with an IN list the planner, lacking statistics, may prefer an
+    // index on a predicate column and scan every row it covers.
+    pub fn sql(&self, keys: usize) -> String {
+        let row = format!("({})", vec!["?"; self.primary_key.len()].join(", "));
+        format!(
+            "SELECT 1 FROM (VALUES {}) AS k CROSS JOIN {}",
+            vec![row; keys].join(", "),
+            self.joined
+        )
+    }
+}
+
+pub fn compile_predicate_probe(ast: &Ast, tables: &Tables) -> Result<PredicateProbe, EngineError> {
     super::opacity::validate_encrypted_column_usage(tables, ast)?;
     let mut c = Compiler::new(tables);
     c.check_table(&ast.table)?;
@@ -476,22 +495,23 @@ pub fn compile_predicate_probe(
         .ok_or_else(|| reject(format!("unknown table '{}'", ast.table)))?;
     let alias = c.alias();
     let mut wheres: Vec<String> = Vec::new();
-    if let Some(cond) = &ast.where_ {
-        wheres.push(c.compile_condition(cond, &ast.table, &alias)?);
-    }
-    for col in &spec.primary_key {
+    for (i, col) in spec.primary_key.iter().enumerate() {
         wheres.push(format!(
-            "{}.{} = ?",
+            "{}.{} = k.column{}",
             quote_ident(&alias),
             quote_ident(
                 tables
                     .physical_column(&ast.table, col)
                     .expect("primary key column in table mapping")
-            )
+            ),
+            i + 1
         ));
     }
-    let sql = format!(
-        "SELECT 1 FROM {} AS {} WHERE {} LIMIT 1",
+    if let Some(cond) = &ast.where_ {
+        wheres.push(c.compile_condition(cond, &ast.table, &alias)?);
+    }
+    let joined = format!(
+        "{} AS {} WHERE {} LIMIT 1",
         quote_ident(
             tables
                 .physical_name(&ast.table)
@@ -500,7 +520,11 @@ pub fn compile_predicate_probe(
         quote_ident(&alias),
         wheres.join(" AND ")
     );
-    Ok((sql, c.params, spec.primary_key.clone()))
+    Ok(PredicateProbe {
+        joined,
+        params: c.params,
+        primary_key: spec.primary_key.clone(),
+    })
 }
 
 pub fn compile(ast: &Ast, tables: &Tables) -> Result<CompiledQuery, EngineError> {

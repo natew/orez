@@ -196,6 +196,191 @@ fn touched_pk_narrowing_skips_same_table_queries_that_do_not_match() {
     assert_eq!(put_keys(&caught), vec!["t0:d"]);
 }
 
+// counts every statement a recompute sends
+struct Counting<'a> {
+    db: &'a mut dyn SyncDb,
+    statements: usize,
+}
+impl SyncDb for Counting<'_> {
+    fn exec(
+        &mut self,
+        sql: &str,
+        params: &[sync_core::SqlValue],
+    ) -> Result<(), sync_core::DbError> {
+        self.statements += 1;
+        self.db.exec(sql, params)
+    }
+    fn query(
+        &mut self,
+        sql: &str,
+        params: &[sync_core::SqlValue],
+    ) -> Result<Vec<sync_core::Row>, sync_core::DbError> {
+        self.statements += 1;
+        self.db.query(sql, params)
+    }
+}
+
+#[test]
+fn touched_pk_narrowing_probes_changed_keys_a_chunk_per_statement() {
+    // a pull that missed many other clients' writes probes every changed root
+    // key against each query on that table. the keys go a bind-limited chunk per
+    // statement, so 250 unrelated changes cost the same few statements as one,
+    // and a member or a match anywhere in the list, including the last chunk,
+    // still recomputes the query.
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE t0 (id TEXT PRIMARY KEY, v INTEGER)", &[])
+        .unwrap();
+    db.exec("CREATE INDEX t0_v ON t0 (v)", &[]).unwrap();
+    db.exec("CREATE TABLE t1 (id TEXT PRIMARY KEY, v INTEGER)", &[])
+        .unwrap();
+    let tables = tables(2);
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    db.exec("INSERT INTO t0 VALUES ('zy', 1)", &[]).unwrap();
+    let others: Vec<String> = (0..250).map(|i| format!("o{i:03}")).collect();
+    for id in &others {
+        db.exec(
+            "INSERT INTO t0 VALUES (?, 2)",
+            &[sync_core::SqlValue::Text(id.clone())],
+        )
+        .unwrap();
+    }
+    register_query(&mut db, &tables, G, "q1", &where_v(1), 0).unwrap();
+    set_desire(&mut db, G, "c", "q1", 1).unwrap();
+    assert_eq!(
+        put_keys(
+            &db.transaction(|d| recompute_group(d, &tables, G, &changed(&[])))
+                .unwrap()
+        ),
+        vec!["t0:zy"]
+    );
+
+    let statements = |db: &mut TestDb, ids: &[&str]| {
+        db.transaction(|d| {
+            let mut counting = Counting {
+                db: d,
+                statements: 0,
+            };
+            let patch = recompute_group(
+                &mut counting,
+                &tables,
+                G,
+                &changed(&ids.iter().map(|id| ("t0", *id)).collect::<Vec<_>>()),
+            )?;
+            assert!(patch.is_empty(), "unrelated changes must not emit rows");
+            Ok::<_, sync_core::EngineError>(counting.statements)
+        })
+        .unwrap()
+    };
+    let one = statements(&mut db, &["o000"]);
+    let all: Vec<&str> = others.iter().map(String::as_str).collect();
+    let many = statements(&mut db, &all);
+    // 250 keys fit three chunks: two more membership checks and two more probes
+    assert_eq!(
+        many - one,
+        4,
+        "250 unrelated keys cost {many} statements, one key {one}"
+    );
+
+    // a new match sorted after every unrelated key lands in the last chunk
+    db.exec("INSERT INTO t0 VALUES ('zz', 1)", &[]).unwrap();
+    let mut late = all.clone();
+    late.push("zz");
+    let patch = db
+        .transaction(|d| {
+            recompute_group(
+                d,
+                &tables,
+                G,
+                &changed(&late.iter().map(|id| ("t0", *id)).collect::<Vec<_>>()),
+            )
+        })
+        .unwrap();
+    assert_eq!(put_keys(&patch), vec!["t0:zz"]);
+
+    // a member leaving from the last chunk recomputes the query and deletes it
+    db.exec("UPDATE t0 SET v = 3 WHERE id = 'zy'", &[]).unwrap();
+    let mut leaving = all.clone();
+    leaving.push("zy");
+    let patch = db
+        .transaction(|d| {
+            recompute_group(
+                d,
+                &tables,
+                G,
+                &changed(&leaving.iter().map(|id| ("t0", *id)).collect::<Vec<_>>()),
+            )
+        })
+        .unwrap();
+    assert!(
+        patch
+            .iter()
+            .any(|op| op["op"] == "del" && op["id"]["id"] == "zy"),
+        "member zy left the query: {patch:?}"
+    );
+}
+
+#[test]
+fn touched_pk_narrowing_probes_composite_keys_by_every_column() {
+    // a composite key binds each column in declared order: a changed row matches
+    // only when both columns name it
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE member (serverId TEXT, userId TEXT, role TEXT, PRIMARY KEY (serverId, userId))",
+        &[],
+    )
+    .unwrap();
+    let tables = Tables::new().with(
+        "member",
+        TableSpec {
+            columns: vec![
+                ("serverId".into(), ZeroColumnType::String),
+                ("userId".into(), ZeroColumnType::String),
+                ("role".into(), ZeroColumnType::String),
+            ],
+            primary_key: vec!["serverId".into(), "userId".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
+        },
+    );
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    let owners = json!({ "table": "member", "where": {
+        "type": "simple", "op": "=", "left": { "type": "column", "name": "role" },
+        "right": { "type": "literal", "value": "owner" } } });
+    register_query(&mut db, &tables, G, "owners", &owners, 0).unwrap();
+    set_desire(&mut db, G, "c", "owners", 1).unwrap();
+    db.transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+
+    db.exec(
+        "INSERT INTO member VALUES ('s1', 'u1', 'owner'), ('s2', 'u2', 'guest')",
+        &[],
+    )
+    .unwrap();
+    let key = |server: &str, user: &str| {
+        (
+            "member".to_string(),
+            json!({ "serverId": server, "userId": user }).to_string(),
+        )
+    };
+    // (s1, u2) and (s2, u1) cross the columns of the two rows: neither exists
+    let crossed: BTreeSet<_> = [key("s1", "u2"), key("s2", "u1"), key("s2", "u2")].into();
+    let patch = db
+        .transaction(|d| recompute_group(d, &tables, G, &crossed))
+        .unwrap();
+    assert!(
+        patch.is_empty(),
+        "no changed key names the owner row: {patch:?}"
+    );
+    let named: BTreeSet<_> = [key("s2", "u2"), key("s1", "u1")].into();
+    let patch = db
+        .transaction(|d| recompute_group(d, &tables, G, &named))
+        .unwrap();
+    assert_eq!(patch.len(), 1, "{patch:?}");
+    assert_eq!(patch[0]["value"]["serverId"], "s1");
+}
+
 #[test]
 #[ignore = "benchmark — run with --ignored --nocapture"]
 fn narrowing_benchmark() {

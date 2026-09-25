@@ -40,6 +40,9 @@ use super::ast::{Ast, Condition, CorrelatedSubquery};
 use super::compile::{compile_predicate_probe, compile_related_of};
 use super::{compile, parse_ast};
 
+// bound parameters one statement may carry: the Durable Object SQL limit
+const SQL_BIND_LIMIT: usize = 100;
+
 // bind a pk column (parsed from a canonical pk json) as a sqlite value
 pub(crate) fn json_pk_to_sql(v: Option<&Value>) -> SqlValue {
     match v {
@@ -987,31 +990,41 @@ fn query_relevant(
         return Ok(false);
     }
     let ast = parse_ast(&q.ast_json)?;
-    let (sql, base_params, pk_cols) = compile_predicate_probe(&ast, tables)?;
-    for pk in root_pks {
-        // "is this one changed row already a member" is a point lookup on the
-        // full _zsync_query_rows primary key. it used to materialize the whole
-        // of read_query_row_keys(group, hash) -- every row in the query's
-        // result -- to answer it, so the step that exists to make a recompute
-        // CHEAPER read the entire membership of every candidate query. the
-        // per-pk predicate probe below already dominates this loop, so an
-        // indexed one-row existence check is strictly cheaper than the set.
+    let probe = compile_predicate_probe(&ast, tables)?;
+    // one membership check and one predicate probe per chunk of changed keys,
+    // sized to the bind limit, instead of both per key: a pull that missed every
+    // other client's writes since its cookie probes each of them against each
+    // query on their table. the membership check stays a point lookup per key on
+    // the full _zsync_query_rows primary key, never the query's whole set.
+    let per_chunk = (SQL_BIND_LIMIT.saturating_sub(probe.params.len()) / probe.primary_key.len())
+        .clamp(1, SQL_BIND_LIMIT - 3);
+    for chunk in root_pks.chunks(per_chunk) {
+        let mut params = vec![text(group), text(&q.hash), text(&q.root_table)];
+        params.extend(chunk.iter().map(|pk| text(pk.as_str())));
         let member = !db
             .query(
-                "SELECT 1 FROM _zsync_query_rows
-                 WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk = ?",
-                &[text(group), text(&q.hash), text(&q.root_table), text(pk)],
+                &format!(
+                    "SELECT 1 FROM _zsync_query_rows
+                     WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk IN ({})
+                     LIMIT 1",
+                    vec!["?"; chunk.len()].join(", ")
+                ),
+                &params,
             )?
             .is_empty();
         if member {
             return Ok(true);
         }
-        let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
-        let mut params = base_params.clone();
-        for col in &pk_cols {
-            params.push(json_pk_to_sql(pk_obj.get(col)));
+        let mut params =
+            Vec::with_capacity(chunk.len() * probe.primary_key.len() + probe.params.len());
+        for pk in chunk {
+            let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
+            for col in &probe.primary_key {
+                params.push(json_pk_to_sql(pk_obj.get(col)));
+            }
         }
-        if !db.query(&sql, &params)?.is_empty() {
+        params.extend(probe.params.iter().cloned());
+        if !db.query(&probe.sql(chunk.len()), &params)?.is_empty() {
             return Ok(true);
         }
     }
@@ -1248,10 +1261,12 @@ pub(crate) fn recompute_group_with_rehydrate(
     }
 
     // re-emit rows whose data changed but whose membership did not (still
-    // referenced, without duplicating a put/del from a membership flip)
+    // referenced, without duplicating a put/del from a membership flip). only a
+    // recomputed query holds a live value, so the refcount read is skipped for
+    // every changed row no recompute reached, which on a narrowed pull is all.
     for (table, pk) in changed {
         let key = (table.clone(), pk.clone());
-        if emitted.contains(&key) {
+        if emitted.contains(&key) || !values.contains_key(&key) {
             continue;
         }
         if read_ref(db, group, table, pk)? > 0
