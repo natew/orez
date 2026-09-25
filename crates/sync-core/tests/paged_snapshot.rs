@@ -429,6 +429,60 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     );
 }
 
+fn live_index_names(db: &mut TestDb) -> Vec<String> {
+    db.query(
+        "SELECT name FROM sqlite_schema
+         WHERE type = 'index' AND tbl_name = 'item_record' AND sql IS NOT NULL
+         ORDER BY name",
+        &[],
+    )
+    .unwrap()
+    .iter()
+    .map(|row| match &row.values[0] {
+        SqlValue::Text(name) => name.clone(),
+        value => panic!("expected index name, got {value:?}"),
+    })
+    .collect()
+}
+
+#[test]
+fn cutover_restores_live_index_names_so_generations_never_compound_them() {
+    let (mut db, tables) = setup();
+    // a clone an older engine left under its stage name after cutover
+    db.exec(
+        &item_sql("CREATE INDEX _zsync_stage_9_item_idx_0 ON item(label)"),
+        &[],
+    )
+    .unwrap();
+    for start in [10, 20] {
+        let generation = db
+            .transaction(|db| begin_snapshot_generation(db, &tables, start))
+            .unwrap()
+            .generation;
+        db.transaction(|db| {
+            apply_snapshot_page(db, &tables, generation, "item", &[item("a", "one")], None)
+        })
+        .unwrap();
+        db.transaction(|db| finalize_snapshot_generation(db, &tables, generation, start))
+            .unwrap();
+        assert_eq!(
+            live_index_names(&mut db),
+            vec!["item_label_unique".to_string()],
+            "generation {generation} must leave exactly the live index set"
+        );
+    }
+    let duplicate = db.exec(
+        &item_sql(
+            "INSERT INTO item (id, label, rank, done, meta) VALUES ('dup', 'one', 1, 0, NULL)",
+        ),
+        &[],
+    );
+    assert!(
+        duplicate.is_err(),
+        "the rebuilt UNIQUE index must still enforce"
+    );
+}
+
 fn two_tables() -> Tables {
     let string_column = |name: &str| (name.to_string(), ZeroColumnType::String);
     Tables::new()

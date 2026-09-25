@@ -910,6 +910,22 @@ pub fn apply_snapshot_changes(
     })
 }
 
+// the live table's own secondary indexes, by their live names. clones left
+// by an older engine that kept stage names after cutover are not the table's
+// own and are dropped with the stage copies instead of being restored.
+fn live_index_sql(db: &mut dyn SyncDb, table: &str) -> Result<Vec<String>, EngineError> {
+    db.query(
+        "SELECT sql FROM sqlite_schema
+         WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL
+           AND name NOT GLOB '_zsync_stage_*'
+         ORDER BY name",
+        &[SqlValue::Text(table.to_string())],
+    )?
+    .iter()
+    .map(|row| required_text(row, "sql").map(str::to_string))
+    .collect()
+}
+
 fn live_trigger_sql(db: &mut dyn SyncDb, table: &str) -> Result<Vec<String>, EngineError> {
     db.query(
         "SELECT sql FROM sqlite_schema
@@ -946,18 +962,17 @@ pub fn finalize_snapshot_generation(
     }
 
     let names = sorted_table_names(tables);
-    let triggers = names
-        .iter()
-        .map(|table| {
-            live_trigger_sql(
-                db,
-                tables
-                    .physical_name(table)
-                    .expect("iterated table has physical mapping"),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for (table, trigger_sql) in names.iter().zip(triggers) {
+    let mut live_schema = Vec::with_capacity(names.len());
+    for table in &names {
+        let physical_table = tables
+            .physical_name(table)
+            .expect("iterated table has physical mapping");
+        live_schema.push((
+            live_index_sql(db, physical_table)?,
+            live_trigger_sql(db, physical_table)?,
+        ));
+    }
+    for (table, (index_sql, trigger_sql)) in names.iter().zip(live_schema) {
         let physical_table = tables
             .physical_name(table)
             .expect("iterated table has physical mapping");
@@ -970,6 +985,26 @@ pub fn finalize_snapshot_generation(
             ),
             &[],
         )?;
+        // the stage carried renamed clones so paging enforced the live
+        // constraints. sqlite cannot rename an index, so rebuild each under
+        // its live name; kept under stage names, a consumer's idempotent DDL
+        // would add its own copy beside every clone and each generation
+        // would clone both again.
+        let clones = db.query(
+            "SELECT name FROM sqlite_schema
+             WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL
+               AND name GLOB '_zsync_stage_*'",
+            &[SqlValue::Text(physical_table.to_string())],
+        )?;
+        for row in &clones {
+            db.exec(
+                &format!("DROP INDEX {}", quote_ident(required_text(row, "name")?)),
+                &[],
+            )?;
+        }
+        for sql in index_sql {
+            db.exec(&sql, &[])?;
+        }
         for sql in trigger_sql {
             db.exec(&sql, &[])?;
         }
