@@ -2503,3 +2503,51 @@ async fn fixture_config_still_works() {
     let (status, _resp) = send(&router, req).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+// a real socket handshake: oneshot requests carry no upgrade, so only a served
+// router shows what the 101 actually says.
+async fn wake_handshake(protocols: Option<&str>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(custom_config(), tmp.path().to_path_buf()).into_router_trusted();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut request = format!(
+        "GET /wake-ns/wake?clientID=c1 HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    );
+    if let Some(protocols) = protocols {
+        request.push_str(&format!("Sec-WebSocket-Protocol: {protocols}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).await.unwrap();
+        head.push(byte[0]);
+    }
+    String::from_utf8(head).unwrap().to_ascii_lowercase()
+}
+
+#[tokio::test]
+async fn wake_socket_selects_the_offered_auth_protocol() {
+    let head = wake_handshake(Some("orez-auth.dG9rZW4, other")).await;
+    assert!(head.starts_with("http/1.1 101"), "{head}");
+    assert!(
+        head.contains("sec-websocket-protocol: orez-auth.dg9rzw4\r\n"),
+        "a 101 that selects none of the offered protocols fails the client handshake: {head}"
+    );
+
+    let head = wake_handshake(None).await;
+    assert!(head.starts_with("http/1.1 101"), "{head}");
+    assert!(!head.contains("sec-websocket-protocol"), "{head}");
+}

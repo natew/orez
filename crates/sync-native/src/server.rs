@@ -14,7 +14,7 @@ use axum::extract::Request;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, ORIGIN};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, ORIGIN, SEC_WEBSOCKET_PROTOCOL};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -932,6 +932,7 @@ async fn wake_ws(
     State(state): State<Arc<AppState>>,
     Path(ns): Path<String>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     let token = params
@@ -942,6 +943,24 @@ async fn wake_ws(
         return json_status(error.status, json!({ "error": error.message }));
     }
     let client_id = params.get("clientID").cloned().unwrap_or_default();
+    // a client that cannot set headers on a WebSocket handshake offers its
+    // bearer as an `orez-auth.<b64>` subprotocol (orez-lite's transport does
+    // whenever it holds an auth token). RFC 6455 has the client fail a 101 that
+    // selects none of the protocols it offered, so without the echo bun closes
+    // every wake socket with 1002 and browsers refuse it, leaving those clients
+    // on the interval poll alone.
+    let offered = headers
+        .get_all(SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .find(|protocol| protocol.starts_with("orez-auth."))
+        .map(str::to_string);
+    let ws = match offered {
+        Some(protocol) => ws.protocols([protocol]),
+        None => ws,
+    };
     ws.on_upgrade(move |socket| wake_socket(socket, state, ns, client_id))
 }
 
