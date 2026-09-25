@@ -4,7 +4,11 @@
 // namespace worker thread (see namespace.rs), so every method runs on that
 // one writer — the plan's "one writer per namespace" invariant is structural,
 // not lock-based. positional `?` bindings only (matches the DO SqlStorage
-// constraint the engine is written against). the SyncDb boundary is
+// constraint the engine is written against). statements come from the
+// connection's statement cache (sized in namespace.rs open_connection): the
+// engine replays the same few hundred statements, and re-parsing the
+// trigger-bearing writes on every call took about 15% of a busy worker
+// thread. the SyncDb boundary is
 // exec/query only; the HOST owns transaction begin/commit/rollback (see
 // engine.rs), because the CF host must orchestrate the same steps around an
 // async JS mutator and so the engine can't drive tx boundaries.
@@ -53,14 +57,15 @@ impl<'c> SyncDb for RusqliteDb<'c> {
     fn exec(&mut self, sql: &str, params: &[SqlValue]) -> Result<(), DbError> {
         let bound: Vec<Value> = params.iter().map(to_value).collect();
         self.conn
-            .execute(sql, rusqlite::params_from_iter(bound.iter()))
+            .prepare_cached(sql)
+            .and_then(|mut stmt| stmt.execute(rusqlite::params_from_iter(bound.iter())))
             .map(|_| ())
             .map_err(map_err)
     }
 
     fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
         let bound: Vec<Value> = params.iter().map(to_value).collect();
-        let mut stmt = self.conn.prepare(sql).map_err(map_err)?;
+        let mut stmt = self.conn.prepare_cached(sql).map_err(map_err)?;
         let columns: Arc<[String]> = stmt
             .column_names()
             .into_iter()

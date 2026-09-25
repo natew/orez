@@ -186,6 +186,8 @@ pub(crate) fn rows_changed(conn: &Connection, before: u64) -> u64 {
     }
 }
 
+const STATEMENT_CACHE_CAPACITY: usize = 512;
+
 fn open_connection(path: &Path, tuning: crate::SqliteTuning) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     conn.execute_batch(
@@ -207,6 +209,11 @@ fn open_connection(path: &Path, tuning: crate::SqliteTuning) -> Result<Connectio
         .map_err(|e| e.to_string())?;
     conn.pragma_update(None, "mmap_size", tuning.mmap_bytes)
         .map_err(|e| e.to_string())?;
+    // RusqliteDb prepares every statement through this cache. rusqlite's
+    // default of 16 is smaller than the engine's working set (pull, push,
+    // membership, seed, and a host's admin writes per table), so the LRU would
+    // evict before reuse and every call would re-parse.
+    conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
     Ok(conn)
 }
 
