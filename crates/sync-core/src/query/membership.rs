@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
-use crate::db::{SqlValue, SyncDb};
+use crate::db::{Row, SqlValue, SyncDb};
 use crate::error::EngineError;
 use crate::schema::{TableSpec, Tables};
 use crate::value::{zero_pk_id, zero_row};
@@ -927,7 +927,7 @@ fn collect_dependent_rows(
     ast: &Ast,
     depth: usize,
     live: &mut BTreeSet<(String, String)>,
-    values: &mut BTreeMap<(String, String), Value>,
+    values: &mut BTreeMap<(String, String), Row>,
 ) -> Result<(), EngineError> {
     for sub in dependent_subqueries(ast) {
         let cr = compile_related_of(parent_sql, parent_params, parent_table, sub, tables, depth)?;
@@ -937,14 +937,11 @@ fn collect_dependent_rows(
                 cr.child_table
             ))
         })?;
-        for row in &db.query(&cr.sql, &cr.params)? {
-            let pk_obj = raw_pk(child_spec, row);
+        for row in db.query(&cr.sql, &cr.params)? {
+            let pk_obj = raw_pk(child_spec, &row);
             let key = canonical_pk(child_spec, &pk_obj);
             live.insert((cr.child_table.clone(), key.clone()));
-            values.insert(
-                (cr.child_table.clone(), key),
-                zero_row(tables, &cr.child_table, child_spec, row)?,
-            );
+            values.insert((cr.child_table.clone(), key), row);
         }
         // the child row-set is the parent for the child's own dependent subqueries
         collect_dependent_rows(
@@ -1042,6 +1039,14 @@ pub fn recompute_group(
 // transition replay never double-emits a row this recompute handled
 pub(crate) type MembershipDiff = (Vec<Value>, BTreeSet<(String, String)>);
 
+// the zero value of a live member row (a row `values` collected above).
+fn live_zero_row(tables: &Tables, table: &str, row: &Row) -> Result<Value, EngineError> {
+    let spec = tables
+        .get(table)
+        .ok_or_else(|| EngineError::internal(format!("member table '{table}' missing")))?;
+    zero_row(tables, table, spec, row)
+}
+
 pub(crate) fn recompute_group_with_rehydrate(
     db: &mut dyn SyncDb,
     tables: &Tables,
@@ -1070,9 +1075,12 @@ pub(crate) fn recompute_group_with_rehydrate(
     let touched: BTreeSet<&str> = changed.iter().map(|(t, _)| t.as_str()).collect();
     let mut computed: BTreeSet<String> = read_query_state(db, group)?;
 
-    // net reference delta per (table, pk), and the live value cache for puts
+    // net reference delta per (table, pk), and the live rows for puts. rows stay
+    // raw until one is emitted: a steady recompute re-reads every member but
+    // emits few, and converting each member to its zero value up front was most
+    // of a busy group's pull time.
     let mut ref_delta: BTreeMap<(String, String), i64> = BTreeMap::new();
-    let mut values: BTreeMap<(String, String), Value> = BTreeMap::new();
+    let mut values: BTreeMap<(String, String), Row> = BTreeMap::new();
     let mut rehydrate_rows: BTreeSet<(String, String)> = BTreeSet::new();
 
     for q in &queries {
@@ -1103,14 +1111,11 @@ pub(crate) fn recompute_group_with_rehydrate(
         let mut live: BTreeSet<(String, String)> = BTreeSet::new();
 
         let compiled = compile(&ast, tables)?;
-        for row in &db.query(&compiled.sql, &compiled.params)? {
-            let pk_obj = raw_pk(spec, row);
+        for row in db.query(&compiled.sql, &compiled.params)? {
+            let pk_obj = raw_pk(spec, &row);
             let key = canonical_pk(spec, &pk_obj);
             live.insert((q.root_table.clone(), key.clone()));
-            values.insert(
-                (q.root_table.clone(), key),
-                zero_row(tables, &q.root_table, spec, row)?,
-            );
+            values.insert((q.root_table.clone(), key), row);
         }
 
         // dependent rows (related output + positive-EXISTS filter subqueries),
@@ -1218,10 +1223,10 @@ pub(crate) fn recompute_group_with_rehydrate(
         let new = old + delta;
         set_ref(db, group, table, pk, old, new, version)?;
         if old == 0 && new > 0 {
-            let value = values
-                .get(&(table.clone(), pk.clone()))
-                .cloned()
+            let row = values
+                .remove(&(table.clone(), pk.clone()))
                 .ok_or_else(|| EngineError::internal("added row missing live value"))?;
+            let value = live_zero_row(tables, table, &row)?;
             let physical_table = tables
                 .physical_name(table)
                 .expect("member table has physical mapping");
@@ -1250,8 +1255,9 @@ pub(crate) fn recompute_group_with_rehydrate(
             continue;
         }
         if read_ref(db, group, table, pk)? > 0
-            && let Some(value) = values.get(&key)
+            && let Some(row) = values.remove(&key)
         {
+            let value = live_zero_row(tables, table, &row)?;
             let physical_table = tables
                 .physical_name(table)
                 .expect("member table has physical mapping");
@@ -1269,10 +1275,10 @@ pub(crate) fn recompute_group_with_rehydrate(
         if emitted.contains(&key) {
             continue;
         }
-        let value = values
-            .get(&key)
-            .cloned()
+        let row = values
+            .remove(&key)
             .ok_or_else(|| EngineError::internal("rehydrated row missing live value"))?;
+        let value = live_zero_row(tables, &key.0, &row)?;
         let physical_table = tables
             .physical_name(&key.0)
             .expect("member table has physical mapping");
