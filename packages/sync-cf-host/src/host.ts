@@ -741,7 +741,7 @@ export function createSyncDurableObject<
   validateSyncHostConfig(config)
   const compileQuery = createQueryCompiler(config.schema)
   const defaultRetainChanges = String(config.retainChanges ?? 4_096)
-  const idleTeardownMs = config.idleTeardownMs ?? 5_000
+  const idleTeardownMs = config.idleTeardownMs ?? null
   // A CF fan-out wakes every client into an HTTP pull. Give concurrent writer
   // requests a real batching window so a storm burst creates one pull wave.
   const wakeCoalesceMs = config.wakeCoalesceMs ?? 25
@@ -976,6 +976,7 @@ export function createSyncDurableObject<
     }
 
     #simulateIdleTeardown(now: number): void {
+      if (idleTeardownMs === null) return
       if (this.#lastRequestAt > 0 && now - this.#lastRequestAt >= idleTeardownMs) {
         this.#bootID = crypto.randomUUID()
         this.#hibernations++

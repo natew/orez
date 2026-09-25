@@ -317,7 +317,7 @@ async function runLocal(
 
 type EvictionCfTarget = SyncTarget & {
   pull(): Promise<void>
-  hibernationStatus(): Promise<{ bootID: string; idleTeardownMs: number }>
+  hibernationStatus(): Promise<{ bootID: string; idleTeardownMs: number | null }>
 }
 
 // idle-teardown/hibernation drill for rust-cf. It resumes the same clients
@@ -363,6 +363,9 @@ async function runCf(
     await target.pull()
     await assertConverged(target, watchers, expected, prefix, 120_000)
     const before = await target.hibernationStatus()
+    if (before.idleTeardownMs === null) {
+      throw new Error('CF target does not configure idleTeardownMs; nothing to evict')
+    }
     const idleMs = args['idle-ms']
       ? Number(args['idle-ms'])
       : before.idleTeardownMs + 1_000

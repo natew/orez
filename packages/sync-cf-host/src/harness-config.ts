@@ -345,6 +345,8 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     schema: harnessSchema,
     mutators: harnessMutators,
     queryTransformVersion: 1,
+    // the integration test and the eviction harness exercise the teardown model
+    idleTeardownMs: 5_000,
     // the fixture's real defineQueries registry: the host resolves every
     // desired named query through the same builders the client registers.
     queries: queries as AnyQueryRegistry,

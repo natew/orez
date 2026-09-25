@@ -105,7 +105,6 @@ export function createSootSyncConfig(authenticate) {
     queries: appQueries,
     queryTransformVersion: 1,
     retainChanges: 4_096,
-    idleTeardownMs: 5_000,
     wakeCoalesceMs: 25,
   }
 }
@@ -124,7 +123,7 @@ The pieces:
 - **`namespace` has planes.** `soot` and its legacy alias map to the
   control-plane namespace; `proj-<id>` and `p-<id>` map to a project
   namespace. Claims carry a `plane` discriminator plus project id and role.
-- Contrast sets `retainChanges`, `idleTeardownMs`, and `wakeCoalesceMs` explicitly
+- Contrast sets `retainChanges` and `wakeCoalesceMs` explicitly
   rather than taking defaults.
 
 Contrast is mid-cutover. The default deployable worker (`src/worker.ts`) still wires

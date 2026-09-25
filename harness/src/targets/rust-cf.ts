@@ -18,7 +18,7 @@ const WORKER =
 
 export type RustCfStatus = {
   bootID: string
-  idleTeardownMs: number
+  idleTeardownMs: number | null
   hibernations: number
   databaseSizeBytes: number
   wasmMemoryBytes: number

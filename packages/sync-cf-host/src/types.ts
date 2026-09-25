@@ -171,6 +171,13 @@ export type SyncHostConfig<
   /** Server-owned invalidation epoch for permission/schema transforms. */
   queryTransformVersion?: number | ((claims: NormalizedClaims) => number)
   retainChanges?: number
+  /**
+   * Test model of a hibernation eviction: after this much inactivity the next
+   * request resets the object's in-memory state the way a real eviction would.
+   * Leave it unset in production, where the runtime evicts for real; a
+   * simulated reset there drops pending wakes whenever one request blocks the
+   * object for longer than the window.
+   */
   idleTeardownMs?: number
   wakeCoalesceMs?: number
   /** per-query guard for recursive transaction query materialization. */

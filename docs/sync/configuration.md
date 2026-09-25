@@ -132,7 +132,7 @@ projecting the full namespace.
 | Field                          | Type         | Default           | Meaning                                                                                                                       |
 | ------------------------------ | ------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `retainChanges`                | `number`     | 4096              | Change-log rows kept below the high watermark. A client whose cookie falls below the pruned floor gets a snapshot.            |
-| `idleTeardownMs`               | `number`     | 5000              | Simulated idle-teardown window. After this much inactivity the DO resets its in-memory boot state, mirroring a real eviction. |
+| `idleTeardownMs`               | `number`     | unset (off)       | Test-only eviction model. After this much inactivity the DO resets its in-memory boot state. Leave unset in production.       |
 | `wakeCoalesceMs`               | `number`     | 25                | Batching window for the wake fan-out. A storm of writes produces one pull wave instead of one per write.                      |
 | `authorizeAdmin(request, env)` | `=> boolean` | `ADMIN_KEY` check | Authorizes `/admin/*` routes. The default requires `env.ADMIN_KEY` set and a matching `x-admin-key` header.                   |
 
