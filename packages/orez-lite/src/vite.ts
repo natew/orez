@@ -1,7 +1,12 @@
 import { resolve } from 'node:path'
 
-import type { LocalSyncHostConfig } from './local.js'
+import type { LocalSyncHost, LocalSyncHostConfig } from './local.js'
 import type { Plugin } from 'vite'
+
+// vite restarts by creating the new server, which runs configureServer, before it
+// closes the old one. the old server's host still holds the port at that point, so
+// the new instance stops it first instead of failing to bind.
+const hostsByPort = new Map<number, LocalSyncHost>()
 
 export interface OrezLitePluginOptions {
   config?: string
@@ -52,15 +57,23 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
       if (!localConfig) {
         throw new Error('orez-lite local configuration was not loaded')
       }
+      const { port } = localConfig
+      const previous = hostsByPort.get(port)
+      if (previous) {
+        hostsByPort.delete(port)
+        await previous.close()
+      }
       const { startLocalSyncHost } = await import('./local.js')
       const host = await startLocalSyncHost({
         ...localConfig,
         dataDir: resolve(root, localConfig.dataDir),
       })
+      hostsByPort.set(port, host)
       let closing = false
       const close = async () => {
         if (closing) return
         closing = true
+        if (hostsByPort.get(port) === host) hostsByPort.delete(port)
         await host.close()
       }
 
