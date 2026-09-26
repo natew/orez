@@ -672,7 +672,11 @@ class BrowserSyncHostImpl<
     transformVersion: number
   ): Record<string, unknown> {
     if (!body.queries) return body
-    const queries = body.queries as { version?: unknown; patch?: unknown }
+    const queries = body.queries as {
+      version?: unknown
+      baseVersion?: unknown
+      patch?: unknown
+    }
     if (!Array.isArray(queries.patch)) return body
     const patch = resolveQueryPatch(
       queries.patch,

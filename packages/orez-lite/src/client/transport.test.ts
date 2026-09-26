@@ -2334,17 +2334,18 @@ describe('Orez HTTP desired-query sync', () => {
     })
     installWithQueries(fetch, (name, args) => ({ resolved: name, args }))
 
-    const { messages } = openRawSocketWithMessages({
+    const { messages, socket } = openRawSocketWithMessages({
       desiredQueriesPatch: [
         { op: 'put', hash: 'h1', name: 'byOwner', args: [{ ownerId: 'u1' }] },
       ],
     })
 
     await eventually(() => expect(requests.length).toBeGreaterThan(0))
-    // the pull body ships {queries:{version, patch:[{op:'put',hash,ast}]}} with
-    // name+args resolved to the AST by the transform
+    // the pull body ships its last acknowledged version and resolves name+args
+    // to the AST with the client transform.
     expect(requests[0].body.queries).toEqual({
       version: 1,
+      baseVersion: 0,
       patch: [
         {
           op: 'put',
@@ -2359,6 +2360,57 @@ describe('Orez HTTP desired-query sync', () => {
         (m) => m[0] === 'pokePart' && Array.isArray(m[1].gotQueriesPatch)
       )
       expect(poke?.[1].gotQueriesPatch).toEqual([{ op: 'put', hash: 'h1' }])
+    })
+
+    socket.send(
+      JSON.stringify([
+        'changeDesiredQueries',
+        {
+          desiredQueriesPatch: [
+            { op: 'put', hash: 'h1', name: 'byOwner', args: [{ ownerId: 'u1' }] },
+          ],
+        },
+      ])
+    )
+    await eventually(() => expect(requests.length).toBeGreaterThan(1))
+    expect(requests[1].body.queries.baseVersion).toBe(1)
+  })
+
+  test('keeps the unacknowledged query prefix when another change is queued', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(recordRequest(input, init))
+      return jsonResponse({
+        cookie: requests.length,
+        lastMutationIDChanges: {},
+        rowsPatch: [],
+      })
+    })
+    installWithQueries(fetch, (name) => ({ resolved: name }))
+    const { socket, messages } = openRawSocketWithMessages({
+      desiredQueriesPatch: [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }],
+    })
+    await eventually(() => expect(requests.length).toBeGreaterThan(0))
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    )
+
+    socket.send(
+      JSON.stringify([
+        'changeDesiredQueries',
+        {
+          desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }],
+        },
+      ])
+    )
+    await eventually(() => expect(requests.length).toBeGreaterThan(1))
+    expect(requests[1].body.queries).toEqual({
+      version: 2,
+      baseVersion: 0,
+      patch: [
+        { op: 'put', hash: 'h1', ast: { resolved: 'byOwner' } },
+        { op: 'put', hash: 'h2', ast: { resolved: 'byOwner' } },
+      ],
     })
   })
 

@@ -29,13 +29,15 @@ const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
 
 // apply the desiredQueriesPatch and return hashes whose rows need re-sending.
 // a committed pull response can be lost after the server records a desire, so
-// even an existing desire needs its rows again when the client replays a put.
+// a put still pending at the client's last acknowledged version needs its rows
+// again, even if the client queued another change after a response was lost.
 fn apply_desired_patch(
     db: &mut dyn SyncDb,
     tables: &Tables,
     group: &str,
     client: &str,
     queries: &Value,
+    prior_hashes: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, EngineError> {
     let obj = queries
         .as_object()
@@ -50,7 +52,22 @@ fn apply_desired_patch(
         .get("patch")
         .and_then(Value::as_array)
         .ok_or_else(|| EngineError::bad_request("queries.patch must be an array"))?;
+    let base_version = match obj.get("baseVersion") {
+        // older clients do not report their last received ack, so treat their
+        // puts as unacknowledged until they upgrade.
+        None => 0,
+        Some(value) => wire::non_negative_safe_int(value).ok_or_else(|| {
+            EngineError::bad_request("queries.baseVersion must be a non-negative integer")
+        })?,
+    };
+    if base_version > version {
+        return Err(EngineError::bad_request(
+            "queries.baseVersion cannot exceed queries.version",
+        ));
+    }
+    let replayed_patch = base_version < client_query_version(db, group, client)?;
     let mut rehydrate = BTreeSet::new();
+    let mut active_hashes = prior_hashes.clone();
     for op in patch {
         let kind = op.get("op").and_then(Value::as_str);
         match kind {
@@ -78,7 +95,10 @@ fn apply_desired_patch(
                 };
                 register_query(db, tables, group, hash, ast, transform_version)?;
                 set_desire(db, group, client, hash, version)?;
-                rehydrate.insert(hash.to_string());
+                let newly_desired = active_hashes.insert(hash.to_string());
+                if replayed_patch || newly_desired {
+                    rehydrate.insert(hash.to_string());
+                }
             }
             Some("del") => {
                 let hash = op
@@ -86,8 +106,12 @@ fn apply_desired_patch(
                     .and_then(Value::as_str)
                     .ok_or_else(|| EngineError::bad_request("query del requires a hash"))?;
                 remove_desire(db, group, client, hash)?;
+                active_hashes.remove(hash);
             }
-            Some("clear") => clear_desires(db, group, client)?,
+            Some("clear") => {
+                clear_desires(db, group, client)?;
+                active_hashes.clear();
+            }
             _ => return Err(EngineError::bad_request("unknown desiredQueriesPatch op")),
         }
     }
@@ -204,7 +228,14 @@ pub fn handle_query_pull(
     // apply the desired-query lifecycle before recomputing
     let applied_queries = match body.get("queries") {
         None | Some(Value::Null) => None,
-        Some(queries) => Some(apply_desired_patch(db, tables, group, client_id, queries)?),
+        Some(queries) => Some(apply_desired_patch(
+            db,
+            tables,
+            group,
+            client_id,
+            queries,
+            &prior_hashes,
+        )?),
     };
 
     // Pruning raises the floor, which is the moment a client group that stopped
