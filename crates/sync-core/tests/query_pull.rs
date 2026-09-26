@@ -389,8 +389,8 @@ fn new_client_with_current_transform_version_preserves_group_membership() {
     assert_eq!(put_ids(&second), vec!["i1", "i3"]);
     assert_eq!(
         h.db.conn.total_changes() - before,
-        5,
-        "only the new client's claim, transform, query definition, desire, and ack rows should be written"
+        4,
+        "only the new client's claim, transform, desire, and ack rows should be written"
     );
     let membership_after =
         h.db.query(
@@ -586,14 +586,38 @@ fn newly_desiring_client_rehydrates_existing_group_query() {
     assert!(!has_clear(&restarted));
     assert_eq!(put_ids(&restarted), vec!["i1", "i3"]);
 
-    // replaying the same put for the same client is only a version update and
-    // does not resend the full result repeatedly.
+    // the first response could be lost after commit, so replaying the same put
+    // must resend the rows even when the desire already exists.
     let replay = h.pull(
         "c2",
         restarted["cookie"].clone(),
         Some(json!({ "version": 2, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] })),
     );
-    assert!(put_ids(&replay).is_empty());
+    assert_eq!(put_ids(&replay), vec!["i1", "i3"]);
+}
+
+#[test]
+fn committed_query_response_lost_replays_rows_without_rewriting_membership() {
+    let mut h = QHost::new();
+    let base = h.pull("c1", json!(null), None);
+    let query = json!({
+        "version": 1,
+        "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }],
+    });
+    let first = h.pull("c1", base["cookie"].clone(), Some(query.clone()));
+    assert_eq!(put_ids(&first), vec!["i1", "i3"]);
+
+    // the first response was lost after commit. the client retries from its
+    // old cookie and still needs the rows even though membership already exists.
+    let before = h.db.conn.total_changes();
+    let replay = h.pull("c1", base["cookie"].clone(), Some(query));
+    let written = h.db.conn.total_changes() - before;
+    assert_eq!(put_ids(&replay), vec!["i1", "i3"]);
+    assert_eq!(replay["gotQueries"], first["gotQueries"]);
+    assert_eq!(
+        written, 0,
+        "a query replay must not rewrite durable membership"
+    );
 }
 
 #[test]
@@ -891,10 +915,7 @@ fn int64_column_values_larger_than_safe_integer_pull_without_error() {
     let tables = Tables::new().with(
         "budget",
         TableSpec {
-            columns: vec![
-                ("id".into(), String),
-                ("amountMinor".into(), Number),
-            ],
+            columns: vec![("id".into(), String), ("amountMinor".into(), Number)],
             primary_key: vec!["id".into()],
             encrypted_columns: Default::default(),
             encrypted_physical_columns: Default::default(),
@@ -925,6 +946,8 @@ fn int64_column_values_larger_than_safe_integer_pull_without_error() {
     assert_eq!(patch.len(), 2);
     assert_eq!(patch[0], json!({ "op": "clear" }));
     assert_eq!(patch[1]["op"], "put");
-    assert_eq!(patch[1]["value"]["amountMinor"], json!(15017516016016000_i64));
+    assert_eq!(
+        patch[1]["value"]["amountMinor"],
+        json!(15017516016016000_i64)
+    );
 }
-

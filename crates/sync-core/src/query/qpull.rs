@@ -27,10 +27,9 @@ use super::membership::{
 
 const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
 
-// apply the desiredQueriesPatch and return queries newly desired by this client.
-// an existing group can already have
-// durable membership for those hashes, but the new client's local store may not
-// have the rows and needs an idempotent re-send.
+// apply the desiredQueriesPatch and return hashes whose rows need re-sending.
+// a committed pull response can be lost after the server records a desire, so
+// even an existing desire needs its rows again when the client replays a put.
 fn apply_desired_patch(
     db: &mut dyn SyncDb,
     tables: &Tables,
@@ -78,9 +77,8 @@ fn apply_desired_patch(
                     })?,
                 };
                 register_query(db, tables, group, hash, ast, transform_version)?;
-                if set_desire(db, group, client, hash, version)? {
-                    rehydrate.insert(hash.to_string());
-                }
+                set_desire(db, group, client, hash, version)?;
+                rehydrate.insert(hash.to_string());
             }
             Some("del") => {
                 let hash = op
