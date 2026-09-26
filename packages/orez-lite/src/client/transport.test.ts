@@ -539,6 +539,30 @@ describe('Orez HTTP transport', () => {
     expect(requests[1].body.cookie).toBe(1)
   })
 
+  test('wake keepalives do not pull and stop when the socket closes', async () => {
+    vi.useFakeTimers()
+    const wakeSockets = useFakeNativeWebSocket()
+    const fetch = unchangedPullFetch()
+    const transport = installHttpPullTransport({ origin: ORIGIN, fetch, wake: true })
+    transports.push(transport)
+    openRawSocketWithMessages()
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(wakeSockets).toHaveLength(1)
+    wakeSockets[0].onopen?.()
+    await vi.advanceTimersByTimeAsync(500)
+    const pulls = fetch.mock.calls.length
+    expect(pulls).toBe(2)
+    wakeSockets[0].onmessage?.({ data: 'pong' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(wakeSockets[0].sent).toEqual(['ping'])
+    expect(fetch).toHaveBeenCalledTimes(pulls)
+
+    wakeSockets[0].onclose?.()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(wakeSockets[0].sent).toEqual(['ping'])
+  })
+
   test('a data-changed pull that lands during an in-flight pull runs again after it', async () => {
     // hosts that know the server advanced call transport.pull() as their
     // data-changed nudge (pullHttpPullTransports, and sootsim's render worker
@@ -2117,9 +2141,10 @@ function useFakeNativeWebSocket() {
     url: string
     protocols: string | string[] | undefined
     onopen: (() => void) | null
-    onmessage: (() => void) | null
+    onmessage: ((event?: { data?: unknown }) => void) | null
     onclose: (() => void) | null
     onerror: (() => void) | null
+    sent: string[]
   }> = []
 
   class FakeNativeWebSocket {
@@ -2130,9 +2155,10 @@ function useFakeNativeWebSocket() {
 
     readonly url: string
     onopen: (() => void) | null = null
-    onmessage: (() => void) | null = null
+    onmessage: ((event?: { data?: unknown }) => void) | null = null
     onclose: (() => void) | null = null
     onerror: (() => void) | null = null
+    sent: string[] = []
 
     constructor(
       url: string | URL,
@@ -2144,6 +2170,10 @@ function useFakeNativeWebSocket() {
 
     close() {
       this.onclose?.()
+    }
+
+    send(data: string) {
+      this.sent.push(data)
     }
   }
 

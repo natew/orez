@@ -30,16 +30,21 @@ runs:
     - name: Verify the published launcher
       shell: bash
       run: |
-        # the registry serves a new version's metadata a moment after publish,
-        # and npm skips an optional dependency it cannot resolve without saying
-        # anything, so installing immediately reports the launcher's "binary
-        # package is missing" message for a package that published correctly.
-        # 0.1.4 failed on all nine targets that way, 0.3s after publish.
+        # npm view can keep serving a cached pre-publish 404 even after npm
+        # publish succeeds. read the registry directly with a fresh URL for
+        # each attempt, then install with a cache that has no negative entry.
         package_name="$(node -p "require('./.release/platform/package.json').name")"
+        registry_url="https://registry.npmjs.org/$package_name/${{ inputs.version }}"
         visible=''
         attempt=0
         while [ "$attempt" -lt 60 ]; do
-          if [ "$(npm view "$package_name@${{ inputs.version }}" version 2>/dev/null)" = '${{ inputs.version }}' ]; then
+          if curl --fail --silent --show-error \
+            -H 'Cache-Control: no-cache' \
+            "$registry_url?attempt=$attempt" 2>/dev/null \
+            | jq -e \
+              --arg version '${{ inputs.version }}' \
+              --arg source_commit '${{ github.sha }}' \
+              '.version == $version and .orezSourceCommit == $source_commit' >/dev/null; then
             visible=1
             break
           fi
@@ -50,14 +55,13 @@ runs:
           echo "$package_name@${{ inputs.version }} published but the registry has not served it in five minutes" >&2
           exit 1
         fi
-        # npm can retain the pre-publish 404 for an optional dependency even
-        # after npm view sees the new package. Installing the target explicitly
-        # still exercises the launcher while avoiding that negative-cache race.
+        # installing the target explicitly exercises the launcher without
+        # relying on resolution of its optional dependency from a stale cache.
         # the launcher picks its package by the host's libc, so a musl package
         # is verified on a musl host: on the glibc runner that built it, the
         # launcher looks for the glibc sibling instead, which a parallel job may
         # not have published yet.
-        install="npm install --prefer-online --prefix .release/smoke --ignore-scripts orez-sync-native@${{ inputs.version }} $package_name@${{ inputs.version }}"
+        install="npm install --prefer-online --cache .release/smoke-cache --prefix .release/smoke --ignore-scripts orez-sync-native@${{ inputs.version }} $package_name@${{ inputs.version }}"
         if [ '${{ inputs.libc }}' = 'musl' ]; then
           docker run --rm -v "$PWD/.release:/work/.release" -w /work node:24-alpine \
             sh -euc "$install >&2 && .release/smoke/node_modules/.bin/sync-native --version" > .release/smoke-version
