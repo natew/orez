@@ -1985,7 +1985,7 @@ export function createSyncDurableObject<
         let response: Record<string, unknown>
         {
           const queries = body.queries as
-            | { version?: unknown; patch?: unknown }
+            | { version?: unknown; baseVersion?: unknown; patch?: unknown }
             | undefined
           if (queries && Array.isArray(queries.patch)) {
             // named queries resolve in-process against the app's ordinary

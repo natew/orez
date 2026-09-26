@@ -628,6 +628,7 @@ fn newer_version_of_an_existing_query_does_not_resend_rows() {
         json!(null),
         Some(json!({
             "version": 1,
+            "baseVersion": 0,
             "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }],
         })),
     );
@@ -639,12 +640,44 @@ fn newer_version_of_an_existing_query_does_not_resend_rows() {
         first["cookie"].clone(),
         Some(json!({
             "version": 2,
+            "baseVersion": 1,
             "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }],
         })),
     );
     assert!(put_ids(&repeated).is_empty());
     assert_eq!(repeated["gotQueries"]["version"], json!(2));
     assert_eq!(h.db.conn.total_changes() - before, 2);
+}
+
+#[test]
+fn unacknowledged_put_replays_after_another_query_change() {
+    let mut h = QHost::new();
+    let base = h.pull("c1", json!(null), None);
+    let first = h.pull(
+        "c1",
+        base["cookie"].clone(),
+        Some(json!({
+            "version": 1,
+            "baseVersion": 0,
+            "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }],
+        })),
+    );
+    assert_eq!(put_ids(&first), vec!["i1", "i3"]);
+
+    let replay = h.pull(
+        "c1",
+        base["cookie"].clone(),
+        Some(json!({
+            "version": 2,
+            "baseVersion": 0,
+            "patch": [
+                { "op": "put", "hash": "q_open", "ast": open_query() },
+                { "op": "del", "hash": "q_missing" },
+            ],
+        })),
+    );
+    assert_eq!(put_ids(&replay), vec!["i1", "i3"]);
+    assert_eq!(replay["gotQueries"]["version"], json!(2));
 }
 
 #[test]

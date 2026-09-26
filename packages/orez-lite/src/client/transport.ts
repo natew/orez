@@ -563,6 +563,7 @@ class ZeroHttpSocket {
   // in-flight pull sent so the server's ack can clear that prefix.
   private desiredQueryPatch: QueryPatchOp[] = []
   private queryVersion = 0
+  private ackedQueryVersion = 0
   private sentQueryVersion: number | undefined
   private sentQueryPatchLen = 0
   private readonly pendingDeletedClientIDs = new Set<string>()
@@ -1112,6 +1113,7 @@ class ZeroHttpSocket {
       got.version >= this.sentQueryVersion
     ) {
       this.desiredQueryPatch.splice(0, this.sentQueryPatchLen)
+      this.ackedQueryVersion = got.version
       this.sentQueryVersion = undefined
     }
   }
@@ -1173,7 +1175,11 @@ class ZeroHttpSocket {
     if (includeQueries && this.desiredQueryPatch.length > 0) {
       this.sentQueryVersion = this.queryVersion
       this.sentQueryPatchLen = this.desiredQueryPatch.length
-      body.queries = { version: this.queryVersion, patch: [...this.desiredQueryPatch] }
+      body.queries = {
+        version: this.queryVersion,
+        baseVersion: this.ackedQueryVersion,
+        patch: [...this.desiredQueryPatch],
+      }
     } else {
       this.sentQueryVersion = undefined
     }

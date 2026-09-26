@@ -29,7 +29,8 @@ const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
 
 // apply the desiredQueriesPatch and return hashes whose rows need re-sending.
 // a committed pull response can be lost after the server records a desire, so
-// a put at the already-acknowledged version needs its rows again.
+// a put still pending at the client's last acknowledged version needs its rows
+// again, even if the client queued another change after a response was lost.
 fn apply_desired_patch(
     db: &mut dyn SyncDb,
     tables: &Tables,
@@ -51,7 +52,20 @@ fn apply_desired_patch(
         .get("patch")
         .and_then(Value::as_array)
         .ok_or_else(|| EngineError::bad_request("queries.patch must be an array"))?;
-    let replayed_patch = version == client_query_version(db, group, client)?;
+    let base_version = match obj.get("baseVersion") {
+        // older clients do not report their last received ack, so treat their
+        // puts as unacknowledged until they upgrade.
+        None => 0,
+        Some(value) => wire::non_negative_safe_int(value).ok_or_else(|| {
+            EngineError::bad_request("queries.baseVersion must be a non-negative integer")
+        })?,
+    };
+    if base_version > version {
+        return Err(EngineError::bad_request(
+            "queries.baseVersion cannot exceed queries.version",
+        ));
+    }
+    let replayed_patch = base_version < client_query_version(db, group, client)?;
     let mut rehydrate = BTreeSet::new();
     let mut active_hashes = prior_hashes.clone();
     for op in patch {

@@ -394,8 +394,10 @@ impl QueryHost {
             "cookie": self.cookie,
         });
         if let Some(patch) = patch {
+            let base_version = self.version;
             self.version += 1;
-            body["queries"] = json!({ "version": self.version, "patch": patch });
+            body["queries"] =
+                json!({ "version": self.version, "baseVersion": base_version, "patch": patch });
         }
         let tables = self.tables.clone();
         let response = self
