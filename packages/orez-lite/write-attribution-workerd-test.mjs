@@ -508,7 +508,12 @@ new_sqlite_classes = ["ZeroDO"]
       for (let attempt = 0; attempt < 50; attempt++) {
         const events = parseTransactionSamples(logText).slice(eventsBefore)
         writes = events.filter((row) => row.name === 'application_sql_write')
-        if (writes.length > 0) break
+        if (
+          writes.length > 0 &&
+          writes.reduce((sum, event) => sum + event.physicalTotal, 0) === billingDelta
+        ) {
+          break
+        }
         await Bun.sleep(50)
       }
       receipts.push({
