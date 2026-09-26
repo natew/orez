@@ -1308,7 +1308,22 @@ export function createOrezDataWorker<
                 resolved.instance,
                 { force: true }
               )
-              return Response.json(summary)
+              // return the schema and write-budget verdict with the restore so
+              // callers observe the state produced by this operation.
+              const schemaStatus = await stub.orezApplicationSchemaStatus(
+                options.schema.version
+              )
+              const writeBudgetResponse = await stub.fetch(
+                new Request(new URL('/_orez/write-budget', request.url))
+              )
+              if (!writeBudgetResponse.ok) {
+                throw new Error(`write budget returned ${writeBudgetResponse.status}`)
+              }
+              return Response.json({
+                ...summary,
+                schemaStatus,
+                writeBudget: await writeBudgetResponse.json(),
+              })
             } catch (error) {
               return new Response(`${action} failed: ${errorMessage(error)}`, {
                 status: 500,

@@ -111,7 +111,8 @@ try {
   )
   const restoreText = await restoreResponse.text()
   assert.equal(restoreResponse.status, 200, restoreText)
-  assert.deepEqual(JSON.parse(restoreText), {
+  const { schemaStatus, writeBudget, ...restored } = JSON.parse(restoreText)
+  assert.deepEqual(restored, {
     ok: true,
     ns: `ns:${restoreNamespace}`,
     key: restoreFixture.key,
@@ -120,6 +121,16 @@ try {
     rows: 1,
     counts: { item: 1 },
   })
+  assert.equal(
+    schemaStatus.schemaVersion,
+    restoreResponse.headers.get('x-orez-schema-version')
+  )
+  assert.equal(schemaStatus.ready, true)
+  assert.equal(schemaStatus.restoring, false)
+  assert.ok(schemaStatus.attemptCount > 0)
+  assert.equal(writeBudget.enabled, true)
+  assert.equal(writeBudget.tripped, false)
+  assert.ok(writeBudget.budget > writeBudget.windowRows)
   const restoreTotalAfter = await fetch(
     `${base}/application-total-changes/${restoreNamespace}`
   ).then((response) => response.json())
@@ -148,10 +159,10 @@ try {
   }
   assert.deepEqual(restoreCost, {
     totalChanges: 18,
-    rowsRead: 2_833,
+    rowsRead: 2_835,
     rowsWritten: 28,
     sessions: 9,
-    statements: 174,
+    statements: 176,
     callbacks: 0,
   })
   assert.deepEqual(
