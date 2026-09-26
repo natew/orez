@@ -359,6 +359,14 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       return true
     },
     authorizeWake(request) {
+      const match = request.headers
+        .get('authorization')
+        ?.match(/^Bearer token-([^:]+)(?::(\d+))?$/)
+      if (match) {
+        const userID = match[1]
+        const tokenIssuedAt = match[2] ? Number(match[2]) : undefined
+        return tokenIssuedAt !== undefined ? { userID, tokenIssuedAt } : { userID }
+      }
       const claims = authenticateHarness(request)
       return claims ? { userID: claims.userID } : false
     },

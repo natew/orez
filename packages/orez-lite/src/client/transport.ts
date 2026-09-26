@@ -846,6 +846,9 @@ class ZeroHttpSocket {
         if (this.readyState !== this.OPEN || this.wakeSocket) return
         const url =
           `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}` +
+          (this.clientGroupID
+            ? `&clientGroupID=${encodeURIComponent(this.clientGroupID)}`
+            : '') +
           (wakeToken === undefined ? '' : `&wakeToken=${encodeURIComponent(wakeToken)}`)
         const protocol =
           this.state.wake === true && this.authToken

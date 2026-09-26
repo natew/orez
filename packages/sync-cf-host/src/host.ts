@@ -75,6 +75,7 @@ const WAKE_SUBSCRIBER_TAG = 'orez:wake-subscriber'
 // the worker always deletes from the incoming request before setting its own,
 // so a client cannot present one.
 const IDENTITY_HEADER = 'x-orez-sync-identity'
+const WAKE_ISSUED_AT_HEADER = 'x-orez-wake-issued-at'
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MIN_SNAPSHOT_PAGE_ROWS = 100
 const WORKER_STAGE_TELEMETRY_SAMPLE_RATE = 0.01
@@ -195,11 +196,26 @@ type SnapshotPage = {
 // after an eviction, in the shape it accepts.
 type SocketAttachment = {
   clientID: string
-  identity?: RealtimeIdentity
+  identity?:
+    | RealtimeIdentity
+    | { userID: string; clientID: string; clientGroupID?: string }
   topics?: RealtimeTopic[]
   // A producer socket, which has no identity and no topics: it holds
   // generations, and generations deliberately do not survive an eviction.
   producerID?: string
+}
+
+function isRealtimeIdentity(
+  identity: SocketAttachment['identity']
+): identity is RealtimeIdentity {
+  return (
+    typeof identity === 'object' &&
+    identity !== null &&
+    typeof identity.userID === 'string' &&
+    typeof identity.clientID === 'string' &&
+    typeof identity.clientGroupID === 'string' &&
+    identity.clientGroupID.length > 0
+  )
 }
 type FaultPoint =
   | 'push_before_mutation'
@@ -366,6 +382,16 @@ async function boundedRequestObject(
 }
 
 function routeAfterNamespace(pathname: string): string {
+  if (
+    pathname.startsWith('/admin/') ||
+    pathname === '/wake' ||
+    pathname === '/notify' ||
+    pathname === '/pull' ||
+    pathname === '/push' ||
+    pathname.startsWith('/realtime/')
+  ) {
+    return pathname
+  }
   const [, , ...parts] = pathname.split('/')
   return `/${parts.join('/')}`
 }
@@ -561,6 +587,7 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         const sampled = Math.random() < WORKER_STAGE_TELEMETRY_SAMPLE_RATE
         const isAdmin = route.startsWith('/admin/')
         let wakeUserID: string | null = null
+        let wakeIssuedAt: number | null = null
         if (route === '/wake') {
           let wakeRequest: Request = request
           const protocol = request.headers.get('sec-websocket-protocol')?.trim()
@@ -592,7 +619,15 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           }
           const wake = await config.authorizeWake(wakeRequest, env)
           if (!wake) return json({ error: 'missing wake capability' }, 401)
-          if (typeof wake === 'object') wakeUserID = wake.userID
+          if (typeof wake === 'object') {
+            wakeUserID = wake.userID
+            if (
+              typeof wake.tokenIssuedAt === 'number' &&
+              Number.isFinite(wake.tokenIssuedAt)
+            ) {
+              wakeIssuedAt = wake.tokenIssuedAt
+            }
+          }
           // A namespace that streams fields authorizes every subscription against
           // this userID, so a capability that does not carry one cannot open the
           // socket. Failing here names the cause; accepting it would produce a
@@ -616,6 +651,7 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         headers.delete(NAMESPACE_HEADER)
         headers.delete(UPSTREAM_PATH_HEADER)
         headers.delete(IDENTITY_HEADER)
+        headers.delete(WAKE_ISSUED_AT_HEADER)
         headers.delete(NOTIFY_IF_SUBSCRIBED_HEADER)
         let forwardedBody: ForwardedSyncBody | null = null
         // /wake and /realtime/produce are both websocket upgrades and have no
@@ -679,6 +715,8 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         // group against this userID before it will read a single row, so there is
         // nothing gained by moving them here.
         if (wakeUserID) headers.set(IDENTITY_HEADER, encodeURIComponent(wakeUserID))
+        if (wakeIssuedAt !== null)
+          headers.set(WAKE_ISSUED_AT_HEADER, String(wakeIssuedAt))
         const hashedNamespace = await namespaceHash(namespace)
         headers.set(NAMESPACE_HEADER, hashedNamespace)
         try {
@@ -935,6 +973,19 @@ export function createSyncDurableObject<
         ])
         this.#initSkipped = this.#controlGet('initFingerprint') === initFingerprint
         if (!this.#initSkipped) {
+          this.#directSql.exec(`CREATE TABLE IF NOT EXISTS orez_revocations (
+            user_id TEXT NOT NULL,
+            revoked_at INTEGER NOT NULL
+          )`)
+          this.#directSql.exec(
+            'CREATE INDEX IF NOT EXISTS idx_orez_revocations_user_id ON orez_revocations(user_id, revoked_at)'
+          )
+          this.#directSql.exec(
+            'CREATE VIEW IF NOT EXISTS revocations AS SELECT user_id, revoked_at FROM orez_revocations'
+          )
+          this.#directSql.exec(
+            'CREATE TRIGGER IF NOT EXISTS trg_revocations_insert INSTEAD OF INSERT ON revocations BEGIN INSERT INTO orez_revocations(user_id, revoked_at) VALUES (NEW.user_id, NEW.revoked_at); END;'
+          )
           config.initialize(this.#directSql)
           this.#directSql.exec(
             "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
@@ -2365,7 +2416,7 @@ export function createSyncDurableObject<
             )
             continue
           }
-          if (!attachment.identity) continue
+          if (!isRealtimeIdentity(attachment.identity)) continue
           subscribers.push({
             socket,
             identity: attachment.identity,
@@ -2400,28 +2451,42 @@ export function createSyncDurableObject<
       const params = new URL(request.url).searchParams
       const clientID = params.get('clientID')
       if (!clientID) return json({ error: 'clientID is required' }, 400)
+      const encodedUserID = request.headers.get(IDENTITY_HEADER)
+      const rawIssuedAt = request.headers.get(WAKE_ISSUED_AT_HEADER)
+      const userID = encodedUserID ? decodeURIComponent(encodedUserID) : null
+      if (userID) {
+        const rows = this.#directSql.query<{ revoked_at: number }>(
+          'SELECT MAX(revoked_at) AS revoked_at FROM orez_revocations WHERE user_id = ?',
+          [userID]
+        )
+        const latestRevocation = rows[0]?.revoked_at
+        if (typeof latestRevocation === 'number' && Number.isFinite(latestRevocation)) {
+          const tokenIssuedAt = rawIssuedAt !== null ? Number(rawIssuedAt) : -Infinity
+          if (Number.isNaN(tokenIssuedAt) || tokenIssuedAt < latestRevocation) {
+            return json({ error: 'revoked wake capability' }, 401)
+          }
+        }
+      }
       const pair = new WebSocketPair()
       const [client, server] = Object.values(pair)
       // The userID is the worker's, taken from the authenticated request. The
       // group is the client's own claim, and stays a claim: every subscription
       // is checked against this userID before a row is read, so asserting
       // someone else's group buys nothing.
-      const encodedUserID = request.headers.get(IDENTITY_HEADER)
       const clientGroupID = params.get('clientGroupID')
-      const identity =
-        encodedUserID && clientGroupID
-          ? {
-              userID: decodeURIComponent(encodedUserID),
-              clientID,
-              clientGroupID,
-            }
-          : undefined
+      const identity = encodedUserID
+        ? {
+            userID: decodeURIComponent(encodedUserID),
+            clientID,
+            ...(clientGroupID ? { clientGroupID } : {}),
+          }
+        : undefined
       server.serializeAttachment({
         clientID,
         identity,
       } satisfies SocketAttachment)
       this.ctx.acceptWebSocket(server, [WAKE_SUBSCRIBER_TAG, `client:${clientID}`])
-      if (identity) {
+      if (isRealtimeIdentity(identity)) {
         const host = this.#realtimeHost()
         if (host) {
           this.#realtimeConnections.set(
@@ -2450,6 +2515,52 @@ export function createSyncDurableObject<
       upstreamPath: string | null
     ): Promise<Response> | Response {
       if (route === '/admin/health') return json({ ok: true })
+      if (route === '/admin/revoke') {
+        if (request.method !== 'POST') {
+          return json({ error: 'method not allowed' }, 405)
+        }
+        return request
+          .json()
+          .catch(() => ({}))
+          .then((body) => {
+            const parsed = typeof body === 'object' && body !== null ? body : {}
+            const targetUserID =
+              'userID' in parsed && typeof parsed.userID === 'string'
+                ? parsed.userID
+                : 'userId' in parsed && typeof parsed.userId === 'string'
+                  ? parsed.userId
+                  : null
+            if (!targetUserID) {
+              return json({ error: 'userID is required' }, 400)
+            }
+            const revokedAt =
+              'now' in parsed &&
+              typeof parsed.now === 'number' &&
+              Number.isFinite(parsed.now)
+                ? parsed.now
+                : Date.now()
+            this.ctx.storage.transactionSync(() => {
+              this.#directSql.exec(`CREATE TABLE IF NOT EXISTS orez_revocations (
+                user_id TEXT NOT NULL,
+                revoked_at INTEGER NOT NULL
+              )`)
+              this.#directSql.exec(
+                'INSERT INTO orez_revocations (user_id, revoked_at) VALUES (?, ?)',
+                [targetUserID, revokedAt]
+              )
+            })
+            let closedSockets = 0
+            for (const socket of this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)) {
+              const attachment = socketAttachment(socket)
+              if (attachment?.identity?.userID === targetUserID) {
+                this.#realtimeDrop(socket)
+                socketCloseQuietly(socket, 1008, 'user revoked')
+                closedSockets++
+              }
+            }
+            return json({ ok: true, userID: targetUserID, revokedAt, closedSockets })
+          })
+      }
       if (route === '/admin/sql-billing') return json({ ...this.#sqlBilling })
       if (route === '/admin/upstream-write-budget' && request.method === 'GET')
         return this.#upstreamWriteBudgetStatus()

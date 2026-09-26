@@ -1574,7 +1574,7 @@ describe('Orez HTTP transport', () => {
     await eventually(() => expect(wakeSockets).toHaveLength(1))
     expect(getToken).toHaveBeenCalledTimes(1)
     expect(wakeSockets[0].url).toBe(
-      'wss://orez-http.local/wake?clientID=c1&wakeToken=signed%20token%26scope%3Done'
+      'wss://orez-http.local/wake?clientID=c1&clientGroupID=cg1&wakeToken=signed%20token%26scope%3Done'
     )
   })
 
@@ -1598,8 +1598,8 @@ describe('Orez HTTP transport', () => {
     await eventually(() => expect(wakeSockets).toHaveLength(2), 1_000)
     expect(getToken).toHaveBeenCalledTimes(2)
     expect(wakeSockets.map((socket) => socket.url)).toEqual([
-      'wss://orez-http.local/wake?clientID=c1&wakeToken=wake-token-1',
-      'wss://orez-http.local/wake?clientID=c1&wakeToken=wake-token-2',
+      'wss://orez-http.local/wake?clientID=c1&clientGroupID=cg1&wakeToken=wake-token-1',
+      'wss://orez-http.local/wake?clientID=c1&clientGroupID=cg1&wakeToken=wake-token-2',
     ])
   })
 
@@ -1662,7 +1662,9 @@ describe('Orez HTTP transport', () => {
     openRawSocketWithMessages()
 
     await eventually(() => expect(wakeSockets).toHaveLength(1))
-    expect(wakeSockets[0].url).toBe('wss://orez-http.local/wake?clientID=c1')
+    expect(wakeSockets[0].url).toBe(
+      'wss://orez-http.local/wake?clientID=c1&clientGroupID=cg1'
+    )
     expect(wakeSockets[0].protocols).toBe('orez-auth.dG9rZW4tdTE')
   })
 

@@ -121,7 +121,10 @@ export type SyncHostConfig<
   authorizeWake(
     request: Request,
     env: Env
-  ): boolean | { userID: string } | Promise<boolean | { userID: string }>
+  ):
+    | boolean
+    | { userID: string; tokenIssuedAt?: number }
+    | Promise<boolean | { userID: string; tokenIssuedAt?: number }>
   /** Authorize upstream service notifications before selecting a namespace DO. */
   authorizeNotify(request: Request, env: Env): boolean | Promise<boolean>
   /** Resolve the first path component or another consumer-defined namespace. */
