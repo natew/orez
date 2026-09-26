@@ -153,8 +153,8 @@ fn update_and_delete_use_full_images_and_advance_the_change_log() {
             .unwrap()
             .is_empty()
     );
-    // insert + update old/new + delete preserve the legacy cookie sequence
-    assert_eq!(sync_core::watermark(&mut db).unwrap(), 4);
+    // insert, key-preserving update, and delete log one change each
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 3);
 }
 
 #[test]

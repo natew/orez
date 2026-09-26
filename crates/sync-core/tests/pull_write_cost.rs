@@ -247,7 +247,9 @@ fn a_row_change_writes_a_bounded_number_of_bytes() {
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
 
-    let changes = 200;
+    // enough changes to cycle many segments, so the average covers segments
+    // at every fill level rather than one young segment.
+    let changes = 3000;
     for i in 0..changes {
         h.exec(&format!(
             "INSERT INTO item_record VALUES ('i{i}','label{i}',{i}.0,0,NULL)"
@@ -259,7 +261,9 @@ fn a_row_change_writes_a_bounded_number_of_bytes() {
     let _ = std::fs::remove_file(&path);
     let per_change = wal / changes;
     assert!(
-        per_change < 48 * 1_024,
+        // ~30 KiB at a 16 KiB rotation, ~52 KiB at 64 KiB: about 26 KiB is
+        // the row's own table and index pages, the rest the segment rewrite.
+        per_change < 40 * 1_024,
         "one row change wrote {per_change} bytes on average"
     );
 }

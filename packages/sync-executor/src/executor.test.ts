@@ -219,8 +219,8 @@ describe('sync executor', () => {
 
   test('helper rotation keeps the per-client LMID checkpoint', async () => {
     for (const [fillerBytes, expectedSegments] of [
-      [60_000, 1],
-      [70_000, 2],
+      [15_000, 1],
+      [17_000, 2],
     ] as const) {
       const { database, sqlite } = sqliteDatabase()
       const mutators = {

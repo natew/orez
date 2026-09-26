@@ -800,7 +800,7 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 // bump when the trigger bodies change shape. versioned names make startup
 // idempotent, and the version feeds schema_revision so hosts re-run the
 // schema pass exactly once when new bodies ship.
-pub const TRIGGER_VERSION: u32 = 5;
+pub const TRIGGER_VERSION: u32 = 6;
 
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();
@@ -828,6 +828,22 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
         let tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d_v{TRIGGER_VERSION}"));
         let new_pk = pk_object(tables, table, spec, "NEW");
         let old_pk = pk_object(tables, table, spec, "OLD");
+        // an update that keeps its key names the row once. naming it under
+        // both OLD and NEW doubled every ordinary update's ledger entry; the
+        // pair is only needed when the key itself moved.
+        let key_kept = spec
+            .primary_key
+            .iter()
+            .map(|col| {
+                let physical = quote_ident(
+                    tables
+                        .physical_column(table, col)
+                        .expect("primary key column in table mapping"),
+                );
+                format!("OLD.{physical} IS NEW.{physical}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
         let rotate = format!(
             "INSERT INTO _zsync_log_segments
                 (startVersion, endVersion, payload, pending, captureMode)
@@ -881,29 +897,36 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_u} AFTER UPDATE ON {tq} BEGIN
                 UPDATE _zsync_log_segments
-                SET pending = json_insert(
-                    json_insert(
-                        pending,
+                SET pending = CASE WHEN {key_kept}
+                    THEN json_insert(pending, '$[#]', json_array({tl}, {new_pk}))
+                    ELSE json_insert(
+                        json_insert(
+                            pending,
+                            '$[#]',
+                            json_array({tl}, {old_pk})
+                        ),
                         '$[#]',
-                        json_array({tl}, {old_pk})
-                    ),
-                    '$[#]',
-                    json_array({tl}, {new_pk})
-                )
+                        json_array({tl}, {new_pk})
+                    )
+                END
                 WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
                   AND captureMode = 1;
                 {rotate}
                 UPDATE _zsync_log_segments
-                SET endVersion = endVersion + 2,
+                SET endVersion = endVersion + CASE WHEN {key_kept} THEN 1 ELSE 2 END,
                     payload = json_insert(
                         payload,
                         '$.transactions[#]',
                         json_object(
-                            'version', CAST(endVersion + 2 AS TEXT),
-                            'changes', json_array(
-                                json_array({tl}, {old_pk}),
-                                json_array({tl}, {new_pk})
-                            )
+                            'version',
+                            CAST(endVersion + CASE WHEN {key_kept} THEN 1 ELSE 2 END AS TEXT),
+                            'changes', CASE WHEN {key_kept}
+                                THEN json_array(json_array({tl}, {new_pk}))
+                                ELSE json_array(
+                                    json_array({tl}, {old_pk}),
+                                    json_array({tl}, {new_pk})
+                                )
+                            END
                         )
                     )
                 WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
