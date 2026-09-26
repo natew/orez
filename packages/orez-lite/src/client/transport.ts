@@ -581,6 +581,7 @@ class ZeroHttpSocket {
   private wakeSocket: { close(): void } | undefined
   private wakeConnecting = false
   private wakeReconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private wakeKeepaliveTimer: ReturnType<typeof setInterval> | undefined
   private wakeReconnectAttempts = 0
   private readonly generation: number
   private readonly zeroInstanceID: string
@@ -813,9 +814,8 @@ class ZeroHttpSocket {
     if (this.state.wake) this.openWakeChannel()
   }
 
-  // notification-only wake channel: a real WebSocket to <origin>/wake that
-  // carries no data. any frame means "pull now", so a wake triggers an
-  // immediate (coalesced) pull — push-shaped propagation without waiting on
+  // wake channel: a websocket to <origin>/wake that sends keepalives. wake
+  // frames trigger an immediate (coalesced) pull without waiting on
   // the poll interval. advisory only: if it drops we reconnect, and the
   // interval poll remains the safety net that guarantees convergence.
   private openWakeChannel() {
@@ -834,10 +834,11 @@ class ZeroHttpSocket {
       let wakeToken: string | undefined
       let socket: {
         onopen: (() => void) | null
-        onmessage: (() => void) | null
+        onmessage: ((event?: { data?: unknown }) => void) | null
         onclose: (() => void) | null
         onerror: (() => void) | null
         close(): void
+        send(data: string): void
       }
       try {
         if (typeof this.state.wake === 'object') {
@@ -864,6 +865,7 @@ class ZeroHttpSocket {
       this.wakeSocket = socket
       const reconnect = () => {
         if (this.wakeSocket !== socket) return
+        clearInterval(this.wakeKeepaliveTimer)
         this.wakeSocket = undefined
         this.scheduleWakeReconnect()
       }
@@ -880,11 +882,14 @@ class ZeroHttpSocket {
       socket.onopen = () => {
         if (this.wakeSocket !== socket) return
         this.wakeReconnectAttempts = 0
+        this.wakeKeepaliveTimer = setInterval(() => socket.send('ping'), 60_000)
         this.requestPullAfterCurrent()
       }
-      socket.onmessage = () => this.requestPullAfterCurrent()
-      socket.onclose = reconnect
-      socket.onerror = reconnect
+      socket.onmessage = (event) => {
+        // old hosts answer ping in the message handler; new hosts auto-respond.
+        if (event?.data !== 'pong') this.requestPullAfterCurrent()
+      }
+      socket.onclose = socket.onerror = reconnect
     })()
   }
 
@@ -905,6 +910,7 @@ class ZeroHttpSocket {
   }
 
   private closeWakeChannel() {
+    clearInterval(this.wakeKeepaliveTimer)
     if (this.wakeReconnectTimer) {
       clearTimeout(this.wakeReconnectTimer)
       this.wakeReconnectTimer = undefined

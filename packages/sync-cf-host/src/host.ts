@@ -848,6 +848,7 @@ export function createSyncDurableObject<
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env)
+      ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))
       const recordRowsWritten = (rows: number) => {
         this.#sqlBilling.rowsWritten += rows
         if (this.#recordingIngestBillable) this.#ingestBreaker.recordBillable(rows)
@@ -2852,10 +2853,6 @@ export function createSyncDurableObject<
       socket: WebSocket,
       message: string | ArrayBuffer
     ): Promise<void> {
-      if (message === 'ping') {
-        socket.send('pong')
-        return
-      }
       this.#initialize()
       const host = this.#realtimeHost()
       if (!host || typeof message !== 'string') return
