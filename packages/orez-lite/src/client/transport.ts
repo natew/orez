@@ -561,11 +561,11 @@ class ZeroHttpSocket {
   // the accumulated un-acked desired-query delta to ship, a client-side state
   // version that bumps on each change, and the version/length of the delta the
   // in-flight pull sent so the server's ack can clear that prefix.
-  private desiredQueryPatch: QueryPatchOp[] = []
+  private queryPatch: QueryPatchOp[] = []
   private queryVersion = 0
-  private ackedQueryVersion = 0
-  private sentQueryVersion: number | undefined
-  private sentQueryPatchLen = 0
+  private ackVersion = 0
+  private sentVersion: number | undefined
+  private sentPatchLen = 0
   private readonly pendingDeletedClientIDs = new Set<string>()
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
@@ -939,24 +939,24 @@ class ZeroHttpSocket {
     const transform = this.state.queryTransform
     for (const op of desiredQueriesPatch as DesiredQueryPatchOp[]) {
       if (op.op === 'clear') {
-        this.desiredQueryPatch.push({ op: 'clear' })
+        this.queryPatch.push({ op: 'clear' })
       } else if (op.op === 'del') {
-        this.desiredQueryPatch.push({ op: 'del', hash: op.hash })
+        this.queryPatch.push({ op: 'del', hash: op.hash })
       } else if (op.op === 'put') {
         const inline = (op as { ast?: unknown }).ast
         const name = (op as { name?: string }).name ?? ''
         const args = ((op as { args?: readonly unknown[] }).args ??
           []) as readonly unknown[]
         if (name && transform) {
-          this.desiredQueryPatch.push({
+          this.queryPatch.push({
             op: 'put',
             hash: op.hash,
             ast: transform(name, args),
           })
         } else if (name) {
-          this.desiredQueryPatch.push({ op: 'put', hash: op.hash, name, args })
+          this.queryPatch.push({ op: 'put', hash: op.hash, name, args })
         } else if (inline !== undefined) {
-          this.desiredQueryPatch.push({ op: 'put', hash: op.hash, ast: inline })
+          this.queryPatch.push({ op: 'put', hash: op.hash, ast: inline })
         }
       }
     }
@@ -1107,14 +1107,10 @@ class ZeroHttpSocket {
   private applyServerGotQueries(response: PullResponse) {
     const got = response.gotQueries
     this.pendingGotQueriesPatch = got ? [...got.patch] : []
-    if (
-      got &&
-      this.sentQueryVersion !== undefined &&
-      got.version >= this.sentQueryVersion
-    ) {
-      this.desiredQueryPatch.splice(0, this.sentQueryPatchLen)
-      this.ackedQueryVersion = got.version
-      this.sentQueryVersion = undefined
+    if (got && this.sentVersion !== undefined && got.version >= this.sentVersion) {
+      this.queryPatch.splice(0, this.sentPatchLen)
+      this.ackVersion = got.version
+      this.sentVersion = undefined
     }
   }
 
@@ -1172,16 +1168,16 @@ class ZeroHttpSocket {
     // ship the un-acked desired-query delta with the pull; remember what we
     // sent so the server ack can clear exactly that prefix. a recovery pull
     // (includeQueries=false) never carries desires.
-    if (includeQueries && this.desiredQueryPatch.length > 0) {
-      this.sentQueryVersion = this.queryVersion
-      this.sentQueryPatchLen = this.desiredQueryPatch.length
+    if (includeQueries && this.queryPatch.length > 0) {
+      this.sentVersion = this.queryVersion
+      this.sentPatchLen = this.queryPatch.length
       body.queries = {
         version: this.queryVersion,
-        baseVersion: this.ackedQueryVersion,
-        patch: [...this.desiredQueryPatch],
+        baseVersion: this.ackVersion,
+        patch: [...this.queryPatch],
       }
     } else {
-      this.sentQueryVersion = undefined
+      this.sentVersion = undefined
     }
     if (includeQueries && deletedClientIDs.length > 0) {
       body.deletedClientIDs = deletedClientIDs
