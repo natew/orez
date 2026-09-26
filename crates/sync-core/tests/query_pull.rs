@@ -591,7 +591,7 @@ fn newly_desiring_client_rehydrates_existing_group_query() {
     let replay = h.pull(
         "c2",
         restarted["cookie"].clone(),
-        Some(json!({ "version": 2, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] })),
+        Some(json!({ "version": 1, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] })),
     );
     assert_eq!(put_ids(&replay), vec!["i1", "i3"]);
 }
@@ -618,6 +618,33 @@ fn committed_query_response_lost_replays_rows_without_rewriting_membership() {
         written, 0,
         "a query replay must not rewrite durable membership"
     );
+}
+
+#[test]
+fn newer_version_of_an_existing_query_does_not_resend_rows() {
+    let mut h = QHost::new();
+    let first = h.pull(
+        "c1",
+        json!(null),
+        Some(json!({
+            "version": 1,
+            "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }],
+        })),
+    );
+    assert_eq!(put_ids(&first), vec!["i1", "i3"]);
+
+    let before = h.db.conn.total_changes();
+    let repeated = h.pull(
+        "c1",
+        first["cookie"].clone(),
+        Some(json!({
+            "version": 2,
+            "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }],
+        })),
+    );
+    assert!(put_ids(&repeated).is_empty());
+    assert_eq!(repeated["gotQueries"]["version"], json!(2));
+    assert_eq!(h.db.conn.total_changes() - before, 2);
 }
 
 #[test]
