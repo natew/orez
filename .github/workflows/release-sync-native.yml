@@ -195,6 +195,7 @@ jobs:
       - uses: ./.github/actions/publish-sync-native
         with:
           version: ${{ needs.plan.outputs.version }}
+          libc: ${{ matrix.libc }}
 
   dispatch-stable:
     needs: [plan, launcher, mac-arm64, remaining-platforms]
