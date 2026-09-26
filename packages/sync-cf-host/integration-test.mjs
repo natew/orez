@@ -770,7 +770,7 @@ try {
 
     const rawHeadBefore = await admin('/admin/sql', {
       query:
-        'SELECT endVersion AS head FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
+        'SELECT endVersion AS head, (SELECT COUNT(*) FROM _zsync_log_segments) AS segments FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
     })
     const rawBefore = await billing()
     response = await post(
@@ -784,7 +784,7 @@ try {
     const rawAfter = await billing()
     const rawHeadAfter = await admin('/admin/sql', {
       query:
-        'SELECT endVersion AS head FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
+        'SELECT endVersion AS head, (SELECT COUNT(*) FROM _zsync_log_segments) AS segments FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
     })
 
     const helperCost = delta(helperBefore, helperAfter)
@@ -798,6 +798,13 @@ try {
       rawHeadAfter.rows[0].head - rawHeadBefore.rows[0].head,
       logicalRows + 1,
       `${logicalRows}-row raw batch preserves trigger envelopes plus its LMID`
+    )
+    const rawSegmentInserts =
+      rawHeadAfter.rows[0].segments - rawHeadBefore.rows[0].segments
+    equal(
+      rawSegmentInserts,
+      logicalRows === 250 ? 2 : 0,
+      `${logicalRows}-row raw batch uses the pinned number of ledger segments`
     )
     console.log(
       `[ledger-cost] ${JSON.stringify({
@@ -816,8 +823,8 @@ try {
     )
     equal(
       rawCost.rowsWritten,
-      logicalRows * 3 + 2,
-      `${logicalRows}-row raw capture stays at the pinned trigger cost`
+      logicalRows * 3 + 2 + rawSegmentInserts,
+      `${logicalRows}-row raw capture stays at the pinned trigger and rotation cost`
     )
   }
 
