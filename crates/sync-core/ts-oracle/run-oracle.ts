@@ -86,9 +86,9 @@ class QueryOracle {
   }
 
   upsert(table: string, row: Row) {
-    const existed = this.rows.get(table)!.has(row.id)
     this.rows.get(table)!.set(row.id, row)
-    this.watermark += existed ? 2 : 1
+    // an insert and a key-preserving update each log one change
+    this.watermark++
     this.changed.add(memberKey(table, row))
   }
 

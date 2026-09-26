@@ -7,12 +7,13 @@ use crate::db::{DbError, SqlValue, SyncDb};
 use crate::error::EngineError;
 
 // every change rewrites the whole active segment (sqlite has no in-place
-// append for a text value), so this bounds the bytes one change writes. 64 KiB
-// keeps that near 32 KiB on average; at 768 KiB a native host wrote ~400 KiB
-// per row change, doubled again by the wal checkpoint. it only sets how the log
+// append for a text value), so this bounds the bytes one change writes. 16 KiB
+// keeps that near 8 KiB on average, a couple of pages; at 768 KiB a native host
+// wrote ~400 KiB per row change and at 64 KiB ~32 KiB, doubled again by the wal
+// checkpoint. it only sets how the log
 // is chunked: retention prunes by version, and a pull at the head still reads
 // the one active row.
-pub(crate) const ROTATE_AT_BYTES: usize = 64 * 1_024;
+pub(crate) const ROTATE_AT_BYTES: usize = 16 * 1_024;
 const MAX_PAYLOAD_BYTES: usize = 1_024 * 1_024;
 
 // bump when the packed payload shape changes; part of schema_revision so hosts

@@ -347,8 +347,8 @@ fn a_missing_first_packed_segment_fails_loud() {
 #[test]
 fn raw_trigger_rotation_preserves_the_incremental_boundary() {
     for (label, filler_bytes, expected_segments) in [
-        ("below threshold", 60_000, 1),
-        ("above threshold", 70_000, 2),
+        ("below threshold", 15_000, 1),
+        ("above threshold", 17_000, 2),
     ] {
         let mut h = setup();
         h.pull(json!(null), "u1").unwrap();
@@ -454,7 +454,7 @@ fn a_large_lmid_checkpoint_does_not_wedge_the_next_mutation() {
     // under the rotation threshold and unwedges the namespace
     let (healed_start, healed_end, healed_bytes) = active(&mut h);
     assert_eq!((healed_start, healed_end), (start, end));
-    assert!(healed_bytes < 64 * 1_024);
+    assert!(healed_bytes < 16 * 1_024);
 
     // every client's lastMutationID survives the move, exactly
     let lmid = |h: &mut Host, group: String, client: String| -> i64 {
