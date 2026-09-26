@@ -353,22 +353,22 @@ pub fn register_query(
     };
     let changed = prev_ast.as_deref() != Some(ast_text.as_str()) || prev_tv != transform_version;
 
-    db.exec(
-        "INSERT INTO _zsync_queries (clientGroupID, hash, ast, rootTable, deps, transformVersion)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (clientGroupID, hash) DO UPDATE SET ast = excluded.ast,
-             rootTable = excluded.rootTable, deps = excluded.deps,
-             transformVersion = excluded.transformVersion",
-        &[
-            text(group),
-            text(hash),
-            text(ast_text),
-            text(&ast.table),
-            text(deps),
-            SqlValue::Text(transform_version.to_string()),
-        ],
-    )?;
     if changed {
+        db.exec(
+            "INSERT INTO _zsync_queries (clientGroupID, hash, ast, rootTable, deps, transformVersion)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (clientGroupID, hash) DO UPDATE SET ast = excluded.ast,
+                 rootTable = excluded.rootTable, deps = excluded.deps,
+                 transformVersion = excluded.transformVersion",
+            &[
+                text(group),
+                text(hash),
+                text(ast_text),
+                text(&ast.table),
+                text(deps),
+                SqlValue::Text(transform_version.to_string()),
+            ],
+        )?;
         db.exec(
             "DELETE FROM _zsync_query_state WHERE clientGroupID = ? AND hash = ?",
             &[text(group), text(hash)],
@@ -384,21 +384,15 @@ pub fn set_desire(
     client: &str,
     hash: &str,
     client_version: i64,
-) -> Result<bool, EngineError> {
-    let existed = !db
-        .query(
-            "SELECT 1 FROM _zsync_desires
-             WHERE clientGroupID = ? AND clientID = ? AND hash = ?",
-            &[text(group), text(client), text(hash)],
-        )?
-        .is_empty();
+) -> Result<(), EngineError> {
     db.exec(
         "INSERT INTO _zsync_desires (clientGroupID, clientID, hash, clientVersion)
          VALUES (?, ?, ?, ?)
-         ON CONFLICT (clientGroupID, clientID, hash) DO UPDATE SET clientVersion = excluded.clientVersion",
+         ON CONFLICT (clientGroupID, clientID, hash) DO UPDATE SET clientVersion = excluded.clientVersion
+         WHERE excluded.clientVersion > clientVersion",
         &[text(group), text(client), text(hash), SqlValue::Text(client_version.to_string())],
     )?;
-    Ok(!existed)
+    Ok(())
 }
 
 pub fn remove_desire(
@@ -482,7 +476,8 @@ pub(crate) fn advance_query_ack(
     db.exec(
         "INSERT INTO _zsync_query_ack (clientGroupID, clientID, version)
          VALUES (?, ?, ?)
-         ON CONFLICT (clientGroupID, clientID) DO UPDATE SET version = max(version, excluded.version)",
+         ON CONFLICT (clientGroupID, clientID) DO UPDATE SET version = excluded.version
+         WHERE excluded.version > version",
         &[
             text(group),
             text(client),
@@ -1120,9 +1115,8 @@ pub(crate) fn recompute_group_with_rehydrate(
             if !query_relevant(db, tables, group, q, changed)? {
                 continue;
             }
-        } else {
+        } else if computed.insert(q.hash.clone()) {
             // never computed for this group (newly desired, or AST changed): compute
-            computed.insert(q.hash.clone());
             set_query_state(db, group, &q.hash)?;
         }
         let spec = tables.get(&q.root_table).ok_or_else(|| {
