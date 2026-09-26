@@ -30,29 +30,37 @@ runs:
     - name: Verify the published launcher
       shell: bash
       run: |
-        # npm view can keep serving a cached pre-publish 404 even after npm
-        # publish succeeds. read the registry directly with a fresh URL for
-        # each attempt, then install with a cache that has no negative entry.
+        # npm's package index can lag behind a published version. read both
+        # version records directly and install their verified tarballs.
         package_name="$(node -p "require('./.release/platform/package.json').name")"
-        registry_url="https://registry.npmjs.org/$package_name/${{ inputs.version }}"
-        visible=''
+        platform_url="https://registry.npmjs.org/$package_name/${{ inputs.version }}"
+        launcher_url="https://registry.npmjs.org/orez-sync-native/${{ inputs.version }}"
+        platform_tarball=''
+        launcher_tarball=''
         attempt=0
         while [ "$attempt" -lt 60 ]; do
-          if curl --fail --silent --show-error \
+          platform_tarball="$(curl --fail --silent --show-error \
             -H 'Cache-Control: no-cache' \
-            "$registry_url?attempt=$attempt" 2>/dev/null \
-            | jq -e \
+            "$platform_url?attempt=$attempt" 2>/dev/null \
+            | jq -r \
               --arg version '${{ inputs.version }}' \
               --arg source_commit '${{ github.sha }}' \
-              '.version == $version and .orezSourceCommit == $source_commit' >/dev/null; then
-            visible=1
+              'if .version == $version and .orezSourceCommit == $source_commit then .dist.tarball // empty else empty end')" || platform_tarball=''
+          launcher_tarball="$(curl --fail --silent --show-error \
+            -H 'Cache-Control: no-cache' \
+            "$launcher_url?attempt=$attempt" 2>/dev/null \
+            | jq -r \
+              --arg version '${{ inputs.version }}' \
+              --arg source_commit '${{ github.sha }}' \
+              'if .version == $version and .orezSourceCommit == $source_commit then .dist.tarball // empty else empty end')" || launcher_tarball=''
+          if [ -n "$platform_tarball" ] && [ -n "$launcher_tarball" ]; then
             break
           fi
           attempt=$((attempt + 1))
           sleep 5
         done
-        if [ -z "$visible" ]; then
-          echo "$package_name@${{ inputs.version }} published but the registry has not served it in five minutes" >&2
+        if [ -z "$platform_tarball" ] || [ -z "$launcher_tarball" ]; then
+          echo "orez-sync-native@${{ inputs.version }} or $package_name@${{ inputs.version }} has not reached the registry in five minutes" >&2
           exit 1
         fi
         # installing the target explicitly exercises the launcher without
@@ -61,13 +69,14 @@ runs:
         # is verified on a musl host: on the glibc runner that built it, the
         # launcher looks for the glibc sibling instead, which a parallel job may
         # not have published yet.
-        install="npm install --prefer-online --cache .release/smoke-cache --prefix .release/smoke --ignore-scripts orez-sync-native@${{ inputs.version }} $package_name@${{ inputs.version }}"
+        install="npm install --cache .release/smoke-cache --prefix .release/smoke --ignore-scripts --omit=optional"
         if [ '${{ inputs.libc }}' = 'musl' ]; then
           docker run --rm -v "$PWD/.release:/work/.release" -w /work node:24-alpine \
-            sh -euc "$install >&2 && .release/smoke/node_modules/.bin/sync-native --version" > .release/smoke-version
+            sh -euc "$install \"\$1\" \"\$2\" >&2 && .release/smoke/node_modules/.bin/sync-native --version" \
+            sh "$launcher_tarball" "$platform_tarball" > .release/smoke-version
           actual="$(cat .release/smoke-version)"
         else
-          $install
+          $install "$launcher_tarball" "$platform_tarball"
           actual="$(.release/smoke/node_modules/.bin/sync-native --version)"
         fi
         case "$actual" in
