@@ -8,9 +8,9 @@
 // The three shapes a refused client can take, in rising cost:
 //
 //   retry   same client, same cookie          nothing written, nothing sent
-//   restart new client, same group and cookie 4 rows of per-client bookkeeping
+//   restart new client, same group and cookie 3 rows of per-client bookkeeping
 //                                             written, EVERY row sent
-//   cold    new client, same group, no cookie 4 rows of per-client bookkeeping
+//   cold    new client, same group, no cookie 3 rows of per-client bookkeeping
 //                                             written, EVERY row sent
 //
 // A restart looks cheap on a write meter and is not: a client that has never
@@ -118,7 +118,7 @@ fn a_restart_that_lost_its_cookie_preserves_group_membership() {
         h.pull_as("c-cold", "g1", json!(null), "u1").unwrap()
     });
     assert_eq!(
-        written, 4,
+        written, 3,
         "only the new client's bookkeeping should be written"
     );
     assert_eq!(rows_sent(&response), 1_000);
