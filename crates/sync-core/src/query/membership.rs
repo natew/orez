@@ -547,6 +547,18 @@ pub(crate) fn collect_abandoned_client_groups(
     retain_changes: i64,
 ) -> Result<(), EngineError> {
     let bound = crate::store::floor(db)? - retain_changes;
+    // pruning raises the floor on nearly every pull, and the deletes below
+    // scan every membership row. they can only remove something once a group
+    // has fallen behind the bound, so look for one first. membership with no
+    // seen row at all (orphaned by an older engine) goes with the next group
+    // that expires.
+    let expired = db.query(
+        "SELECT 1 FROM _zsync_client_group_seen WHERE watermark < ? LIMIT 1",
+        &[crate::store::counter(bound)],
+    )?;
+    if expired.is_empty() {
+        return Ok(());
+    }
     // one predicate, applied to each table: a group is live iff it was seen
     // within one retention window of the floor. A group with no seen row at
     // all is caught by the same test, which is what collects membership
