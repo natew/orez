@@ -43,6 +43,11 @@
       "import": "./dist/room/cloudflare.js",
       "default": "./dist/room/cloudflare.js"
     },
+    "./room/ticket": {
+      "types": "./dist/room/ticket.d.ts",
+      "import": "./dist/room/ticket.js",
+      "default": "./dist/room/ticket.js"
+    },
     "./encryption": {
       "types": "./dist/client/encrypted-column-codec.d.ts",
       "import": "./dist/client/encrypted-column-codec.js",

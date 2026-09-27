@@ -8,8 +8,29 @@ true for the next few milliseconds.
 ```ts
 import { connectRoom, ROOM_PATH } from 'orez-lite/room'
 
-const room = connectRoom({ url: `wss://your.app${ROOM_PATH}race-42`, meta: { name } })
+const room = connectRoom({
+  // called for every connect, so each reconnect carries a fresh ticket.
+  url: async () => {
+    const { ticket } = await fetch('/api/room-ticket?room=race-42').then((r) => r.json())
+    return `wss://your.app${ROOM_PATH}race-42?ticket=${ticket}`
+  },
+  meta: { name },
+})
 ```
+
+## Who gets in
+
+A room admits a socket only with a ticket for that room. The app's server
+decides who may join (a session, access to whatever the room is about) and
+signs one with `signRoomTicket(secret, room, userId)` from
+`orez-lite/room/ticket`; every host checks it with the same secret before the
+socket joins, so a room never looks up a session itself and nobody reaches a
+room the app did not admit them to. A ticket names its room and its user and
+lasts a minute by default; the client asks for a new one on every connect.
+
+The ticket's user is on every member as `user`, and can be trusted; `meta` is
+whatever the member says about itself. One user holds at most
+`maxMembersPerUser` places in a room, so a single account cannot fill it.
 
 ## What travels
 
@@ -62,18 +83,27 @@ the other is drawn, the way racing games do.
 The room itself (`orez-lite/room/host`) has no I/O and no clock. Two hosts
 wrap it:
 
-- **Development**: the `orez()` Vite plugin serves rooms on the dev server's
-  own port at `/__orez/room/<name>`, so web and native clients reach them at
-  the app's origin.
+- **Development**: with `roomSecret` in `orez-lite.config.ts`, the `orez()`
+  Vite plugin serves rooms on the dev server's own port at
+  `/__orez/room/<name>`, so web and native clients reach them at the app's
+  origin.
 - **Cloudflare**: bind `OrezRoomDO` (from `orez-lite/room/cloudflare`, also
-  returned by `createOrezDataWorker`) as `OREZ_ROOM_DO`, and the data worker
-  routes `/__orez/room/<name>` to one object per room name.
+  returned by `createOrezDataWorker`) as `OREZ_ROOM_DO` and the secret as
+  `OREZ_ROOM_SECRET`, and the data worker routes `/__orez/room/<name>` to one
+  object per room name. A host of its own calls `routeRoom(request, rooms,
+  secret)`.
 
-Every bound is a limit in `RoomLimits`: members, state and event size, events
-per second, retained keys and metadata size. A socket that sends more than a
-few messages before its hello, or anything that is not a room message, is
-closed.
+Every bound is a limit in `RoomLimits`: members (in all and per user), state
+size and states per second, event size, events and event bytes per member per
+second, retained keys and their bytes (which bound a welcome), and metadata
+size. A socket that sends more than a few messages before its hello, stays
+ten seconds without one, says nothing for a minute, or sends anything that is
+not a room message, is closed.
 
-A room has no authorization of its own: anyone who can reach the path can
-join any room name. The Node host takes an `authorize` callback; on
-Cloudflare, check the request in your worker before `routeRoom`.
+The host knows how far behind each receiver is without seeing its socket's
+queue (Cloudflare does not show one): every 16 KB it sends a random mark, and
+the client echoes each mark as it reads it. A mark cannot be echoed before it
+arrives, so a receiver that stops reading cannot hide it. A receiver more than
+`maxBufferedBytes` behind skips snapshots, and one more than `maxQueuedBytes`
+behind is closed, because events are reliable and cannot be skipped; it
+reconnects to a welcome with the room as it is.

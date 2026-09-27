@@ -33,6 +33,9 @@ export interface LocalSyncHostConfig {
   workerRetention?: NativeHostWorkerRetention
   changeLogRows?: number
   startupTimeoutMs?: number
+  // serves game rooms on the dev server, admitting sockets whose ticket this
+  // signed (orez-lite/room/ticket). without it the dev server has no rooms.
+  roomSecret?: string
 }
 
 export interface LocalSyncHostExit {

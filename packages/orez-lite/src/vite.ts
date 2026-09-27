@@ -81,9 +81,12 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
       // game rooms ride the dev server's own port, as they ride the app's
       // origin in production.
       const { attachRoomServer } = await import('./room/node.js')
-      const rooms = server.httpServer
-        ? attachRoomServer(server.httpServer as Server)
-        : null
+      const rooms =
+        server.httpServer && localConfig.roomSecret
+          ? attachRoomServer(server.httpServer as Server, {
+              secret: localConfig.roomSecret,
+            })
+          : null
       server.httpServer?.once('close', () => rooms?.close())
       server.httpServer?.once('close', close)
       server.watcher.once('close', close)

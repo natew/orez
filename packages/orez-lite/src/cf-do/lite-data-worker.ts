@@ -85,6 +85,8 @@ export interface OrezDataWorkerEnv {
   ZERO_SQL_DO: OrezDataWorkerNamespace
   // bound to `OrezRoomDO` to serve game rooms at /__orez/room/<name>.
   OREZ_ROOM_DO?: RoomNamespace
+  // what the app signs room tickets with (orez-lite/room/ticket).
+  OREZ_ROOM_SECRET?: string
   OREZ_DO_WRITE_BUDGET_ROWS?: string
   OREZ_DO_WRITE_BUDGET_WINDOW_MS?: string
   OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN?: string
@@ -1177,7 +1179,7 @@ export function createOrezDataWorker<
       const route = new URL(request.url).pathname
       // game rooms live in their own objects, outside any namespace.
       if (env.OREZ_ROOM_DO) {
-        const room = routeRoom(request, env.OREZ_ROOM_DO)
+        const room = await routeRoom(request, env.OREZ_ROOM_DO, env.OREZ_ROOM_SECRET ?? '')
         if (room) return room
       }
       try {

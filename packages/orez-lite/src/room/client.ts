@@ -30,7 +30,10 @@ export type RoomFrame = { from: RoomSample; to: RoomSample; alpha: number }
 export type RoomStatus = 'connecting' | 'open' | 'closed'
 
 export type RoomClientOptions<Meta> = {
-  url: string
+  // called again for every connect, so a room that wants a ticket gets a
+  // fresh one each time; a URL that fails to arrive is retried like a socket
+  // that failed to open.
+  url: string | (() => string | Promise<string>)
   meta: Meta
   onEvent?: (event: RoomEvent) => void
   onJoin?: (member: RoomMember<Meta>) => void
@@ -74,7 +77,9 @@ const MAX_EXTRAPOLATE_MS = 250
 // the delay never drops below two snapshots' spacing, and grows with jitter.
 const MIN_DELAY_MS = 60
 const MAX_DELAY_MS = 400
-const RECONNECT_MS = [250, 500, 1000, 2000, 4000]
+// a room turned away again and again (a ticket refused, a room full) is asked
+// less and less often.
+const RECONNECT_MS = [250, 500, 1000, 2000, 4000, 8000, 15000]
 
 export function connectRoom<Meta>(options: RoomClientOptions<Meta>): RoomClient<Meta> {
   const Socket = options.WebSocket ?? globalThis.WebSocket
@@ -187,6 +192,9 @@ export function connectRoom<Meta>(options: RoomClientOptions<Meta>): RoomClient<
       case 'pong':
         onClock(message.c, message.s)
         return
+      case 'mark':
+        send({ t: 'mark', m: message.m })
+        return
       case 'event': {
         const { ref: own, t: _, ...event } = message
         if (event.key !== undefined) {
@@ -209,9 +217,23 @@ export function connectRoom<Meta>(options: RoomClientOptions<Meta>): RoomClient<
     }
   }
 
-  function open() {
+  function retry() {
     setStatus('connecting')
-    const ws = new Socket(options.url)
+    const wait = RECONNECT_MS[Math.min(attempt++, RECONNECT_MS.length - 1)]!
+    timers.push(setTimeout(open, wait))
+  }
+
+  async function open() {
+    setStatus('connecting')
+    let url: string
+    try {
+      url = typeof options.url === 'string' ? options.url : await options.url()
+    } catch {
+      if (!closed) retry()
+      return
+    }
+    if (closed) return
+    const ws = new Socket(url)
     ws.binaryType = 'arraybuffer'
     socket = ws
     ws.onopen = () => {
@@ -240,12 +262,10 @@ export function connectRoom<Meta>(options: RoomClientOptions<Meta>): RoomClient<
       // the room's state is the welcome's again on reconnect.
       retained.clear()
       if (closed) return setStatus('closed')
-      setStatus('connecting')
-      const wait = RECONNECT_MS[Math.min(attempt++, RECONNECT_MS.length - 1)]!
-      timers.push(setTimeout(open, wait))
+      retry()
     }
   }
-  open()
+  void open()
 
   return {
     get id() {

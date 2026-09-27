@@ -16,9 +16,11 @@
  * Times are milliseconds on the host's clock. Clients estimate it with pings.
  */
 
-export const ROOM_PROTOCOL_VERSION = 1
+export const ROOM_PROTOCOL_VERSION = 2
 
-export type RoomMember<Meta = unknown> = { id: number; meta: Meta }
+// `user` is who the member's ticket was signed for, so it can be trusted;
+// `meta` is whatever the member said about itself.
+export type RoomMember<Meta = unknown> = { id: number; user: string; meta: Meta }
 
 export type RoomEventInput = {
   // retained under this key for late joiners; a later event with the same key
@@ -43,6 +45,8 @@ export type RoomEvent = {
 export type ClientText =
   | { t: 'hello'; v: number; meta: unknown }
   | { t: 'ping'; c: number }
+  // echoes a mark as it is read.
+  | { t: 'mark'; m: string }
   | ({ t: 'event'; ref: number } & RoomEventInput)
 
 export type ServerText =
@@ -57,6 +61,8 @@ export type ServerText =
   | { t: 'join'; member: RoomMember }
   | { t: 'leave'; id: number }
   | { t: 'pong'; c: number; s: number }
+  // how far a receiver has read: echo it back on arrival.
+  | { t: 'mark'; m: string }
   | ({ t: 'event'; ref?: number } & RoomEvent)
   | { t: 'reject'; ref: number; reason: 'claimed' | 'rate' | 'size' }
 
