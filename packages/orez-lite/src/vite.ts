@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 
 import type { LocalSyncHost, LocalSyncHostConfig } from './local.js'
+import type { Server } from 'node:http'
 import type { Plugin } from 'vite'
 
 // vite restarts by creating the new server, which runs configureServer, before it
@@ -77,6 +78,13 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
         await host.close()
       }
 
+      // game rooms ride the dev server's own port, as they ride the app's
+      // origin in production.
+      const { attachRoomServer } = await import('./room/node.js')
+      const rooms = server.httpServer
+        ? attachRoomServer(server.httpServer as Server)
+        : null
+      server.httpServer?.once('close', () => rooms?.close())
       server.httpServer?.once('close', close)
       server.watcher.once('close', close)
       void host.exited.then((exit) => {

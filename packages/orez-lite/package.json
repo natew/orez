@@ -28,6 +28,21 @@
       "import": "./dist/realtime.js",
       "default": "./dist/realtime.js"
     },
+    "./room": {
+      "types": "./dist/room/index.d.ts",
+      "import": "./dist/room/index.js",
+      "default": "./dist/room/index.js"
+    },
+    "./room/host": {
+      "types": "./dist/room/host.d.ts",
+      "import": "./dist/room/host.js",
+      "default": "./dist/room/host.js"
+    },
+    "./room/cloudflare": {
+      "types": "./dist/room/cloudflare.d.ts",
+      "import": "./dist/room/cloudflare.js",
+      "default": "./dist/room/cloudflare.js"
+    },
     "./encryption": {
       "types": "./dist/client/encrypted-column-codec.d.ts",
       "import": "./dist/client/encrypted-column-codec.js",
@@ -125,7 +140,8 @@
     "bedrock-sqlite": "workspace:*",
     "esbuild": "^0.25.0",
     "orez-sync-cf-host": "workspace:*",
-    "orez-sync-executor": "workspace:*"
+    "orez-sync-executor": "workspace:*",
+    "ws": "^8.19.0"
   },
   "peerDependencies": {
     "@rocicorp/zero": ">=1.7.0",
@@ -144,7 +160,8 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
-    "wrangler": "^4.75.0"
+    "wrangler": "^4.75.0",
+    "@types/ws": "^8.18.1"
   },
   "files": [
     "dist",
