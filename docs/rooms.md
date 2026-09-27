@@ -27,7 +27,9 @@ number and the host's clock, so every member agrees what happened first.
 - An event with a `key` is retained as room state. Late joiners receive every
   retained event in order in their welcome, and `data: null` removes one.
 - `ifAbsent: true` makes the event a claim: only the first sender wins, the
-  rest are rejected. Item boxes, seats and "who crossed first" are claims.
+  rest are rejected, and only the holder may change or remove it. Item
+  boxes, seats and "who crossed first" are claims. Any member may change or
+  remove a key that is not a claim.
 - A member's retained events go when it leaves, as ordered removals, unless
   sent with `persist: true`.
 
@@ -35,8 +37,10 @@ number and the host's clock, so every member agrees what happened first.
 
 `room.now()` is the host's clock, estimated from pings: a burst on connect,
 then every two seconds, taking the offset from the quickest recent round
-trips and slewing rather than jumping so a running game never sees time go
-backwards. Schedule shared moments (a race start, a round end) as host times
+trips and slewing it at most 4 ms per ping so a running game does not see
+time go backwards. The welcome's own clock stands in until the first pong,
+and an estimate more than 250 ms out is corrected at once. Samples stamped
+more than ten seconds from the host's clock are dropped. Schedule shared moments (a race start, a round end) as host times
 in an event, and every client counts down to the same instant.
 
 ## Drawing other members
@@ -66,4 +70,10 @@ wrap it:
   routes `/__orez/room/<name>` to one object per room name.
 
 Every bound is a limit in `RoomLimits`: members, state and event size, events
-per second, retained keys and metadata size.
+per second, retained keys and metadata size. A socket that sends more than a
+few messages before its hello, or anything that is not a room message, is
+closed.
+
+A room has no authorization of its own: anyone who can reach the path can
+join any room name. The Node host takes an `authorize` callback; on
+Cloudflare, check the request in your worker before `routeRoom`.

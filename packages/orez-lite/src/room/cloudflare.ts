@@ -62,7 +62,14 @@ export class OrezRoomDO {
 export function routeRoom(request: Request, rooms: RoomNamespace) {
   const path = new URL(request.url).pathname
   if (!path.startsWith(ROOM_PATH)) return null
-  const name = decodeURIComponent(path.slice(ROOM_PATH.length))
+  if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket')
+    return new Response('expected a websocket', { status: 426 })
+  let name: string
+  try {
+    name = decodeURIComponent(path.slice(ROOM_PATH.length))
+  } catch {
+    return new Response('invalid room', { status: 400 })
+  }
   if (!name || name.length > 256) return new Response('invalid room', { status: 400 })
   return rooms.get(rooms.idFromName(name)).fetch(request)
 }

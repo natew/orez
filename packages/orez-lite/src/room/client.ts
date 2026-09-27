@@ -149,6 +149,7 @@ export function connectRoom<Meta>(options: RoomClientOptions<Meta>): RoomClient<
       let samples = history.get(entry.id)
       if (!samples) history.set(entry.id, (samples = []))
       const last = samples[samples.length - 1]
+      if (!Number.isFinite(entry.sampledAt)) continue
       if (last && entry.sampledAt <= last.sampledAt) continue
       samples.push({ sampledAt: entry.sampledAt, payload: entry.payload.slice() })
       if (samples.length > HISTORY) samples.shift()
@@ -160,10 +161,14 @@ export function connectRoom<Meta>(options: RoomClientOptions<Meta>): RoomClient<
       case 'welcome':
         id = message.id
         tickMs = 1000 / message.tickHz
+        // the welcome's clock stands in until the first pong measures one,
+        // so handlers of the welcome's events already see the host's time.
+        if (!synced) offset = message.now - performance.now()
         members.clear()
         for (const member of message.members) members.set(member.id, member.meta as Meta)
         retained.clear()
-        for (const event of message.events) if (event.key) retained.set(event.key, event)
+        for (const event of message.events)
+          if (event.key !== undefined) retained.set(event.key, event)
         attempt = 0
         setStatus('open')
         for (const member of message.members)
@@ -232,6 +237,8 @@ export function connectRoom<Meta>(options: RoomClientOptions<Meta>): RoomClient<
       for (const member of members.keys()) options.onLeave?.(member)
       members.clear()
       history.clear()
+      // the room's state is the welcome's again on reconnect.
+      retained.clear()
       if (closed) return setStatus('closed')
       setStatus('connecting')
       const wait = RECONNECT_MS[Math.min(attempt++, RECONNECT_MS.length - 1)]!

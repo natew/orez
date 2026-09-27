@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 
 import { afterEach, describe, expect, test } from 'vitest'
+import { WebSocket as RawSocket } from 'ws'
 
 import { connectRoom, type RoomClient } from './client.js'
 import { attachRoomServer } from './node.js'
@@ -93,6 +94,13 @@ describe('rooms', () => {
       'claimed'
     )
 
+    // a claim is its holder's: nobody else drops it to take it.
+    // the winner's event reached both before the loser's rejection did.
+    const holder = a.retained.get('box:1')?.from === a.id ? a : b
+    const other = holder === a ? b : a
+    await expect(other.send({ key: 'box:1', data: null })).rejects.toThrow('claimed')
+    await expect(other.send({ key: 'box:1', data: 'mine' })).rejects.toThrow('claimed')
+
     const start = await a.send({ key: 'start', data: { at: 123 }, persist: true })
     await a.send({ key: 'ready:a', data: true })
     expect(start.seq).toBeGreaterThan(0)
@@ -114,6 +122,46 @@ describe('rooms', () => {
     expect(late.retained.has('start')).toBe(true)
     const claimer: RoomClient<unknown> = late.retained.get('box:1')?.from === b.id ? b : a
     expect(late.retained.has('box:1')).toBe(claimer === b)
+  })
+
+  test('hostile input is turned away without taking the server down, and a late hello joins the live room', async () => {
+    const { host, join } = await setup()
+    // a raw socket speaks whatever the test tells it to.
+    const raw = (room: string) => {
+      const socket = new RawSocket(host.url(room))
+      socket.on('error', () => {})
+      return socket
+    }
+    const opened = (socket: RawSocket) =>
+      new Promise<void>((resolve) => socket.once('open', () => resolve()))
+    const ended = (socket: RawSocket) =>
+      new Promise<void>((resolve) => socket.once('close', () => resolve()))
+    for (const text of ['null', '42', '[]', '{"t":"event"}', '{"t":"ping"}']) {
+      const socket = raw('race')
+      await opened(socket)
+      socket.send(text)
+      await ended(socket)
+    }
+    await ended(raw('%zz'))
+
+    // a socket that has not said hello yet keeps its room alive, so its
+    // hello lands in the room the others are in.
+    const lurker = raw('race')
+    await opened(lurker)
+    const texts: Array<{ t: string; id?: number }> = []
+    lurker.on('message', (data, binary) => {
+      if (!binary) texts.push(JSON.parse(String(data)))
+    })
+    const a = await join('a')
+    a.close()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(host.rooms.rooms()).toEqual(['race'])
+    lurker.send(JSON.stringify({ t: 'hello', v: 1, meta: { name: 'lurker' } }))
+    await until(() => texts.some((m) => m.t === 'welcome'))
+    const b = await join('b')
+    await until(() => texts.some((m) => m.t === 'join'))
+    expect(b.members.size).toBe(2)
+    lurker.close()
   })
 
   test('rooms are separate and go away when empty', async () => {

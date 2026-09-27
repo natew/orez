@@ -36,6 +36,12 @@ export type RoomLimits = {
   maxBufferedBytes: number
 }
 
+// a sample stamped further than this from the host's clock is refused, so one
+// member's bad clock cannot hold everyone else's history of it in the future.
+const MAX_SAMPLE_SKEW_MS = 10_000
+// messages a socket may send before its hello; past that it is closed.
+const MAX_PRE_HELLO = 32
+
 export const DEFAULT_ROOM_LIMITS: RoomLimits = {
   tickHz: 30,
   maxMembers: 16,
@@ -81,9 +87,13 @@ export function createRoomHost(options: {
   limits?: Partial<RoomLimits>
 }): RoomHost {
   const limits = { ...DEFAULT_ROOM_LIMITS, ...options.limits }
+  // a state's length rides in the snapshot as a u16.
+  if (limits.maxStateBytes > 0xffff) throw new Error('maxStateBytes is at most 65535')
   const { now } = options
   const members = new Map<number, Member>()
   const retained = new Map<string, RoomEvent>()
+  // keys taken by a claim: only the member holding one may change or drop it.
+  const claims = new Set<string>()
   let nextId = 1
   let seq = 0
   let tick = 0
@@ -111,6 +121,7 @@ export function createRoomHost(options: {
     for (const [key, event] of retained) {
       if (event.from !== member.id || event.persist) continue
       retained.delete(key)
+      claims.delete(key)
       broadcast({ t: 'event', seq: ++seq, at: now(), from: member.id, key, data: null })
     }
   }
@@ -130,7 +141,8 @@ export function createRoomHost(options: {
     if (++member.budget > limits.maxEventsPerSecond) return reject('rate')
     if (size > limits.maxEventBytes) return reject('size')
     const { key } = message
-    if (key !== undefined && message.ifAbsent && retained.has(key))
+    const held = key === undefined ? undefined : retained.get(key)
+    if (held && (message.ifAbsent || (claims.has(key!) && held.from !== member.id)))
       return reject('claimed')
     if (key !== undefined && !retained.has(key) && retained.size >= limits.maxRetained)
       return reject('size')
@@ -143,8 +155,13 @@ export function createRoomHost(options: {
       ...(message.persist ? { persist: true } : {}),
     }
     if (key !== undefined) {
-      if (message.data === null) retained.delete(key)
-      else retained.set(key, stamped)
+      if (message.data === null) {
+        retained.delete(key)
+        claims.delete(key)
+      } else {
+        retained.set(key, stamped)
+        if (message.ifAbsent) claims.add(key)
+      }
     }
     // the sender's copy carries its ref, so it learns its own event's place.
     for (const other of members.values())
@@ -163,6 +180,7 @@ export function createRoomHost(options: {
     },
     open(socket) {
       let member: Member | null = null
+      let early = 0
       return {
         message(data) {
           if (typeof data !== 'string') {
@@ -173,21 +191,23 @@ export function createRoomHost(options: {
             )
               return
             const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+            const sampledAt = view.getFloat64(0, true)
+            if (!(Math.abs(sampledAt - now()) <= MAX_SAMPLE_SKEW_MS)) return
             // copied: the host keeps it past the socket's buffer.
-            member.state = {
-              id: member.id,
-              sampledAt: view.getFloat64(0, true),
-              payload: data.slice(STATE_HEADER),
-            }
+            member.state = { id: member.id, sampledAt, payload: data.slice(STATE_HEADER) }
             member.dirty = true
             return
           }
+          if (!member && ++early > MAX_PRE_HELLO) return socket.close(4003, 'no hello')
+          if (data.length > limits.maxEventBytes + limits.maxMetaBytes)
+            return socket.close(1009, 'too large')
           let message: ClientText
           try {
             message = JSON.parse(data)
           } catch {
             return socket.close(1003, 'not json')
           }
+          if (!isClientText(message)) return socket.close(1003, 'not a room message')
           if (message.t === 'ping') {
             socket.send(
               JSON.stringify({ t: 'pong', c: message.c, s: now() } satisfies ServerText)
@@ -263,5 +283,27 @@ export function createRoomHost(options: {
         member.socket.send(encodeSnapshot(tick, at, entries))
       }
     },
+  }
+}
+
+// the shape of a client message, checked before any of it is trusted.
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
+function isClientText(message: unknown): message is ClientText {
+  if (!isRecord(message)) return false
+  switch (message.t) {
+    case 'ping':
+      return typeof message.c === 'number'
+    case 'hello':
+      return typeof message.v === 'number'
+    case 'event':
+      return (
+        typeof message.ref === 'number' &&
+        (message.key === undefined || typeof message.key === 'string') &&
+        'data' in message
+      )
+    default:
+      return false
   }
 }

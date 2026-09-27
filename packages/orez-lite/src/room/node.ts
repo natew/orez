@@ -23,9 +23,11 @@ export type RoomServerOptions = {
 export function attachRoomServer(server: Server, options: RoomServerOptions = {}) {
   const prefix = options.prefix ?? ROOM_PATH
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
+  // a room lives while any socket is open on it, joined or not yet, so a
+  // hello that arrives late still finds the room everyone else is in.
   const rooms = new Map<
     string,
-    { host: RoomHost; timer: ReturnType<typeof setInterval> }
+    { host: RoomHost; timer: ReturnType<typeof setInterval>; sockets: number }
   >()
   const origin = performance.timeOrigin
 
@@ -39,6 +41,7 @@ export function attachRoomServer(server: Server, options: RoomServerOptions = {}
     const room = {
       host,
       timer: setInterval(() => host.tick(), 1000 / host.limits.tickHz),
+      sockets: 0,
     }
     rooms.set(name, room)
     return room
@@ -46,6 +49,7 @@ export function attachRoomServer(server: Server, options: RoomServerOptions = {}
 
   const join = (socket: WebSocket, name: string) => {
     const room = roomOf(name)
+    room.sockets++
     const connection = room.host.open({
       send: (data) => socket.send(data),
       close: (code, reason) => socket.close(code, reason),
@@ -63,7 +67,7 @@ export function attachRoomServer(server: Server, options: RoomServerOptions = {}
     })
     socket.on('close', () => {
       connection.close()
-      if (room.host.size === 0 && rooms.get(name) === room) {
+      if (--room.sockets === 0 && rooms.get(name) === room) {
         clearInterval(room.timer)
         rooms.delete(name)
       }
@@ -73,7 +77,13 @@ export function attachRoomServer(server: Server, options: RoomServerOptions = {}
   const onUpgrade = async (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     const path = new URL(request.url ?? '/', 'http://room').pathname
     if (!path.startsWith(prefix)) return
-    const name = decodeURIComponent(path.slice(prefix.length))
+    let name: string
+    try {
+      name = decodeURIComponent(path.slice(prefix.length))
+    } catch {
+      socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
+      return
+    }
     if (
       !name ||
       name.length > 256 ||
