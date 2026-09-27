@@ -273,7 +273,11 @@ export function createRoomHost(options: {
       )
   }
 
-  const recordOf = (m: Member): RoomMember => ({ id: m.id, user: m.link.user, meta: m.meta })
+  const recordOf = (m: Member): RoomMember => ({
+    id: m.id,
+    user: m.link.user,
+    meta: m.meta,
+  })
 
   return {
     limits,
@@ -343,7 +347,10 @@ export function createRoomHost(options: {
               pings = 0
             }
             if (++pings > MAX_PINGS_PER_SECOND) return
-            write(link, JSON.stringify({ t: 'pong', c: message.c, s: now() } satisfies ServerText))
+            write(
+              link,
+              JSON.stringify({ t: 'pong', c: message.c, s: now() } satisfies ServerText)
+            )
             return
           }
           if (message.t === 'hello') {

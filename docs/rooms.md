@@ -91,7 +91,7 @@ wrap it:
   returned by `createOrezDataWorker`) as `OREZ_ROOM_DO` and the secret as
   `OREZ_ROOM_SECRET`, and the data worker routes `/__orez/room/<name>` to one
   object per room name. A host of its own calls `routeRoom(request, rooms,
-  secret)`.
+secret)`.
 
 Every bound is a limit in `RoomLimits`: members (in all and per user), state
 size and states per second, event size, events and event bytes per member per

@@ -1179,7 +1179,11 @@ export function createOrezDataWorker<
       const route = new URL(request.url).pathname
       // game rooms live in their own objects, outside any namespace.
       if (env.OREZ_ROOM_DO) {
-        const room = await routeRoom(request, env.OREZ_ROOM_DO, env.OREZ_ROOM_SECRET ?? '')
+        const room = await routeRoom(
+          request,
+          env.OREZ_ROOM_DO,
+          env.OREZ_ROOM_SECRET ?? ''
+        )
         if (room) return room
       }
       try {

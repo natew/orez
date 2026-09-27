@@ -192,7 +192,9 @@ describe('rooms', () => {
           socket.close()
           resolve(101)
         })
-        socket.on('unexpected-response', (_request, response) => resolve(response.statusCode!))
+        socket.on('unexpected-response', (_request, response) =>
+          resolve(response.statusCode!)
+        )
         socket.on('error', () => {})
       })
     const ticket = (room: string, options?: { ttlMs?: number }) =>
@@ -206,11 +208,15 @@ describe('rooms', () => {
     expect(await status(forged)).toBe(403)
     const [expires, user, signature] = (await ticket('race')).split('.')
     expect(
-      await status(`${host.base('race')}?ticket=${Number(expires) + 1}.${user}.${signature}`)
+      await status(
+        `${host.base('race')}?ticket=${Number(expires) + 1}.${user}.${signature}`
+      )
     ).toBe(403)
     // a ticket cannot be moved to another user.
     const other = btoa('v').replace(/=+$/, '')
-    expect(await status(`${host.base('race')}?ticket=${expires}.${other}.${signature}`)).toBe(403)
+    expect(
+      await status(`${host.base('race')}?ticket=${expires}.${other}.${signature}`)
+    ).toBe(403)
     // nothing turned away made a room.
     expect(host.rooms.rooms()).toEqual([])
     expect(await status(`${host.base('race')}?ticket=${await ticket('race')}`)).toBe(101)

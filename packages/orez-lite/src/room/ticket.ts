@@ -106,6 +106,10 @@ export async function admitRoom(
     return 400
   }
   if (!name || name.length > 256) return 400
-  const user = await verifyRoomTicket(secret, name, url.searchParams.get(ROOM_TICKET_PARAM))
+  const user = await verifyRoomTicket(
+    secret,
+    name,
+    url.searchParams.get(ROOM_TICKET_PARAM)
+  )
   return user === null ? 403 : { room: name, user }
 }
