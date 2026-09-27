@@ -127,73 +127,91 @@ export function readNativeSqlMigrationStatements(
     }
   }
   visit(migrationsDir)
-  const statements = migrationPaths
-    .sort((a, b) => a.localeCompare(b))
-    .flatMap((path) => {
-      const migrationId = path.slice(migrationsDir.length + 1)
-      // drizzle rebuilds a table by creating `__new_<table>`, copying rows into
-      // it, dropping the original, and renaming the copy over it. the runner
-      // ledgers those statements individually, and the rename destroys the very
-      // table the create made — so a run that stops after the rename records the
-      // create as applied with nothing left to rename, and every later run dies
-      // on `no such table: __new_<table>`. carrying the temp table onto the rest
-      // of the block makes it skip itself once it has already completed.
-      let recreateTempTable: string | null = null
-      return readFileSync(path, 'utf-8')
-        .split('--> statement-breakpoint')
-        .map((statement) => statement.trim())
-        .filter(Boolean)
-        .map((sql, index) => {
-          const statement = parseStatement(sql)
-          const rewritten = statement.sql
-            .replace(
-              /^CREATE TABLE\s+(?!IF NOT EXISTS\s+)/i,
-              'CREATE TABLE IF NOT EXISTS '
-            )
-            .replace(
-              /^CREATE UNIQUE INDEX\s+(?!IF NOT EXISTS\s+)/i,
-              'CREATE UNIQUE INDEX IF NOT EXISTS '
-            )
-            .replace(
-              /^CREATE INDEX\s+(?!IF NOT EXISTS\s+)/i,
-              'CREATE INDEX IF NOT EXISTS '
-            )
-          const skipIfTableMissing = recreateTempTable
-          const created = /^CREATE TABLE IF NOT EXISTS\s+[`"]?(__new_\w+)[`"]?/i.exec(
-            rewritten
+  const statements = nativeSqlMigrationStatementsFromSources(
+    migrationPaths
+      .sort((a, b) => a.localeCompare(b))
+      .map((path) => ({
+        migrationId: path.slice(migrationsDir.length + 1),
+        sql: readFileSync(path, 'utf-8'),
+      })),
+    parseStatement
+  )
+  return withSupersessions(migrationsDir, statements)
+}
+
+/**
+ * the same statements for migration files already in memory, in apply order.
+ * a statement's id is `<migrationId>:<index>`, so ids stay stable only while
+ * each source keeps its migrationId and statement order.
+ */
+export function nativeSqlMigrationStatementsFromSources(
+  sources: ReadonlyArray<{ migrationId: string; sql: string }>,
+  parseStatement: (sql: string) => ParsedNativeSqlMigrationStatement
+): NativeSqlMigrationStatement[] {
+  return sources.flatMap(({ migrationId, sql: source }) => {
+    // drizzle rebuilds a table by creating `__new_<table>`, copying rows into
+    // it, dropping the original, and renaming the copy over it. the runner
+    // ledgers those statements individually, and the rename destroys the very
+    // table the create made — so a run that stops after the rename records the
+    // create as applied with nothing left to rename, and every later run dies
+    // on `no such table: __new_<table>`. carrying the temp table onto the rest
+    // of the block makes it skip itself once it has already completed.
+    let recreateTempTable: string | null = null
+    return source
+      .split('--> statement-breakpoint')
+      .map((statement) => statement.trim())
+      .filter(Boolean)
+      .map((sql, index) => {
+        const statement = parseStatement(sql)
+        const rewritten = statement.sql
+          .replace(/^CREATE TABLE\s+(?!IF NOT EXISTS\s+)/i, 'CREATE TABLE IF NOT EXISTS ')
+          .replace(
+            /^CREATE UNIQUE INDEX\s+(?!IF NOT EXISTS\s+)/i,
+            'CREATE UNIQUE INDEX IF NOT EXISTS '
           )
-          if (created) recreateTempTable = created[1]
-          // every statement from the CREATE through the RENAME belongs to the
-          // block, the rename included. the reconciler resurrects them as one
-          // unit, so it needs membership on the DROP too.
-          const blockTempTable = recreateTempTable
-          if (
-            recreateTempTable &&
-            !created &&
-            new RegExp(
-              `^ALTER TABLE\\s+[\`"]?${recreateTempTable}[\`"]?\\s+RENAME TO`,
-              'i'
-            ).test(rewritten)
-          ) {
-            recreateTempTable = null
-          }
-          const plainCreate =
-            !created && /^CREATE TABLE IF NOT EXISTS\s+[`"]?\w+/i.test(rewritten)
-          return {
-            id: `${migrationId}:${index}`,
-            ...statement,
-            ...(skipIfTableMissing ? { skipIfTableMissing } : null),
-            ...(blockTempTable
-              ? { rebuildTarget: blockTempTable.slice('__new_'.length) }
-              : null),
-            ...(created ? { rebuildColumns: rebuildColumnNames(rewritten) } : null),
-            ...(plainCreate
-              ? { declaredColumns: createTableColumnEntries(rewritten) }
-              : null),
-            sql: rewritten,
-          }
-        })
-    })
+          .replace(/^CREATE INDEX\s+(?!IF NOT EXISTS\s+)/i, 'CREATE INDEX IF NOT EXISTS ')
+        const skipIfTableMissing = recreateTempTable
+        const created = /^CREATE TABLE IF NOT EXISTS\s+[`"]?(__new_\w+)[`"]?/i.exec(
+          rewritten
+        )
+        if (created) recreateTempTable = created[1]
+        // every statement from the CREATE through the RENAME belongs to the
+        // block, the rename included. the reconciler resurrects them as one
+        // unit, so it needs membership on the DROP too.
+        const blockTempTable = recreateTempTable
+        if (
+          recreateTempTable &&
+          !created &&
+          new RegExp(
+            `^ALTER TABLE\\s+[\`"]?${recreateTempTable}[\`"]?\\s+RENAME TO`,
+            'i'
+          ).test(rewritten)
+        ) {
+          recreateTempTable = null
+        }
+        const plainCreate =
+          !created && /^CREATE TABLE IF NOT EXISTS\s+[`"]?\w+/i.test(rewritten)
+        return {
+          id: `${migrationId}:${index}`,
+          ...statement,
+          ...(skipIfTableMissing ? { skipIfTableMissing } : null),
+          ...(blockTempTable
+            ? { rebuildTarget: blockTempTable.slice('__new_'.length) }
+            : null),
+          ...(created ? { rebuildColumns: rebuildColumnNames(rewritten) } : null),
+          ...(plainCreate
+            ? { declaredColumns: createTableColumnEntries(rewritten) }
+            : null),
+          sql: rewritten,
+        }
+      })
+  })
+}
+
+function withSupersessions(
+  migrationsDir: string,
+  statements: NativeSqlMigrationStatement[]
+): NativeSqlMigrationStatement[] {
   const supersessionsPath = join(migrationsDir, 'supersessions.json')
   if (!existsSync(supersessionsPath)) return statements
   const configuredSupersessions: unknown = JSON.parse(

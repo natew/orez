@@ -30,6 +30,32 @@ export type CloudflareNativeIndexShape = {
   unique: boolean
 }
 
+export type CloudflareNativePublicTable = {
+  table: string
+  publicTable: string
+  publish?: boolean
+}
+
+/**
+ * namespaces that boot a narrower schema than the top-level statements. the
+ * selector module exports `bootSetForInstance(instance): string | null`; a
+ * name picks that set and null picks the top-level statements. a set's Zero
+ * schema metadata, registration, and shape assertion cover only its tables.
+ */
+export type CloudflareNativeBootSets = {
+  selectorImportSpecifier: string
+  sets: Record<
+    string,
+    {
+      tables: string[]
+      nativeSqlStatements: unknown
+      publicTables?: CloudflareNativePublicTable[]
+      expectedTables?: CloudflareNativeTableShape[]
+      expectedIndexes?: CloudflareNativeIndexShape[]
+    }
+  >
+}
+
 export type CloudflareMigrationModuleSourceParts =
   | {
       mode: 'noop'
@@ -42,9 +68,10 @@ export type CloudflareMigrationModuleSourceParts =
       schemaImportSpecifier: string
       nativeSqlStatements: unknown
       /** publish: false keeps rollback-image capture without a changefeed. */
-      publicTables?: Array<{ table: string; publicTable: string; publish?: boolean }>
+      publicTables?: CloudflareNativePublicTable[]
       expectedTables?: CloudflareNativeTableShape[]
       expectedIndexes?: CloudflareNativeIndexShape[]
+      bootSets?: CloudflareNativeBootSets
     }
 
 export function buildMigrationModuleSource(
@@ -69,20 +96,27 @@ export const orezAppSchema = {
 
   if (parts.mode === 'native') {
     const applicationSqlGlobal = applyPrefix('__nspfx_cf_application_sql_client', cfg)
+    const bootSets = parts.bootSets
     return `import { schema } from ${JSON.stringify(parts.schemaImportSpecifier)}
-
+${bootSets ? `import { bootSetForInstance } from ${JSON.stringify(bootSets.selectorImportSpecifier)}\n` : ''}
 export const SCHEMA_VERSION = ${JSON.stringify(parts.schemaVersion)}
 
-const nativeSqlStatements = ${JSON.stringify(parts.nativeSqlStatements)}
-const configuredPublicTables = ${JSON.stringify(parts.publicTables ?? [])}
-const expectedTables = ${JSON.stringify(parts.expectedTables ?? [])}
-const expectedIndexes = ${JSON.stringify(parts.expectedIndexes ?? [])}
 const migrationTable = ${JSON.stringify(migrationTableName)}
 
 function quoteIdentifier(value) {
   return '"' + String(value).replaceAll('"', '""') + '"'
 }
 
+// one migration runner per boot set. every namespace shares the ledger table
+// and the runner code; only the statements, registrations, and expected shape
+// differ, so a narrower namespace never boots tables it does not own.
+function createNativeMigrations({
+  schema,
+  nativeSqlStatements,
+  configuredPublicTables,
+  expectedTables,
+  expectedIndexes,
+}) {
 const supersededStatementIds = new Set(nativeSqlStatements.flatMap((item) =>
   item && typeof item === 'object' && typeof item.sql === 'string' && item.sql.trim() && Array.isArray(item.supersedes)
     ? item.supersedes : [],
@@ -1133,7 +1167,7 @@ async function liveSchemaSummary(client) {
 // round-trips per statement. it is a parameter rather than another global
 // because durable object instances share an isolate, so a global bound to one
 // instance would be read by another.
-export async function ${runCloudflareMigrations}({
+async function migrate({
   schemaOnly = false,
   registrationOnly = false,
   instance = 'singleton',
@@ -1210,11 +1244,71 @@ export async function ${runCloudflareMigrations}({
   }
 }
 
+return { migrate, resolvedPublicTables }
+}
+
+const defaultMigrations = createNativeMigrations({
+  schema,
+  nativeSqlStatements: ${JSON.stringify(parts.nativeSqlStatements)},
+  configuredPublicTables: ${JSON.stringify(parts.publicTables ?? [])},
+  expectedTables: ${JSON.stringify(parts.expectedTables ?? [])},
+  expectedIndexes: ${JSON.stringify(parts.expectedIndexes ?? [])},
+})
+${
+  bootSets
+    ? `
+const bootSets = ${JSON.stringify(bootSets.sets)}
+const bootSetMigrations = new Map()
+
+function schemaForTables(tables) {
+  const owned = new Set(tables)
+  return {
+    ...schema,
+    tables: Object.fromEntries(
+      Object.entries(schema.tables || {}).filter(([, table]) =>
+        table && typeof table.name === 'string' &&
+        owned.has(String(table.serverName || table.name).replace(/^public\\./, '')),
+      ),
+    ),
+  }
+}
+
+function migrationsForInstance(instance) {
+  const name = bootSetForInstance(instance)
+  if (name === null) return defaultMigrations
+  let migrations = bootSetMigrations.get(name)
+  if (!migrations) {
+    const set = bootSets[name]
+    if (!set) {
+      throw new Error('instance ' + instance + ' selects unknown boot set ' + JSON.stringify(name))
+    }
+    migrations = createNativeMigrations({
+      schema: schemaForTables(set.tables),
+      nativeSqlStatements: set.nativeSqlStatements,
+      configuredPublicTables: set.publicTables || [],
+      expectedTables: set.expectedTables || [],
+      expectedIndexes: set.expectedIndexes || [],
+    })
+    bootSetMigrations.set(name, migrations)
+  }
+  return migrations
+}
+`
+    : `
+function migrationsForInstance() {
+  return defaultMigrations
+}
+`
+}
+export async function ${runCloudflareMigrations}(options = {}) {
+  return migrationsForInstance(options.instance ?? 'singleton').migrate(options)
+}
+
 export { ${runCloudflareMigrations} as runCloudflareMigrations }
 export const orezAppSchema = {
   version: SCHEMA_VERSION,
   schema,
-  publicTables: resolvedPublicTables,
+  publicTables: defaultMigrations.resolvedPublicTables,
   migrate: ${runCloudflareMigrations},
 }
 `

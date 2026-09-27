@@ -118,6 +118,131 @@ describe('buildMigrationModuleSource', () => {
     expect(registerTables).toHaveBeenCalledWith(configuredPublicTables)
   })
 
+  it('boots a selected namespace from its own boot set', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = {
+        tables: {
+          widget: { name: 'widget', columns: { id: { type: 'string' } }, primaryKey: ['id'] },
+          gadget: { name: 'gadget', columns: { id: { type: 'string' } }, primaryKey: ['id'] },
+        },
+        relationships: {},
+      }
+    `)
+    const selectorModuleUrl = javascriptModuleUrl(`
+      export function bootSetForInstance(instance) {
+        return instance.startsWith('ns:gadget-') ? 'gadget' : null
+      }
+    `)
+    const fullPublicTables = [
+      { table: 'widget', publicTable: 'public.widget' },
+      { table: 'gadget', publicTable: 'public.gadget' },
+    ]
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-sets',
+        schemaImportSpecifier: schemaModuleUrl,
+        nativeSqlStatements: [
+          {
+            id: '0001/migration.sql:0',
+            sql: 'CREATE TABLE widget (id text PRIMARY KEY)',
+          },
+          {
+            id: '0001/migration.sql:1',
+            sql: 'CREATE TABLE gadget (id text PRIMARY KEY)',
+          },
+        ],
+        publicTables: fullPublicTables,
+        bootSets: {
+          selectorImportSpecifier: selectorModuleUrl,
+          sets: {
+            gadget: {
+              tables: ['gadget'],
+              nativeSqlStatements: [
+                {
+                  id: '0001/migration.sql:1',
+                  sql: 'CREATE TABLE gadget (id text PRIMARY KEY)',
+                },
+              ],
+              publicTables: [{ table: 'gadget', publicTable: 'public.gadget' }],
+            },
+          },
+        },
+      })
+    )
+
+    function recordingClient() {
+      const executed: string[] = []
+      const metadata: string[] = []
+      const registered: unknown[] = []
+      const ledger = new Set<string>()
+      const tx = {
+        async query(sql: string, params: readonly unknown[] = []) {
+          const applied = migrationLedgerRows(sql, params, ledger)
+          if (applied) return applied
+          if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
+          if (sql.startsWith('SELECT name, type, sql FROM sqlite_master')) return []
+          if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables'))
+            return []
+          throw new Error(`unexpected query: ${sql}`)
+        },
+        async exec(sql: string, params: unknown[] = []) {
+          if (sql.startsWith('INSERT INTO "__contrast_cf_migrations"')) {
+            ledger.add(String(params[0]))
+          } else if (sql.startsWith('INSERT OR REPLACE INTO _zero_schema_tables')) {
+            metadata.push(String(params[0]))
+          } else if (!sql.startsWith('CREATE TABLE IF NOT EXISTS')) {
+            executed.push(sql)
+          }
+        },
+        async execMany(
+          statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+        ) {
+          for (const statement of statements)
+            await this.exec(statement.sql, [...(statement.params ?? [])])
+          return statements.map(() => ({ changes: 0 }))
+        },
+        async registerTables(tables: unknown) {
+          registered.push(tables)
+        },
+      }
+      const client = {
+        async transaction(_compile: unknown, run: (inner: typeof tx) => Promise<void>) {
+          await run(tx)
+        },
+      }
+      return { client, executed, metadata, registered }
+    }
+
+    const scoped = recordingClient()
+    await expect(
+      migrationModule.orezAppSchema.migrate({
+        client: scoped.client,
+        instance: 'ns:gadget-1',
+      })
+    ).resolves.toEqual({ tables: ['public.gadget'] })
+    expect(scoped.executed).toEqual(['CREATE TABLE gadget (id text PRIMARY KEY)'])
+    expect(scoped.metadata).toEqual(['gadget'])
+    expect(scoped.registered.at(-1)).toEqual([
+      { table: 'gadget', publicTable: 'public.gadget' },
+    ])
+
+    const whole = recordingClient()
+    await expect(
+      migrationModule.orezAppSchema.migrate({
+        client: whole.client,
+        instance: 'singleton',
+      })
+    ).resolves.toEqual({ tables: ['public.widget', 'public.gadget'] })
+    expect(whole.executed).toEqual([
+      'CREATE TABLE widget (id text PRIMARY KEY)',
+      'CREATE TABLE gadget (id text PRIMARY KEY)',
+    ])
+    expect(whole.metadata).toEqual(['widget', 'gadget'])
+    // the data worker's feed projection reads the top-level registrations
+    expect(migrationModule.orezAppSchema.publicTables).toEqual(fullPublicTables)
+  })
+
   it('exports a coherent no-op descriptor', async () => {
     const migrationModule = await importJavascriptModule(
       buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
