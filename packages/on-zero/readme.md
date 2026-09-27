@@ -546,6 +546,21 @@ disabled, or its provider unmounts. Descendants can use the identity and current
 check to fence provider-bound work before resolving the module-level mutation
 facade.
 
+### persistent local cache
+
+`createZeroKvStore()` from `on-zero/kv-store` returns the local cache each
+platform keeps: IndexedDB on web (memory during a server render) and SQLite on
+native through Zero's op-sqlite adapter, which needs `@op-engineering/op-sqlite`
+installed in the app. pass it as the `kvStore` prop; without it the client
+stays in memory.
+
+```tsx
+import { createZeroKvStore } from 'on-zero/kv-store'
+
+const kvStore = useMemo(() => createZeroKvStore(), [])
+<ProvideZero kvStore={kvStore} … />
+```
+
 ### multiple client instances
 
 one page can run several zero clients (e.g. a global control-plane instance
