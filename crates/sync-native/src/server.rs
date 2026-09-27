@@ -12,7 +12,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::Request;
 use axum::extract::connect_info::ConnectInfo;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, ORIGIN, SEC_WEBSOCKET_PROTOCOL};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -135,6 +135,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/health", get(health))
         .route("/admin/namespaces", get(admin_namespaces))
         .route("/{ns}/admin/notify", post(admin_notify))
+        .route("/{ns}/admin/revoke", post(admin_revoke))
         .route("/{ns}/admin/sql", post(admin_sql))
         .route("/{ns}/admin/settle-push", post(admin_settle_push))
         .route("/{ns}/admin/status", get(admin_status))
@@ -280,6 +281,97 @@ async fn admin_notify(State(state): State<Arc<AppState>>, Path(ns): Path<String>
     }
     state.wake.wake(&ns, "");
     StatusCode::NO_CONTENT.into_response()
+}
+
+// revocations live beside the namespace's rows, as they do in the durable
+// object host, so a restart keeps refusing capabilities minted before them.
+const REVOCATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS orez_revocations (
+    user_id TEXT NOT NULL,
+    revoked_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orez_revocations_user_id
+    ON orez_revocations(user_id, revoked_at);";
+
+fn record_revocation(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    revoked_at: i64,
+) -> rusqlite::Result<()> {
+    conn.execute_batch(REVOCATIONS_TABLE)?;
+    conn.execute(
+        "INSERT INTO orez_revocations (user_id, revoked_at) VALUES (?1, ?2)",
+        rusqlite::params![user_id, revoked_at],
+    )?;
+    Ok(())
+}
+
+fn latest_revocation(conn: &rusqlite::Connection, user_id: &str) -> rusqlite::Result<Option<i64>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'orez_revocations')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT MAX(revoked_at) FROM orez_revocations WHERE user_id = ?1",
+        [user_id],
+        |row| row.get(0),
+    )
+}
+
+// record a revocation for one user and close that user's wake sockets. a
+// capability minted before the user's latest revocation is refused at
+// upgrade, so the user cannot reopen the socket with one they already hold.
+async fn admin_revoke(
+    State(state): State<Arc<AppState>>,
+    Path(ns): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return json_status(400, json!({ "error": "invalid json" }));
+    };
+    let Some(user_id) = body
+        .get("userID")
+        .or_else(|| body.get("userId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return json_status(400, json!({ "error": "userID is required" }));
+    };
+    let revoked_at = body
+        .get("now")
+        .and_then(Value::as_f64)
+        .filter(|now| now.is_finite())
+        .map(|now| now as i64)
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as i64)
+                .unwrap_or(0)
+        });
+    let namespace = match state.manager.get(&ns) {
+        Ok(namespace) => namespace,
+        Err(error) => return json_status(400, json!({ "error": error })),
+    };
+    let user = user_id.clone();
+    if let Err(error) = namespace
+        .run(move |conn| record_revocation(conn, &user, revoked_at))
+        .await
+    {
+        return json_status(500, json!({ "error": error.to_string() }));
+    }
+    let closed_sockets = state.wake.revoke(&ns, &user_id);
+    json_status(
+        200,
+        json!({
+            "ok": true,
+            "userID": user_id,
+            "revokedAt": revoked_at,
+            "closedSockets": closed_sockets,
+        }),
+    )
 }
 
 async fn pull(
@@ -939,9 +1031,28 @@ async fn wake_ws(
         .get("wakeToken")
         .filter(|token| !token.is_empty())
         .cloned();
-    if let Err(error) = (state.authorize_wake)(ns.clone(), token).await {
-        return json_status(error.status, json!({ "error": error.message }));
+    let identity = match (state.authorize_wake)(ns.clone(), token).await {
+        Ok(identity) => identity,
+        Err(error) => return json_status(error.status, json!({ "error": error.message })),
+    };
+    if let Some(identity) = &identity {
+        let namespace = match state.manager.get(&ns) {
+            Ok(namespace) => namespace,
+            Err(error) => return json_status(400, json!({ "error": error })),
+        };
+        let user = identity.user_id.clone();
+        match namespace
+            .run(move |conn| latest_revocation(conn, &user))
+            .await
+        {
+            Ok(Some(latest)) if identity.token_issued_at < latest as f64 => {
+                return json_status(401, json!({ "error": "revoked wake capability" }));
+            }
+            Ok(_) => {}
+            Err(error) => return json_status(500, json!({ "error": error.to_string() })),
+        }
     }
+    let user_id = identity.map(|identity| identity.user_id);
     let client_id = params.get("clientID").cloned().unwrap_or_default();
     // a client that cannot set headers on a WebSocket handshake offers its
     // bearer as an `orez-auth.<b64>` subprotocol (orez-lite's transport does
@@ -961,17 +1072,32 @@ async fn wake_ws(
         Some(protocol) => ws.protocols([protocol]),
         None => ws,
     };
-    ws.on_upgrade(move |socket| wake_socket(socket, state, ns, client_id))
+    ws.on_upgrade(move |socket| wake_socket(socket, state, ns, client_id, user_id))
 }
 
-async fn wake_socket(mut socket: WebSocket, state: Arc<AppState>, ns: String, client_id: String) {
-    let subscription = state.wake.subscribe(&ns, &client_id);
+async fn wake_socket(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    ns: String,
+    client_id: String,
+    user_id: Option<String>,
+) {
+    let subscription = state.wake.subscribe(&ns, &client_id, user_id.as_deref());
     loop {
         tokio::select! {
             _ = subscription.waked() => {
                 if socket.send(Message::Text("wake".into())).await.is_err() {
                     break;
                 }
+            }
+            _ = subscription.revoked() => {
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1008,
+                        reason: "user revoked".into(),
+                    })))
+                    .await;
+                break;
             }
             incoming = socket.recv() => {
                 match incoming {

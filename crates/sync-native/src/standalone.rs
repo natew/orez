@@ -20,6 +20,7 @@ use crate::retain::RetentionPolicy;
 use crate::{
     AuthClaims, AuthError, AuthFn, AuthorizeWakeFn, QueryResolution, QueryResolveError,
     ResolveQueriesFn, ResolvedQueries, SyncNativeConfig, SyncNativeHost, SyncNativeSecurity,
+    WakeIdentity,
 };
 
 pub const USAGE: &str = "sync-native
@@ -519,7 +520,18 @@ fn callback_wake(client: Client, url: Url, admin_token: HeaderValue) -> Authoriz
                     AuthError::upstream(format!("wake authorization callback failed: {error}"))
                 })?;
             if response.status() == reqwest::StatusCode::NO_CONTENT {
-                return Ok(());
+                return Ok(None);
+            }
+            if response.status() == reqwest::StatusCode::OK {
+                let identity: WakeAuthorizeResponse = response.json().await.map_err(|error| {
+                    AuthError::upstream(format!(
+                        "wake authorization callback returned invalid JSON: {error}"
+                    ))
+                })?;
+                return Ok(Some(WakeIdentity {
+                    user_id: identity.user_id,
+                    token_issued_at: identity.token_issued_at,
+                }));
             }
             if response.status().is_client_error() {
                 return Err(AuthError::unauthorized("invalid wake capability"));
@@ -578,6 +590,15 @@ struct AuthRequest {
 struct WakeAuthorizeRequest {
     namespace: String,
     token: String,
+}
+
+// a 200 from the wake callback names the capability's user and issue time
+#[derive(Deserialize)]
+struct WakeAuthorizeResponse {
+    #[serde(rename = "userID")]
+    user_id: String,
+    #[serde(rename = "tokenIssuedAt")]
+    token_issued_at: f64,
 }
 
 #[derive(Serialize)]
@@ -827,6 +848,12 @@ mod tests {
                     },
                 ),
             )
+            .route(
+                "/wake-identity",
+                post(|| async {
+                    axum::Json(json!({ "userID": "user-1", "tokenIssuedAt": 1234.0 }))
+                }),
+            )
             .route("/forbidden", post(|| async { StatusCode::FORBIDDEN }))
             .with_state(seen.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -897,12 +924,32 @@ mod tests {
                 .status,
             401
         );
-        authorize_wake(
-            "project-one".to_string(),
-            Some("signed-capability".to_string()),
-        )
-        .await
-        .unwrap();
+        assert_eq!(
+            authorize_wake(
+                "project-one".to_string(),
+                Some("signed-capability".to_string()),
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        let authorize_identified_wake = callback_wake(
+            client.clone(),
+            Url::parse(&format!("http://127.0.0.1:{port}/wake-identity")).unwrap(),
+            admin_token.parse().unwrap(),
+        );
+        assert_eq!(
+            authorize_identified_wake(
+                "project-one".to_string(),
+                Some("signed-capability".to_string()),
+            )
+            .await
+            .unwrap(),
+            Some(WakeIdentity {
+                user_id: "user-1".to_string(),
+                token_issued_at: 1234.0,
+            })
+        );
 
         let (auth_headers, auth_body) = seen.auth.lock().unwrap().take().unwrap();
         assert_eq!(auth_headers["authorization"], "Bearer original");

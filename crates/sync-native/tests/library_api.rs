@@ -29,6 +29,7 @@ use sync_native::ResolvedQueries;
 use sync_native::SyncNativeConfig;
 use sync_native::SyncNativeHost;
 use sync_native::SyncNativeSecurity;
+use sync_native::WakeIdentity;
 use sync_native::engine::{InitFn, MutateFn};
 
 // ---- helpers -----------------------------------------------------------
@@ -137,7 +138,7 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
         initialize: custom_init(),
         mutate: custom_mutate(),
         authenticate: custom_auth(),
-        authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
+        authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(None) })),
         retain_changes: 4096,
         query_resolution: None,
         admin_tx_lease,
@@ -2455,7 +2456,7 @@ async fn fixture_config_still_works() {
                     .ok_or_else(|| AuthError::unauthorized("missing auth"))
             })
         }),
-        authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
+        authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(None) })),
         retain_changes: 4096,
         query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
@@ -2550,4 +2551,107 @@ async fn wake_socket_selects_the_offered_auth_protocol() {
     let head = wake_handshake(None).await;
     assert!(head.starts_with("http/1.1 101"), "{head}");
     assert!(!head.contains("sec-websocket-protocol"), "{head}");
+}
+
+// a served router with a wake authorizer that reads `t-<issuedAt>` as a
+// capability minted for user-1 at that time.
+async fn serve_identified_wake_host(dir: &std::path::Path) -> (std::net::SocketAddr, axum::Router) {
+    let mut config = custom_config();
+    config.authorize_wake = Arc::new(|_, token| {
+        Box::pin(async move {
+            let issued_at = token
+                .as_deref()
+                .and_then(|token| token.strip_prefix("t-"))
+                .and_then(|issued_at| issued_at.parse::<f64>().ok())
+                .ok_or_else(|| AuthError::unauthorized("invalid wake capability"))?;
+            Ok(Some(WakeIdentity {
+                user_id: "user-1".to_string(),
+                token_issued_at: issued_at,
+            }))
+        })
+    });
+    let router = test_host(config, dir.to_path_buf()).into_router_trusted();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = router.clone();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            served.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (addr, router)
+}
+
+async fn open_wake(addr: std::net::SocketAddr, token: &str) -> (String, tokio::net::TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "GET /wake-ns/wake?clientID=c1&wakeToken={token} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).await.unwrap();
+        head.push(byte[0]);
+    }
+    (
+        String::from_utf8(head).unwrap().to_ascii_lowercase(),
+        stream,
+    )
+}
+
+fn admin_revoke_req(ns: &str, body: Value) -> Request<axum::body::Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/{ns}/admin/revoke"))
+        .header("content-type", "application/json")
+        .header("x-admin-key", ADMIN_TOKEN)
+        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn revoke_closes_the_users_wake_socket_and_refuses_older_capabilities() {
+    use tokio::io::AsyncReadExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (addr, router) = serve_identified_wake_host(tmp.path()).await;
+
+    let (head, mut socket) = open_wake(addr, "t-100").await;
+    assert!(head.starts_with("http/1.1 101"), "{head}");
+
+    let (status, revoked) = send(
+        &router,
+        admin_revoke_req("wake-ns", json!({ "userID": "user-1", "now": 200 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revoked["revokedAt"], 200);
+    assert_eq!(revoked["closedSockets"], 1);
+
+    // the server's close frame: opcode 0x8, then the 1008 status code
+    let mut frame = [0u8; 4];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        socket.read_exact(&mut frame),
+    )
+    .await
+    .expect("the revoked socket was not closed")
+    .unwrap();
+    assert_eq!(frame[0] & 0x0f, 0x8, "expected a close frame: {frame:?}");
+    assert_eq!(u16::from_be_bytes([frame[2], frame[3]]), 1008);
+
+    let (head, _) = open_wake(addr, "t-150").await;
+    assert!(
+        head.starts_with("http/1.1 401"),
+        "a capability minted before the revocation must be refused: {head}"
+    );
+    let (head, _) = open_wake(addr, "t-300").await;
+    assert!(head.starts_with("http/1.1 101"), "{head}");
+
+    let (status, _) = send(&router, admin_revoke_req("wake-ns", json!({}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

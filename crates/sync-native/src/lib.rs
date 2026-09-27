@@ -109,10 +109,21 @@ pub type AuthFuture = Pin<Box<dyn Future<Output = Result<AuthClaims, AuthError>>
 /// so standalone hosts can delegate policy to their application server.
 pub type AuthFn = Arc<dyn Fn(HeaderMap, String) -> AuthFuture + Send + Sync>;
 
-pub type WakeAuthorizeFuture = Pin<Box<dyn Future<Output = Result<(), AuthError>> + Send>>;
+/// The user a wake capability was minted for, and when. A capability minted
+/// before that user's latest revocation in the namespace is refused, and a
+/// revocation closes the user's open wake sockets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WakeIdentity {
+    pub user_id: String,
+    pub token_issued_at: f64,
+}
+
+pub type WakeAuthorizeFuture =
+    Pin<Box<dyn Future<Output = Result<Option<WakeIdentity>, AuthError>> + Send>>;
 
 /// Validate a short-lived wake capability for one namespace before upgrading
-/// its advisory WebSocket.
+/// its advisory WebSocket. `Some` names the capability's user, which makes
+/// the socket subject to `/admin/revoke`.
 pub type AuthorizeWakeFn = Arc<dyn Fn(String, Option<String>) -> WakeAuthorizeFuture + Send + Sync>;
 
 /// One named desired query forwarded by a client for server-side resolution.
