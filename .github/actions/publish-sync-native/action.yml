@@ -69,7 +69,8 @@ runs:
         # is verified on a musl host: on the glibc runner that built it, the
         # launcher looks for the glibc sibling instead, which a parallel job may
         # not have published yet.
-        install="npm install --cache .release/smoke-cache --prefix .release/smoke --ignore-scripts --omit=optional"
+        # npm 12 refuses tarball URLs unless remote fetches are allowed.
+        install="npm install --allow-remote=all --cache .release/smoke-cache --prefix .release/smoke --ignore-scripts --omit=optional"
         if [ '${{ inputs.libc }}' = 'musl' ]; then
           docker run --rm -v "$PWD/.release:/work/.release" -w /work node:24-alpine \
             sh -euc "$install \"\$1\" \"\$2\" >&2 && .release/smoke/node_modules/.bin/sync-native --version" \
