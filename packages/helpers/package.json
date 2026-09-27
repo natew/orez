@@ -21,6 +21,12 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./clipboard": {
+      "types": "./dist/clipboard/clipboard.d.ts",
+      "react-native": "./dist/clipboard/clipboard.native.js",
+      "import": "./dist/clipboard/clipboard.js",
+      "default": "./dist/clipboard/clipboard.js"
+    },
     "./server-only": {
       "types": "./dist/server-only.d.ts",
       "import": "./dist/server-only.js",
