@@ -2459,6 +2459,65 @@ describe('Orez HTTP desired-query sync', () => {
     ])
   })
 
+  test('a reconnected socket keeps its query version ahead of the server ack', async () => {
+    // the server keeps one monotonic ack per client and refuses a patch whose
+    // base is newer than its version, as the sync host does.
+    let serverAck = 0
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      const queries = request.body.queries
+      if (!queries) return jsonResponse({ cookie: 1, unchanged: true })
+      if (queries.baseVersion > queries.version) {
+        return jsonResponse(
+          { error: 'queries.baseVersion cannot exceed queries.version' },
+          { status: 400 }
+        )
+      }
+      serverAck = Math.max(serverAck, queries.version)
+      return jsonResponse({
+        cookie: requests.length,
+        lastMutationIDChanges: {},
+        rowsPatch: [],
+        gotQueries: { version: serverAck, patch: [] },
+      })
+    })
+    installWithQueries(fetch, (name) => ({ resolved: name }))
+    const change = (socket: WebSocket, hash: string) =>
+      socket.send(
+        JSON.stringify([
+          'changeDesiredQueries',
+          { desiredQueriesPatch: [{ op: 'put', hash, name: 'byOwner', args: [] }] },
+        ])
+      )
+    const queryRequests = () => requests.filter((request) => request.body.queries)
+
+    const desired = [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }]
+    const first = openRawSocketWithMessages({ desiredQueriesPatch: desired })
+    await eventually(() => expect(queryRequests()).toHaveLength(1))
+    change(first.socket, 'h2')
+    await eventually(() => expect(queryRequests()).toHaveLength(2))
+    change(first.socket, 'h3')
+    await eventually(() => expect(queryRequests()).toHaveLength(3))
+    expect(serverAck).toBe(3)
+    first.socket.close()
+
+    const second = openRawSocketWithMessages({ desiredQueriesPatch: desired })
+    await eventually(() => expect(queryRequests()).toHaveLength(4))
+    await eventually(() =>
+      expect(second.messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    )
+    change(second.socket, 'h4')
+    await eventually(() => expect(queryRequests()).toHaveLength(5))
+    expect(queryRequests()[4].body.queries).toEqual({
+      version: 4,
+      baseVersion: 3,
+      patch: [{ op: 'put', hash: 'h4', ast: { resolved: 'byOwner' } }],
+    })
+    expect(serverAck).toBe(4)
+  })
+
   test('named desired queries ship name+args for the server to resolve', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
