@@ -69,6 +69,9 @@ export function createLocalApplicationSqlClientFactory(options: {
     const database = new DatabaseSync(resolve(dataDir, `${namespace}.sqlite`))
     database.exec('PRAGMA foreign_keys = ON')
     database.exec('PRAGMA journal_mode = WAL')
+    // the native sync host writes this file from its own connection; wait for its
+    // write lock as it waits for ours, instead of failing the mutation at once
+    database.exec('PRAGMA busy_timeout = 5000')
     connections.push(database)
 
     const client: LocalApplicationSqlClient = {
@@ -111,7 +114,9 @@ export function createLocalApplicationSqlClientFactory(options: {
                 ),
               }
             }
-            database.exec('BEGIN')
+            // take the write lock up front: a deferred transaction that reads and
+            // then writes cannot wait out another writer, whatever the timeout
+            database.exec('BEGIN IMMEDIATE')
             try {
               const value = await work({
                 exec,
