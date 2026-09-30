@@ -1091,7 +1091,8 @@ let report: ExecutionReport
 try {
   report = await execute(trace)
 } catch (error) {
-  const failure = error as TraceExecutionError
+  if (!(error instanceof TraceExecutionError)) throw error
+  const failure = error
   console.error(`[state-machine] FAIL seed=${seed}: ${String(failure.failure)}`)
   failWithArtifact(
     failure,

@@ -164,5 +164,8 @@
     "sync",
     "zero-cache",
     "development"
-  ]
+  ],
+  "patchedDependencies": {
+    "@rocicorp/zero@1.9.0": "patches/@rocicorp%2Fzero@1.9.0.patch"
+  }
 }

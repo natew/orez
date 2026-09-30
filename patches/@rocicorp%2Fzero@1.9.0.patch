@@ -1,0 +1,12 @@
+diff --git a/out/zero-client/src/client/active-clients-manager.js b/out/zero-client/src/client/active-clients-manager.js
+index 11250a56a3bc24665762f28a11bdfe1e502747ff..368b492469cc8e7f3eab3c9e3ca95a8d1dda68d8 100644
+--- a/out/zero-client/src/client/active-clients-manager.js
++++ b/out/zero-client/src/client/active-clients-manager.js
+@@ -83,6 +83,7 @@ var ActiveClientsManager = class ActiveClientsManager {
+ 		this.#activeClients.add(clientID);
+ 	}
+ 	async #init(signal) {
++		if (signal.aborted) return;
+ 		const { clientGroupID, clientID } = this;
+ 		const name = toLockName(clientGroupID, clientID);
+ 		const channel = new bc(toBroadcastChannelName(clientGroupID));

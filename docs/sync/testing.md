@@ -195,6 +195,13 @@ pull. This also checks recovery when every query has been undesired. CI replays
 `harness/regressions/pull-fault-prune-recovery.json` alongside the generated seed;
 the explicit pull, retention floor, and view-oracle checks remain required.
 
+The same replay closes its first client while startup is still pending. Zero
+1.9.0 can create its active-client BroadcastChannel after that client's abort
+signal has fired, leaving the process alive after cleanup. Both the root and
+harness installs apply `patches/@rocicorp%2Fzero@1.9.0.patch`, which checks that
+signal before allocating the channel or client lock. The replay must exit before
+CI can start the generated schedule.
+
 **The engine and host mutation matrix** (`harness/mutants/`, runner
 `harness/scripts/mutation-matrix.ts`, results `docs/sync/mutation-matrix.md`)
 keeps twelve known bugs as compile-checked patches: nine in the Rust engine and

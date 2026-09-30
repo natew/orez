@@ -16,6 +16,9 @@
     "@rocicorp/zero-sqlite3",
     "protobufjs",
   ],
+  "patchedDependencies": {
+    "@rocicorp/zero@1.9.0": "../patches/@rocicorp%2Fzero@1.9.0.patch",
+  },
   "packages": {
     "@badrap/valita": ["@badrap/valita@0.3.11", "", {}, "sha512-oak0W8bycFjnrLeVCVvZqkOWTGh74wCPKUxGLJyhRukRs+V/hQdfZp1eDcQE4Gf3UrtJWfR/Ou4Xe0DZqJZ2FA=="],
 
