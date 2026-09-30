@@ -8,6 +8,14 @@ publishes every public workspace package with npm trusted publishing. Canary
 versions use the current stable version plus `-canary.<timestamp>` and the npm
 `canary` dist-tag.
 
+An accepted npm upload can remain in processing after `npm publish` exits
+successfully. Before reporting success, the release script verifies every exact
+version in the public registry's install index, the canary tag for canaries,
+and the downloaded tarball's checksum. It checks only unavailable packages
+for up to fifteen minutes, bypassing cached misses. Missing versions, tags,
+or tarballs fail the run; stable commits and tags are created only after this
+verification passes.
+
 Canary publishing does not edit manifests, create a release commit or tag, or
 push back to `main`. Stable release commits, whose subject matches the checked-in
 `v<version>`, are skipped instead of producing a canary of the same version.

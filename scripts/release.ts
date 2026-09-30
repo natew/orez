@@ -37,6 +37,7 @@ import {
   planSyncNativeRelease,
   syncNativeContractCheckMode,
 } from './sync-native-release-plan.js'
+import { npmReleaseRegistry, verifyNpmRelease } from './verify-npm-release.js'
 
 const args = process.argv.slice(2)
 const knownArgs = new Set([
@@ -821,10 +822,13 @@ if (packOnly) {
 
 function isPublished({ name, version }: (typeof preparedPackages)[number]) {
   try {
-    const output = run(`npm view ${name}@${version} version --json --prefer-online`, {
-      cwd: tmpBase,
-      silent: true,
-    }).toString()
+    const output = run(
+      `npm view ${name}@${version} version --json --prefer-online --registry=${npmReleaseRegistry}`,
+      {
+        cwd: tmpBase,
+        silent: true,
+      }
+    ).toString()
     const found = JSON.parse(output.trim())
     return found === version || (Array.isArray(found) && found.includes(version))
   } catch (error) {
@@ -858,9 +862,12 @@ if (pendingPackages.length > 0) {
       // each npm process exchanges one package-scoped OIDC token. npm's
       // workspace publisher reuses its first token and package two rejects it.
       for (const pkg of pendingPackages) {
-        run(`npm publish --ignore-scripts --access public ${tag}`.trim(), {
-          cwd: pkg.cwd,
-        })
+        run(
+          `npm publish --ignore-scripts --access public --registry=${npmReleaseRegistry} ${tag}`.trim(),
+          {
+            cwd: pkg.cwd,
+          }
+        )
       }
     } else {
       if (!ci && process.stdin.isTTY && process.stdout.isTTY) {
@@ -884,10 +891,13 @@ if (pendingPackages.length > 0) {
       const nodeOptions = [process.env.NODE_OPTIONS, `--require=${webAuthCache}`]
         .filter(Boolean)
         .join(' ')
-      run(`npm publish --workspaces --ignore-scripts --access public ${tag}`.trim(), {
-        cwd: tmpBase,
-        env: { NODE_OPTIONS: nodeOptions },
-      })
+      run(
+        `npm publish --workspaces --ignore-scripts --access public --registry=${npmReleaseRegistry} ${tag}`.trim(),
+        {
+          cwd: tmpBase,
+          env: { NODE_OPTIONS: nodeOptions },
+        }
+      )
     }
   } catch (error) {
     let postflight = pendingPackages.map((pkg) => ({
@@ -911,6 +921,10 @@ if (pendingPackages.length > 0) {
     )
   }
 }
+
+// npm can accept an upload while the version is still being processed.
+// every release must prove consumers can resolve and download all packages.
+await verifyNpmRelease(preparedPackages, { tag: canary ? 'canary' : undefined })
 
 // git commit + tag + push (skip for canary releases)
 if (!canary) {

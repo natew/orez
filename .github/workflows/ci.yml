@@ -51,6 +51,9 @@ jobs:
       - name: format check
         run: bun run format:check
 
+      - name: npm release availability checks
+        run: bun test scripts/release-publish.test.ts scripts/verify-npm-release.test.ts
+
       - name: typecheck
         run: bun run check
 
