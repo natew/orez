@@ -234,7 +234,7 @@ try {
     `read sessions serialized (maxConcurrentReads ${result.body.maxConcurrentReads})`
   )
   assertions++
-  // The same load with the read lane disabled is the negative control: these
+  // a load with the read lane disabled is the negative control: these
   // reads are identical SQL, so a concurrency number above one here would mean
   // the counter is measuring something other than admission.
   const admissionControl = ns('application-admission-control')
@@ -244,14 +244,55 @@ try {
   )
   check(control.status, 200, 'admission negative control status')
   check(control.body.maxConcurrentReads, 1, 'write-lane reads serialize one at a time')
-  assert.ok(
-    control.body.waitMs.readP95 > result.body.waitMs.readP95,
-    `read lane did not reduce read admission wait (read lane p95 ${result.body.waitMs.readP95} ms, write lane p95 ${control.body.waitMs.readP95} ms)`
-  )
-  assertions++
   console.log(
     `application admission: read lane p50 ${result.body.waitMs.p50} ms / p95 ${result.body.waitMs.p95} ms / max ${result.body.waitMs.max} ms, read p95 ${result.body.waitMs.readP95} ms, concurrent reads ${result.body.maxConcurrentReads}; write-lane control read p95 ${control.body.waitMs.readP95} ms, max ${control.body.waitMs.max} ms`
   )
+
+  // elapsed times from separate loads include unrelated scheduling stalls.
+  // queue identical reads behind a held writer and measure how many preceding
+  // readers must release their turns before each read gains admission.
+  const batches = []
+  for (const readLane of [true, false]) {
+    const namespace = ns('application-read-batch')
+    const batch = await call(
+      `_application-admission/${namespace}`,
+      `/read-batch?readLane=${Number(readLane)}`
+    )
+    check(batch.status, 200, 'read batch status')
+    check(
+      batch.body.queued,
+      { writer: true, readers: 0, queued: 8 },
+      'every reader waits behind the held writer before release'
+    )
+    check(
+      batch.body.granted,
+      readLane
+        ? { writer: false, readers: 8, queued: 0 }
+        : { writer: true, readers: 0, queued: 7 },
+      'writer release grants the read batch or the first exclusive reader'
+    )
+    check(
+      batch.body.waitTurns,
+      readLane ? Array(8).fill(0) : [0, 1, 2, 3, 4, 5, 6, 7],
+      'read admission waits for exactly the preceding exclusive reader releases'
+    )
+    check(
+      batch.body.balances,
+      Array.from({ length: 8 }, () => [{ balance: 100 }]),
+      'every admitted reader executes the same SQL'
+    )
+    check(
+      batch.body.residue,
+      { writer: false, readers: 0, queued: 0 },
+      'read batch releases every session'
+    )
+    batches.push(batch.body)
+  }
+  assert.ok(
+    batches[1].waitTurns[7] > batches[0].waitTurns[7],
+    `read lane did not reduce read admission wait (read lane p95 ${batches[0].waitTurns[7]} turns, write lane p95 ${batches[1].waitTurns[7]} turns)`
+  )
+  assertions++
 
   const canceledQueued = ns('application-canceled-queued')
   const held = call(`_application-cancellation/${canceledQueued}`, '/hold')

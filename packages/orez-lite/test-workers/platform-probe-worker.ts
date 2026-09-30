@@ -558,6 +558,50 @@ export class ProbeDurableObject extends ZeroDO {
     }
   }
 
+  async applicationReadAdmissionProbe(readLane: boolean) {
+    using writer = await this.applicationSqlSession('barrier')
+    await writer.begin()
+    const readers = []
+    const waitTurns: number[] = []
+    const balances = []
+    let releasedReads = 0
+    try {
+      for (let index = 0; index < 8; index++) {
+        readers.push(
+          await this.applicationSqlSession(`read-${index}`, { readOnly: readLane })
+        )
+      }
+      // begin queues synchronously inside the object. hold the writer until
+      // every reader is waiting, then count preceding reader releases rather
+      // than comparing clocks across independently scheduled loads.
+      const pending = readers.map((reader) =>
+        reader.begin().then(() => {
+          waitTurns.push(releasedReads)
+        })
+      )
+      const queued = this.applicationAdmissionResidue()
+      await writer.commit()
+      const granted = this.applicationAdmissionResidue()
+      for (let index = 0; index < readers.length; index++) {
+        await pending[index]
+        balances.push(
+          await readers[index].query("SELECT balance FROM accounts WHERE id = 'primary'")
+        )
+        releasedReads++
+        await readers[index].commit()
+      }
+      return {
+        queued,
+        granted,
+        waitTurns,
+        balances,
+        residue: this.applicationAdmissionResidue(),
+      }
+    } finally {
+      for (const reader of readers) reader[Symbol.dispose]()
+    }
+  }
+
   applicationCancellationMark(stage: string): void {
     this.#applicationCancellationStages.add(stage)
   }
@@ -977,6 +1021,14 @@ export default {
     }
     if (first === '_application-admission') {
       if (!second) return json({ error: 'unknown application admission probe' }, 404)
+      if (third === 'read-batch') {
+        const target = env.PROBE_DO.get(env.PROBE_DO.idFromName(second))
+        return json(
+          await target.applicationReadAdmissionProbe(
+            url.searchParams.get('readLane') !== '0'
+          )
+        )
+      }
       return runApplicationAdmissionProbe(env, second, url)
     }
     if (first === '_application-cancellation') {
