@@ -54,6 +54,13 @@ delivery. The callbacks keep authentication, authorization, and query policy in
 the application. Storage retention is disabled unless the application
 explicitly supplies `workerRetention`.
 
+The native host stops when its spawning process exits, including SIGKILL. The
+launcher forwards SIGINT and SIGTERM and gives shutdown two seconds before
+forcing an exit. A lifetime pipe also stops the native host if the launcher dies.
+Local dev checks the configured port before preparing SQLite. An occupied port
+fails immediately with its holder's PID and command (using `lsof` on Unix or
+`netstat` and `tasklist` on Windows); choose another port offset or stop the holder.
+
 Local application SQL uses the Node SQLite adapter from `orez-lite/local`:
 
 ```ts

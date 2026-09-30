@@ -467,6 +467,10 @@ impl SyncNativeHost {
             .await
             .expect("failed to bind");
 
+        self.run_listener(listener).await;
+    }
+
+    pub(crate) async fn run_listener(self, listener: tokio::net::TcpListener) {
         // background retention: on each tick, evict idle namespace workers and
         // reclaim disk. the startup sweep already ran in the constructor; this
         // keeps a long-lived process bounded without waiting for a restart.

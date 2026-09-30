@@ -3,6 +3,7 @@
 
 const { createRequire } = require('node:module')
 const { spawn } = require('node:child_process')
+const { assertPortAvailable } = require('./port-check.cjs')
 
 const PACKAGES = {
   'darwin-arm64': {
@@ -74,18 +75,76 @@ try {
   process.exit(1)
 }
 
-const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit' })
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => child.kill(signal))
-}
-child.on('error', (error) => {
-  throw error
-})
-child.on('exit', (code, signal) => {
-  if (!signal) {
-    process.exitCode = code ?? 1
-    return
+async function main() {
+  const args = process.argv.slice(2)
+  const parentPid = Number(process.env.OREZ_SYNC_NATIVE_PARENT_PID ?? process.ppid)
+  const parentAlive = () => {
+    if (process.ppid !== parentPid) return false
+    try {
+      process.kill(parentPid, 0)
+      return true
+    } catch (error) {
+      if (error.code === 'ESRCH') return false
+      if (error.code === 'EPERM') return true
+      throw error
+    }
   }
-  process.removeAllListeners(signal)
-  process.kill(process.pid, signal)
-})
+  let child
+  let stopping = false
+  let forceExit
+  const stop = (signal = 'SIGTERM') => {
+    if (stopping) return
+    stopping = true
+    if (!child) process.exit(1)
+    child.kill(signal)
+    forceExit = setTimeout(() => child.kill('SIGKILL'), 2000)
+  }
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => stop(signal))
+  }
+  // reparenting also catches SIGKILL, which cannot run the parent's cleanup.
+  const parentWatch = setInterval(() => {
+    if (!parentAlive()) stop()
+  }, 100)
+  try {
+    if (args[0] === 'serve') {
+      const portIndex = args.indexOf('--port')
+      const hostIndex = args.indexOf('--host')
+      if (portIndex >= 0) {
+        await assertPortAvailable(
+          Number(args[portIndex + 1]),
+          hostIndex >= 0 ? args[hostIndex + 1] : undefined
+        )
+      }
+    }
+    if (!parentAlive()) return stop()
+    child = spawn(binary, args, {
+      // the pipe is owned only by this launcher. EOF kills the native host
+      // even if the launcher itself is killed before it can forward a signal.
+      stdio: ['pipe', 'inherit', 'inherit'],
+      env: { ...process.env, OREZ_SYNC_NATIVE_PARENT_PIPE: '1' },
+    })
+    child.on('error', (error) => {
+      console.error(`sync-native could not start: ${error.message}`)
+      clearInterval(parentWatch)
+      clearTimeout(forceExit)
+      process.exitCode = 1
+    })
+    child.on('exit', (code, signal) => {
+      clearInterval(parentWatch)
+      clearTimeout(forceExit)
+      if (!signal) {
+        process.exitCode = code ?? 1
+        return
+      }
+      process.removeAllListeners(signal)
+      process.kill(process.pid, signal)
+    })
+  } catch (error) {
+    clearInterval(parentWatch)
+    console.error(`sync-native: ${error.message}`)
+    process.exitCode = 1
+  }
+}
+
+void main()

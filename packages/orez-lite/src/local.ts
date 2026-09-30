@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url'
 
 import {
   createNativeHost,
+  assertNativeHostPortAvailable,
   type NativeHostCallbacks,
   type NativeHostWorkerRetention,
 } from './native.js'
@@ -70,6 +71,7 @@ export async function startLocalSyncHost(
     throw new TypeError(`invalid native sync namespace: ${config.namespace}`)
   }
 
+  await assertNativeHostPortAvailable(config.port, config.host)
   await config.prepare?.()
 
   const dataDir = resolve(config.dataDir)

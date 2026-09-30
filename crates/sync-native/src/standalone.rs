@@ -245,6 +245,15 @@ fn loopback_url(value: &str, flag: &str) -> Result<Url, String> {
 }
 
 pub async fn serve(config: ServeConfig) -> Result<(), String> {
+    // reserve the port before opening databases or running startup retention.
+    let listener = tokio::net::TcpListener::bind((config.host, config.port))
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to bind native sync port {}:{}: {error}",
+                config.host, config.port
+            )
+        })?;
     let schema = read_json(&config.schema, "schema")?;
     let tables = Tables::from_zero_schema(&schema)
         .map_err(|error| format!("invalid schema {}: {error}", config.schema.display()))?;
@@ -338,7 +347,7 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
         config.data_dir,
         security,
     );
-    host.run_on(config.host, config.port).await;
+    host.run_listener(listener).await;
     Ok(())
 }
 

@@ -11,7 +11,8 @@
     "sync-native": "bin/sync-native.cjs"
   },
   "exports": {
-    "./launcher": "./bin/sync-native.cjs"
+    "./launcher": "./bin/sync-native.cjs",
+    "./port-check": "./bin/port-check.cjs"
   },
   "files": [
     "bin"

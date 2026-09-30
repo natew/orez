@@ -1,10 +1,12 @@
+import { once } from 'node:events'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { createLocalApplicationSqlClientFactory } from './local.js'
+import { createLocalApplicationSqlClientFactory, startLocalSyncHost } from './local.js'
 
 const unusedCompiler = () => {
   throw new Error('unexpected AST query')
@@ -24,6 +26,36 @@ afterEach(async () => {
 })
 
 describe('local application SQL', () => {
+  it('rejects an occupied native port before preparing or opening the database', async () => {
+    const holder = createServer()
+    holder.listen(0, '127.0.0.1')
+    await once(holder, 'listening')
+    const address = holder.address()
+    if (!address || typeof address === 'string') throw new Error('missing TCP address')
+    let prepared = false
+    try {
+      await expect(
+        startLocalSyncHost({
+          schema: { tables: {} },
+          namespace: 'app',
+          dataDir: '/does-not-exist/orez-supervision-test',
+          port: address.port,
+          callbacks: {
+            authenticate: 'http://127.0.0.1:3000/auth',
+            authorizeWake: 'http://127.0.0.1:3000/wake',
+            transformQueries: 'http://127.0.0.1:3000/query',
+          },
+          prepare() {
+            prepared = true
+          },
+        })
+      ).rejects.toThrow(`PID ${process.pid}`)
+      expect(prepared).toBe(false)
+      expect(holder.listening).toBe(true)
+    } finally {
+      await new Promise<void>((resolve) => holder.close(() => resolve()))
+    }
+  })
   it('executes bound queries and compiled plans, and rolls back a rejected batch', async () => {
     const factory = setup()
     const client = factory('app')

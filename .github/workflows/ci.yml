@@ -237,6 +237,9 @@ jobs:
       - name: build workspace
         run: cargo build --workspace
 
+      - name: native launcher supervision
+        run: node --test packages/orez-sync-native/supervision.test.cjs
+
       - name: sync-native format check
         run: cargo fmt -p sync-native -- --check
 

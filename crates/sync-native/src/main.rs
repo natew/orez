@@ -19,6 +19,21 @@ async fn main() {
             sync_core::schema_revision()
         ),
         Command::Serve(config) => {
+            if std::env::var_os("OREZ_SYNC_NATIVE_PARENT_PIPE").is_some() {
+                // the launcher owns stdin's write end. abrupt launcher death
+                // closes it, so no signal handler is needed to stop this host.
+                std::thread::spawn(|| {
+                    use std::io::Read;
+                    let mut buffer = [0u8; 64];
+                    loop {
+                        match std::io::stdin().read(&mut buffer) {
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            Ok(0) | Err(_) => std::process::exit(0),
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
             if let Err(error) = serve(*config).await {
                 eprintln!("error: {error}");
                 std::process::exit(1);

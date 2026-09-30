@@ -35,6 +35,11 @@ export interface NativeHost {
 
 const load = createRequire(import.meta.url)
 
+export async function assertNativeHostPortAvailable(port: number, host?: string) {
+  const { assertPortAvailable } = load('orez-sync-native/port-check')
+  await assertPortAvailable(port, host)
+}
+
 export function createNativeHost(options: NativeHostOptions): NativeHost {
   validateOptions(options)
 
@@ -50,7 +55,14 @@ export function createNativeHost(options: NativeHostOptions): NativeHost {
         const child = spawn(
           process.execPath,
           [launcher, ...nativeHostArguments(options, schemaPath, initSqlPath)],
-          { stdio: 'inherit', ...spawnOptions }
+          {
+            stdio: 'inherit',
+            ...spawnOptions,
+            env: {
+              ...(spawnOptions.env ?? process.env),
+              OREZ_SYNC_NATIVE_PARENT_PID: String(process.pid),
+            },
+          }
         )
         const cleanup = () => rmSync(configDir, { force: true, recursive: true })
         child.once('error', cleanup)
