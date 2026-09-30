@@ -519,6 +519,7 @@ jobs:
         run: |
           cd harness
           bun src/state-machine.ts --against rust-local --seed 1 --steps 18
+          bun src/state-machine.ts --against rust-local --nemesis --seed 36695003678 --replay regressions/pull-fault-prune-recovery.json --no-shrink
           bun src/state-machine.ts --against rust-local --nemesis --seed ${{ github.run_id }} --steps 24
 
       - name: upload native seeds and minimized traces

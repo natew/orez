@@ -189,6 +189,12 @@ overlaps a fired engine fault, fails as invalid instead of passing vacuously
 (replays and shrink candidates are judged on execution alone). See
 `docs/sync/nemesis-red-proof.md` for the red proofs.
 
+Before an explicit pruning pull, an armed pull error or quota must have a
+confirmed firing receipt and the affected client must complete a later successful
+pull. This also checks recovery when every query has been undesired. CI replays
+`harness/regressions/pull-fault-prune-recovery.json` alongside the generated seed;
+the explicit pull, retention floor, and view-oracle checks remain required.
+
 **The engine and host mutation matrix** (`harness/mutants/`, runner
 `harness/scripts/mutation-matrix.ts`, results `docs/sync/mutation-matrix.md`)
 keeps twelve known bugs as compile-checked patches: nine in the Rust engine and

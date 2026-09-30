@@ -1,0 +1,38 @@
+{
+  "trace": [
+    {
+      "kind": "clientRestart"
+    },
+    {
+      "kind": "desire",
+      "slot": 1,
+      "projectIDs": ["p2"]
+    },
+    {
+      "kind": "undesire",
+      "slot": 1
+    },
+    {
+      "kind": "checkpoint"
+    },
+    {
+      "kind": "clientRestart"
+    },
+    {
+      "kind": "prune",
+      "epoch": 20
+    },
+    {
+      "kind": "serverRestart"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "error"
+    },
+    {
+      "kind": "prune",
+      "epoch": 23
+    }
+  ]
+}

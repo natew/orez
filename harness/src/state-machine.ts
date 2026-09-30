@@ -427,6 +427,8 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
   let pendingTransport: { receipt: TransportReceipt } | undefined
   let currentStep = -1
   let currentOperation: Operation = { kind: 'checkpoint' }
+  const failedPullRequests = new Map<string, number>()
+  const successfulPullRequests = new Map<string, number>()
 
   const healTransport = (transport: NonNullable<typeof pendingTransport>) => {
     if (transport.receipt.heal) return
@@ -487,8 +489,16 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
   }
 
   const onSync = (observation: SyncHttpObservation) => {
+    if (observation.phase !== 'terminal') return
+    const clientID = (observation.body as { clientID?: string } | undefined)?.clientID
+    if (observation.path === 'pull' && clientID && observation.status === 200) {
+      successfulPullRequests.set(
+        clientID,
+        Math.max(successfulPullRequests.get(clientID) ?? 0, observation.request)
+      )
+    }
     const fault = pendingFault
-    if (!fault || observation.phase !== 'terminal') return
+    if (!fault) return
     const pointPath = fault.receipt.arm.point.startsWith('push_') ? 'push' : 'pull'
     if (observation.path !== pointPath) return
     if (fault.receipt.arm.kind === 'kill') {
@@ -503,6 +513,8 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
       responseText.includes(fault.receipt.arm.point) &&
       responseText.includes('injected')
     ) {
+      if (observation.path === 'pull' && clientID)
+        failedPullRequests.set(clientID, observation.request)
       resolveFault(
         fault,
         'fired',
@@ -690,11 +702,10 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           break
         }
         case 'prune': {
-          const pullKill =
-            pendingFault?.receipt.arm.kind === 'kill' &&
-            pendingFault.receipt.arm.point.startsWith('pull_')
-              ? pendingFault
-              : undefined
+          const pullFault = pendingFault?.receipt.arm.point.startsWith('pull_')
+            ? pendingFault
+            : undefined
+          const pullKill = pullFault?.receipt.arm.kind === 'kill' ? pullFault : undefined
           const throughPullKill = async <T>(request: () => Promise<T>, label: string) => {
             try {
               return await request()
@@ -723,6 +734,27 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
               `prune setup ${index}`
             )
           }
+          // a background client pull must fire the armed error/quota and then
+          // recover before the explicit pruning pull. otherwise that check can
+          // join the intentionally failing in-flight pull and reject its own
+          // injected fault. require the receipt and a later successful request
+          // from the same client, including when all views were undesired.
+          if (pullFault && pullFault.receipt.arm.kind !== 'kill') {
+            const resolution = await withTimeout(
+              pullFault.resolution,
+              'prune pull-fault receipt',
+              5_000
+            )
+            if (resolution !== 'fired') throw new Error('prune pull fault did not fire')
+          }
+          await eventually(() => {
+            const failedRequest = failedPullRequests.get(client.clientID)
+            if (
+              failedRequest !== undefined &&
+              (successfulPullRequests.get(client.clientID) ?? 0) <= failedRequest
+            )
+              throw new Error('client has not recovered from injected pull fault')
+          }, `seed ${seed} step ${step} pull-fault recovery`)
           // Make pruning self-contained so removing surrounding operations
           // during shrinking cannot create a dependency-only false failure.
           await throughPullKill(() => target.pull(), 'prune pull')
