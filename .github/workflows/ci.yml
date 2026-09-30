@@ -66,6 +66,7 @@ jobs:
         run: bun run test:native:guard
 
       - name: TypeScript host mutation matrix
+        id: host-mutation-matrix
         run: >-
           cd harness && bun scripts/mutation-matrix.ts
           --mutants H1-backup-scan-without-read-session,H2-admit-writer-with-reader-open,H3-skip-pending-change-promotion
@@ -74,7 +75,7 @@ jobs:
           --run-id host-${{ github.run_id }}
 
       - name: upload TypeScript host mutation results
-        if: always()
+        if: ${{ always() && steps.host-mutation-matrix.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: host-mutation-matrix-${{ github.sha }}

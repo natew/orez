@@ -35,7 +35,10 @@ describe('sync-native npm packages', () => {
 
     const temporary = mkdtempSync(resolve(tmpdir(), 'orez-sync-native-package-'))
     const fakeBinary = resolve(temporary, 'fake-sync-native')
-    writeFileSync(fakeBinary, '#!/bin/sh\nprintf \'%s\\n\' "$@"\n')
+    writeFileSync(
+      fakeBinary,
+      '#!/bin/sh\nprintf \'%s\\n\' "$OREZ_SYNC_NATIVE_PARENT_PIPE" "$@"\n'
+    )
     chmodSync(fakeBinary, 0o755)
 
     const platformDir = resolve(
@@ -50,7 +53,7 @@ describe('sync-native npm packages', () => {
     const shim = resolve(launcherDir, 'bin/sync-native.cjs')
     expect(
       execFileSync(process.execPath, [shim, 'one', 'two'], { encoding: 'utf8' })
-    ).toBe('one\ntwo\n')
+    ).toBe('1\none\ntwo\n')
   })
 
   it('writes exact versions into publishable package copies', () => {

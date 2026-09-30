@@ -17,16 +17,20 @@ function portHolder(port) {
     }).trim()
     return `PID ${pid} (${name})`
   }
-  const rows = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpc'], {
+  const rows = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'], {
     encoding: 'utf8',
   })
-  let pid
   return rows
     .trim()
     .split('\n')
-    .flatMap((line) => {
-      if (line.startsWith('p')) pid = line.slice(1)
-      return line.startsWith('c') ? [`PID ${pid} (${line.slice(1)})`] : []
+    .filter((line) => line.startsWith('p'))
+    .map((line) => {
+      const pid = line.slice(1)
+      // argv names the executable even when Linux's comm is a thread name.
+      const command = execFileSync('ps', ['-p', pid, '-o', 'args='], {
+        encoding: 'utf8',
+      }).trim()
+      return `PID ${pid} (${command})`
     })
     .join(', ')
 }

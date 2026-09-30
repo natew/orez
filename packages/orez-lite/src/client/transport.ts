@@ -1112,7 +1112,10 @@ class ZeroHttpSocket {
       this.ackVersion = got.version
       this.sentVersion = undefined
       // the ack spans sockets, so a new socket's counter must pass it
-      this.queryVersion = Math.max(this.queryVersion, got.version + (this.queryPatch.length ? 1 : 0))
+      this.queryVersion = Math.max(
+        this.queryVersion,
+        got.version + (this.queryPatch.length ? 1 : 0)
+      )
     }
   }
 

@@ -140,6 +140,10 @@ export function prepareLauncherPackage(
   cpSync(resolve(root, 'LICENSE'), resolve(outputDir, 'LICENSE'))
   const shim = resolve(outputDir, 'bin/sync-native.cjs')
   writeFileSync(shim, renderSyncNativeShim())
+  cpSync(
+    resolve(root, 'packages/orez-sync-native/bin/port-check.cjs'),
+    resolve(outputDir, 'bin/port-check.cjs')
+  )
   chmodSync(shim, 0o755)
   return outputDir
 }
