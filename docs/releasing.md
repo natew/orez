@@ -1,9 +1,12 @@
 # Releasing Orez
 
 Every ordinary push to `main` publishes a canary after the full `CI` workflow
-passes. `.github/workflows/release.yml` publishes every public workspace package
-with npm trusted publishing. Canary versions use the current stable version plus
-`-canary.<timestamp>` and the npm `canary` dist-tag.
+passes. `.github/workflows/release-sync-native.yml` first verifies the native
+source and publishes any required native update. When that top-level workflow
+succeeds, `.github/workflows/release.yml` checks out its exact source commit and
+publishes every public workspace package with npm trusted publishing. Canary
+versions use the current stable version plus `-canary.<timestamp>` and the npm
+`canary` dist-tag.
 
 Canary publishing does not edit manifests, create a release commit or tag, or
 push back to `main`. Stable release commits, whose subject matches the checked-in
@@ -58,8 +61,9 @@ bun release --patch --ci
 The local command verifies the checkout, dispatches `release-sync-native.yml`,
 prints the run URL, and exits. GitHub then owns the full release under OIDC. The
 native workflow publishes a new native package version when the durable
-contract changed, then dispatches `release.yml` itself. That second top-level
-workflow publishes the public workspace family and finally creates and pushes
+contract or native source changed, then dispatches `release.yml` itself. That
+second top-level workflow publishes the public workspace family and finally
+creates and pushes
 the stable version commit and tag. Keeping both as top-level workflows matters:
 npm validates the workflow filename registered for each package's trusted
 publisher. No local npm login or second release command is involved.
@@ -70,7 +74,7 @@ release script checks npm before every publish and skips versions that already
 reached the registry.
 
 Stable publishing still requires an explicit dispatch; ordinary main pushes
-only publish canaries.
+publish the native prerequisite when needed and the workspace canary family.
 
 ## Local consumer validation
 

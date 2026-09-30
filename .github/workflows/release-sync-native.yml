@@ -1,6 +1,8 @@
 name: Release sync-native
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       stable_bump:
@@ -23,7 +25,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.candidate.outputs.release }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: select latest main build
+        id: candidate
+        run: bash scripts/release-candidate.sh
+
   plan:
+    needs: candidate
+    if: needs.candidate.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 50
     outputs:
@@ -202,6 +220,7 @@ jobs:
     if: >-
       ${{
         always() &&
+        github.event_name == 'workflow_dispatch' &&
         inputs.stable_bump != 'none' &&
         needs.plan.result == 'success' &&
         (

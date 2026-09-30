@@ -1,8 +1,9 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: [Release sync-native]
+    types: [completed]
   workflow_dispatch:
     inputs:
       bump:
@@ -24,7 +25,11 @@ concurrency:
 
 jobs:
   canary:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -35,26 +40,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: select latest main build
         id: candidate
-        run: |
-          git fetch origin main --no-tags
-          version=$(node -p "require('./package.json').version")
-          subject=$(git log -1 --pretty=%s)
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-            echo "A newer main commit exists; its push will publish the canary instead."
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          elif [ "$subject" = "v$version" ]; then
-            echo "Skipping stable release commit v$version."
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          elif [[ "$subject" == *'[skip canary]'* ]]; then
-            echo "Skipping canary while new package names are bootstrapped."
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          fi
+        run: bash scripts/release-candidate.sh
 
       - uses: actions/setup-node@v6
         if: steps.candidate.outputs.release == 'true'

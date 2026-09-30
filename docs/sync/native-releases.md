@@ -135,19 +135,25 @@ bun scripts/normalize-sync-native-licenses.ts LICENSES.txt
 ## Release flow
 
 Native versions are allocated by CI, not checked into a dedicated version-bump
-commit. An explicitly dispatched stable release starts `Release sync-native`
-as its top-level workflow so its GitHub OIDC identity matches the trusted
-publisher registered on npm. The native plan compares both the current durable
-contract and a deterministic hash of the native Rust source inputs to the
-complete platform release on npm. It publishes when either value is stale. The
+commit. Ordinary main pushes and explicitly dispatched stable releases start
+`Release sync-native` as a top-level workflow so its GitHub OIDC identity matches
+the trusted publisher registered on npm. The native plan compares both the
+current durable contract and a deterministic hash of the native Rust source
+inputs to the complete platform release on npm. It publishes when either value
+is stale. The
 contract revision is the compatibility signal used by runtime schema
 initialization; the source revision is the build-freshness signal and is never
 derived from the compiled binary because native outputs are not reproducible
 across runners. When a publish is needed, the plan selects the next unused
 native patch version and injects that version while compiling and packaging the
-source commit. After every native package succeeds, this workflow dispatches
-the top-level `Release` workflow, whose separate OIDC identity publishes the
-stable package family and creates the version commit and tag.
+source commit. After the native workflow succeeds for a main push, its completion
+triggers the top-level `Release` workflow to publish the workspace canary family
+from that exact commit. An explicit stable dispatch instead dispatches `Release`
+with the requested stable increment after every native package succeeds. That
+workflow publishes the stable package family and creates the version commit and
+tag. Both paths preserve the separate workflow identities registered on npm.
+Stable commits, `[skip canary]` commits, and superseded pushes skip automatic
+native and canary publishing.
 
 The workflow can also be dispatched directly for an emergency native-only
 release. Either entry point requires current `main` and green CI for that exact
