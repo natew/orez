@@ -45,6 +45,8 @@ declare module "bedrock-sqlite/browser" {
     pluck(toggle?: boolean): this;
     expand(toggle?: boolean): this;
     raw(toggle?: boolean): this;
+    numbersAsDoubles(toggle?: boolean): this;
+    readonly parameterCount: number;
     columns(): ColumnDefinition[];
     bind(...params: any[]): this;
   }
@@ -55,7 +57,7 @@ declare module "bedrock-sqlite/browser" {
     readonly name: string;
     readonly inTransaction: boolean;
     prepare(source: string): Statement;
-    exec(sql: string): this;
+    exec(sql: string, options?: { resetStatements?: boolean }): this;
     transaction<F extends (...args: any[]) => any>(
       fn: F
     ): F & {

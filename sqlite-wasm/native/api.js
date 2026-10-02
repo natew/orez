@@ -334,13 +334,17 @@ Module.onRuntimeInitialized = () => {
       return stmt
     }
 
-    exec(sql) {
+    // { resetStatements: false } runs sqlite3_exec as the C api does, leaving
+    // every other statement's cursor where it was
+    exec(sql, { resetStatements = true } = {}) {
       this._assertOpen()
       // reset active statements to prevent "SQL statements in progress" errors
-      // native better-sqlite3 does this in C++; in wasm we do it unconditionally
+      // native better-sqlite3 does this in C++; in wasm we do it by default
       // since zero-cache may not always enable unsafeMode before exec
-      for (const stmt of this._statements) {
-        if (!stmt._finalized) sqlite3.reset(stmt._ptr)
+      if (resetStatements) {
+        for (const stmt of this._statements) {
+          if (!stmt._finalized) sqlite3.reset(stmt._ptr)
+        }
       }
       const tp = stringToHeap(sql)
       try {
@@ -591,6 +595,7 @@ Module.onRuntimeInitialized = () => {
       this._expand = false
       this._raw = false
       this._bound = false
+      this._numbersAsDoubles = false
 
       const tp = stringToHeap(source)
       try {
@@ -619,6 +624,18 @@ Module.onRuntimeInitialized = () => {
     }
     get readonly() {
       return this._readonly
+    }
+    // sqlite3_bind_parameter_count: the largest parameter index
+    get parameterCount() {
+      this._assertReady()
+      return sqlite3.bind_parameter_count(this._ptr)
+    }
+
+    // bind every number with sqlite3_bind_double, as hosts that hand sqlite a
+    // double for every JS number do (React Native's iOS bridges)
+    numbersAsDoubles(toggle = true) {
+      this._numbersAsDoubles = toggle
+      return this
     }
 
     finalize() {
@@ -859,7 +876,7 @@ Module.onRuntimeInitialized = () => {
           break
         }
         case 'number':
-          if (Number.isSafeInteger(value)) {
+          if (!this._numbersAsDoubles && Number.isSafeInteger(value)) {
             if (value >= INT32_MIN && value <= INT32_MAX) {
               rc = sqlite3.bind_int(this._ptr, position, value)
             } else {
