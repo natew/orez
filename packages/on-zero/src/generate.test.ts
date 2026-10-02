@@ -139,6 +139,28 @@ export const relations = defineRelations(schema, (r) => ({
     )
   })
 
+  test('preserves schemas owned by drizzle-zero configuration', async () => {
+    const dataDir = join(testDir, 'src/data')
+    const schemaPath = join(dataDir, 'generated/schema.ts')
+    const externalSchema = `import { createSchema, table, string } from '@rocicorp/zero'
+export const schema = createSchema({
+  tables: [table('post').columns({ id: string() }).primaryKey('id')],
+})
+`
+    writeFileSync(join(dataDir, 'post.ts'), `export const posts = () => zql.post`)
+    writeFileSync(join(testDir, 'src/database/schema.ts'), `export * from './schema-public'`)
+    writeFileSync(join(testDir, 'src/database/schema-public.ts'), `
+import { pgTable, text } from 'drizzle-orm/pg-core'
+export const post = pgTable('post', { id: text('id').primaryKey() })
+`)
+    writeFileSync(join(testDir, 'src/database/drizzle-zero.config.ts'), `export default {}`)
+    writeFileSync(schemaPath, externalSchema)
+
+    await generate({ dir: dataDir, silent: true })
+
+    expect(readFileSync(schemaPath, 'utf8')).toBe(externalSchema)
+  })
+
   test('generates every crud slot for a default table registration', async () => {
     writeFileSync(
       join(testDir, 'post/mutations.ts'),

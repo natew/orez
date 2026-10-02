@@ -40,7 +40,7 @@ import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate
 import type { DataLayout } from './generate-layout'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
-const GENERATOR_CACHE_VERSION = '7'
+const GENERATOR_CACHE_VERSION = '8'
 
 const isGeneratorSourceFile = (name: string) =>
   name.endsWith('.ts') &&
@@ -966,9 +966,17 @@ async function generateWithProject(
   // build entirely and return the cached counts. the configureServer watcher
   // still re-runs generate on real model/query edits.
   const databaseSchemaPath = resolve(dirname(baseDir), 'database/schema.ts')
-  const needsSqliteZeroSchema = existsSync(databaseSchemaPath)
+  const needsDrizzleSchema = existsSync(databaseSchemaPath)
+  const externalZeroConfigPath = resolve(
+    dirname(databaseSchemaPath),
+    'drizzle-zero.config.ts'
+  )
+  const externalZeroConfig = existsSync(externalZeroConfigPath)
+    ? readFileSync(externalZeroConfigPath, 'utf8')
+    : null
+  const needsSqliteZeroSchema = needsDrizzleSchema && externalZeroConfig === null
   const inputHash = hash(
-    `${hashInputTree(layout.sourceRoots, generatedDir)}\0${metadataHash}`
+    `${hashInputTree(layout.sourceRoots, generatedDir)}\0${metadataHash}\0${externalZeroConfig}`
   )
   if (
     !force &&
@@ -1004,6 +1012,7 @@ async function generateWithProject(
       }
     }) &&
     existsSync(resolve(generatedDir, 'models.ts')) &&
+    (!needsDrizzleSchema || existsSync(resolve(generatedDir, 'drizzleSchema.ts'))) &&
     (!needsSqliteZeroSchema || existsSync(resolve(generatedDir, 'schema.ts')))
   ) {
     let counts: Partial<GenerateResult> = {}
@@ -1058,7 +1067,7 @@ async function generateWithProject(
   ]
 
   let filesChanged = writeResults.filter(Boolean).length
-  if (needsSqliteZeroSchema) {
+  if (needsDrizzleSchema) {
     const membership = dataMembershipFromLayout(layout)
     const drizzleSchema = await generateDrizzleSchemaInputFileWithProject(
       {
@@ -1068,15 +1077,18 @@ async function generateWithProject(
       },
       project
     )
-    const sqliteSchema = renderDrizzleZeroSqliteSchemaModule({
-      importPath: './drizzleSchema',
-      tableNames: membership.allTables,
-    })
     if (writeFileIfChanged(resolve(generatedDir, 'drizzleSchema.ts'), drizzleSchema)) {
       filesChanged++
     }
-    if (writeFileIfChanged(resolve(generatedDir, 'schema.ts'), sqliteSchema)) {
-      filesChanged++
+    // drizzle-zero owns its output when the app declares its configuration.
+    if (needsSqliteZeroSchema) {
+      const sqliteSchema = renderDrizzleZeroSqliteSchemaModule({
+        importPath: './drizzleSchema',
+        tableNames: membership.allTables,
+      })
+      if (writeFileIfChanged(resolve(generatedDir, 'schema.ts'), sqliteSchema)) {
+        filesChanged++
+      }
     }
   }
   let queryCount = 0
