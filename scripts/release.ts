@@ -36,6 +36,7 @@ import {
 import { SYNC_NATIVE_PLATFORMS } from './sync-native-platforms.js'
 import {
   planSyncNativeRelease,
+  parseNpmMetadata,
   syncNativeContractCheckMode,
   syncNativeSourceRevision,
 } from './sync-native-release-plan.js'
@@ -641,10 +642,18 @@ const nativeLauncherPkg = JSON.parse(
 )
 let nativeReleaseVersion = process.env.OREZ_SYNC_NATIVE_VERSION
 if (canary && !rePublish && !packOnly && !dryRun && !nativeReleaseVersion) {
-  const latest = JSON.parse(
+  const latest = parseNpmMetadata(
     execFileSync(
       'npm',
-      ['view', 'orez-sync-native@latest', '--json', '--prefer-online'],
+      [
+        'view',
+        'orez-sync-native@latest',
+        'version',
+        'orezSourceCommit',
+        'orezNativeSourceRevision',
+        '--json',
+        '--prefer-online',
+      ],
       { encoding: 'utf8' }
     )
   )
