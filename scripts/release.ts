@@ -33,6 +33,7 @@ import {
   preparePlatformPackage,
   syncNativeVersion,
 } from './sync-native-package.js'
+import { SYNC_NATIVE_PLATFORMS } from './sync-native-platforms.js'
 import {
   planSyncNativeRelease,
   syncNativeContractCheckMode,
@@ -413,14 +414,20 @@ if (into) {
           prepareLauncherPackage(staged, syncNativeVersion())
           item.dir = staged
         }
-      } else if (!skipBuild && item.pkg.scripts?.build) {
+      } else if (item.name === 'bedrock-sqlite') {
+        run('make -B dist/package.json', { cwd: item.dir })
+      } else if (!skipBuild) {
         if (item.dir === root) {
+          cleanRootDist()
           run('bun x tsc && chmod +x dist/cli-entry.js')
         } else if (item.name === 'orez-sync-cf-host') {
           run('bun run build:wasm && bun run build:runtime', { cwd: item.dir })
         } else if (item.name === 'orez-lite') {
-          run('bun run build:runtime', { cwd: item.dir })
-        } else {
+          run(
+            'bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime',
+            { cwd: item.dir }
+          )
+        } else if (item.pkg.scripts?.build) {
           run('bun run build', { cwd: item.dir })
         }
       }
@@ -614,6 +621,21 @@ if (packOnly && !patch && !minor && !major && !canary) {
 
 // version map for resolving workspace:* at publish time
 const versionMap = new Map(packages.map((p) => [p.pkg.name, p.next]))
+if (canary && !rePublish && !packOnly && !dryRun) {
+  const response = await fetch('https://registry.npmjs.org/orez/canary')
+  if (response.ok) {
+    const metadata = (await response.json()) as { releaseSourceCommit?: string }
+    const sourceCommit =
+      process.env.GITHUB_SHA ||
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+    if (metadata.releaseSourceCommit === sourceCommit) {
+      console.info(
+        `Canary already published from ${sourceCommit}; skipping duplicate release.`
+      )
+      process.exit(0)
+    }
+  }
+}
 const nativeLauncherPkg = JSON.parse(
   readFileSync(resolve(root, 'packages', 'orez-sync-native', 'package.json'), 'utf8')
 )
@@ -627,9 +649,29 @@ if (canary && !rePublish && !packOnly && !dryRun && !nativeReleaseVersion) {
     )
   )
   if (latest.orezNativeSourceRevision !== syncNativeSourceRevision()) {
-    throw new Error(
-      'Native source changed; the native release must publish before this canary. Local --into builds it immediately.'
+    console.info(
+      'Skipping canary until the native release publishes this source. Local --into can build it immediately.'
     )
+    process.exit(0)
+  }
+  const platforms = await Promise.all(
+    SYNC_NATIVE_PLATFORMS.map(async ({ npmPackage }) => {
+      const response = await fetch(
+        `https://registry.npmjs.org/${encodeURIComponent(npmPackage)}/${latest.version}`
+      )
+      if (!response.ok) return false
+      const metadata = (await response.json()) as typeof latest
+      return (
+        metadata.orezSourceCommit === latest.orezSourceCommit &&
+        metadata.orezNativeSourceRevision === latest.orezNativeSourceRevision
+      )
+    })
+  )
+  if (platforms.some((complete) => !complete)) {
+    console.info(
+      'Skipping canary until every native platform package is published from the same source.'
+    )
+    process.exit(0)
   }
   nativeReleaseVersion = latest.version
 }
@@ -681,9 +723,10 @@ if (!packOnly && !dryRun && !trustedPublishing) {
 }
 
 // check: format, lint, types, tests
+if (!rePublish && existsSync(sqlitePkgPath))
+  run('make -B dist/package.json', { cwd: sqliteWasmDir })
 if (!packOnly && !rePublish && !canary) {
   console.info('\nchecking...')
-  run('make -B dist/package.json', { cwd: sqliteWasmDir })
   run('bun run format')
   run('bun run format:check')
   run('bun run lint')

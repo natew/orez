@@ -59,7 +59,6 @@ jobs:
           bun-version: 1.4.0
 
       - name: Wait for exact commit CI
-        if: github.event_name == 'workflow_dispatch' && inputs.stable_bump != 'none'
         run: >-
           bun scripts/ops/watch-ci.ts
           --sha "$GITHUB_SHA"
@@ -95,9 +94,10 @@ jobs:
             exit 1
           fi
           bun scripts/sync-native-package.ts check
-          if [[ '${{ github.event_name }}' == 'workflow_dispatch' && '${{ inputs.stable_bump }}' != 'none' ]]; then
-            bun test scripts/sync-native-package.test.ts scripts/release-package-order.test.ts scripts/sync-native-release-plan.test.ts
-          fi
+          bun test \
+            scripts/sync-native-package.test.ts \
+            scripts/release-package-order.test.ts \
+            scripts/sync-native-release-plan.test.ts
           cargo build --locked --release -p sync-native --bin sync-native
           plan="$(bun scripts/sync-native-release-plan.ts target/release/sync-native)"
           echo "$plan"

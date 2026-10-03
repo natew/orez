@@ -74,4 +74,4 @@ parent would create a package cycle or an unbuilt-dist resolution problem.
 - Use any canary, including your own, without waiting for an official beta. Pin the printed version because the shared `canary` tag moves. Record the source branch.
 - Verify content by packing the exact npm version and inspecting changed dist or source files and `releaseSourceCommit` in its manifest. A matching version string alone proves nothing.
 - State the validation actually performed in each commit message body. Write `Validation: none` when no checks were run. Do not imply a canary has passed tests.
-- Native source changes require the native artifacts to finish compiling before the JavaScript canary. Unchanged native source uses the published source revision; local `--into` builds native only when the selected downstream family needs it.
+- Native source changes require the existing validated native release to finish before the JavaScript canary. Unchanged native source uses the published source revision; local `--into` builds native only when the selected downstream family needs it.
