@@ -11,6 +11,8 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  lstatSync,
+  renameSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -21,7 +23,6 @@ import { tmpdir } from 'node:os'
 import { resolve, join, relative } from 'node:path'
 
 import {
-  assertLocalReleaseVersions,
   orderReleasePackages,
   selectLocalReleasePackages,
   sharedReleasePackageDirectories,
@@ -32,10 +33,11 @@ import {
   preparePlatformPackage,
   syncNativeVersion,
 } from './sync-native-package.js'
+import { SYNC_NATIVE_PLATFORMS } from './sync-native-platforms.js'
 import {
-  nextSyncNativeVersion,
   planSyncNativeRelease,
   syncNativeContractCheckMode,
+  syncNativeSourceRevision,
 } from './sync-native-release-plan.js'
 import { npmReleaseRegistry, verifyNpmRelease } from './verify-npm-release.js'
 
@@ -69,7 +71,7 @@ const canary = args.includes('--canary')
 const ci = args.includes('--ci')
 const rePublish = args.includes('--republish')
 const skipAll = args.includes('--skip-all')
-const skipTest = args.includes('--skip-test') || skipAll || rePublish
+const skipTest = canary || args.includes('--skip-test') || skipAll || rePublish
 const skipBuild = args.includes('--skip-build') || skipAll || rePublish
 const packOnly = args.includes('--pack-only')
 const intoIdx = args.indexOf('--into')
@@ -84,6 +86,7 @@ const nativeContractCheckMode = syncNativeContractCheckMode({
   rePublish,
   trustedPublishing,
 })
+const verifyNativeContract = !canary && nativeContractCheckMode !== 'skip'
 
 if (!patch && !minor && !major && !canary && !rePublish && !packOnly && !into) {
   console.info(
@@ -228,6 +231,11 @@ function stageForPack(
   const stagedPath = join(destDir, 'package.json')
   const staged = JSON.parse(readFileSync(stagedPath, 'utf-8'))
   staged.version = version
+  if (!rePublish) {
+    staged.releaseSourceCommit =
+      process.env.GITHUB_SHA ||
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+  }
   for (const depField of [
     'dependencies',
     'devDependencies',
@@ -269,8 +277,15 @@ function installedCopies(targetDir: string, name: string): string[] {
     for (const entry of readdirSync(modulesDir, { withFileTypes: true })) {
       // symlinks are skipped rather than followed: a linked package belongs to
       // whatever tree it really lives in, and following them can cycle
-      if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+      if (!entry.isDirectory()) continue
       const dir = join(modulesDir, entry.name)
+      if (entry.name === '.bun') {
+        for (const stored of readdirSync(dir, { withFileTypes: true })) {
+          if (stored.isDirectory()) visit(join(dir, stored.name, 'node_modules'))
+        }
+        continue
+      }
+      if (entry.name.startsWith('.')) continue
       if (entry.name.startsWith('@')) {
         for (const scoped of readdirSync(dir, { withFileTypes: true })) {
           if (scoped.isDirectory()) visit(join(dir, scoped.name, 'node_modules'))
@@ -282,19 +297,6 @@ function installedCopies(targetDir: string, name: string): string[] {
   }
   visit(join(targetDir, 'node_modules'))
   return found
-}
-
-function installedCopyVersions(
-  targetDir: string,
-  name: string
-): { dir: string; version: string }[] {
-  return installedCopies(targetDir, name).map((dir) => {
-    const installedPkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
-    if (typeof installedPkg.version !== 'string') {
-      throw new Error(`${name}: installed package at ${dir} has no version`)
-    }
-    return { dir, version: installedPkg.version }
-  })
 }
 
 // --into <dir>: quick local release, packs each package and unpacks into target node_modules
@@ -373,95 +375,69 @@ if (into) {
     pkgDirs.push({ name: pkg.name, dir, pkg })
   }
 
-  const sourcePackageCopies = pkgDirs.map(({ name, pkg }) => ({
-    pkg,
-    copies: installedCopyVersions(targetDir, name),
-  }))
-  assertLocalReleaseVersions(sourcePackageCopies)
-  const sourceCopies = new Map(
-    sourcePackageCopies.map(({ pkg, copies }) => [pkg.name, copies])
-  )
-
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
     throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
   }
-  const nativePackageNames = new Set(['orez-sync-native', nativePlatform.npmPackage])
-  const nativeSourceVersion = syncNativeVersion()
-  const nativeCopies = [
-    ...installedCopyVersions(targetDir, 'orez-sync-native'),
-    ...installedCopyVersions(targetDir, nativePlatform.npmPackage),
-  ]
-  const nativeVersions = new Set(nativeCopies.map(({ version }) => version))
-  if (nativeVersions.size > 1) {
-    throw new Error(
-      `sync-native --into found mismatched installed versions: ${[...nativeVersions].join(', ')}`
-    )
-  }
-  const installedNativeVersion = [...nativeVersions][0]
-  const nativeReleaseVersion =
-    installedNativeVersion && installedNativeVersion !== nativeSourceVersion
-      ? nextSyncNativeVersion(installedNativeVersion, nativeSourceVersion)
-      : nativeSourceVersion
-
-  console.info('building...')
-  cleanRootDist()
-  run('bun run build')
-  run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
-  const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
-
-  run('cargo build --release -p sync-native --bin sync-native')
-  const nativePlatformDir = resolve(tmpDir, 'native-platform')
-  const nativeBinary = resolve(root, 'target', 'release', nativePlatform.executable)
-  preparePlatformPackage(
-    nativePlatform.id,
-    nativeBinary,
-    nativePlatformDir,
-    nativeReleaseVersion
-  )
-  const nativePlatformPkg = JSON.parse(
-    readFileSync(resolve(nativePlatformDir, 'package.json'), 'utf8')
-  )
-  pkgDirs.push({
-    name: nativePlatformPkg.name,
-    dir: nativePlatformDir,
-    pkg: nativePlatformPkg,
-  })
-
-  const nativeLauncherDir = resolve(tmpDir, 'native-launcher')
-  prepareLauncherPackage(nativeLauncherDir, nativeReleaseVersion)
-  const nativeLauncherPkg = JSON.parse(
-    readFileSync(resolve(nativeLauncherDir, 'package.json'), 'utf8')
-  )
-  pkgDirs.push({
-    name: nativeLauncherPkg.name,
-    dir: nativeLauncherDir,
-    pkg: nativeLauncherPkg,
-  })
-
-  const packageCopies = pkgDirs.map(({ name, pkg }) => ({
-    pkg,
-    copies: sourceCopies.get(name) ?? installedCopyVersions(targetDir, name),
-  }))
-  for (const packageCopy of packageCopies) {
-    if (nativePackageNames.has(packageCopy.pkg.name)) continue
-    assertLocalReleaseVersions([packageCopy])
+  for (const directory of ['orez-sync-native', `sync-native-${nativePlatform.id}`]) {
+    const dir = resolve(root, 'packages', directory)
+    const pkg = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8'))
+    pkgDirs.push({ name: pkg.name, dir, pkg })
   }
   const copies = new Map(
-    packageCopies.map(({ pkg, copies }) => [pkg.name, copies.map(({ dir }) => dir)])
+    pkgDirs.map(({ name }) => [name, installedCopies(targetDir, name)])
   )
   const installed = new Set(
     pkgDirs.filter(({ name }) => copies.get(name)!.length > 0).map(({ name }) => name)
   )
   const selectedPkgDirs = selectLocalReleasePackages(pkgDirs, installed)
-
-  // --into ships the versions already in the tree; nothing is bumped here
-  const versionMap = new Map(
-    pkgDirs.map(({ name, pkg }) => [name, pkg.version as string])
-  )
-
+  if (selectedPkgDirs.length === 0)
+    throw new Error('No upstream packages are installed in the target')
+  const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
+  const nativeNames = new Set(['orez-sync-native', nativePlatform.npmPackage])
   let released = 0
   try {
+    for (const item of selectedPkgDirs) {
+      if (nativeNames.has(item.name)) {
+        if (item.name === nativePlatform.npmPackage) {
+          if (!skipBuild) run('cargo build --release -p sync-native --bin sync-native')
+          const staged = resolve(tmpDir, 'native-platform')
+          preparePlatformPackage(
+            nativePlatform.id,
+            resolve(root, 'target', 'release', nativePlatform.executable),
+            staged,
+            syncNativeVersion()
+          )
+          item.dir = staged
+        } else {
+          const staged = resolve(tmpDir, 'native-launcher')
+          prepareLauncherPackage(staged, syncNativeVersion())
+          item.dir = staged
+        }
+      } else if (item.name === 'bedrock-sqlite') {
+        run('make -B dist/package.json', { cwd: item.dir })
+      } else if (!skipBuild) {
+        if (item.dir === root) {
+          cleanRootDist()
+          run('bun x tsc && chmod +x dist/cli-entry.js')
+        } else if (item.name === 'orez-sync-cf-host') {
+          run('bun run build:wasm && bun run build:runtime', { cwd: item.dir })
+        } else if (item.name === 'orez-lite') {
+          run(
+            'bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime',
+            { cwd: item.dir }
+          )
+        } else if (item.pkg.scripts?.build) {
+          run('bun run build', { cwd: item.dir })
+        }
+      }
+    }
+
+    // --into ships the versions already in the tree; nothing is bumped here
+    const versionMap = new Map(
+      pkgDirs.map(({ name, pkg }) => [name, pkg.version as string])
+    )
+
     for (const { name, dir, pkg } of selectedPkgDirs) {
       // a dependency the consumer does not have yet lands hoisted
       const destDirs = copies.get(name)!
@@ -470,7 +446,10 @@ if (into) {
       const stageDir = join(tmpDir, 'stage', name)
       mkdirSync(stageDir, { recursive: true })
       stageForPack(dir, pkg, pkg.version, versionMap, stageDir)
-      run(`npm pack --pack-destination ${tmpDir}`, { cwd: stageDir, silent: true })
+      execFileSync('bun', ['pm', 'pack', '--ignore-scripts', '--destination', tmpDir], {
+        cwd: stageDir,
+        stdio: 'pipe',
+      })
 
       const files = readdirSync(tmpDir)
       const prefix = name.replace('@', '').replace('/', '-')
@@ -479,10 +458,17 @@ if (into) {
       if (!packed) throw new Error(`${name}: pack produced no tgz`)
 
       const tgzPath = join(tmpDir, packed)
-      for (const destDir of destDirs) {
-        mkdirSync(destDir, { recursive: true })
-        rmSync(join(destDir, 'dist'), { recursive: true, force: true })
-        run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
+      for (const [index, destDir] of destDirs.entries()) {
+        const extracted = join(tmpDir, `install-${released}-${index}`)
+        mkdirSync(extracted)
+        execFileSync('tar', ['-xzf', tgzPath, '-C', extracted, '--strip-components=1'])
+        if (existsSync(destDir) && !lstatSync(destDir).isSymbolicLink()) {
+          const nested = join(destDir, 'node_modules')
+          if (existsSync(nested)) renameSync(nested, join(extracted, 'node_modules'))
+        }
+        rmSync(destDir, { recursive: true, force: true })
+        mkdirSync(resolve(destDir, '..'), { recursive: true })
+        renameSync(extracted, destDir)
       }
       rmSync(tgzPath)
       released++
@@ -635,10 +621,60 @@ if (packOnly && !patch && !minor && !major && !canary) {
 
 // version map for resolving workspace:* at publish time
 const versionMap = new Map(packages.map((p) => [p.pkg.name, p.next]))
+if (canary && !rePublish && !packOnly && !dryRun) {
+  const response = await fetch('https://registry.npmjs.org/orez/canary')
+  if (response.ok) {
+    const metadata = (await response.json()) as { releaseSourceCommit?: string }
+    const sourceCommit =
+      process.env.GITHUB_SHA ||
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+    if (metadata.releaseSourceCommit === sourceCommit) {
+      console.info(
+        `Canary already published from ${sourceCommit}; skipping duplicate release.`
+      )
+      process.exit(0)
+    }
+  }
+}
 const nativeLauncherPkg = JSON.parse(
   readFileSync(resolve(root, 'packages', 'orez-sync-native', 'package.json'), 'utf8')
 )
 let nativeReleaseVersion = process.env.OREZ_SYNC_NATIVE_VERSION
+if (canary && !rePublish && !packOnly && !dryRun && !nativeReleaseVersion) {
+  const latest = JSON.parse(
+    execFileSync(
+      'npm',
+      ['view', 'orez-sync-native@latest', '--json', '--prefer-online'],
+      { encoding: 'utf8' }
+    )
+  )
+  if (latest.orezNativeSourceRevision !== syncNativeSourceRevision()) {
+    console.info(
+      'Skipping canary until the native release publishes this source. Local --into can build it immediately.'
+    )
+    process.exit(0)
+  }
+  const platforms = await Promise.all(
+    SYNC_NATIVE_PLATFORMS.map(async ({ npmPackage }) => {
+      const response = await fetch(
+        `https://registry.npmjs.org/${encodeURIComponent(npmPackage)}/${latest.version}`
+      )
+      if (!response.ok) return false
+      const metadata = (await response.json()) as typeof latest
+      return (
+        metadata.orezSourceCommit === latest.orezSourceCommit &&
+        metadata.orezNativeSourceRevision === latest.orezNativeSourceRevision
+      )
+    })
+  )
+  if (platforms.some((complete) => !complete)) {
+    console.info(
+      'Skipping canary until every native platform package is published from the same source.'
+    )
+    process.exit(0)
+  }
+  nativeReleaseVersion = latest.version
+}
 if (!nativeReleaseVersion && nativeContractCheckMode === 'select-and-verify') {
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
@@ -687,9 +723,10 @@ if (!packOnly && !dryRun && !trustedPublishing) {
 }
 
 // check: format, lint, types, tests
-if (!packOnly && !rePublish) {
-  console.info('\nchecking...')
+if (!rePublish && existsSync(sqlitePkgPath))
   run('make -B dist/package.json', { cwd: sqliteWasmDir })
+if (!packOnly && !rePublish && !canary) {
+  console.info('\nchecking...')
   run('bun run format')
   run('bun run format:check')
   run('bun run lint')
@@ -713,7 +750,7 @@ if (!packOnly && !rePublish) {
 // (soot factory defect #49, 2026-08-06). compare the schema revision the two
 // binaries actually report. the stable OIDC workflow publishes native first
 // and passes the exact version selected by its contract-aware release plan.
-if (nativeContractCheckMode !== 'skip') {
+if (verifyNativeContract) {
   console.info('\nchecking npm sync-native contract...')
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
@@ -760,7 +797,8 @@ if (rePublish) {
   console.info('\nbuilding...')
   cleanRootDist()
   run('bun run build')
-  run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
+  if (!canary)
+    run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
 }
 
 // bump versions in source (skip for --pack-only and --canary)
@@ -861,13 +899,35 @@ if (pendingPackages.length > 0) {
     if (trustedPublishing) {
       // each npm process exchanges one package-scoped OIDC token. npm's
       // workspace publisher reuses its first token and package two rejects it.
-      for (const pkg of pendingPackages) {
-        run(
-          `npm publish --ignore-scripts --access public --registry=${npmReleaseRegistry} ${tag}`.trim(),
-          {
-            cwd: pkg.cwd,
-          }
-        )
+      if (canary) {
+        for (let index = 0; index < pendingPackages.length; index += 6) {
+          await Promise.all(
+            pendingPackages.slice(index, index + 6).map(async (pkg) => {
+              const child = Bun.spawn(
+                [
+                  'npm',
+                  'publish',
+                  '--ignore-scripts',
+                  '--access',
+                  'public',
+                  `--registry=${npmReleaseRegistry}`,
+                  '--tag',
+                  'canary',
+                ],
+                { cwd: pkg.cwd, stdout: 'inherit', stderr: 'inherit' }
+              )
+              if ((await child.exited) !== 0)
+                throw new Error(`Publish failed for ${pkg.name}`)
+            })
+          )
+        }
+      } else {
+        for (const pkg of pendingPackages) {
+          run(
+            `npm publish --ignore-scripts --access public --registry=${npmReleaseRegistry} ${tag}`.trim(),
+            { cwd: pkg.cwd }
+          )
+        }
       }
     } else {
       if (!ci && process.stdin.isTTY && process.stdout.isTTY) {

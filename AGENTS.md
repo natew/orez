@@ -1,13 +1,8 @@
 This file is the repo's agent contract. `.claude/claude.md` is a symlink to it,
 so Claude and Codex read the same source. Edit this file, never the symlink.
 
-DO NOT PUBLUSH without permission!
-
-COMMIT before you publish!
-
-ALWAYS merge finished work to main and push (pull first). Standing
-permission from nate (2026-07-16): main pushes do not need re-asking.
-Publishing/releasing still ALWAYS needs explicit permission.
+Stable npm releases need explicit permission. Canaries and local releases need none.
+Commit before publishing. Validated work lands on main and is pushed after sync.
 
 Worktrees go under `~/.worktrees/orez-<slug>`, never in `/tmp` or inside the
 repo. Remove yours (`git worktree remove <path>`) when the task ends, or leave
@@ -23,11 +18,7 @@ mean `bun run format:check` (oxfmt) passes, and CI runs both in the `test` job.
 Run `bun run format:check` before pushing, or CI goes red on whitespace after a
 green suite. This has already cost one red main push.
 
-the ONLY way to publish is:
-
-`bun release --patch --ci`
-
-IF YOU JUST TESTED USE `--skip-test`
+Stable releases use `bun release --patch --ci` after explicit approval.
 
 ## Cloudflare reads and writes are a billing contract (owner rule, 2026-08-03)
 
@@ -75,3 +66,12 @@ path for consumers is always the parent package (`orez-lite/realtime`, not
 use the parent path only. Direct sub-package imports are allowed solely inside
 this repo's own sub-packages and the harness where importing through the
 parent would create a package cycle or an unbuilt-dist resolution problem.
+
+## Fast upstream releases
+
+- Run `bun release --into ~/<downstream>` in an isolated worktree to build the installed package family and replace downstream `node_modules` immediately. No commit, push, publish, CI, or tests are required. Use `--skip-build` only for outputs already built from your current source.
+- Push `main` to publish a canary independently of full CI. Canaries build and publish without test gates; normal beta and stable releases keep their existing gates.
+- Use any canary, including your own, without waiting for an official beta. Pin the printed version because the shared `canary` tag moves. Record the source branch.
+- Verify content by packing the exact npm version and inspecting changed dist or source files and `releaseSourceCommit` in its manifest. A matching version string alone proves nothing.
+- State the validation actually performed in each commit message body. Write `Validation: none` when no checks were run. Do not imply a canary has passed tests.
+- Native source changes require the existing validated native release to finish before the JavaScript canary. Unchanged native source uses the published source revision; local `--into` builds native only when the selected downstream family needs it.
