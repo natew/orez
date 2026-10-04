@@ -148,12 +148,21 @@ export const schema = createSchema({
 })
 `
     writeFileSync(join(dataDir, 'post.ts'), `export const posts = () => zql.post`)
-    writeFileSync(join(testDir, 'src/database/schema.ts'), `export * from './schema-public'`)
-    writeFileSync(join(testDir, 'src/database/schema-public.ts'), `
+    writeFileSync(
+      join(testDir, 'src/database/schema.ts'),
+      `export * from './schema-public'`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/schema-public.ts'),
+      `
 import { pgTable, text } from 'drizzle-orm/pg-core'
 export const post = pgTable('post', { id: text('id').primaryKey() })
-`)
-    writeFileSync(join(testDir, 'src/database/drizzle-zero.config.ts'), `export default {}`)
+`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/drizzle-zero.config.ts'),
+      `export default {}`
+    )
     writeFileSync(schemaPath, externalSchema)
 
     await generate({ dir: dataDir, silent: true })
