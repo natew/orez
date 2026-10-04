@@ -2414,6 +2414,133 @@ describe('Orez HTTP desired-query sync', () => {
     })
   })
 
+  test('dropping a query the in-flight pull is hydrating supersedes that pull', async () => {
+    // a reader flicking through sessions: each selection puts its window and
+    // deletes the previous one. the pull already carrying a dropped window must
+    // not hold the newest selection behind its response.
+    const requests: RequestRecord[] = []
+    const signals: AbortSignal[] = []
+    const failures: unknown[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      signals.push(init!.signal!)
+      const puts = (request.body.queries?.patch ?? []).map(
+        (op: { op: string; hash: string }) => (op.op === 'put' ? op.hash : '')
+      )
+      if (requests.length === 2) {
+        // the pull hydrating h2 hangs until it is aborted
+        await new Promise((_resolve, reject) => {
+          init!.signal!.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          )
+        })
+      }
+      return jsonResponse({
+        cookie: requests.length,
+        lastMutationIDChanges: {},
+        rowsPatch: [],
+        gotQueries: {
+          version: request.body.queries?.version ?? 0,
+          patch: puts.filter(Boolean).map((hash: string) => ({ op: 'put', hash })),
+        },
+      })
+    })
+    const transport = installWithQueries(fetch, (name) => ({ resolved: name }))
+    transport.subscribeLifecycle((event) => {
+      if (event.type === 'failure') failures.push(event)
+    })
+    const { socket, messages } = openRawSocketWithMessages({
+      desiredQueriesPatch: [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }],
+    })
+    await eventually(() => expect(messages.some((m) => m[0] === 'pokeEnd')).toBe(true))
+
+    socket.send(
+      JSON.stringify([
+        'changeDesiredQueries',
+        { desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }] },
+      ])
+    )
+    await eventually(() => expect(requests.length).toBe(2))
+    const supersededAt = Date.now()
+    socket.send(
+      JSON.stringify([
+        'changeDesiredQueries',
+        {
+          desiredQueriesPatch: [
+            { op: 'del', hash: 'h2' },
+            { op: 'put', hash: 'h3', name: 'byOwner', args: [] },
+          ],
+        },
+      ])
+    )
+
+    await eventually(() => expect(requests.length).toBe(3))
+    // the replacement leaves at once instead of after the hung response and
+    // the pull spacing, re-shipping the whole unacknowledged delta
+    expect(Date.now() - supersededAt).toBeLessThan(200)
+    expect(signals[1].aborted).toBe(true)
+    expect(requests[2].body.cookie).toEqual(requests[1].body.cookie)
+    expect(requests[2].body.queries.patch).toEqual([
+      { op: 'put', hash: 'h2', ast: { resolved: 'byOwner' } },
+      { op: 'del', hash: 'h2' },
+      { op: 'put', hash: 'h3', ast: { resolved: 'byOwner' } },
+    ])
+    await eventually(() =>
+      expect(
+        messages.some(
+          (m) =>
+            m[0] === 'pokePart' &&
+            (m[1].gotQueriesPatch ?? []).some((op: { hash: string }) => op.hash === 'h3')
+        )
+      ).toBe(true)
+    )
+    expect(failures).toEqual([])
+    expect(socket.readyState).toBe(WebSocket.OPEN)
+  })
+
+  test('a query change that drops nothing in flight waits for the current pull', async () => {
+    const requests: RequestRecord[] = []
+    const signals: AbortSignal[] = []
+    const releaseSecond = defer<void>()
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(recordRequest(input, init))
+      signals.push(init!.signal!)
+      const request = requests.at(-1)!
+      if (requests.length === 2) await releaseSecond.promise
+      return jsonResponse({
+        cookie: requests.length,
+        lastMutationIDChanges: {},
+        rowsPatch: [],
+        gotQueries: { version: request.body.queries?.version ?? 0, patch: [] },
+      })
+    })
+    installWithQueries(fetch, (name) => ({ resolved: name }))
+    const { socket, messages } = openRawSocketWithMessages({
+      desiredQueriesPatch: [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }],
+    })
+    await eventually(() => expect(messages.some((m) => m[0] === 'pokeEnd')).toBe(true))
+    socket.send(
+      JSON.stringify([
+        'changeDesiredQueries',
+        { desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }] },
+      ])
+    )
+    await eventually(() => expect(requests.length).toBe(2))
+    // h1 was shipped by an earlier pull, so dropping it does not touch the one in flight
+    socket.send(
+      JSON.stringify([
+        'changeDesiredQueries',
+        { desiredQueriesPatch: [{ op: 'del', hash: 'h1' }] },
+      ])
+    )
+    await sleep(100)
+    expect(signals[1].aborted).toBe(false)
+    expect(requests.length).toBe(2)
+    releaseSecond.resolve()
+    await eventually(() => expect(requests.length).toBe(3))
+  })
+
   test('an ad-hoc put with an inline ast ships that ast unchanged', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

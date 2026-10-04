@@ -146,6 +146,7 @@ const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
 // handshake, and a misrouted /wake billed 1.94M requests that way. back off to
 // a 30s ceiling, halved-plus-jitter so a fleet reconnecting after one outage
 // does not arrive in lockstep. a socket that reaches open resets the ladder.
+const PULL_SUPERSEDED = new Error('Orez HTTP pull superseded by a desired-query change')
 const WAKE_RECONNECT_BASE_MS = 500
 const WAKE_RECONNECT_MAX_MS = 30_000
 
@@ -238,6 +239,7 @@ export type HttpPullLifecycleEvent = {
     | 'listener'
     | 'open'
     | 'pull'
+    | 'pull-superseded'
     | 'close'
     | 'failure'
     | 'superseded'
@@ -569,6 +571,9 @@ class ZeroHttpSocket {
   private readonly pendingDeletedClientIDs = new Set<string>()
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
+  // a change that drops a query the in-flight pull hydrates supersedes it
+  private pullAbort: AbortController | undefined
+  private inFlightPuts = new Set<string>()
   private nextPullTimer: ReturnType<typeof setTimeout> | undefined
   private lastPullEndedAt = Number.NEGATIVE_INFINITY
   private pendingPushes: unknown[] = []
@@ -681,7 +686,8 @@ class ZeroHttpSocket {
         this.flushGeneration++
         this.queueDesiredQueries(message[1])
         this.queueDeletedClients(message[1]?.deleted)
-        this.requestPullAfterCurrent()
+        if (this.dropsInFlightQuery(message[1])) this.supersedePull()
+        else this.requestPullAfterCurrent()
         return
       case 'updateAuth':
         this.flushGeneration++
@@ -741,13 +747,17 @@ class ZeroHttpSocket {
       0,
       MAX_DELETED_CLIENTS_PER_PULL
     )
+    const abort = new AbortController()
+    this.pullAbort = abort
     this.pullInFlight = this.fetchPull(
       this.clientGroupID,
       this.cookie,
       true,
-      deletedClientIDs
+      deletedClientIDs,
+      abort.signal
     )
       .then((response) => {
+        if (abort.signal.aborted) return
         this.applyServerDeletedClients(response, deletedClientIDs)
         this.applyServerGotQueries(response)
         if (response.unchanged) {
@@ -758,19 +768,39 @@ class ZeroHttpSocket {
         this.emitLifecycle('pull')
       })
       .catch((error) => {
+        // superseded: nothing applied, so the replacement re-ships the same
+        // delta from the same cookie, the lost-response case the server handles
+        if (abort.signal.reason === PULL_SUPERSEDED) return
         this.fail(error)
         throw error
       })
       .finally(() => {
         this.lastPullEndedAt = performance.now()
+        const superseded = abort.signal.reason === PULL_SUPERSEDED
         const pullAgain = this.pullAfterCurrent
         this.pullAfterCurrent = false
         this.pullInFlight = undefined
-        if (pullAgain && this.readyState !== this.CLOSED) {
-          this.requestPullAfterCurrent()
-        }
+        this.pullAbort = undefined
+        this.inFlightPuts.clear()
+        if (this.readyState === this.CLOSED) return
+        if (superseded) this.run(this.pull())
+        else if (pullAgain) this.requestPullAfterCurrent()
       })
     return this.pullInFlight
+  }
+
+  private dropsInFlightQuery(body: unknown) {
+    if (!this.pullInFlight || this.inFlightPuts.size === 0) return false
+    const patch = (body as { desiredQueriesPatch?: unknown })?.desiredQueriesPatch
+    if (!Array.isArray(patch)) return false
+    return (patch as DesiredQueryPatchOp[]).some(
+      (op) => op.op === 'clear' || (op.op === 'del' && this.inFlightPuts.has(op.hash))
+    )
+  }
+
+  private supersedePull() {
+    this.emitLifecycle('pull-superseded')
+    this.pullAbort?.abort(PULL_SUPERSEDED)
   }
 
   // settle every tracked upstream effect, then prove quiescence with two pull
@@ -1163,7 +1193,8 @@ class ZeroHttpSocket {
     clientGroupID: string,
     cookie: string | null,
     includeQueries: boolean,
-    deletedClientIDs: readonly string[] = []
+    deletedClientIDs: readonly string[] = [],
+    signal?: AbortSignal
   ) {
     const body: Record<string, unknown> = {
       clientID: this.clientID,
@@ -1176,6 +1207,9 @@ class ZeroHttpSocket {
     if (includeQueries && this.queryPatch.length > 0) {
       this.sentVersion = this.queryVersion
       this.sentPatchLen = this.queryPatch.length
+      for (const op of this.queryPatch) {
+        if (op.op === 'put') this.inFlightPuts.add(op.hash)
+      }
       body.queries = {
         version: this.queryVersion,
         baseVersion: this.ackVersion,
@@ -1187,11 +1221,11 @@ class ZeroHttpSocket {
     if (includeQueries && deletedClientIDs.length > 0) {
       body.deletedClientIDs = deletedClientIDs
     }
-    const response = (await this.postJSON('/pull', body)) as PullResponse
+    const response = (await this.postJSON('/pull', body, signal)) as PullResponse
     return this.state.payloadCodec.decodePull(response)
   }
 
-  private async postJSON(path: '/pull' | '/push', body: unknown) {
+  private async postJSON(path: '/pull' | '/push', body: unknown, signal?: AbortSignal) {
     const base =
       path === '/push' ? this.state.pushOriginString : this.state.pullOriginString
     const url = new URL(`${base}${path}`)
@@ -1217,6 +1251,7 @@ class ZeroHttpSocket {
           'content-type': 'application/json',
         },
         body: requestBody,
+        signal,
       },
       REQUEST_HEADER_DEADLINE_MS
     )
@@ -1544,6 +1579,10 @@ export async function fetchWithHeaderDeadline(
       new Error(`Orez HTTP ${path} response headers missed ${deadlineMs}ms deadline`)
     )
   }, deadlineMs)
+  const callerSignal = init.signal
+  const forwardAbort = () => controller.abort(callerSignal?.reason)
+  if (callerSignal?.aborted) forwardAbort()
+  else callerSignal?.addEventListener('abort', forwardAbort, { once: true })
   try {
     return await fetchImpl(url, { ...init, signal: controller.signal })
   } catch (error) {
