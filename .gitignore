@@ -18,3 +18,4 @@ perf/write-amplification/.generated-chat-wrapper/
 target/
 .release/
 packages/sync-native-*/bin/
+scripts/tmp/
