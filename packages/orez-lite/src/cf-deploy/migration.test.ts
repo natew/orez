@@ -450,12 +450,111 @@ describe('buildMigrationModuleSource', () => {
 
     await migrationModule.orezAppSchema.migrate({ client })
 
-    expect(ledgerQueries).toBe(1)
-    expect(ledgerRowsRead).toBe(1)
+    // prepare applies the first pending file and each later file re-reads.
+    // historical ledger ids stay out of both probes.
+    expect(ledgerQueries).toBe(2)
+    expect(ledgerRowsRead).toBe(3)
     expect(sessions).toBe(2)
     expect(postCommitCallbacks).toBe(2)
     expect(tables).toEqual(new Set(['alpha', 'beta']))
     expect(ledger.size).toBe(1_003)
+  })
+
+  it('re-reads the ledger so a concurrent migrate does not insert an applied id', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = { tables: {}, relationships: {} }
+    `)
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-concurrent',
+        schemaImportSpecifier: schemaModuleUrl,
+        nativeSqlStatements: [
+          {
+            id: '0002_alpha/migration.sql:0',
+            sql: 'CREATE TABLE alpha (id TEXT PRIMARY KEY)',
+          },
+          {
+            id: '0003_beta/migration.sql:0',
+            sql: 'CREATE TABLE beta (id TEXT PRIMARY KEY)',
+          },
+        ],
+      })
+    )
+    const ledger = new Set<string>()
+    const tables = new Set<string>()
+    const executed: string[] = []
+    let tail = Promise.resolve()
+    const tx = {
+      async query(sql: string, params: readonly unknown[] = []) {
+        const applied = migrationLedgerRows(sql, params, ledger)
+        if (applied) return applied
+        if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) return []
+        if (
+          sql.includes("FROM sqlite_master WHERE type IN ('table', 'index')") ||
+          sql.includes("SELECT name FROM sqlite_master WHERE type = 'table'")
+        ) {
+          return [...tables].map((name) => ({ name, type: 'table', sql: '' }))
+        }
+        if (sql.startsWith('SELECT name, schema_json FROM _zero_schema_tables')) return []
+        throw new Error(`unexpected query: ${sql}`)
+      },
+      async exec(sql: string, params: unknown[] = []) {
+        if (
+          sql.startsWith('CREATE TABLE IF NOT EXISTS "__contrast_cf_migrations"') ||
+          sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')
+        ) {
+          return
+        }
+        if (
+          sql === 'CREATE TABLE alpha (id TEXT PRIMARY KEY)' ||
+          sql === 'CREATE TABLE beta (id TEXT PRIMARY KEY)'
+        ) {
+          executed.push(sql)
+          tables.add(sql.includes('alpha') ? 'alpha' : 'beta')
+          return
+        }
+        if (sql.startsWith('INSERT INTO "__contrast_cf_migrations"')) {
+          const id = String(params[0])
+          if (ledger.has(id)) {
+            throw new Error(`UNIQUE constraint failed: __contrast_cf_migrations.id ${id}`)
+          }
+          ledger.add(id)
+          return
+        }
+        throw new Error(`unexpected exec: ${sql}`)
+      },
+      async execMany(
+        statements: ReadonlyArray<{ sql: string; params?: readonly unknown[] }>
+      ) {
+        for (const statement of statements)
+          await this.exec(statement.sql, [...(statement.params ?? [])])
+        return statements.map(() => ({ changes: 0 }))
+      },
+      async registerTables() {},
+    }
+    const client = {
+      readTransaction: readFreshSchema,
+      async transaction(_compile: unknown, run: (inner: typeof tx) => Promise<void>) {
+        const runTransaction = tail.then(() => run(tx))
+        tail = runTransaction.then(
+          () => undefined,
+          () => undefined
+        )
+        await runTransaction
+      },
+    }
+
+    await Promise.all([
+      migrationModule.orezAppSchema.migrate({ client }),
+      migrationModule.orezAppSchema.migrate({ client }),
+    ])
+
+    expect(executed).toEqual([
+      'CREATE TABLE alpha (id TEXT PRIMARY KEY)',
+      'CREATE TABLE beta (id TEXT PRIMARY KEY)',
+    ])
+    expect(ledger.size).toBe(2)
   })
 
   it('accepts equivalent SQLite type affinities and still rejects incompatible types', async () => {

@@ -954,7 +954,6 @@ async function nativeSchemaIsCurrent(tx) {
 }
 
 async function applyNativeSchema(tx, instance, {
-  applied = null,
   prepare = true,
   migrationFile = null,
   finalize = true,
@@ -964,10 +963,11 @@ async function applyNativeSchema(tx, instance, {
       'CREATE TABLE IF NOT EXISTS ' + quoteIdentifier(migrationTable) +
         ' (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)',
     )
-    applied = await readAppliedMigrationStatements(tx)
-  } else if (!(applied instanceof Set)) {
-    throw new Error('migration ledger state is required after prepare')
   }
+  // re-read inside every file transaction. the applied set from the previous
+  // transaction is stale once a concurrent runMigrations commits between
+  // files, and inserting those ids again fails the caller.
+  const applied = await readAppliedMigrationStatements(tx)
   if (prepare) await reconcilePhantomLedger(tx, applied)
   // register BEFORE the statements, not only after them. a cdc trigger whose
   // _orez_cdc_tables row is missing is invisible to beginSchemaChange, which
@@ -1304,7 +1304,6 @@ async function migrate({
       }, async (tx) => {
         phase = 'migration ' + migrationFile
         migrationState = await applyNativeSchema(tx, instance, {
-          applied: migrationState.applied,
           prepare: false,
           migrationFile,
           finalize: index === remainingMigrationFiles.length - 1,
