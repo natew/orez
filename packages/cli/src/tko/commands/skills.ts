@@ -13,6 +13,7 @@ import {
   rmdirSync,
   symlinkSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
@@ -23,8 +24,41 @@ import pc from 'picocolors'
 
 const SKILL_PREFIX = 'takeout-'
 
-function getSkillsDirs(cwd: string): string[] {
-  return [join(cwd, '.claude', 'skills'), join(cwd, '.agents', 'skills')]
+export type SkillHarness = 'claude' | 'agents'
+
+export interface SkillTargetDir {
+  path: string
+  harness: SkillHarness
+}
+
+export const TIER_TO_CLAUDE_MODEL: Record<string, string> = {
+  sm: 'haiku',
+  md: 'sonnet',
+  lg: 'opus',
+  xl: 'fable',
+}
+
+export function transformSkillForHarness(content: string, harness: SkillHarness): string {
+  if (harness !== 'claude') return content
+  if (!content.startsWith('---')) return content
+  const endIndex = content.indexOf('---', 3)
+  if (endIndex === -1) return content
+  const frontmatter = content.slice(0, endIndex)
+  const transformed = frontmatter.replace(
+    /^(\s*model:\s*)(sm|md|lg|xl)\s*$/m,
+    (match, prefix, tier) => {
+      const mapped = TIER_TO_CLAUDE_MODEL[tier]
+      return mapped ? `${prefix}${mapped}` : match
+    }
+  )
+  return transformed + content.slice(endIndex)
+}
+
+function getSkillsDirs(cwd: string): SkillTargetDir[] {
+  return [
+    { path: join(cwd, '.claude', 'skills'), harness: 'claude' },
+    { path: join(cwd, '.agents', 'skills'), harness: 'agents' },
+  ]
 }
 
 function hasSkillFrontmatter(content: string): boolean {
@@ -87,7 +121,8 @@ async function generateDocSkills(
     console.info(pc.dim(`found ${docs.length} documentation files`))
   }
 
-  for (const skillsDir of skillsDirs) {
+  for (const target of skillsDirs) {
+    const skillsDir = target.path
     if (clean && existsSync(skillsDir)) {
       const existing = readdirSync(skillsDir)
       for (const dir of existing) {
@@ -122,7 +157,8 @@ async function generateDocSkills(
       const skillName = nameMatch[1]!.trim()
       expectedSkillNames.add(skillName)
 
-      for (const skillsDir of skillsDirs) {
+      for (const target of skillsDirs) {
+        const skillsDir = target.path
         const skillDir = join(skillsDir, skillName)
         const skillFile = join(skillDir, 'SKILL.md')
 
@@ -131,13 +167,25 @@ async function generateDocSkills(
         }
 
         const relativePath = relative(skillDir, doc.path)
+        const targetContent = transformSkillForHarness(content, target.harness)
+        const isSymlinkTarget = targetContent === content
 
         let shouldCreate = true
         try {
           const stat = lstatSync(skillFile)
-          if (stat.isSymbolicLink() && existsSync(skillFile)) {
+          if (isSymlinkTarget && stat.isSymbolicLink() && existsSync(skillFile)) {
             const existingContent = readFileSync(skillFile, 'utf-8')
             if (existingContent === content) {
+              unchanged++
+              shouldCreate = false
+            }
+          } else if (
+            !isSymlinkTarget &&
+            !stat.isSymbolicLink() &&
+            existsSync(skillFile)
+          ) {
+            const existingContent = readFileSync(skillFile, 'utf-8')
+            if (existingContent === targetContent) {
               unchanged++
               shouldCreate = false
             }
@@ -151,12 +199,21 @@ async function generateDocSkills(
 
         if (!shouldCreate) continue
 
-        symlinkSync(relativePath, skillFile)
-        symlinked++
+        if (isSymlinkTarget) {
+          symlinkSync(relativePath, skillFile)
+          symlinked++
 
-        console.info(
-          `  ${pc.green('⟷')} ${skillName} ${pc.dim(`(${relative(cwd, skillsDir)})`)}`
-        )
+          console.info(
+            `  ${pc.green('⟷')} ${skillName} ${pc.dim(`(${relative(cwd, skillsDir)})`)}`
+          )
+        } else {
+          writeFileSync(skillFile, targetContent, 'utf-8')
+          generated++
+
+          console.info(
+            `  ${pc.cyan('✎')} ${skillName} ${pc.dim(`(${relative(cwd, skillsDir)}: model mapped)`)}`
+          )
+        }
       }
     } else {
       if (!hasFrontmatter) {
@@ -169,7 +226,8 @@ async function generateDocSkills(
     }
   }
 
-  for (const skillsDir of skillsDirs) {
+  for (const target of skillsDirs) {
+    const skillsDir = target.path
     for (const dir of readdirSync(skillsDir)) {
       if (expectedSkillNames.has(dir)) continue
 
@@ -193,6 +251,8 @@ async function generateDocSkills(
           const linkTarget = readlinkSync(skillFile)
           const resolvedTarget = resolve(skillDir, linkTarget)
           shouldUnlink = resolvedTarget.startsWith(`${localDocsDir}/`)
+        } else if (stat.isFile()) {
+          shouldUnlink = true
         }
       } catch {
         // ignore unrelated skill directories
@@ -205,7 +265,7 @@ async function generateDocSkills(
         rmdirSync(skillDir)
       }
       removed++
-      console.info(`  ${pc.red('✕')} ${dir} ${pc.dim('(removed stale symlink)')}`)
+      console.info(`  ${pc.red('✕')} ${dir} ${pc.dim('(removed stale skill)')}`)
     }
   }
 
@@ -262,7 +322,7 @@ const generateCommand = defineCommand({
     if (symlinked > 0) console.info(`  ${pc.green(`${symlinked} symlinked`)}`)
     if (generated > 0)
       console.info(
-        `  ${pc.yellow(`${generated} generated`)} ${pc.dim('(add frontmatter to enable symlink)')}`
+        `  ${pc.cyan(`${generated} generated`)} ${pc.dim('(model tier translated)')}`
       )
     if (skipped > 0)
       console.info(
@@ -270,8 +330,8 @@ const generateCommand = defineCommand({
       )
     if (unchanged > 0) console.info(`  ${pc.dim(`${unchanged} unchanged`)}`)
     if (removed > 0) console.info(`  ${pc.red(`${removed} removed`)}`)
-    for (const skillsDir of skillsDirs) {
-      console.info(pc.dim(`  skills in ${skillsDir}`))
+    for (const target of skillsDirs) {
+      console.info(pc.dim(`  skills in ${target.path}`))
     }
     console.info()
   },
