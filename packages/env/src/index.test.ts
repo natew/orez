@@ -58,7 +58,7 @@ describe('@o/env', () => {
     )
     writeFileSync(
       join(dir, '.env.development'),
-      '# managed by src/env.ts!\nOREZ_ENV_TEST_SECRET=\nOREZ_ENV_TEST_ROTATED=old-key\nOREZ_ENV_TEST_OVERRIDE=managed\nOREZ_ENV_TEST_MODE=dev-3000'
+      '# managed by src/env.ts!\nOREZ_ENV_TEST_SECRET=\nOREZ_ENV_TEST_ROTATED=old-key\nOREZ_ENV_TEST_OVERRIDE=managed\nOREZ_ENV_TEST_SHELL=shell-value\nOREZ_ENV_TEST_MODE=dev-3000'
     )
     process.chdir(dir)
     process.env.TAKEOUT_ENV_MODE = 'development'
@@ -68,6 +68,8 @@ describe('@o/env', () => {
     process.env.OREZ_ENV_TEST_ROTATED = 'old-key'
     // an explicit parent export that differs from the managed file
     process.env.OREZ_ENV_TEST_OVERRIDE = 'parent'
+    // a shell-only export an earlier run mirrored into the managed file
+    process.env.OREZ_ENV_TEST_SHELL = 'shell-value'
 
     const result = createEnv({
       ports: { web: 3000 },
@@ -76,6 +78,7 @@ describe('@o/env', () => {
         OREZ_ENV_TEST_SECRET: '',
         OREZ_ENV_TEST_ROTATED: '',
         OREZ_ENV_TEST_OVERRIDE: '',
+        OREZ_ENV_TEST_SHELL: '',
       },
       development: ({ ports }) => ({ OREZ_ENV_TEST_MODE: `dev-${ports.web}` }),
       production: { OREZ_ENV_TEST_MODE: 'production' },
@@ -84,6 +87,7 @@ describe('@o/env', () => {
     expect(result.env.OREZ_ENV_TEST_SECRET).toBe('real-secret')
     expect(result.env.OREZ_ENV_TEST_ROTATED).toBe('new-key')
     expect(result.env.OREZ_ENV_TEST_OVERRIDE).toBe('parent')
+    expect(result.env.OREZ_ENV_TEST_SHELL).toBe('shell-value')
     expect(result.env.OREZ_ENV_TEST_MODE).toBe('dev-3000')
   })
 })

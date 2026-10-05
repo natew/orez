@@ -257,12 +257,14 @@ export function createEnv<
     }
   }
 
-  // a refreshed mode key is recomputed; a refreshed base key reads the user's .env
+  // a refreshed mode key is recomputed; a refreshed base key reads the user's
+  // .env when .env names it. a key .env does not name keeps its process value:
+  // the managed file only mirrored it, most often from a shell export.
   const sourceValue = (key: string): string | undefined =>
     refreshedKeys.has(key)
       ? modeKeys.has(key)
         ? undefined
-        : userDotEnv[key]
+        : (userDotEnv[key] ?? process.env[key])
       : process.env[key]
 
   // resolve expected values and build final env
