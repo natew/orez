@@ -1,3 +1,5 @@
+import { CDC_SCHEMA_VERSION } from '../cf-do/cdc.js'
+
 import type { CloudflareConfig } from './config.js'
 
 const SENTINEL_LOWER = 'nspfx'
@@ -345,8 +347,8 @@ async function readLiveIndexes(tx) {
   return indexes
 }
 
-async function assertExpectedSchema(tx) {
-  const liveColumns = await readLiveColumns(tx)
+async function assertExpectedSchema(tx, liveColumns = null) {
+  liveColumns ??= await readLiveColumns(tx)
   // two passes on purpose. reporting only the FIRST missing table makes an
   // operator fix them one deploy at a time, and a per-column mismatch later in
   // the list would throw before the missing-table set was even known. collect
@@ -574,6 +576,25 @@ async function readAppliedMigrationStatements(tx) {
   return applied
 }
 
+function pendingMigrationFilesFor(applied) {
+  const pendingMigrationFiles = []
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
+    if (!item.sql.split('\\n').some((line) => {
+      const trimmed = line.trim()
+      return trimmed.length > 0 && !trimmed.startsWith('--')
+    })) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    if (supersededStatementIds.has(baseId) || applied.has(baseId)) continue
+    const file = baseId.split(':')[0]
+    if (!pendingMigrationFiles.includes(file)) pendingMigrationFiles.push(file)
+  }
+  return pendingMigrationFiles
+}
+
 async function deleteAppliedMigrationStatement(tx, baseId) {
   await tx.exec(
     'DELETE FROM ' + quoteIdentifier(migrationTable) +
@@ -678,8 +699,8 @@ function skippedByLiveSchema(item, tables, liveColumns) {
   ) : false
 }
 
-async function reconcilePhantomLedger(tx, applied) {
-  if (applied.size === 0) return
+async function reconcilePhantomLedger(tx, applied, { inspectOnly = false, schemaRows = null, liveColumns = null } = {}) {
+  if (applied.size === 0) return false
   // retired statements retain their identities, but no longer own an effect
   // that reconciliation may resurrect, including their rebuild metadata.
   const activeStatements = nativeSqlStatements.flatMap((statement, index) => {
@@ -689,7 +710,7 @@ async function reconcilePhantomLedger(tx, applied) {
     const id = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
     return supersededStatementIds.has(id) ? [] : [{ ...item, id }]
   })
-  const schemaRows = await tx.query(
+  schemaRows ??= await tx.query(
     "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT GLOB '_orez_bk_*'",
   )
   const tables = new Set()
@@ -698,7 +719,7 @@ async function reconcilePhantomLedger(tx, applied) {
     if (row.type === 'table') tables.add(row.name)
     else indexes.set(row.name, row.sql)
   }
-  const liveColumns = await readLiveColumns(tx)
+  liveColumns ??= await readLiveColumns(tx)
   // only the last applied, applicable index operation owns its current DDL.
   // an unapplied successor is not evidence that an older effect was replaced.
   // use the existing schema snapshot; this adds no per-statement database reads.
@@ -828,7 +849,8 @@ async function reconcilePhantomLedger(tx, applied) {
       }
     }
   }
-  if (resurrect.size === 0) return
+  if (resurrect.size === 0) return false
+  if (inspectOnly) return true
   // a resurrected rebuild block must re-run with its sibling PRAGMA
   // foreign_keys toggles, or the block re-executes under FK enforcement.
   const resurrectedFiles = new Set(
@@ -864,6 +886,69 @@ async function reconcilePhantomLedger(tx, applied) {
   }
 }
 
+// current namespaces use a shared read session. repair keeps the existing
+// writer path and re-reads its ledger after acquiring the exclusive turn.
+async function nativeSchemaIsCurrent(tx) {
+  const schemaRows = await tx.query(
+    "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT GLOB '_orez_bk_*'",
+  )
+  const tables = new Set(schemaRows.filter((row) => row.type === 'table').map((row) => row.name))
+  if (!tables.has(migrationTable) || !tables.has('_zero_schema_tables')) return false
+  const applied = await readAppliedMigrationStatements(tx)
+  if (pendingMigrationFilesFor(applied).length > 0) return false
+  const liveColumns = await readLiveColumns(tx)
+  if (await reconcilePhantomLedger(tx, applied, { inspectOnly: true, schemaRows, liveColumns })) return false
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    if (!statement || typeof statement !== 'object' || !Array.isArray(statement.declaredColumns)) continue
+    const id = typeof statement.id === 'string' && statement.id ? statement.id : 'statement-' + index
+    if (supersededStatementIds.has(id)) continue
+    const created = /^CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(statement.sql.trim())
+    if (!created) continue
+    const columns = new Set((liveColumns.get(created[1]) || []).map((column) => column.name))
+    if (statement.declaredColumns.some((column) => column && typeof column.name === 'string' && !columns.has(column.name))) return false
+  }
+  // a shape mismatch may be repaired by declared-column convergence, so it
+  // takes the writer path where the existing assertion still reports errors.
+  try {
+    await assertExpectedSchema(tx, liveColumns)
+  } catch {
+    return false
+  }
+  const registrations = publicTables()
+  if (registrations.length) {
+    const cdcColumns = new Set((liveColumns.get('_orez_cdc_tables') || []).map((column) => column.name))
+    if (!['physical_table', 'table_name', 'columns_json', 'publish', 'schema_version'].every((name) => cdcColumns.has(name))) return false
+    // probe only this schema's registrations in bounded packs. table_xinfo
+    // includes generated capture columns.
+    for (let offset = 0; offset < registrations.length; offset += 24) {
+      const pack = registrations.slice(offset, offset + 24)
+      const rows = await tx.query(
+        'WITH expected(physical_table, table_name, publish) AS (VALUES ' + pack.map(() => '(?, ?, ?)').join(', ') +
+        ') SELECT e.physical_table FROM expected e LEFT JOIN _orez_cdc_tables c ON c.physical_table = e.physical_table' +
+        ' WHERE c.table_name = e.table_name AND c.publish = e.publish AND c.schema_version = ${CDC_SCHEMA_VERSION}' +
+        ' AND c.columns_json = (SELECT json_group_array(name) FROM (SELECT name FROM pragma_table_xinfo(e.physical_table) ORDER BY cid))' +
+        " AND (SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (" +
+        " '_orez_cdc_' || lower(hex(e.physical_table)) || '_insert'," +
+        " '_orez_cdc_' || lower(hex(e.physical_table)) || '_update'," +
+        " '_orez_cdc_' || lower(hex(e.physical_table)) || '_delete')) = 3",
+        pack.flatMap((table) => [table.table, table.publicTable, table.publish === false ? 0 : 1]),
+      )
+      if (rows.length !== pack.length) return false
+    }
+  }
+  const metadata = schemaMetadataStatements()
+  for (let offset = 0; offset < metadata.length; offset += 32) {
+    const pack = metadata.slice(offset, offset + 32)
+    const rows = await tx.query(
+      'WITH expected(name, schema_json) AS (VALUES ' + pack.map(() => '(?, ?)').join(', ') +
+      ') SELECT e.name FROM expected e JOIN _zero_schema_tables s ON s.name = e.name AND s.schema_json = e.schema_json',
+      pack.flatMap((statement) => statement.params),
+    )
+    if (rows.length !== pack.length) return false
+  }
+  return true
+}
+
 async function applyNativeSchema(tx, instance, {
   applied = null,
   prepare = true,
@@ -892,21 +977,7 @@ async function applyNativeSchema(tx, instance, {
   // this is a no-op beyond creating the cdc bookkeeping tables early.
   if (prepare) await tx.registerTables(publicTables())
   const appliedStatementIds = new Set(applied)
-  const pendingMigrationFiles = []
-  for (const [index, statement] of nativeSqlStatements.entries()) {
-    const item = typeof statement === 'string'
-      ? { id: 'statement-' + index, sql: statement }
-      : statement
-    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
-    if (!item.sql.split('\\n').some((line) => {
-      const trimmed = line.trim()
-      return trimmed.length > 0 && !trimmed.startsWith('--')
-    })) continue
-    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
-    if (supersededStatementIds.has(baseId) || appliedStatementIds.has(baseId)) continue
-    const file = baseId.split(':')[0]
-    if (!pendingMigrationFiles.includes(file)) pendingMigrationFiles.push(file)
-  }
+  const pendingMigrationFiles = pendingMigrationFilesFor(appliedStatementIds)
   const selectedMigrationFile =
     migrationFile === null && prepare ? (pendingMigrationFiles[0] ?? null) : migrationFile
   const remainingMigrationFiles = pendingMigrationFiles.filter(
@@ -1199,6 +1270,15 @@ async function migrate({
   // so what is left is only reachable through a message that says more.
   let phase = 'session-acquire'
   try {
+    phase = 'schema-check'
+    const current = await client.readTransaction(() => {
+      throw new Error('native schema migration does not use queryAst')
+    }, nativeSchemaIsCurrent)
+    if (current) return {
+      tables: resolvedPublicTables.map((table) => table.publicTable),
+      ...(schemaOnly ? { schemaOnly: true } : null),
+    }
+    phase = 'session-acquire'
     let migrationState
     await client.transaction(() => {
       throw new Error('native schema migration does not use queryAst')

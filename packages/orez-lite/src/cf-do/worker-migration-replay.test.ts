@@ -256,6 +256,14 @@ function migrationClient(core: Awaited<ReturnType<typeof createWorkerCore>>) {
       core.zero.registerApplicationSqlTables(
         tables.map((entry) => ({ table: entry.table, publicTable: entry.publicTable }))
       ),
+    readTransaction: async (
+      _compile: unknown,
+      work: (tx: Record<string, unknown>) => Promise<unknown>
+    ) =>
+      work({
+        query: async (sql: string, params: readonly unknown[] = []) =>
+          core.zero.executeSQL(sql, [...params]).rows,
+      }),
     transaction: async (
       _compile: unknown,
       work: (tx: Record<string, unknown>) => Promise<unknown>
@@ -320,6 +328,74 @@ function decompose(written: Array<{ sql: string; rows: number }>) {
 }
 
 describe('stale namespace migration replay cost', () => {
+  it('checks a current namespace without writer sessions and still repairs publication and phantom effects', async () => {
+    const core = await createWorkerCore()
+    const schemaUrl = `data:text/javascript;base64,${Buffer.from(`
+      export const schema = { tables: { widget: {
+        name: 'widget', columns: { id: { type: 'string' } }, primaryKey: ['id']
+      } }, relationships: {} }
+    `).toString('base64')}`
+    const module = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'read-current',
+        schemaImportSpecifier: schemaUrl,
+        nativeSqlStatements: [
+          { id: '0000_widget:0', sql: 'CREATE TABLE widget (id TEXT PRIMARY KEY)' },
+        ],
+        expectedTables: [
+          {
+            name: 'widget',
+            columns: [{ name: 'id', notNull: true, primaryKeyOrder: 1, sqlType: 'text' }],
+          },
+        ],
+      })
+    )
+    const client = migrationClient(core)
+    const writers = vi.spyOn(client, 'transaction')
+    const migrate = () => module.orezAppSchema.migrate({ client })
+    await migrate()
+    expect(core.sql.exec('SELECT name FROM _zero_schema_tables').toArray()).toEqual([
+      { name: 'widget' },
+    ])
+    expect(
+      core.sql.exec('SELECT physical_table FROM _orez_cdc_tables').toArray()
+    ).toContainEqual({ physical_table: 'widget' })
+    writers.mockClear()
+    core.start()
+    await Promise.all(Array.from({ length: 33 }, migrate))
+    core.stop()
+    expect(writers).not.toHaveBeenCalled()
+    expect(core.written).toEqual([])
+
+    // stale schema publication must still take the writer and republish.
+    core.sql.exec(
+      "UPDATE _zero_schema_tables SET schema_json = '{}' WHERE name = 'widget'"
+    )
+    await migrate()
+    expect(writers).toHaveBeenCalledTimes(1)
+    expect(
+      JSON.parse(
+        String(
+          core.sql
+            .exec("SELECT schema_json FROM _zero_schema_tables WHERE name = 'widget'")
+            .one().schema_json
+        )
+      ).primaryKey
+    ).toEqual(['id'])
+
+    // a ledgered create whose effect disappeared must still replay.
+    core.sql.exec('DROP TABLE widget')
+    core.zero.invalidateSchemaCaches()
+    writers.mockClear()
+    await migrate()
+    expect(writers).toHaveBeenCalledTimes(1)
+    expect(core.sql.exec('SELECT * FROM widget').toArray()).toEqual([])
+    writers.mockClear()
+    await migrate()
+    expect(writers).not.toHaveBeenCalled()
+  })
+
   it('replays every sibling after a guarded scratch-column repair rolls back', async () => {
     const core = await createWorkerCore()
     core.sql.exec('CREATE TABLE widget (id TEXT PRIMARY KEY, createdAt timestamp)')

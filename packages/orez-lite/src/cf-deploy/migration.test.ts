@@ -39,6 +39,14 @@ function migrationLedgerRows(
   return rows
 }
 
+// these statement-focused clients start with an uninitialized namespace.
+async function readFreshSchema(
+  _compile: unknown,
+  run: (tx: { query: () => Promise<unknown[]> }) => Promise<unknown>
+) {
+  return run({ query: async () => [] })
+}
+
 describe('buildMigrationModuleSource', () => {
   it('exports a native descriptor backed by the imported Zero schema', async () => {
     const schemaModuleUrl = javascriptModuleUrl(`
@@ -207,6 +215,7 @@ describe('buildMigrationModuleSource', () => {
         },
       }
       const client = {
+        readTransaction: readFreshSchema,
         async transaction(_compile: unknown, run: (inner: typeof tx) => Promise<void>) {
           await run(tx)
         },
@@ -334,6 +343,7 @@ describe('buildMigrationModuleSource', () => {
       async registerTables() {},
     }
     const client = {
+      readTransaction: readFreshSchema,
       async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
         transaction++
         await run(tx)
@@ -430,6 +440,7 @@ describe('buildMigrationModuleSource', () => {
       async registerTables() {},
     }
     const client = {
+      readTransaction: readFreshSchema,
       async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
         sessions++
         await run(tx)
@@ -511,6 +522,7 @@ describe('buildMigrationModuleSource', () => {
       async registerTables() {},
     }
     const client = {
+      readTransaction: readFreshSchema,
       async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
         await run(tx)
       },
@@ -623,6 +635,7 @@ describe('buildMigrationModuleSource', () => {
       async registerTables() {},
     }
     const client = {
+      readTransaction: readFreshSchema,
       async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
         await run(tx)
       },
@@ -745,6 +758,7 @@ describe('buildMigrationModuleSource', () => {
       async registerTables() {},
     }
     const client = {
+      readTransaction: readFreshSchema,
       async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
         await run(tx)
       },
@@ -822,6 +836,7 @@ describe('buildMigrationModuleSource', () => {
         async registerTables() {},
       }
       const client = {
+        readTransaction: readFreshSchema,
         async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
           await run(tx)
         },
@@ -979,6 +994,7 @@ describe('buildMigrationModuleSource', () => {
       async registerTables() {},
     }
     const client = {
+      readTransaction: readFreshSchema,
       async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
         await run(tx)
       },

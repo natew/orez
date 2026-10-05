@@ -1,7 +1,7 @@
+import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'bun:test'
 
 import { createEnv, expected } from './index.js'
 
@@ -54,11 +54,11 @@ describe('@o/env', () => {
     const dir = mkdtempSync(join(tmpdir(), 'orez-env-'))
     writeFileSync(
       join(dir, '.env'),
-      'OREZ_ENV_TEST_SECRET=real-secret\nexport OREZ_ENV_TEST_ROTATED="new-key"\nOREZ_ENV_TEST_OVERRIDE=from-file\n',
+      'OREZ_ENV_TEST_SECRET=real-secret\nexport OREZ_ENV_TEST_ROTATED="new-key"\nOREZ_ENV_TEST_OVERRIDE=from-file\n'
     )
     writeFileSync(
       join(dir, '.env.development'),
-      '# managed by src/env.ts!\nOREZ_ENV_TEST_SECRET=\nOREZ_ENV_TEST_ROTATED=old-key\nOREZ_ENV_TEST_OVERRIDE=managed\nOREZ_ENV_TEST_MODE=dev-3000',
+      '# managed by src/env.ts!\nOREZ_ENV_TEST_SECRET=\nOREZ_ENV_TEST_ROTATED=old-key\nOREZ_ENV_TEST_OVERRIDE=managed\nOREZ_ENV_TEST_MODE=dev-3000'
     )
     process.chdir(dir)
     process.env.TAKEOUT_ENV_MODE = 'development'
