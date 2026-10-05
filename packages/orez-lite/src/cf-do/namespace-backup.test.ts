@@ -997,6 +997,108 @@ describe('namespace backup restore', () => {
     ])
   })
 
+  it('drops captured tables before the cdc registry when an older backup replaces a live object', async () => {
+    const key = 'backups/singleton/older-cdc.ndjson'
+    const stored = bucketWith(
+      key,
+      dump([
+        { kind: 'header', format: 'test-v3', ns: 'source' },
+        {
+          kind: 'table',
+          name: 'message',
+          sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)',
+          indexes: [],
+        },
+        { kind: 'rows', table: 'message', rows: [{ id: 'restored' }] },
+        { kind: 'footer', tables: 1, rows: 1 },
+      ])
+    )
+    const db = new BetterSqlite3(':memory:')
+    db.exec('PRAGMA foreign_keys = ON')
+    db.exec('CREATE TABLE message (id TEXT PRIMARY KEY)')
+    db.exec(
+      'CREATE TABLE messageReaction (id TEXT PRIMARY KEY, messageId TEXT NOT NULL REFERENCES message(id))'
+    )
+    db.exec(
+      'CREATE TABLE _orez_cdc_tables (physical_table TEXT PRIMARY KEY, table_name TEXT NOT NULL)'
+    )
+    db.exec(
+      'CREATE TABLE _orez_cdc_buffer (seq INTEGER PRIMARY KEY, table_name TEXT, op TEXT)'
+    )
+    db.exec(
+      `CREATE TRIGGER "_orez_cdc_message_insert" AFTER INSERT ON message BEGIN
+        INSERT INTO "_orez_cdc_buffer" (table_name, op) VALUES ('message', 'INSERT');
+      END`
+    )
+    db.exec("INSERT INTO _orez_cdc_tables VALUES ('message', 'public.message')")
+    db.exec("INSERT INTO message VALUES ('current')")
+    db.exec("INSERT INTO messageReaction VALUES ('reaction', 'current')")
+    const drops: string[] = []
+    const manager = createNamespaceBackupManager({
+      ...sqliteSnapshotCallbacks(db),
+      format: 'test-v3',
+      markerTable: '_test_backup_meta',
+      excludedTables: ['_test_backup_meta'],
+      files: () => stored.bucket,
+      query: async (_env, _namespace, sql, params) => {
+        const statement = db.prepare(sql)
+        if (statement.reader) return statement.all(...params)
+        statement.run(...params)
+        return []
+      },
+      batch: async (_env, _namespace, statements) => {
+        db.exec('BEGIN')
+        try {
+          for (const statement of statements) {
+            const target = /^DROP TABLE IF EXISTS "([^"]+)"$/.exec(statement.sql)?.[1]
+            if (target) drops.push(statement.sql)
+            if (
+              target &&
+              target !== '_orez_cdc_tables' &&
+              target !== '_orez_cdc_buffer' &&
+              db
+                .prepare(
+                  "SELECT 1 AS ok FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name GLOB '_orez_cdc_*'"
+                )
+                .get(target) &&
+              !db
+                .prepare(
+                  "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_orez_cdc_tables'"
+                )
+                .get()
+            ) {
+              throw new Error('no such table: _orez_cdc_tables')
+            }
+            db.prepare(statement.sql).run(...(statement.params ?? []))
+          }
+          db.exec('COMMIT')
+        } catch (error) {
+          db.exec('ROLLBACK')
+          throw error
+        }
+      },
+      listNamespaces: async () => ['singleton'],
+    })
+
+    await manager.importNamespace({}, 'singleton', key, { allowNonEmpty: true })
+
+    const messageDrop = drops.indexOf('DROP TABLE IF EXISTS "message"')
+    const registryDrop = drops.indexOf('DROP TABLE IF EXISTS "_orez_cdc_tables"')
+    const bufferDrop = drops.indexOf('DROP TABLE IF EXISTS "_orez_cdc_buffer"')
+    expect(messageDrop).toBeGreaterThanOrEqual(0)
+    expect(messageDrop).toBeLessThan(registryDrop)
+    expect(messageDrop).toBeLessThan(bufferDrop)
+    expect(db.prepare('SELECT id FROM message').all()).toEqual([{ id: 'restored' }])
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '\\_orez\\_cdc\\_%' ESCAPE '\\'"
+        )
+        .all()
+    ).toEqual([])
+    db.close()
+  })
+
   it('drops reverse-FK current tables in bounded batches against real SQLite', async () => {
     const key = 'backups/singleton/real-older.ndjson'
     const stored = bucketWith(

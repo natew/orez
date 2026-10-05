@@ -927,6 +927,24 @@ export function createNamespaceBackupManager<Env>(
           tableDependencies(row.sql, row.name, dropNamesBySqlIdentity),
         ])
     )
+    // a captured-table drop rewrites `_orez_cdc_tables` in that same statement,
+    // so the registry and buffer have to outlive every other drop. an older
+    // backup can then replace a live object instead of dying on the missing
+    // registry.
+    const cdcBookkeeping = ['_orez_cdc_tables', '_orez_cdc_buffer']
+    for (const name of dropNames) {
+      if (cdcBookkeeping.includes(name)) continue
+      const dependencies = new Set(dropDependencies.get(name) ?? [])
+      let changed = false
+      for (const book of cdcBookkeeping) {
+        const canonical = dropNamesBySqlIdentity.get(book)
+        if (!canonical || canonical === name) continue
+        if (dependencies.has(canonical)) continue
+        dependencies.add(canonical)
+        changed = true
+      }
+      if (changed) dropDependencies.set(name, [...dependencies])
+    }
     const dropStatements = dependencyOrder(dropNames, dropDependencies)
       .reverse()
       .map((name) => ({
