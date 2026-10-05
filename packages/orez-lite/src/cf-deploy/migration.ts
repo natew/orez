@@ -905,6 +905,10 @@ async function nativeSchemaIsCurrent(tx) {
     const created = /^CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(statement.sql.trim())
     if (!created) continue
     const columns = new Set((liveColumns.get(created[1]) || []).map((column) => column.name))
+    // absent tables belong to phantom reconciliation, including scratch
+    // tables intentionally dropped by their migration. convergence only
+    // adds declared columns to tables that still exist.
+    if (columns.size === 0) continue
     if (statement.declaredColumns.some((column) => column && typeof column.name === 'string' && !columns.has(column.name))) return false
   }
   // a shape mismatch may be repaired by declared-column convergence, so it

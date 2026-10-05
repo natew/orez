@@ -342,6 +342,12 @@ describe('stale namespace migration replay cost', () => {
         schemaImportSpecifier: schemaUrl,
         nativeSqlStatements: [
           { id: '0000_widget:0', sql: 'CREATE TABLE widget (id TEXT PRIMARY KEY)' },
+          {
+            id: '0000_widget:1',
+            sql: 'CREATE TABLE scratch (id TEXT PRIMARY KEY)',
+            declaredColumns: [{ name: 'id', definition: 'id TEXT PRIMARY KEY' }],
+          },
+          { id: '0000_widget:2', sql: 'DROP TABLE scratch' },
         ],
         expectedTables: [
           {
