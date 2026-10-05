@@ -149,19 +149,20 @@ type EnvResult<
 const validEnvs = { development: true, production: true } as const
 const managedDotEnvHeader = '# managed by src/env.ts!'
 
-function readManagedDotEnv(dotEnvPath: string): Record<string, string> {
+function readDotEnv(dotEnvPath: string, managed: boolean): Record<string, string> {
   const fs = getFs()
   if (!fs || !fs.existsSync(dotEnvPath)) {
     return {}
   }
 
   const content = fs.readFileSync(dotEnvPath, 'utf-8')
-  if (!content.startsWith(`${managedDotEnvHeader}\n`)) {
+  if (managed && !content.startsWith(`${managedDotEnvHeader}\n`)) {
     return {}
   }
 
   const values: Record<string, string> = {}
-  for (const line of content.split('\n')) {
+  for (const rawLine of content.split('\n')) {
+    const line = managed ? rawLine : rawLine.trim().replace(/^export\s+/, '')
     if (!line || line.startsWith('#')) {
       continue
     }
@@ -171,11 +172,12 @@ function readManagedDotEnv(dotEnvPath: string): Record<string, string> {
       continue
     }
 
-    const key = line.slice(0, equalsIndex)
+    const key = line.slice(0, equalsIndex).trim()
     const rawValue = line.slice(equalsIndex + 1)
     // unquoted values are literal, quoted values just strip quotes
     values[key] =
-      rawValue.startsWith('"') && rawValue.endsWith('"')
+      (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+      (!managed && rawValue.startsWith("'") && rawValue.endsWith("'"))
         ? rawValue.slice(1, -1)
         : rawValue
   }
@@ -225,28 +227,12 @@ export function createEnv<
       ? modeConfig({ ports, portOffset, pgUrl })
       : modeConfig
   const modeKeys = new Set(Object.keys(modeEnv || {}))
-  const managedDevEnv =
-    NODE_ENV === 'development' && config.freshDev
-      ? readManagedDotEnv('.env.development')
-      : {}
+  const freshDev = NODE_ENV === 'development' && Boolean(config.freshDev)
+  const managedDevEnv = freshDev ? readDotEnv('.env.development', true) : {}
+  // bun loads .env.development over .env, so a value our managed file echoes
+  // back (a blank secret, a rotated key) would shadow the user's .env forever.
+  const userDotEnv = freshDev ? readDotEnv('.env', false) : {}
   const refreshedKeys = new Set<string>()
-
-  // in dev mode with freshDev, refresh only values that came from our managed
-  // .env.development file so computed defaults win over stale inherited values
-  // without clobbering explicit overrides from the parent process. resolution
-  // treats refreshed keys as unset; process.env itself is never mutated here —
-  // only apply() writes to it. deleting from process.env broke the built vite
-  // SSR server: apply()'s VITE_ENVIRONMENT guard constant-folds it to a no-op
-  // there, so cleared vars (e.g. BETTER_AUTH_SECRET read directly by
-  // better-auth) were never restored.
-  if (NODE_ENV === 'development' && config.freshDev && modeEnv) {
-    for (const key of Object.keys(modeEnv)) {
-      const envVal = process.env[key]
-      if (envVal !== undefined && managedDevEnv[key] === envVal) {
-        refreshedKeys.add(key)
-      }
-    }
-  }
 
   // merge base + mode, mode wins
   const merged: Record<string, EnvValue> = {
@@ -254,12 +240,37 @@ export function createEnv<
     ...modeEnv,
   }
 
+  // in dev mode with freshDev, refresh values that came from our managed
+  // .env.development file so computed defaults and the user's .env win over
+  // stale inherited values without clobbering explicit overrides from the
+  // parent process. resolution treats refreshed keys as unset; process.env
+  // itself is never mutated here — only apply() writes to it. deleting from
+  // process.env broke the built vite SSR server: apply()'s VITE_ENVIRONMENT
+  // guard constant-folds it to a no-op there, so cleared vars (e.g.
+  // BETTER_AUTH_SECRET read directly by better-auth) were never restored.
+  if (freshDev) {
+    for (const key of Object.keys(merged)) {
+      const envVal = process.env[key]
+      if (envVal !== undefined && managedDevEnv[key] === envVal) {
+        refreshedKeys.add(key)
+      }
+    }
+  }
+
+  // a refreshed mode key is recomputed; a refreshed base key reads the user's .env
+  const sourceValue = (key: string): string | undefined =>
+    refreshedKeys.has(key)
+      ? modeKeys.has(key)
+        ? undefined
+        : userDotEnv[key]
+      : process.env[key]
+
   // resolve expected values and build final env
   const resolvedEnv: Record<string, string> = { NODE_ENV }
 
   for (const [key, val] of Object.entries(merged)) {
     if (val === expected) {
-      const envVal = refreshedKeys.has(key) ? undefined : process.env[key]
+      const envVal = sourceValue(key)
       if (envVal !== undefined && envVal !== '') {
         resolvedEnv[key] = envVal
       } else if (NODE_ENV === 'production' && !process.env.ALLOW_MISSING_ENV) {
@@ -272,7 +283,7 @@ export function createEnv<
       // prefer process.env over config defaults, except when an explicit mode
       // override is active. In that case, mode-computed keys must resolve from
       // the requested mode rather than inherited parent-process values.
-      const envVal = refreshedKeys.has(key) ? undefined : process.env[key]
+      const envVal = sourceValue(key)
       resolvedEnv[key] =
         explicitMode && modeKeys.has(key)
           ? val
