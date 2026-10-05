@@ -66,6 +66,9 @@ const dataWorker = createOrezDataWorker({
 
 export class ZeroDO extends dataWorker.ZeroDO {
   resetForProof() { this.ctx.abort('snapshot restart proof') }
+  async checkCurrentSchema(instance) {
+    return orezAppSchema.migrate({ instance, client: this.applicationSqlLocalClient(instance) })
+  }
 }
 
 export default {
@@ -179,6 +182,10 @@ export default {
       const result = await dataWorker.ensureNamespaceSchema(env, namespace, { force: true })
       return Response.json(result)
     }
+    if (action === 'current-check') {
+      const stub = env.ZERO_SQL_DO.get(env.ZERO_SQL_DO.idFromName(instance))
+      return Response.json(await stub.checkCurrentSchema(instance))
+    }
     if (action === 'status') {
       return dataWorker.fetch(
         new Request('https://fixture.invalid/' + namespace + '/_orez/status', {
@@ -279,6 +286,9 @@ try {
     sessions:
       after.requestsSinceBoot.applicationSqlSessions -
       before.requestsSinceBoot.applicationSqlSessions,
+    readSessions:
+      after.requestsSinceBoot.applicationSqlReadSessions -
+      before.requestsSinceBoot.applicationSqlReadSessions,
     statements:
       after.requestsSinceBoot.sqlStatements - before.requestsSinceBoot.sqlStatements,
     callbacks: observation.callbacks,
@@ -295,13 +305,39 @@ try {
   // as the same list sent one call at a time. the seed lands like a restore,
   // so the ledger table arrives with no transaction journal or schema
   // snapshot; the migration's first write to it records both here.
+  // the shared read preflight inspects six schema rows in one statement and
+  // session before the two migration writers. its overhead writes no rows.
   assert.deepEqual(cost, {
-    rowsRead: 897,
+    rowsRead: 903,
     rowsWritten: 44,
-    sessions: 2,
-    statements: 86,
+    sessions: 3,
+    readSessions: 1,
+    statements: 87,
     callbacks: 0,
   })
+  const currentBefore = await fetch(`${base}/status/${namespace}`).then((r) => r.json())
+  const checks = await Promise.all(
+    Array.from({ length: 33 }, () => fetch(`${base}/current-check/${namespace}`))
+  )
+  for (const response of checks)
+    assert.equal(response.status, 200, await response.clone().text())
+  const currentAfter = await fetch(`${base}/status/${namespace}`).then((r) => r.json())
+  // every check opens one reader and no writer; caught-up checks write nothing.
+  assert.equal(
+    currentAfter.requestsSinceBoot.applicationSqlSessions -
+      currentBefore.requestsSinceBoot.applicationSqlSessions,
+    33
+  )
+  assert.equal(
+    currentAfter.requestsSinceBoot.applicationSqlReadSessions -
+      currentBefore.requestsSinceBoot.applicationSqlReadSessions,
+    33
+  )
+  assert.equal(
+    currentAfter.sqlBillingSinceBoot.rowsWritten -
+      currentBefore.sqlBillingSinceBoot.rowsWritten,
+    0
+  )
   // raw application sql on a namespace nobody migrated converges the schema
   // before the statement runs, so the tables it asks for already exist
   const firstTouch = await fetch(
