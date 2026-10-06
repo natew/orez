@@ -935,17 +935,13 @@ try {
     }
     await withTimeout(Promise.all(acks), 30_000, `round ${round} server acks`)
 
-    // sentinel barrier: both targets must see this round's marker project
+    // the marker must arrive through replication; a client mutation makes it
+    // visible optimistically before the preceding server changes reach views.
     const sentinel = `sentinel-${SWEEP_SEED}-${round}`
     pools.project.push(sentinel)
-    for (const zero of [stockZero, otherZero]) {
-      const req = zero.mutate(
-        mutators.project.create({ id: sentinel, ownerId: 'u0', name: sentinel })
-      )
-      await withTimeout(
-        assertServerOutcome(req.server, 'success', `sentinel ${sentinel}`),
-        30_000,
-        `sentinel ${sentinel} server ack`
+    for (const target of [stock, other]) {
+      await target.sql(
+        `INSERT INTO project (id, "ownerId", name) VALUES ('${sentinel}', 'u0', '${sentinel}')`
       )
     }
     await eventually(

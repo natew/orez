@@ -98,6 +98,10 @@ jobs:
       - name: harness install
         run: cd harness && bun install
 
+      # nested task/project views must settle before the post-write comparison.
+      - name: replay replication barrier regression
+        run: cd harness && bun src/sweep.ts --seed 85625510 --rounds 10 --queriesPerRound 4 --against rust-local
+
       # committed exact corpus entries run before the seeded nightly sweep.
       # ordinary pull-request sweeps deliberately omit --corpus.
       - name: replay corpus before nightly sweep
