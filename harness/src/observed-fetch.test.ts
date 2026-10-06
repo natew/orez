@@ -115,16 +115,55 @@ test('pull quiescence controller aborts only its pending pulls', async () => {
   })
 
   const caller = new AbortController()
-  const callerPull = controller.fetch('http://localhost/pull?caller=1', {
+  const callerController = createPullQuiescenceFetch(transport)
+  const callerPull = callerController.fetch('http://localhost/pull?caller=1', {
     signal: caller.signal,
   })
   const callerResult = Promise.allSettled([callerPull])
   caller.abort()
-  expect(controller.abortPendingPulls()).toBe(0)
+  expect(callerController.abortPendingPulls()).toBe(0)
   const [callerSettled] = await callerResult
   expect(callerSettled).toMatchObject({ status: 'rejected' })
   if (callerSettled!.status === 'rejected') {
     expect(callerSettled.reason).toBeInstanceOf(Error)
     expect(callerSettled.reason).not.toBeInstanceOf(PullAbortedByQuiesceControllerError)
   }
+})
+
+test('pull quiescence owns the response body after headers arrive', async () => {
+  let headersArrived!: () => void
+  const headers = new Promise<void>((resolve) => {
+    headersArrived = resolve
+  })
+  const transport = (async (_input, init) => {
+    const body = new ReadableStream({
+      start(stream) {
+        init?.signal?.addEventListener('abort', () => stream.error(init.signal!.reason), {
+          once: true,
+        })
+      },
+    })
+    headersArrived()
+    return new Response(body)
+  }) as typeof fetch
+  const controller = createPullQuiescenceFetch(transport)
+  const observations: Array<{ phase: string; error?: unknown }> = []
+  const observed = observedSyncFetch(
+    (value) => observations.push(value),
+    controller.fetch
+  )
+  const request = observed('http://localhost/pull', { method: 'POST', body: '{}' })
+  const result = Promise.allSettled([request])
+  await headers
+  // let the fetch resolve its headers while the body remains blocked.
+  await Promise.resolve()
+  expect(controller.pendingPullCount()).toBe(1)
+  expect(controller.abortPendingPulls()).toBe(1)
+  const [settled] = await result
+  expect(settled).toMatchObject({ status: 'rejected' })
+  if (settled!.status === 'rejected')
+    expect(settled.reason).toBeInstanceOf(PullAbortedByQuiesceControllerError)
+  expect(observations.map(({ phase }) => phase)).toEqual(['invoke', 'terminal'])
+  expect(observations[1]!.error).toBeInstanceOf(PullAbortedByQuiesceControllerError)
+  expect(controller.pendingPullCount()).toBe(0)
 })

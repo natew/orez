@@ -369,6 +369,10 @@ describe('buildMigrationModuleSource', () => {
         schemaVersion: 'schema-cost',
         schemaImportSpecifier: schemaModuleUrl,
         nativeSqlStatements: [
+          ...Array.from({ length: 585 }, (_, index) => ({
+            id: `0000_history/migration.sql:${index}`,
+            sql: '-- historical supersession anchor\n  -- no executable sql',
+          })),
           {
             id: '0001_retired/migration.sql:0',
             sql: 'DROP TABLE IF EXISTS retired',
@@ -451,7 +455,7 @@ describe('buildMigrationModuleSource', () => {
     await migrationModule.orezAppSchema.migrate({ client })
 
     // prepare applies the first pending file and each later file re-reads.
-    // historical ledger ids stay out of both probes.
+    // historical ledger ids and comment-only anchors stay out of both probes.
     expect(ledgerQueries).toBe(2)
     expect(ledgerRowsRead).toBe(3)
     expect(sessions).toBe(2)

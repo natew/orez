@@ -72,7 +72,11 @@ export function createPullQuiescenceFetch(fetchImpl: typeof fetch = globalThis.f
       if (init?.signal?.aborted) callerAbort()
       else init?.signal?.addEventListener('abort', callerAbort, { once: true })
       try {
-        return await fetchImpl(input, { ...init, signal: controller.signal })
+        const response = await fetchImpl(input, { ...init, signal: controller.signal })
+        // fetch resolves at headers. keep the pull owned until its body is
+        // complete, so quiescence also classifies an abort during body delivery.
+        const body = response.body === null ? null : await response.arrayBuffer()
+        return new Response(body, response)
       } catch (error) {
         if (state.abortSource === 'quiesce')
           throw new PullAbortedByQuiesceControllerError({ cause: error })

@@ -537,13 +537,20 @@ function appliedHasStatement(applied, baseId) {
   return applied.has(baseId)
 }
 
+function hasExecutableMigrationSql(item) {
+  return item && typeof item.sql === 'string' && item.sql.split('\\n').some((line) => {
+    const trimmed = line.trim()
+    return trimmed.length > 0 && !trimmed.startsWith('--')
+  })
+}
+
 function knownMigrationStatementIds() {
   const ids = new Set()
   for (const [index, statement] of nativeSqlStatements.entries()) {
     const item = typeof statement === 'string'
       ? { id: 'statement-' + index, sql: statement }
       : statement
-    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
+    if (!hasExecutableMigrationSql(item)) continue
     ids.add(typeof item.id === 'string' && item.id ? item.id : 'statement-' + index)
   }
   return [...ids]
@@ -582,11 +589,7 @@ function pendingMigrationFilesFor(applied) {
     const item = typeof statement === 'string'
       ? { id: 'statement-' + index, sql: statement }
       : statement
-    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
-    if (!item.sql.split('\\n').some((line) => {
-      const trimmed = line.trim()
-      return trimmed.length > 0 && !trimmed.startsWith('--')
-    })) continue
+    if (!hasExecutableMigrationSql(item)) continue
     const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
     if (supersededStatementIds.has(baseId) || applied.has(baseId)) continue
     const file = baseId.split(':')[0]
@@ -1118,13 +1121,9 @@ async function applyNativeSchema(tx, instance, {
       const item = typeof statement === 'string'
         ? { id: 'statement-' + index, sql: statement }
         : statement
-      if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
       // a statement that is only sql comments (a supersession-anchor
       // migration) has nothing to execute.
-      if (!item.sql.split('\\n').some((line) => {
-        const trimmed = line.trim()
-        return trimmed.length > 0 && !trimmed.startsWith('--')
-      })) continue
+      if (!hasExecutableMigrationSql(item)) continue
       const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
       if (supersededStatementIds.has(baseId)) continue
       if (selectedMigrationFile === null || baseId.split(':')[0] !== selectedMigrationFile) {

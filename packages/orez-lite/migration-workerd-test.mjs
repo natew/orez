@@ -298,9 +298,9 @@ try {
     ledger: 1_003,
     callbacks: 0,
   })
-  // the 588 current ids take 19 primary-key probe statements. unmatched
-  // historical rows do not add reads; the previous scan read all 1,001 rows
-  // once per session while opening prepare + one session per file + finalize.
+  // only the three executable ids need primary-key probes in each writer.
+  // the 585 comment-only anchors and unmatched historical rows add no reads;
+  // every file still re-reads under its exclusive transaction.
   // a statement list sent through execMany costs the same rows and statements
   // as the same list sent one call at a time. the seed lands like a restore,
   // so the ledger table arrives with no transaction journal or schema
@@ -308,11 +308,11 @@ try {
   // the shared read preflight inspects six schema rows in one statement and
   // session before the two migration writers. its overhead writes no rows.
   assert.deepEqual(cost, {
-    rowsRead: 903,
+    rowsRead: 321,
     rowsWritten: 44,
     sessions: 3,
     readSessions: 1,
-    statements: 87,
+    statements: 70,
     callbacks: 0,
   })
   const currentBefore = await fetch(`${base}/status/${namespace}`).then((r) => r.json())
