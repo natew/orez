@@ -4,7 +4,7 @@
 // never passes through a float on any host (sol-m0's precision contract). all
 // functions assume the host has a transaction open; none emits BEGIN/COMMIT.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::db::{SqlValue, SyncDb};
 use crate::error::EngineError;
@@ -174,30 +174,6 @@ pub(crate) fn touch_client_group(
             counter(watermark),
             counter(floor_after),
         ],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn delete_clients(
-    db: &mut dyn SyncDb,
-    client_group_id: &str,
-    client_ids: &BTreeSet<String>,
-) -> Result<(), EngineError> {
-    if client_ids.is_empty() {
-        return Ok(());
-    }
-    let placeholders = std::iter::repeat_n("?", client_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut params = Vec::with_capacity(client_ids.len() + 1);
-    params.push(text(client_group_id));
-    params.extend(client_ids.iter().map(text));
-    db.exec(
-        &format!(
-            "DELETE FROM _zsync_clients
-             WHERE clientGroupID = ? AND clientID IN ({placeholders})"
-        ),
-        &params,
     )?;
     Ok(())
 }

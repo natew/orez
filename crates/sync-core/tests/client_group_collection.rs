@@ -2,8 +2,8 @@
 // them.
 //
 // Nothing could collect a group before `_zsync_client_group_seen` existed:
-// `delete_clients` only runs when a live client TELLS the server which of its
-// clients it deleted, so a client that simply never returns leaves its whole
+// subscription cleanup only runs when a live client tells the server which of
+// its clients it retired, so a client that simply never returns leaves its whole
 // membership behind forever. A real store reached 607 groups and 640k
 // membership rows while serving three clients.
 //

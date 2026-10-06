@@ -367,5 +367,12 @@ application response implies the settlement is already pull-visible.
 The coherence guarantee costs one serialized local admin request per
 application-owned push.
 
+Client retirement removes desired queries, query acknowledgements and membership
+while preserving the client's mutation counter and group owner. A sibling tab
+can report retirement before the final push reaches the server. That delayed
+push and its replays retain their ordering and deduplication history. Retrying
+the same retirement writes no rows; the first retirement saves the counter-row
+deletion previously charged by cleanup.
+
 This route is a machine-only part of the native admin surface. Browser requests
 remain forbidden even when they carry the admin token.

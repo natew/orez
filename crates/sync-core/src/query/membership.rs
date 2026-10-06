@@ -444,7 +444,9 @@ pub(crate) fn delete_clients(
             &params,
         )?;
     }
-    crate::store::delete_clients(db, group, client_ids)
+    // a sibling can retire this client before its last push arrives. mutation
+    // order, deduplication and group ownership outlive its subscriptions.
+    Ok(())
 }
 
 // the hashes a client currently desires (for the gotQueries acknowledgement)

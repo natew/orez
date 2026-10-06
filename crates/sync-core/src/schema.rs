@@ -681,8 +681,8 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
     //
     // Nothing here could collect an abandoned client group before this table
     // existed, because nothing recorded when a group was last seen. The only
-    // path that removes clients, `store::delete_clients`, runs when a live
-    // client TELLS the server which of its clients it deleted, so a client that
+    // subscription cleanup runs when a live client tells the server which of
+    // its clients it retired, so a client that
     // simply never comes back — a browser with its storage cleared, a device
     // that died, an app whose key-value store is in memory and forgets its
     // group on every launch — leaves its whole membership behind forever. One

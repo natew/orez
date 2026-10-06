@@ -75,8 +75,8 @@ fn deleting_a_client_with_shared_queries_writes_only_its_client_state() {
             .unwrap()
     });
     assert_eq!(
-        written, 3,
-        "deletion should remove one client, desire, and ack row"
+        written, 2,
+        "retirement removes desire and ack rows while preserving mutation history"
     );
     assert_eq!(response["deletedClientIDs"], json!(["retired"]));
     assert!(response["rowsPatch"].as_array().unwrap().is_empty());

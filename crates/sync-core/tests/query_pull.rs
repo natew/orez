@@ -10,6 +10,7 @@ use common::TestDb;
 use rusqlite::limits::Limit;
 use serde_json::{Value, json};
 
+use sync_core::push::{Preflight, preflight};
 use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::schema::TableSpec;
 use sync_core::value::ZeroColumnType;
@@ -131,7 +132,7 @@ fn has_clear(resp: &Value) -> bool {
 }
 
 #[test]
-fn deleting_a_client_removes_its_queries_membership_and_lmid() {
+fn deleting_a_client_removes_its_queries_membership_and_preserves_lmid() {
     let mut h = QHost::new();
     let keeper = h.pull(
         "keeper",
@@ -192,9 +193,8 @@ fn deleting_a_client_removes_its_queries_membership_and_lmid() {
 
     assert_eq!(response["deletedClientIDs"], json!(["retired"]));
     assert_eq!(del_ids(&response), vec!["i2"]);
-    assert!(response["lastMutationIDChanges"].get("retired").is_none());
+    assert_eq!(response["lastMutationIDChanges"]["retired"], json!(1));
     for table in [
-        "_zsync_clients",
         "_zsync_desires",
         "_zsync_query_ack",
         "_zsync_query_transform_client",
@@ -210,6 +210,15 @@ fn deleting_a_client_removes_its_queries_membership_and_lmid() {
             .unwrap();
         assert!(rows.is_empty(), "{table} retained the deleted client");
     }
+    let counters = h.db.query(
+        "SELECT lastMutationID, userID FROM _zsync_clients WHERE clientGroupID = ? AND clientID = ?",
+        &[SqlValue::Text("g1".into()), SqlValue::Text("retired".into())],
+    ).unwrap();
+    assert_eq!(counters.len(), 1);
+    assert_eq!(
+        counters[0].values,
+        vec![SqlValue::Integer(1), SqlValue::Text("u1".into())]
+    );
 
     let definitions =
         h.db.query(
@@ -245,6 +254,54 @@ fn a_client_cannot_delete_itself() {
             .unwrap_err();
 
     assert_eq!(error.status, 400);
+}
+
+#[test]
+fn retiring_a_client_preserves_mutation_order_replay_and_group_ownership() {
+    let mut h = QHost::new();
+    let push = |id| {
+        json!({
+            "clientGroupID": "g1", "pushVersion": 1,
+            "mutations": [{ "type": "custom", "id": id, "clientID": "retired",
+                            "name": "issue.noop", "args": [{}], "timestamp": 0 }],
+        })
+    };
+    let response = |id| {
+        json!({ "pushResponse": { "mutations": [{
+        "id": { "clientID": "retired", "id": id }, "result": {},
+    }] } })
+    };
+    for id in [1, 2] {
+        h.db.transaction(|db| settle_delegated_push(db, &push(id), &response(id), "u1"))
+            .unwrap();
+    }
+    let body = json!({ "clientID": "keeper", "clientGroupID": "g1",
+                       "cookie": null, "deletedClientIDs": ["retired"] });
+    let tables = h.tables.clone();
+    let cleanup =
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+            .unwrap();
+    assert_eq!(cleanup["deletedClientIDs"], json!(["retired"]));
+    assert_eq!(
+        h.db.transaction(|db| preflight(db, "g1", "retired", 3, "u1"))
+            .unwrap(),
+        Preflight::Applied,
+    );
+    h.db.transaction(|db| settle_delegated_push(db, &push(3), &response(3), "u1"))
+        .unwrap();
+    // a delayed replay cannot apply again or regress an acknowledged id.
+    h.db.transaction(|db| settle_delegated_push(db, &push(2), &response(2), "u1"))
+        .unwrap();
+    let pulled = h.pull("keeper", cleanup["cookie"].clone(), None);
+    assert_eq!(pulled["lastMutationIDChanges"]["retired"], json!(3));
+    let stolen =
+        h.db.transaction(|db| settle_delegated_push(db, &push(4), &response(4), "u2"))
+            .unwrap_err();
+    assert_eq!(stolen.status, 403);
+    let skipped =
+        h.db.transaction(|db| preflight(db, "g1", "retired", 5, "u1"))
+            .unwrap_err();
+    assert_eq!(skipped.status, 400);
 }
 
 #[test]
