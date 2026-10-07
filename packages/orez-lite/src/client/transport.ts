@@ -278,6 +278,9 @@ type HttpPullPageRegistry = {
 type HttpPullTransportRegistration = {
   readonly transport: HttpPullTransport
   readonly options: NormalizedHttpPullTransportOptions
+  readonly wakeTokenProvider:
+    | { current: Extract<HttpPullTransportOptions['wake'], object> }
+    | undefined
 }
 
 type NormalizedHttpPullTransportOptions = {
@@ -288,7 +291,7 @@ type NormalizedHttpPullTransportOptions = {
   readonly pushOrigin: string
   readonly fetch: typeof fetch | undefined
   readonly pullIntervalMs: number | undefined
-  readonly wake: false | true | (() => Promise<string>)
+  readonly wake: false | true | 'custom'
   readonly queryTransform: QueryTransform | undefined
   readonly payloadCodecID: string
   readonly lifecycle: ((event: HttpPullLifecycleEvent) => void) | undefined
@@ -473,7 +476,7 @@ export function ensureHttpPullTransport(
     pushOrigin: trimTrailingSlash(new URL(opts.pushOrigin ?? opts.origin).toString()),
     fetch: opts.fetch,
     pullIntervalMs: opts.pullIntervalMs,
-    wake: typeof opts.wake === 'object' ? opts.wake.getToken : (opts.wake ?? false),
+    wake: typeof opts.wake === 'object' ? 'custom' : (opts.wake ?? false),
     queryTransform: opts.queryTransform,
     payloadCodecID: payloadCodec.id,
     lifecycle: opts.lifecycle,
@@ -488,10 +491,23 @@ export function ensureHttpPullTransport(
         `HTTP pull transport for ${key} is already installed with different ${conflicts.join(', ')}`
       )
     }
+    if (existing.wakeTokenProvider && typeof opts.wake === 'object') {
+      existing.wakeTokenProvider.current = opts.wake
+    }
     return existing.transport
   }
-  const transport = installHttpPullTransport({ ...opts, payloadCodec })
-  pageRegistry.transportsByOrigin.set(key, { transport, options })
+  // token minting belongs to the current caller; the transport and shim keep
+  // page lifetime ownership across module reloads and provider rotation.
+  const wakeTokenProvider =
+    typeof opts.wake === 'object' ? { current: opts.wake } : undefined
+  const transport = installHttpPullTransport({
+    ...opts,
+    payloadCodec,
+    wake: wakeTokenProvider
+      ? { getToken: () => wakeTokenProvider.current.getToken() }
+      : opts.wake,
+  })
+  pageRegistry.transportsByOrigin.set(key, { transport, options, wakeTokenProvider })
   return transport
 }
 

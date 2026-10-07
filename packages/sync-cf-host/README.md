@@ -144,6 +144,12 @@ Pass a mint callback to the low-level HTTP transport. It calls `getToken()` for
 every socket attempt, including reconnects, so short-lived tokens are never
 reused after the wake connection drops:
 
+Calling `ensureHttpPullTransport` again with a custom token provider replaces
+that provider for future wake attempts while retaining the transport and
+WebSocket shim. Module reloads can recreate the callback without chaining
+transports. Switching between custom minting, auth-token wake and disabled wake,
+or changing transport routing or timing, remains a configuration conflict.
+
 ```ts
 import { ensureHttpPullTransport } from 'orez-lite/client'
 

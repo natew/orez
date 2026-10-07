@@ -1753,6 +1753,62 @@ describe('Orez HTTP transport', () => {
     }
   })
 
+  test('module reload refreshes custom wake minting without replacing the transport', async () => {
+    const wakeSockets = useFakeNativeWebSocket()
+    const fetch = unchangedPullFetch()
+    const oldToken = vi.fn(async () => 'wake-before-refresh')
+    const first = createZeroClientTransport({
+      fetch,
+      wake: { getToken: oldToken },
+    }).install(ORIGIN)
+    transports.push(first)
+    const shim = globalThis.WebSocket
+    openRawSocketWithMessages()
+    await eventually(() => expect(wakeSockets).toHaveLength(1))
+    expect(wakeSockets[0].url).toContain('wakeToken=wake-before-refresh')
+
+    vi.resetModules()
+    const reloaded = await import('./transport.js')
+    const provider = {
+      token: 'wake-after-refresh',
+      async getToken() {
+        return this.token
+      },
+    }
+    const newToken = vi.spyOn(provider, 'getToken')
+    expect(
+      reloaded.createZeroClientTransport({ fetch, wake: provider }).install(ORIGIN)
+    ).toBe(first)
+    expect(globalThis.WebSocket).toBe(shim)
+    wakeSockets[0].onerror?.()
+    await eventually(() => expect(wakeSockets).toHaveLength(2), 1_000)
+    expect(wakeSockets[1].url).toContain('wakeToken=wake-after-refresh')
+    expect(oldToken).toHaveBeenCalledTimes(1)
+    expect(newToken).toHaveBeenCalledTimes(1)
+    expect(() =>
+      reloaded.createZeroClientTransport({ fetch, wake: true }).install(ORIGIN)
+    ).toThrow('different wake')
+    expect(() =>
+      reloaded.createZeroClientTransport({ fetch, wake: false }).install(ORIGIN)
+    ).toThrow('different wake')
+    const rejectedToken = vi.fn(async () => 'rejected-config-token')
+    expect(() =>
+      reloaded
+        .createZeroClientTransport({
+          fetch,
+          wake: { getToken: rejectedToken },
+          pullIntervalMs: 1,
+        })
+        .install(ORIGIN)
+    ).toThrow('different pullIntervalMs')
+    expect(globalThis.WebSocket).toBe(shim)
+    wakeSockets[1].onerror?.()
+    await eventually(() => expect(wakeSockets).toHaveLength(3), 1_000)
+    expect(wakeSockets[2].url).toContain('wakeToken=wake-after-refresh')
+    expect(newToken).toHaveBeenCalledTimes(2)
+    expect(rejectedToken).not.toHaveBeenCalled()
+  })
+
   test('createZeroClientTransport installs the shared transport for a Zero server', () => {
     const origin = 'http://127.0.0.1:65503'
     const fetch = vi.fn()
