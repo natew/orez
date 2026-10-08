@@ -6,8 +6,12 @@ SQLITE_SRC_FILES = sqlite-src/sqlite3.c sqlite-src/sqlite3.h
 
 JS_PRE_FILES = native/api.js native/vfs-pre.js
 JS_LIB_FILES = native/vfs.js
-OBJECT_FILES = build/sqlite3.o build/vfs.o
+OBJECT_FILES = build/sqlite3.o build/vfs.o build/sqlite-vec.o build/sqlite-vec-init.o
 EXPORTED_FUNCS_JSON = build/exp_funcs.json
+
+# upstream sqlite-vec v0.1.9 amalgamation, also used by nitro sqlite vec 10.1.0
+SQLITE_VEC_URL = https://github.com/asg017/sqlite-vec/releases/download/v0.1.9/sqlite-vec-0.1.9-amalgamation.tar.gz
+SQLITE_VEC_SHA256 = 3acd67cb4aff080c7050926fd3cf8227905fe5b7ee3829d8ee5024ab1283cf61
 
 # compile flags — bedrock-sqlite is shared by zero-cache and the soot
 # compat sqlite stubs (op-sqlite, expo-sqlite, nitro-sqlite,
@@ -20,6 +24,7 @@ EXPORTED_FUNCS_JSON = build/exp_funcs.json
 # queries. FTS3 ships with FTS4 (same module).
 # still removed (unused): GEOPOLY, SOUNDEX, DBSTAT, UPDATE_DELETE_LIMIT.
 SQLITE_FLAGS = \
+	-DSQLITE_EXTRA_INIT=bedrock_sqlite_init \
 	-DSQLITE_DEFAULT_CACHE_SIZE=-2000 \
 	-DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
 	-DSQLITE_DEFAULT_MEMSTATUS=0 \
@@ -130,13 +135,26 @@ dist/package.json:
 	mkdir -p dist
 	echo '{"type": "commonjs"}' > $@
 
-build/sqlite3.o: $(SQLITE_SRC_FILES)
+build/sqlite3.o: $(SQLITE_SRC_FILES) Makefile
 	mkdir -p build
 	emcc $(EM_FLAGS) $(SQLITE_FLAGS) -c $< -o $@
 
-build/vfs.o: native/vfs.c sqlite-src/sqlite3.h
+build/vfs.o: native/vfs.c sqlite-src/sqlite3.h Makefile
 	mkdir -p build
 	emcc $(EM_FLAGS) $(SQLITE_FLAGS) -I sqlite-src -c $< -o $@
+
+build/sqlite-vec/.ready: Makefile
+	mkdir -p build/sqlite-vec
+	curl -fsSL $(SQLITE_VEC_URL) -o build/sqlite-vec.tar.gz
+	echo '$(SQLITE_VEC_SHA256)  build/sqlite-vec.tar.gz' | sha256sum -c -
+	tar -xzf build/sqlite-vec.tar.gz -C build/sqlite-vec
+	touch $@
+
+build/sqlite-vec.o: build/sqlite-vec/.ready sqlite-src/sqlite3.h
+	emcc $(EM_FLAGS) -DSQLITE_CORE -DSQLITE_VEC_STATIC -I sqlite-src -c build/sqlite-vec/sqlite-vec.c -o $@
+
+build/sqlite-vec-init.o: native/sqlite-vec-init.c build/sqlite-vec/.ready sqlite-src/sqlite3.h
+	emcc $(EM_FLAGS) -DSQLITE_CORE -DSQLITE_VEC_STATIC -I sqlite-src -I build/sqlite-vec -c $< -o $@
 
 $(EXPORTED_FUNCS_JSON): native/api.js
 	mkdir -p build

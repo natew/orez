@@ -29,7 +29,8 @@
     "dist/package.json",
     "bedrock-sqlite.d.ts",
     "bedrock-sqlite-async.d.ts",
-    "bedrock-sqlite-browser.d.ts"
+    "bedrock-sqlite-browser.d.ts",
+    "LICENSE.sqlite-vec"
   ],
   "repository": {
     "type": "git",

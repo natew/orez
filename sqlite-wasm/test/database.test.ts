@@ -466,3 +466,38 @@ describeIfBuilt('data types', () => {
     db.close()
   })
 })
+
+describeIfBuilt('sqlite-vec', () => {
+  it('registers vec0 on each connection and finds the nearest vectors', () => {
+    for (let connection = 0; connection < 2; connection++) {
+      const db = new Database(':memory:')
+      try {
+        db.exec('CREATE VIRTUAL TABLE vectors USING vec0(embedding float[3])')
+        db.prepare('INSERT INTO vectors(rowid, embedding) VALUES (?, ?)').run(
+          1,
+          '[1,0,0]'
+        )
+        db.prepare('INSERT INTO vectors(rowid, embedding) VALUES (?, ?)').run(
+          2,
+          '[2,0,0]'
+        )
+        db.prepare('INSERT INTO vectors(rowid, embedding) VALUES (?, ?)').run(
+          3,
+          '[0,3,0]'
+        )
+        expect(
+          db
+            .prepare(
+              'SELECT rowid, distance FROM vectors WHERE embedding MATCH ? AND k = 2 ORDER BY distance'
+            )
+            .all('[1,0,0]')
+        ).toEqual([
+          { rowid: 1, distance: 0 },
+          { rowid: 2, distance: 1 },
+        ])
+      } finally {
+        db.close()
+      }
+    }
+  })
+})
