@@ -4,6 +4,7 @@ import { useContext, useMemo, useRef, type Context } from 'react'
 
 import { IS_SERVER_RUNTIME } from './helpers/platform'
 import { useZeroDebug } from './helpers/useZeroDebug'
+import { serializeQueryParams } from './queryJson'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery'
 
 import type {
@@ -125,7 +126,7 @@ export function createUseQuery<Schema extends ZeroSchema>({
     // resolveQuery and re-create the query every render. JSON is faster than
     // generic deep-equal for the small, simple-valued objects zero calls
     // actually take, and matches what createUseQueryDirect does.
-    const paramsKey = params === undefined ? '' : JSON.stringify(params)
+    const paramsKey = serializeQueryParams(fn, params)
     const queryRequest = useMemo(
       () => resolveQuery({ customQueries, fn, params }),
       // eslint-disable-next-line react-hooks/exhaustive-deps

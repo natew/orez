@@ -1,3 +1,4 @@
+import { serializeQueryParams } from './queryJson'
 import { getQueryName } from './queryRegistry'
 
 import type { AnyQueryRegistry, Query, Schema as ZeroSchema } from '@rocicorp/zero'
@@ -47,5 +48,6 @@ export function resolveQuery<Schema extends ZeroSchema>({
     )
   }
 
+  serializeQueryParams(fn, params)
   return params !== undefined ? customQuery(params) : customQuery()
 }

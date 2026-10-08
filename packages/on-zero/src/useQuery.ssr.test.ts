@@ -10,7 +10,8 @@
 // then read row.name / row.id (SSR saw row=[], client saw row=undefined → text
 // content mismatch).
 
-import { createSchema, number, string, table } from '@rocicorp/zero'
+import { createBuilder, createSchema, number, string, table } from '@rocicorp/zero'
+import { addContextToQuery } from '@rocicorp/zero/bindings'
 import { expect, test } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'
@@ -36,11 +37,16 @@ const oneTodo = (args: { id: string }) =>
     .where('id', args.id)
     .one()
 
+const invalidTodo = () => {
+  // @ts-expect-error a function is not a JSON query literal.
+  return createBuilder(schema).todo.where('id', () => 'x')
+}
+
 const client = createZeroClient({
   schema,
   models: {},
   groupedQueries: {
-    todo: { allTodos, oneTodo },
+    todo: { allTodos, oneTodo, invalidTodo },
   },
   instanceName: 'ssr-shape-test',
 })
@@ -60,4 +66,19 @@ test('useQuery SSR returns undefined for singular .one() queries', () => {
   const [data, info] = client.useQuery(oneTodo, { id: 'x' })
   expect(data).toBeUndefined()
   expect(info?.type).toBe('unknown')
+})
+
+test('query arguments are refused with query and key before a request is created', () => {
+  expect(() => {
+    // @ts-expect-error a function cannot cross the query JSON boundary.
+    client.getQuery(oneTodo, { id: () => 'x' })
+  }).toThrow("Query 'todo.oneTodo' argument 'params.id' must be JSON: function")
+  expect(client.getQuery(oneTodo, { id: 'x' }).args).toEqual({ id: 'x' })
+})
+
+test('query filter functions are refused before materialization admits their AST', () => {
+  expect(() => addContextToQuery(client.getQuery(invalidTodo), {})).toThrow(
+    "Query 'todo.invalidTodo' argument 'ast.where.right.value' must be JSON: function"
+  )
+  expect(() => addContextToQuery(client.getQuery(allTodos), {})).not.toThrow()
 })

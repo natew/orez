@@ -64,6 +64,13 @@ const [data, state] = useQuery(latestNotifications, { userId, serverId })
 the function name becomes the query name. `useQuery` detects plain functions,
 creates a cached `SyncedQuery` per function, and calls it with your params.
 
+query params and filter values must be JSON. on-zero rejects a function or other
+non-JSON value before subscribing, with the query name and argument path in the
+error, for example `Query 'notification.latestNotifications' argument
+'params.serverId' must be JSON: function`. optional object properties may be
+`undefined` and are omitted, following Zero's JSON contract. other queries on the
+connection keep syncing.
+
 ### query permissions
 
 define permissions inline using `serverWhere()`:

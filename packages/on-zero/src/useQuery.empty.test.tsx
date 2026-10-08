@@ -6,7 +6,7 @@
 // the obvious .filter / .find / .length / for-of on first render. Singular
 // queries get `[undefined, info]` instead (the established zero-react shape).
 
-import { createSchema, number, string, table } from '@rocicorp/zero'
+import { createBuilder, createSchema, number, string, table } from '@rocicorp/zero'
 import { useQuery as useRawZeroQuery } from '@rocicorp/zero/react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -38,12 +38,16 @@ const oneTodo = (args: { id: string }) =>
   (zql as unknown as { todo: { where: (k: string, v: string) => any } }).todo
     .where('id', args.id)
     .one()
+const optionalTodo = (args: { id?: string }) =>
+  createBuilder(schema)
+    .todo.where('id', args.id ?? 'x')
+    .one()
 
 const client = createZeroClient({
   schema,
   models: {},
   groupedQueries: {
-    todo: { allTodos, oneTodo },
+    todo: { allTodos, oneTodo, optionalTodo },
   },
   instanceName: 'empty-shape-test',
 })
@@ -109,4 +113,14 @@ test('raw zero-react useQuery stays inert under a disabled provider', () => {
   const [data, info] = renderWithDisabled(() => useRawZeroQuery(query))
   expect(data).toEqual([])
   expect(info?.type).toBe('unknown')
+})
+
+test('useQuery rejects a function even when JSON.stringify would preserve its memo key', () => {
+  renderWithDisabled(() => client.useQuery(optionalTodo, {}))
+  expect(() =>
+    renderWithDisabled(() =>
+      // @ts-expect-error a function cannot cross the query JSON boundary.
+      client.useQuery(optionalTodo, { id: () => 'x' })
+    )
+  ).toThrow("Query 'todo.optionalTodo' argument 'params.id' must be JSON: function")
 })

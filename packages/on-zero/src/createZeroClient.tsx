@@ -51,6 +51,7 @@ import {
 import { observeMutation, reportMutationInvocationError } from './helpers/useMutation'
 import { registerClientInstance } from './instanceRegistry'
 import { getAllMutationsPermissions, getMutationsPermissions } from './modelRegistry'
+import { assertQueryJson } from './queryJson'
 import { registerQuery } from './queryRegistry'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery'
 import { setCustomQueries } from './run'
@@ -209,9 +210,11 @@ export function createZeroClientInternal<
     for (const [name, fn] of Object.entries(queries)) {
       registerQuery(fn, `${namespace}.${name}`)
       // wrap each plain function in defineQuery
-      wrappedNamespaces[namespace][name] = defineQuery(({ args }: { args: any }) =>
-        fn(args)
-      )
+      wrappedNamespaces[namespace][name] = defineQuery(({ args }: { args: any }) => {
+        const query = fn(args)
+        assertQueryJson(`${namespace}.${name}`, query.ast, 'ast')
+        return query
+      })
     }
   }
 

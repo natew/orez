@@ -15,6 +15,7 @@ import {
 } from './createUseQuery'
 import { useEmitterValue, type Emitter } from './helpers/emitter'
 import { IS_SERVER_RUNTIME } from './helpers/platform'
+import { serializeQueryParams } from './queryJson'
 import { resolveQuery } from './resolveQuery'
 
 import type {
@@ -294,7 +295,7 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
       ttl = options.ttl ?? DEFAULT_TTL_MS
     }
 
-    const paramsKey = params === undefined ? '' : JSON.stringify(params)
+    const paramsKey = serializeQueryParams(fn, params)
 
     // resolve the query once so we know its singular/plural format up front —
     // the no-zero / disabled snapshot needs to match that format so .filter /
