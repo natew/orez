@@ -143,6 +143,7 @@
     "@noble/curves": "1.9.7",
     "@noble/hashes": "1.8.0",
     "bedrock-sqlite": "workspace:*",
+    "es-module-lexer": "1.7.0",
     "esbuild": "^0.25.0",
     "orez-sync-cf-host": "workspace:*",
     "orez-sync-executor": "workspace:*",

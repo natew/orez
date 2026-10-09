@@ -9,6 +9,8 @@ import {
 } from 'fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 
+import { parse } from 'es-module-lexer/js'
+
 const WORKER_MODULE_EXTENSION = /\.(?:cjs|js|mjs|wasm)$/
 const WORKER_SOURCE_MODULE_EXTENSION = /\.(?:cjs|js|mjs)$/
 
@@ -25,13 +27,17 @@ function listWorkerModuleFiles(dir: string, files: string[] = []): string[] {
   return files
 }
 
-function staticWorkerModuleReferences(source: string): string[] {
-  const references: string[] = []
-  const staticRefRe =
-    /\b(?:import\s+(?:[^;]*?\s+from\s+)?|export\s+[^;]*?\s+from\s+)["'](\.\.?\/[^"']+\.(?:cjs|js|mjs|wasm))["']/g
-  let match: RegExpExecArray | null
-  while ((match = staticRefRe.exec(source))) references.push(match[1])
-  return references
+function workerModuleReferences(source: string, staticOnly: boolean): string[] {
+  const [imports] = parse(source)
+  return imports.flatMap((entry) => {
+    if (staticOnly && entry.d !== -1) return []
+    const specifier = entry.n
+    return specifier &&
+      /^\.\.?\//.test(specifier) &&
+      WORKER_MODULE_EXTENSION.test(specifier)
+      ? [specifier]
+      : []
+  })
 }
 
 export function assertWorkerStaticModuleImportsResolve(workerDir: string): void {
@@ -46,7 +52,7 @@ export function assertWorkerStaticModuleImportsResolve(workerDir: string): void 
     } catch {
       continue
     }
-    for (const specifier of staticWorkerModuleReferences(source)) {
+    for (const specifier of workerModuleReferences(source, true)) {
       if (moduleSet.has(resolve(dirname(importer), specifier))) continue
       missing.push({ importer: relative(workerDir, importer), specifier })
     }
@@ -78,19 +84,14 @@ export function pruneUnreachableWorkerModules(
     const f = canon(file)
     if (reachable.has(f)) return
     reachable.add(f)
+    if (!WORKER_SOURCE_MODULE_EXTENSION.test(f)) return
     let src: string
     try {
       src = readFileSync(f, 'utf-8')
     } catch {
       return
     }
-    // match ANY relative module ref in import/export/import(). a FRESH regex per
-    // call — a shared /g regex's lastIndex is clobbered by the recursive visits.
-    const refRe = /["'](\.\.?\/[^"']+\.(?:js|mjs|wasm))["']/g
-    const refs: string[] = []
-    let m: RegExpExecArray | null
-    while ((m = refRe.exec(src))) refs.push(m[1])
-    for (const ref of refs) visit(join(dirname(f), ref))
+    for (const ref of workerModuleReferences(src, false)) visit(join(dirname(f), ref))
   }
   const entryPath = join(workerDir, entryName)
   visit(entryPath)
@@ -192,7 +193,7 @@ export function pruneWorkerChunksBySignature(
     if (!WORKER_SOURCE_MODULE_EXTENSION.test(file)) continue
     try {
       const source = readFileSync(file, 'utf-8')
-      for (const specifier of staticWorkerModuleReferences(source)) {
+      for (const specifier of workerModuleReferences(source, true)) {
         const dependency = resolve(dirname(file), specifier)
         const importers = staticImporters.get(dependency)
         if (importers) importers.push(file)

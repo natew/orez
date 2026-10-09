@@ -6,10 +6,69 @@ import { afterEach, expect, it } from 'vitest'
 
 import {
   assertWorkerStaticModuleImportsResolve,
+  pruneUnreachableWorkerModules,
   pruneWorkerChunksBySignature,
 } from './prune.js'
 
 const workerDirs: string[] = []
+
+it('ignores import-like comments, strings and regular expressions', () => {
+  const workerDir = mkdtempSync(join(tmpdir(), 'orez-prune-import-text-'))
+  workerDirs.push(workerDir)
+  mkdirSync(join(workerDir, 'assets'))
+  writeFileSync(join(workerDir, 'index.js'), 'import "./assets/artifact.js";')
+  writeFileSync(
+    join(workerDir, 'assets/artifact.js'),
+    [
+      '/** `export * as core from "../core/index.js"` */',
+      '// import "./comment.js";',
+      'export const text = "export { x } from \'./string.js\'";',
+      'export const template = `import "./template.js"`;',
+      String.raw`export const expression = /import "\.\/regex.js"/;`,
+    ].join('\n')
+  )
+  expect(() => assertWorkerStaticModuleImportsResolve(workerDir)).not.toThrow()
+})
+
+it('retains actual dynamic dependencies while pruning import-like source text', () => {
+  const workerDir = mkdtempSync(join(tmpdir(), 'orez-prune-dynamic-text-'))
+  workerDirs.push(workerDir)
+  const assetsDir = join(workerDir, 'assets')
+  mkdirSync(assetsDir)
+  writeFileSync(
+    join(workerDir, 'index.js'),
+    'export const load = () => import("./assets/live.js"); export const text = \'import("./assets/dead.js")\';'
+  )
+  writeFileSync(
+    join(assetsDir, 'live.js'),
+    'import "./live.wasm"; export const value = 1;'
+  )
+  writeFileSync(
+    join(assetsDir, 'live.wasm'),
+    new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])
+  )
+  writeFileSync(join(assetsDir, 'dead.js'), 'export const value = 2;')
+  pruneUnreachableWorkerModules(workerDir, 'index.js')
+  expect(existsSync(join(assetsDir, 'live.js'))).toBe(true)
+  expect(existsSync(join(assetsDir, 'live.wasm'))).toBe(true)
+  expect(existsSync(join(assetsDir, 'dead.js'))).toBe(false)
+})
+
+it('decodes escaped module paths before checking actual missing namespace exports', () => {
+  const workerDir = mkdtempSync(join(tmpdir(), 'orez-prune-escaped-import-'))
+  workerDirs.push(workerDir)
+  mkdirSync(join(workerDir, 'assets'))
+  writeFileSync(
+    join(workerDir, 'index.js'),
+    String.raw`export * as value from "./assets/\u006cive.js";`
+  )
+  writeFileSync(join(workerDir, 'assets/live.js'), 'export const value = 1;')
+  expect(() => assertWorkerStaticModuleImportsResolve(workerDir)).not.toThrow()
+  rmSync(join(workerDir, 'assets/live.js'))
+  expect(() => assertWorkerStaticModuleImportsResolve(workerDir)).toThrow(
+    /assets\/live\.js/
+  )
+})
 
 afterEach(() => {
   for (const dir of workerDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
