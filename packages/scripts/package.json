@@ -1,6 +1,6 @@
 {
   "name": "@o/scripts",
-  "version": "0.16.19",
+  "version": "0.16.20",
   "type": "module",
   "main": "./src/cmd.ts",
   "sideEffects": false,

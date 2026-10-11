@@ -1,6 +1,6 @@
 {
   "name": "@o/hooks",
-  "version": "0.16.19",
+  "version": "0.16.20",
   "sideEffects": false,
   "source": "src/index.ts",
   "type": "module",

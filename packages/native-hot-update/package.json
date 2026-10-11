@@ -1,6 +1,6 @@
 {
   "name": "@o/native-hot-update",
-  "version": "0.16.19",
+  "version": "0.16.20",
   "main": "dist/cjs",
   "module": "dist/esm",
   "devDependencies": {
