@@ -55,8 +55,8 @@ test('reconnecting sockets open promptly after consecutive transient failures', 
     fetch: failingFetch(),
   })
   try {
-    // stack three consecutive transient failures: each socket opens, its
-    // opening pull fails, and the transport records the failure.
+    // stack three consecutive transient failures: each socket opens and its
+    // opening pull fails with a 500, closing the socket.
     for (let n = 0; n < 3; n++) {
       const ws = new (globalThis.WebSocket as unknown as new (url: string) => TestSocket)(
         connectURL(n)
