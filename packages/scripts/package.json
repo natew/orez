@@ -21,6 +21,7 @@
   },
   "scripts": {
     "lint": "oxlint src",
+    "test": "bun test src",
     "lint:fix": "oxfmt src && oxlint --fix --fix-suggestions src",
     "typecheck": "tko run typecheck"
   },

@@ -201,49 +201,56 @@ await cmd`sync environment variables from src/env.ts to matching files`
       content: string,
       startMarker: string,
       endMarker: string,
-      newSection: string
+      newSection: string | ((section: string, indent: string) => string)
     ): string {
       const re = new RegExp(
         `^([ \\t]*)${escapeRegExp(startMarker)}(.|\n)*?${escapeRegExp(endMarker)}`,
         'gm'
       )
-      return content.replace(re, (_match, indent) => {
-        return `${indent}${startMarker}\n${newSection}\n${indent}${endMarker}`
+      return content.replace(re, (match, indent) => {
+        const section =
+          typeof newSection === 'function' ? newSection(match, indent) : newSection
+        return `${indent}${startMarker}\n${section}\n${indent}${endMarker}`
       })
     }
 
     function applyYamlMarkers(filePath: string, content: string): string {
-      const markerMatch = content.match(
-        new RegExp(`^(\\s*)${escapeRegExp(yamlStart)}`, 'm')
-      )
-      const indent = markerMatch?.[1] || '      '
-
       const beforeMarker = content.slice(0, content.indexOf(yamlStart))
       const isMap = /x-[\w-]+:.*&[\w-]+/s.test(beforeMarker)
       const isGithubActions = filePath.includes('.github/workflows')
 
-      const envLines = entries
-        .map(({ key, defaultValue }) => {
-          const dep = depResolved[key]
-          const val = dep || defaultValue
-
-          if (isGithubActions) {
-            // deps-derived versions track package.json — emit a literal so a
-            // stale repo secret can never shadow them (a stale ZERO_VERSION
-            // secret once pinned an old zero-cache protocol against a newer
-            // client). matches the .env codegen below, which already does this.
-            return dep
-              ? `${indent}${key}: '${dep}'`
-              : `${indent}${key}: \${{ secrets.${key} }}`
+      return replaceMarkerSection(content, yamlStart, yamlEnd, (section, indent) => {
+        // bindings belong to their block; jobs may use different deployed secrets.
+        const bindings = new Map<string, string>()
+        if (isGithubActions) {
+          for (const match of section.matchAll(
+            /^[ \t]*([A-Za-z_][\w]*):[ \t]*(\S[^\r\n]*)/gm
+          )) {
+            bindings.set(match[1]!, match[2]!)
           }
+        }
 
-          return isMap
-            ? `${indent}${key}: \${${key}:-${val}}`
-            : `${indent}- ${key}=\${${key}:-${val}}`
-        })
-        .join('\n')
+        return entries
+          .map(({ key, defaultValue }) => {
+            const dep = depResolved[key]
+            const val = dep || defaultValue
 
-      return replaceMarkerSection(content, yamlStart, yamlEnd, envLines)
+            if (isGithubActions) {
+              // deps-derived versions track package.json — emit a literal so a
+              // stale repo secret can never shadow them (a stale ZERO_VERSION
+              // secret once pinned an old zero-cache protocol against a newer
+              // client). matches the .env codegen below, which already does this.
+              return dep
+                ? `${indent}${key}: '${dep}'`
+                : `${indent}${key}: ${bindings.get(key) ?? `\${{ secrets.${key} }}`}`
+            }
+
+            return isMap
+              ? `${indent}${key}: \${${key}:-${val}}`
+              : `${indent}- ${key}=\${${key}:-${val}}`
+          })
+          .join('\n')
+      })
     }
 
     function applyDotenvSection(_filePath: string, content: string): string {
