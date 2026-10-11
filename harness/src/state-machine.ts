@@ -564,7 +564,11 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
     await fault.recovery
   }
 
-  const recoverObservedKill = async () => {
+  // recover every observed kill that fired but has no recovery yet. returns
+  // whether any new recovery ran, so a request that just failed can tell a
+  // kill-induced outage (retry once the server is back) from a genuine error.
+  const recoverObservedKill = async (): Promise<boolean> => {
+    let recovered = false
     for (const operation of recordedTrace) {
       const receipt = operation.faultReceipt
       if (
@@ -574,8 +578,12 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
       )
         continue
       const fault = operationFaults.get(receipt.id)
-      if (fault) await recoverKill(fault)
+      if (fault) {
+        if (fault.recovery === undefined) recovered = true
+        await recoverKill(fault)
+      }
     }
+    return recovered
   }
 
   const operationFaults = new Map<string, NonNullable<typeof pendingFault>>()
@@ -706,27 +714,37 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
             ? pendingFault
             : undefined
           const pullKill = pullFault?.receipt.arm.kind === 'kill' ? pullFault : undefined
-          const throughPullKill = async <T>(request: () => Promise<T>, label: string) => {
+          // a background client push or pull can fire the armed kill (push or
+          // pull point) while a prune request is in flight, taking the server
+          // down under it. the setup writes are idempotent, so recover and
+          // retry once when a kill did the damage; anything else rethrows.
+          const throughKill = async <T>(request: () => Promise<T>, label: string) => {
+            // the server holds exactly the last armed fault, which this step
+            // captured here: by the time a concurrent fire clears
+            // pendingFault, this handle still awaits its receipt.
+            const armed = pendingFault
             try {
               return await request()
             } catch (error) {
-              if (!pullKill) throw error
+              if (await recoverObservedKill()) return request()
+              const armedKill = armed?.receipt.arm.kind === 'kill' ? armed : pullKill
+              if (!armedKill) throw error
               const resolution = await withTimeout(
-                pullKill.resolution,
-                `${label} pull-kill receipt`,
+                armedKill.resolution,
+                `${label} kill receipt`,
                 5_000
               ).catch(() => undefined)
               if (resolution !== 'fired') throw error
-              await recoverKill(pullKill)
+              await recoverKill(armedKill)
               return request()
             }
           }
           for (let index = 0; index < 16; index++) {
             const id = `sm-prune-${seed}-${operation.epoch}-${index}`
-            // A background pull can consume an armed kill while this admin
-            // request is in flight. The response is then ambiguous, so make
-            // the setup write idempotent before retrying it after recovery.
-            await throughPullKill(
+            // A background push or pull can consume an armed kill while this
+            // admin request is in flight. The response is then ambiguous, so
+            // make the setup write idempotent before retrying it after recovery.
+            await throughKill(
               () =>
                 target.sql(
                   `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt") VALUES ('${id}', 'p0', '${id}', ${index}, 0, NULL, NULL) ON CONFLICT (id) DO NOTHING`
@@ -747,7 +765,8 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
             )
             if (resolution !== 'fired') throw new Error('prune pull fault did not fire')
           }
-          await eventually(() => {
+          await eventually(async () => {
+            await recoverObservedKill()
             const failedRequest = failedPullRequests.get(client.clientID)
             if (
               failedRequest !== undefined &&
@@ -757,7 +776,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           }, `seed ${seed} step ${step} pull-fault recovery`)
           // Make pruning self-contained so removing surrounding operations
           // during shrinking cannot create a dependency-only false failure.
-          await throughPullKill(() => target.pull(), 'prune pull')
+          await throughKill(() => target.pull(), 'prune pull')
           break
         }
         case 'fullPruneRestart': {
@@ -935,6 +954,9 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
       if (operation.kind === 'prune') {
         await eventually(
           async () => {
+            // a background push can fire the armed kill under this read too;
+            // restart first so the floor read does not fail into the timeout.
+            await recoverObservedKill()
             const rows = (await target.oracle(
               'SELECT floor FROM _zsync_meta WHERE lock = 1'
             )) as { floor: number | string }[]

@@ -78,12 +78,9 @@ type TransportState = {
   readonly queryTransform: QueryTransform | undefined
   readonly queryForward: boolean
   nextPokeID: number
-  transientFailureCount: number
 }
 
 const COOKIE_WIDTH = 20
-const TRANSIENT_RECONNECT_BACKOFF_BASE_MS = 1_000
-const TRANSIENT_RECONNECT_BACKOFF_MAX_MS = 30_000
 
 export type HttpPullTransport = {
   pull(): Promise<void>
@@ -134,7 +131,6 @@ export function installHttpPullTransport(
     queryTransform: opts.queryTransform,
     queryForward: opts.queryForward === true,
     nextPokeID: 0,
-    transientFailureCount: 0,
   }
 
   const Shim = class {
@@ -258,7 +254,15 @@ class ZeroHttpSocket {
     this.queueDesiredQueries(decoded.initConnectionMessage?.[1])
 
     this.state.sockets.add(this)
-    this.openTimer = setTimeout(() => this.open(), reconnectDelayMs(this.state))
+    // open on the next task, never after a failure-count backoff. the open
+    // delivers the `connected` frame Zero's connect attempt waits for as the
+    // server acknowledgement, and Zero abandons that attempt after 10s and
+    // closes the socket (clearing a pending open timer). any backoff past
+    // that deadline turns one outage into a self-sustaining stall: every
+    // retry reads the same elevated count and dies before opening, so no
+    // request ever succeeds to reset it. retry pacing belongs to Zero's own
+    // run loop, not to the acknowledgement.
+    this.openTimer = setTimeout(() => this.open(), 0)
   }
 
   addEventListener(type: SocketEventType, listener: SocketListener | null) {
@@ -549,7 +553,6 @@ class ZeroHttpSocket {
     if (!response.ok) {
       throw new ZeroHttpResponseError(path, response.status)
     }
-    resetTransientFailures(this.state)
     return response.json()
   }
 
@@ -588,7 +591,6 @@ class ZeroHttpSocket {
       if (this.readyState !== this.CLOSED) this.close(1000, error.message)
       return
     }
-    recordTransientFailure(this.state)
     this.emit('error', { error })
     this.close(1011, errorMessage(error))
   }
@@ -847,26 +849,4 @@ function isStaleClientCookieError(error: unknown): error is ZeroHttpResponseErro
     error.path === '/pull' &&
     error.status === 409
   )
-}
-
-function reconnectDelayMs(state: TransportState) {
-  if (state.transientFailureCount === 0) return 0
-  return Math.min(
-    TRANSIENT_RECONNECT_BACKOFF_BASE_MS * 2 ** (state.transientFailureCount - 1),
-    TRANSIENT_RECONNECT_BACKOFF_MAX_MS
-  )
-}
-
-function recordTransientFailure(state: TransportState) {
-  const maxExponent = Math.log2(
-    TRANSIENT_RECONNECT_BACKOFF_MAX_MS / TRANSIENT_RECONNECT_BACKOFF_BASE_MS
-  )
-  state.transientFailureCount = Math.min(
-    state.transientFailureCount + 1,
-    Math.ceil(maxExponent) + 1
-  )
-}
-
-function resetTransientFailures(state: TransportState) {
-  state.transientFailureCount = 0
 }
