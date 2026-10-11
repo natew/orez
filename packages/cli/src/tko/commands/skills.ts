@@ -58,7 +58,9 @@ function getSkillsDirs(cwd: string): SkillTargetDir[] {
   return [
     { path: join(cwd, '.claude', 'skills'), harness: 'claude' },
     { path: join(cwd, '.agents', 'skills'), harness: 'agents' },
-  ]
+  ].filter(
+    (target) => !lstatSync(target.path, { throwIfNoEntry: false })?.isSymbolicLink()
+  ) as SkillTargetDir[]
 }
 
 function hasSkillFrontmatter(content: string): boolean {
@@ -126,7 +128,10 @@ async function generateDocSkills(
     if (clean && existsSync(skillsDir)) {
       const existing = readdirSync(skillsDir)
       for (const dir of existing) {
-        if (dir.startsWith(SKILL_PREFIX)) {
+        if (
+          dir.startsWith(SKILL_PREFIX) &&
+          !lstatSync(join(skillsDir, dir)).isSymbolicLink()
+        ) {
           rmSync(join(skillsDir, dir), { recursive: true })
         }
       }
@@ -161,6 +166,12 @@ async function generateDocSkills(
         const skillsDir = target.path
         const skillDir = join(skillsDir, skillName)
         const skillFile = join(skillDir, 'SKILL.md')
+
+        // linked directories belong to another source, including dangling links.
+        if (lstatSync(skillDir, { throwIfNoEntry: false })?.isSymbolicLink()) {
+          skipped++
+          continue
+        }
 
         if (!existsSync(skillDir)) {
           mkdirSync(skillDir, { recursive: true })
@@ -233,6 +244,8 @@ async function generateDocSkills(
 
       const skillDir = join(skillsDir, dir)
       const skillFile = join(skillDir, 'SKILL.md')
+
+      if (lstatSync(skillDir).isSymbolicLink()) continue
 
       if (dir.startsWith(SKILL_PREFIX)) {
         rmSync(skillDir, { recursive: true, force: true })
@@ -326,7 +339,7 @@ const generateCommand = defineCommand({
       )
     if (skipped > 0)
       console.info(
-        `  ${pc.yellow(`${skipped} skipped`)} ${pc.dim('(missing skill frontmatter)')}`
+        `  ${pc.yellow(`${skipped} skipped`)} ${pc.dim('(linked directories or missing skill frontmatter)')}`
       )
     if (unchanged > 0) console.info(`  ${pc.dim(`${unchanged} unchanged`)}`)
     if (removed > 0) console.info(`  ${pc.red(`${removed} removed`)}`)
