@@ -44,3 +44,4 @@ Owner direction, 2026-10-12 (Nate, voice):
 - `f64eb83c` parse each query AST once per pull (100 queries/20k rows, release best-of): steady 2.97 -> 2.83ms, caught-up 301 -> 292us
 - `5c7669f4` fix-forward: regenerated L1-prune-no-floor mutant for prune_known (CI applicability gate went red after 69698620 moved the floor write; net still catches it)
 - `157101d5` batch touched-pk narrowing (100 queries/20k rows, release best-of): steady 218 -> 25 stmts, rows identical 709, wall 5.26 -> 3.48ms; ten-slice steady 38 -> 21 stmts
+- `453826c6` batch membership/refcount writes (500-departure flip, release): 1524 -> 83 stmts, rows ~4500 and writes 1000 and dels 500 identical, wall flat (crossing cost lives on wasm)
