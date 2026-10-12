@@ -45,3 +45,4 @@ Owner direction, 2026-10-12 (Nate, voice):
 - `5c7669f4` fix-forward: regenerated L1-prune-no-floor mutant for prune_known (CI applicability gate went red after 69698620 moved the floor write; net still catches it)
 - `157101d5` batch touched-pk narrowing (100 queries/20k rows, release best-of): steady 218 -> 25 stmts, rows identical 709, wall 5.26 -> 3.48ms; ten-slice steady 38 -> 21 stmts
 - `453826c6` batch membership/refcount writes (500-departure flip, release): 1524 -> 83 stmts, rows ~4500 and writes 1000 and dels 500 identical, wall flat (crossing cost lives on wasm)
+- `cc0f9bd6` index group bookkeeping (20 clients/10 queries/200 groups, release best-of-3): wall 859 -> 620us, stmts/rows 21/158 unchanged; billed scanned rows ~600 -> ~25 by plan (CF bills scanned); steady/deact/post-deact responses byte-identical
