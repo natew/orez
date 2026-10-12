@@ -673,7 +673,10 @@ pub(crate) fn canonical_pk_text(tables: &Tables, table: &str, pk_text: &str) -> 
 
 struct ActiveQuery {
     hash: String,
-    ast_json: Value,
+    // parsed once here: every pull used to re-parse each query's stored JSON
+    // two or three times (validate, recompute, narrow), which is pure CPU per
+    // long-poll on a many-query group.
+    ast: Ast,
     root_table: String,
     deps: Vec<String>,
 }
@@ -696,9 +699,10 @@ fn active_queries(db: &mut dyn SyncDb, group: &str) -> Result<Vec<ActiveQuery>, 
             serde_json::from_str(&str_col(row.get("deps"))?).unwrap_or_default();
         let ast_json: Value = serde_json::from_str(&ast_text)
             .map_err(|e| EngineError::internal(format!("stored query ast is not json: {e}")))?;
+        let ast = parse_ast(&ast_json)?;
         out.push(ActiveQuery {
             hash,
-            ast_json,
+            ast,
             root_table,
             deps,
         });
@@ -716,8 +720,7 @@ pub(crate) fn validate_active_queries(
 
 fn validate_queries(tables: &Tables, queries: &[ActiveQuery]) -> Result<(), EngineError> {
     for query in queries {
-        let ast = parse_ast(&query.ast_json)?;
-        super::opacity::validate_encrypted_column_usage(tables, &ast)?;
+        super::opacity::validate_encrypted_column_usage(tables, &query.ast)?;
     }
     Ok(())
 }
@@ -999,8 +1002,7 @@ fn query_relevant(
     if root_pks.is_empty() {
         return Ok(false);
     }
-    let ast = parse_ast(&q.ast_json)?;
-    let probe = compile_predicate_probe(&ast, tables)?;
+    let probe = compile_predicate_probe(&q.ast, tables)?;
     // one membership check and one predicate probe per chunk of changed keys,
     // sized to the bind limit, instead of both per key: a pull that missed every
     // other client's writes since its cookie probes each of them against each
@@ -1125,14 +1127,14 @@ pub(crate) fn recompute_group_with_rehydrate(
         let spec = tables.get(&q.root_table).ok_or_else(|| {
             EngineError::internal(format!("query root table '{}' missing", q.root_table))
         })?;
-        let ast = parse_ast(&q.ast_json)?;
+        let ast = &q.ast;
 
         // the query's live members = root rows + related-output child rows, keyed
         // by (table, pk). collecting into one set lets the diff/refcount logic
         // treat every member uniformly regardless of which table it came from.
         let mut live: BTreeSet<(String, String)> = BTreeSet::new();
 
-        let compiled = compile(&ast, tables)?;
+        let compiled = compile(ast, tables)?;
         for row in db.query(&compiled.sql, &compiled.params)? {
             let pk_obj = raw_pk(spec, &row);
             let key = canonical_pk(spec, &pk_obj);
