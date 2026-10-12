@@ -1,16 +1,21 @@
-# Rust production performance pass
+# Lite engine production performance pass
 
 Owner direction, 2026-10-12 (Nate, voice):
 - "send a whole agent into OREZ let's have them do a big huge optimization
   pass. They can just spend as long as they need just optimizing. They should
   just land things. Piece by piece as they validate them and just keep going."
 - "Specifically focused on performance in production and only the rust side"
+- "And by rust, I mean just that the light engine, so any piece of that it
+  doesn't have to be only rust code, but any piece of the light engine
+  performance"
 
 ## Scope
 
-- Rust crates only: `crates/sync-core`, `crates/sync-wasm`, `crates/sync-native`.
-  TypeScript hosts and packages are out of scope except as the harness that
-  measures a Rust change.
+- The lite engine, any language: the Rust crates (`crates/sync-core`,
+  `crates/sync-wasm`, `crates/sync-native`) and the packages that make up
+  orez-lite (`packages/orez-lite`, `sync-cf-host`, `sync-browser-host`,
+  `sync-executor`, `orez-sync-native`). on-zero, the CLI, starters and app
+  helpers are out of scope.
 - Production cost and latency: Durable Object SQL rows read and written per
   pull and push, CPU and wall time per request, wasm memory, and allocation in
   hot paths.
