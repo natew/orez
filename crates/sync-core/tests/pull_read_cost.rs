@@ -201,14 +201,15 @@ fn caught_up_pull_read_cost() {
     assert!(h.rows < 20, "caught-up pull read {} rows", h.rows);
 }
 
-// The pull path must reach the packed ledger by primary key, never by scan:
+// The pull path must reach engine bookkeeping by key, never by scan:
 // `_zsync_log_segments` is WITHOUT ROWID with up to ~16 KiB payload rows, so
-// a scan pages every retained payload on each pull (watermark, change scan,
-// and prune run on nearly every pull of a busy namespace). Exercises the real
-// engine, captures the statements it actually issues, and asserts none plans
-// a scan of the segments table.
+// a scan pages every retained payload on each pull; the group-seen probe and
+// the desires filters scale with namespace size (groups, clients x queries)
+// on every pull. Cloudflare bills every row scanned, so each of these is
+// production money. Exercises the real engine, captures the statements it
+// actually issues, and asserts none plans a scan of these tables.
 #[test]
-fn pull_path_never_scans_the_packed_ledger() {
+fn pull_path_never_scans_engine_tables() {
     let (mut h, cookie) = steady_host_with_retain(10);
     let tables = item_tables();
     // the log spans the setup's cookieless pull (which advances the floor and
@@ -228,7 +229,10 @@ fn pull_path_never_scans_the_packed_ledger() {
     assert_eq!(steady["rowsPatch"].as_array().unwrap().len(), 1);
     let mut checked = 0;
     for line in &h.log {
-        if !line.contains("_zsync_log_segments") {
+        if !line.contains("_zsync_log_segments")
+            && !line.contains("_zsync_client_group_seen")
+            && !line.contains("_zsync_desires")
+        {
             continue;
         }
         let sql = line.split_once(' ').map(|(_, s)| s).unwrap_or(line);
@@ -239,10 +243,16 @@ fn pull_path_never_scans_the_packed_ledger() {
                 .unwrap();
         for row in &plan {
             if let Some(SqlValue::Text(detail)) = row.get("detail") {
-                assert!(
-                    !detail.contains("SCAN _zsync_log_segments"),
-                    "ledger statement plans a scan: {sql} -> {detail}"
-                );
+                for table in [
+                    "_zsync_log_segments",
+                    "_zsync_client_group_seen",
+                    "_zsync_desires",
+                ] {
+                    assert!(
+                        !detail.contains(&format!("SCAN {table}")),
+                        "engine statement plans a scan: {sql} -> {detail}"
+                    );
+                }
             }
         }
         checked += 1;

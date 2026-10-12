@@ -713,6 +713,16 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
         )",
         &[],
     )?;
+    // the prune probe asks for any group older than the bound; without this
+    // it scans every group's row on each floor-advancing pull (nearly every
+    // pull on a busy namespace), and Cloudflare bills every row scanned. seen
+    // rows change at most once per retention window per group, so the write
+    // side is negligible.
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS _zsync_client_group_seen_watermark
+         ON _zsync_client_group_seen (watermark)",
+        &[],
+    )?;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_snapshot_generation (
             lock INTEGER PRIMARY KEY CHECK (lock = 1),

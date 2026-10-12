@@ -279,6 +279,16 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
          ON _zsync_row_refs (clientGroupID, addedVersion)",
         &[],
     )?;
+    // the deactivation check and the active-query load filter desires by
+    // (group, hash); the primary key leads with clientID, so without this
+    // every pull walks the whole group's desires (clients x queries) and
+    // Cloudflare bills every row scanned. desires change only when a client
+    // edits its query set, so the write side costs one index row per patch.
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS _zsync_desires_group_hash
+         ON _zsync_desires (clientGroupID, hash)",
+        &[],
+    )?;
     db.exec(
         "CREATE INDEX IF NOT EXISTS _zsync_row_refs_removed
          ON _zsync_row_refs (clientGroupID, removedVersion) WHERE refcount = 0",
@@ -681,13 +691,21 @@ struct ActiveQuery {
     deps: Vec<String>,
 }
 
-// the distinct queries any client in the group currently desires
+// the distinct queries any client in the group currently desires, driven from
+// the queries table (one row per query) with an EXISTS probe per query into
+// desires. the old desires-driven JOIN walked every client's every desire
+// (clients x queries scanned per pull); the probe touches one index row per
+// query instead. _zsync_queries rows are unique by primary key, so no
+// DISTINCT is needed.
 fn active_queries(db: &mut dyn SyncDb, group: &str) -> Result<Vec<ActiveQuery>, EngineError> {
     let rows = db.query(
-        "SELECT DISTINCT q.hash AS hash, q.ast AS ast, q.rootTable AS rootTable, q.deps AS deps
-         FROM _zsync_desires d JOIN _zsync_queries q
-           ON q.clientGroupID = d.clientGroupID AND q.hash = d.hash
-         WHERE d.clientGroupID = ?",
+        "SELECT q.hash AS hash, q.ast AS ast, q.rootTable AS rootTable, q.deps AS deps
+         FROM _zsync_queries q
+         WHERE q.clientGroupID = ?
+           AND EXISTS (
+             SELECT 1 FROM _zsync_desires d
+             WHERE d.clientGroupID = q.clientGroupID AND d.hash = q.hash
+           )",
         &[text(group)],
     )?;
     let mut out = Vec::new();
