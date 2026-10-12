@@ -44,8 +44,8 @@ impl Meter {
         self.log.clear();
     }
 
-    fn short(sql: &str) -> String {
-        sql.split_whitespace()
+    fn short(line: &str) -> String {
+        line.split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
             .chars()
@@ -57,13 +57,13 @@ impl Meter {
 impl SyncDb for Meter {
     fn exec(&mut self, sql: &str, params: &[SqlValue]) -> Result<(), DbError> {
         self.stmts += 1;
-        self.log.push(format!("exec {}", Self::short(sql)));
+        self.log.push(format!("exec {sql}"));
         self.db.exec(sql, params)
     }
 
     fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
         self.stmts += 1;
-        self.log.push(format!("query {}", Self::short(sql)));
+        self.log.push(format!("query {sql}"));
         let rows = self.db.query(sql, params)?;
         self.rows += rows.len() as u64;
         Ok(rows)
@@ -102,6 +102,10 @@ fn slice_ast(lo: i64, hi: i64) -> Value {
 // ten-slice host with all queries registered and one steady-state change
 // pending: returns (meter, cookie before the change).
 fn steady_host() -> (Meter, Value) {
+    steady_host_with_retain(4096)
+}
+
+fn steady_host_with_retain(retain: i64) -> (Meter, Value) {
     let mut h = Meter::new();
     let tables = item_tables();
     init_schema(&mut h, &tables).unwrap();
@@ -127,7 +131,7 @@ fn steady_host() -> (Meter, Value) {
         "queries": { "version": 1, "patch": patch },
     });
     let first = h
-        .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+        .transaction(|db| handle_query_pull(db, &tables, retain, &body, "u1"))
         .unwrap();
     let cookie = first["cookie"].clone();
     assert_eq!(
@@ -167,7 +171,7 @@ fn steady_pull_read_cost() {
     let mut counts: Vec<_> = counts.into_iter().collect();
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (sql, n) in counts.iter().take(15) {
-        println!("  {n:4} x {sql}");
+        println!("  {n:4} x {}", Meter::short(sql));
     }
     assert!(h.stmts < 42, "steady pull issued {} statements", h.stmts);
     assert!(h.rows < 500, "steady pull read {} rows", h.rows);
@@ -195,4 +199,69 @@ fn caught_up_pull_read_cost() {
     );
     assert!(h.stmts < 10, "caught-up pull issued {} statements", h.stmts);
     assert!(h.rows < 20, "caught-up pull read {} rows", h.rows);
+}
+
+// The pull path must reach the packed ledger by primary key, never by scan:
+// `_zsync_log_segments` is WITHOUT ROWID with up to ~16 KiB payload rows, so
+// a scan pages every retained payload on each pull (watermark, change scan,
+// and prune run on nearly every pull of a busy namespace). Exercises the real
+// engine, captures the statements it actually issues, and asserts none plans
+// a scan of the segments table.
+#[test]
+fn pull_path_never_scans_the_packed_ledger() {
+    let (mut h, cookie) = steady_host_with_retain(10);
+    let tables = item_tables();
+    // the log spans the setup's cookieless pull (which advances the floor and
+    // drains stale segments) and the steady pull below (which scans for
+    // changes). both phases' ledger statements are checked.
+    let steady = h
+        .transaction(|db| {
+            handle_query_pull(
+                db,
+                &tables,
+                10,
+                &json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie }),
+                "u1",
+            )
+        })
+        .unwrap();
+    assert_eq!(steady["rowsPatch"].as_array().unwrap().len(), 1);
+    let mut checked = 0;
+    for line in &h.log {
+        if !line.contains("_zsync_log_segments") {
+            continue;
+        }
+        let sql = line.split_once(' ').map(|(_, s)| s).unwrap_or(line);
+        // EXPLAIN needs bound literals; 0 preserves each statement's index
+        // choice (all binds here are version comparisons or key equalities).
+        let plan =
+            h.db.query(&format!("EXPLAIN QUERY PLAN {sql}").replace('?', "0"), &[])
+                .unwrap();
+        for row in &plan {
+            if let Some(SqlValue::Text(detail)) = row.get("detail") {
+                assert!(
+                    !detail.contains("SCAN _zsync_log_segments"),
+                    "ledger statement plans a scan: {sql} -> {detail}"
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "expected watermark, scan, and prune statements to be checked, saw {checked}"
+    );
+    // the setup's 2,000 writes must have rotated into several segments, so the
+    // drain path above actually ran more than once; otherwise this check is
+    // vacuous (e.g. after a rotation-threshold change).
+    let drains = h
+        .log
+        .iter()
+        .filter(|line| line.starts_with("exec DELETE FROM _zsync_log_segments"))
+        .count();
+    assert!(
+        drains >= 2,
+        "expected the prune drain to remove several stale segments, saw {drains}"
+    );
+    println!("checked {checked} ledger statements, none scans the segments table");
 }
