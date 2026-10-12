@@ -80,11 +80,18 @@ pub fn read_floor(conn: &Connection) -> i64 {
 }
 
 // the durable high-water mark: the max version ever assigned in this namespace.
+// the segment side reads the active segment's end, not MAX(endVersion): the
+// ledger is one contiguous chain, so the last row's end is the max end, and
+// MAX has no index and walks every retained payload on each pull's telemetry.
 pub fn read_watermark(conn: &Connection) -> i64 {
     conn.query_row(
         "SELECT MAX(
              (SELECT high FROM _zsync_watermark WHERE lock = 1),
-             COALESCE((SELECT MAX(endVersion) FROM _zsync_log_segments), 0)
+             COALESCE(
+               (SELECT endVersion FROM _zsync_log_segments
+                WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)),
+               0
+             )
          )",
         [],
         |row| row.get(0),
