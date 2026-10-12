@@ -186,8 +186,15 @@ pub fn handle_query_pull(
     };
 
     store::claim_client(db, group, client_id, user_id)?;
+    // the pull's one watermark + floor read. the ledger is append-only inside
+    // this transaction (nothing on the pull path writes it), so the watermark
+    // cannot move under us; the floor only moves at the prune below, which
+    // returns its new value. everything after reuses these two locals instead
+    // of re-reading (used to be ten bookkeeping reads per pull).
+    let watermark = store::watermark(db)?;
+    let floor_before = store::floor(db)?;
     // after the ownership check, so a rejected claim never marks a group live.
-    store::touch_client_group(db, group, retain_changes)?;
+    store::touch_client_group(db, group, watermark, floor_before, retain_changes)?;
     delete_clients(db, group, &deleted_client_ids)?;
 
     let transform_client_reset = match body.get("_serverQueryTransformVersion") {
@@ -243,10 +250,11 @@ pub fn handle_query_pull(
     // then dead weight nothing else would ever remove, so collect it here — the
     // query layer is where those tables exist, and this is the only path that
     // creates them.
-    if store::prune(db, retain_changes)? {
-        super::membership::collect_abandoned_client_groups(db, retain_changes)?;
+    let floor = store::prune_known(db, watermark, floor_before, retain_changes)?;
+    if floor != floor_before {
+        super::membership::collect_abandoned_client_groups(db, floor, retain_changes)?;
     }
-    let current = store::watermark(db)?;
+    let current = watermark;
     if let Some(c) = cookie
         && c > current
     {
@@ -260,7 +268,7 @@ pub fn handle_query_pull(
     // recompute every active query against it, and write only genuine deltas.
     // a server transform reset remains a fail-closed group invalidation.
     let below_floor = match cookie {
-        Some(c) => c < store::floor(db)?,
+        Some(c) => c < floor,
         None => true,
     };
     let full_response = cookie.is_none() || below_floor || transform_client_reset;
@@ -302,7 +310,6 @@ pub fn handle_query_pull(
             cookie.unwrap(),
             &emitted,
         )?);
-        let floor = store::floor(db)?;
         prune_tombstones(db, floor)?;
     }
     if full_response {

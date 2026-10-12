@@ -541,9 +541,10 @@ pub(crate) fn client_query_version(
 //   per query, so retaining them costs nothing that grows with history.
 pub(crate) fn collect_abandoned_client_groups(
     db: &mut dyn SyncDb,
+    floor: i64,
     retain_changes: i64,
 ) -> Result<(), EngineError> {
-    let bound = crate::store::floor(db)? - retain_changes;
+    let bound = floor - retain_changes;
     // pruning raises the floor on nearly every pull, and the deletes below
     // scan every membership row. they can only remove something once a group
     // has fallen behind the bound, so look for one first. membership with no

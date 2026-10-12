@@ -63,16 +63,33 @@ pub(crate) fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
 // signal means retention stays one decision, `retain_changes`, instead of a
 // second knob that can disagree with it.
 pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<bool, EngineError> {
-    let cutoff = watermark(db)? - retain_changes;
-    if cutoff <= floor(db)? {
-        return Ok(false);
+    let watermark = watermark(db)?;
+    let floor = floor(db)?;
+    Ok(prune_known(db, watermark, floor, retain_changes)? != floor)
+}
+
+// the same prune with a watermark and floor the caller already read. the pull
+// path reads both once up front and threads them through touch, prune, and the
+// floor checks below, so one pull pays two bookkeeping reads instead of ten:
+// the ledger is append-only inside the pull's transaction (nothing on the pull
+// path writes it), so the watermark cannot move under us, and the floor only
+// moves right here. returns the floor after (advanced or not).
+pub(crate) fn prune_known(
+    db: &mut dyn SyncDb,
+    watermark: i64,
+    floor: i64,
+    retain_changes: i64,
+) -> Result<i64, EngineError> {
+    let cutoff = watermark - retain_changes;
+    if cutoff <= floor {
+        return Ok(floor);
     }
     ledger::prune(db, cutoff)?;
     db.exec(
         "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
         &[counter(cutoff)],
     )?;
-    Ok(true)
+    Ok(cutoff)
 }
 
 // epoch bump: append a marker (advances the watermark past every cookie) and
@@ -153,18 +170,22 @@ pub(crate) fn claim_client(
 // floor modifies no row. A busy client therefore writes once per retention
 // window instead of once per pull, and it refreshes before the same pull's
 // prune, so it is never collected out from under itself.
+//
+// takes the watermark and floor the caller already read (see prune_known: one
+// pull reads both once and reuses them everywhere).
 pub(crate) fn touch_client_group(
     db: &mut dyn SyncDb,
     client_group_id: &str,
+    watermark: i64,
+    floor: i64,
     retain_changes: i64,
 ) -> Result<(), EngineError> {
-    let watermark = watermark(db)?;
     // The bound to clear is the floor this request is ABOUT to set, not the one
     // it found. A claim runs before the prune that raises the floor, so testing
     // against the current floor left a window exactly `retain_changes` wide in
     // which a group that had just pulled was still collected by that same
     // pull's prune.
-    let floor_after = floor(db)?.max(watermark - retain_changes);
+    let floor_after = floor.max(watermark - retain_changes);
     db.exec(
         "INSERT INTO _zsync_client_group_seen (clientGroupID, watermark) VALUES (?, ?)
          ON CONFLICT (clientGroupID) DO UPDATE SET watermark = excluded.watermark

@@ -1,0 +1,198 @@
+// What a pull COSTS in SQL reads: statement count and rows returned per pull,
+// metered with a counting SyncDb decorator. Cloudflare bills Durable Object
+// SQLite per row read, and every engine-issued statement also crosses the
+// wasm-to-JS boundary, so both numbers drive production cost and latency.
+//
+// Workload ("ten slices"): 2,000 rows in `item`, 10 range queries of ~200 rows
+// each (the shape of per-channel / per-view queries over one shared table).
+// The load-bearing scenario is the STEADY pull: one row changed since the
+// cookie, nine of ten queries provably unaffected.
+mod common;
+
+use common::{TestDb, item_tables};
+use serde_json::{Value, json};
+use sync_core::query::{handle_query_pull, init_query_schema};
+use sync_core::{DbError, Row, SqlValue, SyncDb, Transactor, init_schema};
+
+struct Meter {
+    db: TestDb,
+    pub stmts: u64,
+    pub rows: u64,
+    pub log: Vec<String>,
+}
+
+impl Meter {
+    fn new() -> Meter {
+        let mut db = TestDb::memory();
+        db.exec(
+            "CREATE TABLE item_record (item_id TEXT PRIMARY KEY, item_label TEXT NOT NULL,
+             sort_rank REAL NOT NULL, is_done INTEGER NOT NULL, metadata_json TEXT)",
+            &[],
+        )
+        .unwrap();
+        Meter {
+            db,
+            stmts: 0,
+            rows: 0,
+            log: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.stmts = 0;
+        self.rows = 0;
+        self.log.clear();
+    }
+
+    fn short(sql: &str) -> String {
+        sql.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(120)
+            .collect()
+    }
+}
+
+impl SyncDb for Meter {
+    fn exec(&mut self, sql: &str, params: &[SqlValue]) -> Result<(), DbError> {
+        self.stmts += 1;
+        self.log.push(format!("exec {}", Self::short(sql)));
+        self.db.exec(sql, params)
+    }
+
+    fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
+        self.stmts += 1;
+        self.log.push(format!("query {}", Self::short(sql)));
+        let rows = self.db.query(sql, params)?;
+        self.rows += rows.len() as u64;
+        Ok(rows)
+    }
+}
+
+impl Transactor for Meter {
+    fn transaction<T, E>(
+        &mut self,
+        body: impl FnOnce(&mut dyn SyncDb) -> Result<T, E>,
+    ) -> Result<T, E> {
+        // counting must observe the engine's statements, so run the body
+        // against this decorator inside the inner transaction.
+        self.db.conn.execute_batch("BEGIN").expect("BEGIN");
+        let result = body(self);
+        match &result {
+            Ok(_) => self.db.conn.execute_batch("COMMIT").expect("COMMIT"),
+            Err(_) => self.db.conn.execute_batch("ROLLBACK").expect("ROLLBACK"),
+        }
+        result
+    }
+}
+
+fn slice_ast(lo: i64, hi: i64) -> Value {
+    json!({
+        "table": "item",
+        "where": { "type": "and", "conditions": [
+            { "type": "simple", "op": ">=", "left": { "type": "column", "name": "rank" },
+              "right": { "type": "literal", "value": lo } },
+            { "type": "simple", "op": "<", "left": { "type": "column", "name": "rank" },
+              "right": { "type": "literal", "value": hi } },
+        ]},
+    })
+}
+
+// ten-slice host with all queries registered and one steady-state change
+// pending: returns (meter, cookie before the change).
+fn steady_host() -> (Meter, Value) {
+    let mut h = Meter::new();
+    let tables = item_tables();
+    init_schema(&mut h, &tables).unwrap();
+    init_query_schema(&mut h).unwrap();
+    for i in 0..2000 {
+        h.db.exec(
+            "INSERT INTO item_record VALUES (?, ?, ?, 0, NULL)",
+            &[
+                SqlValue::Text(format!("i{i}")),
+                SqlValue::Text(format!("label{i}")),
+                SqlValue::Real(i as f64),
+            ],
+        )
+        .unwrap();
+    }
+    let patch: Vec<Value> = (0..10)
+        .map(|k| {
+            json!({ "op": "put", "hash": format!("q{k}"), "ast": slice_ast(k * 200, k * 200 + 200) })
+        })
+        .collect();
+    let body = json!({
+        "clientID": "c1", "clientGroupID": "g1", "cookie": Value::Null,
+        "queries": { "version": 1, "patch": patch },
+    });
+    let first = h
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+        .unwrap();
+    let cookie = first["cookie"].clone();
+    assert_eq!(
+        first["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["op"] == "put")
+            .count(),
+        2000,
+        "setup must deliver all 2,000 rows"
+    );
+    // one steady-state change inside slice 3.
+    h.db.exec(
+        "UPDATE item_record SET item_label = 'changed' WHERE item_id = 'i612'",
+        &[],
+    )
+    .unwrap();
+    (h, cookie)
+}
+
+#[test]
+fn steady_pull_read_cost() {
+    let (mut h, cookie) = steady_host();
+    let tables = item_tables();
+    h.reset();
+    let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie });
+    let resp = h
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+        .unwrap();
+    assert_eq!(resp["rowsPatch"].as_array().unwrap().len(), 1);
+    println!("steady pull: {} statements, {} rows read", h.stmts, h.rows);
+    let mut counts = std::collections::BTreeMap::new();
+    for line in &h.log {
+        *counts.entry(line.clone()).or_insert(0u64) += 1;
+    }
+    let mut counts: Vec<_> = counts.into_iter().collect();
+    counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (sql, n) in counts.iter().take(15) {
+        println!("  {n:4} x {sql}");
+    }
+    assert!(h.stmts < 42, "steady pull issued {} statements", h.stmts);
+    assert!(h.rows < 500, "steady pull read {} rows", h.rows);
+}
+
+#[test]
+fn caught_up_pull_read_cost() {
+    let (mut h, cookie) = steady_host();
+    let tables = item_tables();
+    // drain the steady change first so the second pull is fully caught up.
+    let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie });
+    let drained = h
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+        .unwrap();
+    h.reset();
+    let body2 =
+        json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": drained["cookie"].clone() });
+    let resp = h
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &body2, "u1"))
+        .unwrap();
+    assert_eq!(resp["unchanged"], json!(true));
+    println!(
+        "caught-up pull: {} statements, {} rows read",
+        h.stmts, h.rows
+    );
+    assert!(h.stmts < 10, "caught-up pull issued {} statements", h.stmts);
+    assert!(h.rows < 20, "caught-up pull read {} rows", h.rows);
+}
