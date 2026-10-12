@@ -48,3 +48,4 @@ Owner direction, 2026-10-12 (Nate, voice):
 - `453826c6` batch membership/refcount writes (500-departure flip, release): 1524 -> 83 stmts, rows ~4500 and writes 1000 and dels 500 identical, wall flat (crossing cost lives on wasm)
 - `cc0f9bd6` index group bookkeeping (20 clients/10 queries/200 groups, release best-of-3): wall 859 -> 620us, stmts/rows 21/158 unchanged; billed scanned rows ~600 -> ~25 by plan (CF bills scanned); steady/deact/post-deact responses byte-identical
 - `7ee718cd` native serving watermark by key (400x14KiB segs, release/200 reads): 4.28 -> 0.73ms, values identical 1598
+- workerd A/B billing proof (real workerd, 20 clients x 10 queries + 30 idle groups + ~10 segs, /admin/sql-billing deltas): steady 959 -> 550 rowsRead (-43%), caught-up 481 -> 77 (-84%), writes 0 both; wall flat sub-ms
