@@ -43,3 +43,4 @@ Owner direction, 2026-10-12 (Nate, voice):
 - `f710492e` ledger by PK not scan (400x14KiB segs, release/200 calls): watermark 3.84 -> 0.47ms, scan 4.67 -> 1.68ms, steady prune 3.79 -> 0.52ms (bulk drain-all 0.30 -> 3.36ms once, ~7x cheaper after)
 - `f64eb83c` parse each query AST once per pull (100 queries/20k rows, release best-of): steady 2.97 -> 2.83ms, caught-up 301 -> 292us
 - `5c7669f4` fix-forward: regenerated L1-prune-no-floor mutant for prune_known (CI applicability gate went red after 69698620 moved the floor write; net still catches it)
+- `157101d5` batch touched-pk narrowing (100 queries/20k rows, release best-of): steady 218 -> 25 stmts, rows identical 709, wall 5.26 -> 3.48ms; ten-slice steady 38 -> 21 stmts
