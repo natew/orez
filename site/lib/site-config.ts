@@ -1,21 +1,21 @@
-export type SiteId = 'orez' | 'lite-sync'
+export type SiteId = 'orez' | 'lime-sync'
 
 const siteId = import.meta.env.VITE_SITE
 
-if (siteId !== 'orez' && siteId !== 'lite-sync') {
-  throw new Error('VITE_SITE must be either "orez" or "lite-sync"')
+if (siteId !== 'orez' && siteId !== 'lime-sync') {
+  throw new Error('VITE_SITE must be either "orez" or "lime-sync"')
 }
 
-export const isLiteSyncSite = siteId === 'lite-sync'
+export const isLimeSyncSite = siteId === 'lime-sync'
 
-export const siteConfig = isLiteSyncSite
+export const siteConfig = isLimeSyncSite
   ? {
       id: siteId,
-      name: 'Lite Sync',
-      titleSuffix: 'Lite Sync docs',
+      name: 'Lime Sync',
+      titleSuffix: 'Lime Sync docs',
       description: "A compact Rust and SQLite sync server for Zero's real client.",
-      docsRoot: 'data/lite-sync-docs',
-      showLogo: false,
+      docsRoot: 'data/lime-sync-docs',
+      favicon: '/lime-sync.svg',
       npmHref: 'https://www.npmjs.com/package/orez-lite',
       relatedSite: {
         href: 'https://orez-docs.natewienert.workers.dev',
@@ -28,10 +28,10 @@ export const siteConfig = isLiteSyncSite
       titleSuffix: 'Orez docs',
       description: 'The easy local Zero runner with one command and one configuration.',
       docsRoot: 'data/docs',
-      showLogo: true,
+      favicon: '/favicon.svg',
       npmHref: 'https://www.npmjs.com/package/orez',
       relatedSite: {
-        href: 'https://lite-sync-docs.natewienert.workers.dev',
-        label: 'Lite Sync',
+        href: 'https://lime-sync.natewienert.workers.dev',
+        label: 'Lime Sync',
       },
     }

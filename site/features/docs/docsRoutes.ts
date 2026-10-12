@@ -1,4 +1,4 @@
-import { isLiteSyncSite } from '~/lib/site-config'
+import { isLimeSyncSite } from '~/lib/site-config'
 
 export type DocsPage = {
   title: string
@@ -44,7 +44,7 @@ const orezDocsSections: DocsSection[] = [
   },
 ]
 
-const liteSyncDocsSections: DocsSection[] = [
+const limeSyncDocsSections: DocsSection[] = [
   {
     title: 'Start',
     pages: [
@@ -69,7 +69,7 @@ const liteSyncDocsSections: DocsSection[] = [
   },
 ]
 
-export const docsSections = isLiteSyncSite ? liteSyncDocsSections : orezDocsSections
+export const docsSections = isLimeSyncSite ? limeSyncDocsSections : orezDocsSections
 
 export const docsPages = docsSections.flatMap((section) => section.pages)
 

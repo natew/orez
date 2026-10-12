@@ -13,15 +13,15 @@ bunx orez
 
 oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite) (SQLite in WASM), bundled together so local development is as simple as `bun install && bunx orez`.
 
-## Lite Sync
+## Lime Sync
 
-Lite Sync is the separate SQLite-native Zero engine. The current preview ships
+Lime Sync is the separate SQLite-native Zero engine. The current preview ships
 as [`orez-lite`](https://www.npmjs.com/package/orez-lite) while its package
 boundary is being split from Orez. It runs on Cloudflare and other constrained
 hosts, replaces Zero's server side, and speaks the Zero protocol to the real
 `@rocicorp/zero` client. `orez-lite/client` supplies the transport without
 forking Zero's query or mutation API. Read the
-[Lite Sync documentation](https://lite-sync-docs.natewienert.workers.dev).
+[Lime Sync documentation](https://lime-sync.natewienert.workers.dev).
 
 `orez-lite/aggregate` maintains queryable count and sum columns until Zero ships
 aggregate queries. One declaration generates the SQLite migration and triggers
@@ -47,7 +47,7 @@ export const { ZeroSqlDO, ZeroDO } = orez
 export default orez
 ```
 
-Lite Sync owns namespace routing, schema readiness and coalescing, change-feed
+Lime Sync owns namespace routing, schema readiness and coalescing, change-feed
 projection, write budgets, and optional streaming backups. Applications add
 only product routes, telemetry, cron work, and namespace inventory.
 
@@ -105,7 +105,7 @@ not suitable for production.
 - **Local filesystem** — no replication, no HA. Use `orez pg_dump` for backups.
 
 Orez does not embed zero-cache in Cloudflare Durable Objects. Cloudflare server
-work uses the SQLite-native Lite Sync runtime from `orez-lite/cloudflare`.
+work uses the SQLite-native Lime Sync runtime from `orez-lite/cloudflare`.
 
 ## Backends
 

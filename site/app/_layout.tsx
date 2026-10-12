@@ -20,7 +20,7 @@ export default function Layout() {
           content="width=device-width, initial-scale=1, maximum-scale=5"
         />
         <meta name="theme-color" content="#fdfdfc" />
-        {siteConfig.showLogo ? <link rel="icon" href="/favicon.svg" /> : null}
+        <link rel="icon" href={siteConfig.favicon} />
       </head>
       <body>
         <TamaguiRootProvider>

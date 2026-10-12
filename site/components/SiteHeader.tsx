@@ -2,7 +2,7 @@ import { usePathname } from 'one'
 import { useState } from 'react'
 import { Button, SizableText, Text, XStack, YStack } from 'tamagui'
 
-import { isLiteSyncSite, siteConfig } from '~/lib/site-config'
+import { isLimeSyncSite, siteConfig } from '~/lib/site-config'
 
 import { AppLink } from './AppLink'
 import { ThemeSwitch } from './ThemeSwitch'
@@ -16,7 +16,7 @@ function Mark() {
   )
 }
 
-const primaryLinks = isLiteSyncSite
+const primaryLinks = isLimeSyncSite
   ? [
       { href: '/docs', label: 'Docs' },
       { href: '/docs/architecture', label: 'Architecture' },
@@ -39,7 +39,17 @@ export function SiteHeader() {
       >
         <AppLink href="/" aria-label={`${siteConfig.name} home`} className="brand-link">
           <XStack items="center" gap="$2">
-            {siteConfig.showLogo ? <Mark /> : null}
+            {isLimeSyncSite ? (
+              <img
+                className="lime-mark"
+                src="/lime-sync.svg"
+                alt=""
+                width={24}
+                height={24}
+              />
+            ) : (
+              <Mark />
+            )}
             <Text color="$color12" fontSize={17} fontWeight="700">
               {siteConfig.name.toLowerCase()}
             </Text>
@@ -124,7 +134,7 @@ export function SiteHeader() {
         >
           {[
             ...primaryLinks,
-            ...(isLiteSyncSite ? [] : [{ href: '/docs/node', label: 'Node' }]),
+            ...(isLimeSyncSite ? [] : [{ href: '/docs/node', label: 'Node' }]),
           ].map((item) => (
             <AppLink
               key={item.href}

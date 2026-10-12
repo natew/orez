@@ -2,27 +2,27 @@ import { H1, H2, Paragraph, Text, XStack, YStack } from 'tamagui'
 
 import { AppLink } from '~/components/AppLink'
 
-export function LiteSyncHome() {
+export function LimeSyncHome() {
   return (
     <>
-      <title>Lite Sync · Zero on SQLite</title>
+      <title>Lime Sync · Zero on SQLite</title>
       <meta name="description" content="A Rust sync server for Zero backed by SQLite." />
 
-      <main id="main-content" className="home-page lite-sync-home">
-        <section className="lite-sync-hero">
+      <main id="main-content" className="home-page lime-sync-home">
+        <section className="lime-sync-hero">
           <YStack gap="$4" maxW={640}>
-            <H1 color="$color12" className="lite-sync-title">
+            <H1 color="$color12" className="lime-sync-title">
               Zero on SQLite
             </H1>
-            <Paragraph color="$color10" className="lite-sync-lede">
-              Lite Sync is a Rust sync server for Zero backed by SQLite. It uses the stock
+            <Paragraph color="$color10" className="lime-sync-lede">
+              Lime Sync is a Rust sync server for Zero backed by SQLite. It uses the stock
               @rocicorp/zero client and replaces zero-cache.
             </Paragraph>
-            <XStack className="lite-sync-links" items="center" gap="$5" flexWrap="wrap">
-              <AppLink href="/docs" className="lite-sync-link">
+            <XStack className="lime-sync-links" items="center" gap="$5" flexWrap="wrap">
+              <AppLink href="/docs" className="lime-sync-link">
                 Documentation
               </AppLink>
-              <AppLink href="/docs/architecture" className="lite-sync-link">
+              <AppLink href="/docs/architecture" className="lime-sync-link">
                 Architecture
               </AppLink>
             </XStack>
@@ -32,17 +32,17 @@ export function LiteSyncHome() {
           </YStack>
         </section>
 
-        <section className="lite-sync-section" aria-labelledby="lite-sync-fit-title">
+        <section className="lime-sync-section" aria-labelledby="lime-sync-fit-title">
           <YStack gap="$4" maxW={700}>
-            <H2 id="lite-sync-fit-title" color="$color12" className="lite-sync-heading">
+            <H2 id="lime-sync-fit-title" color="$color12" className="lime-sync-heading">
               How it fits
             </H2>
-            <Paragraph color="$color10" className="lite-sync-copy">
+            <Paragraph color="$color10" className="lime-sync-copy">
               Your application keeps its Zero schema, queries, mutators, authentication,
-              and data endpoints. Lite Sync handles the sync protocol and stores its state
+              and data endpoints. Lime Sync handles the sync protocol and stores its state
               in SQLite.
             </Paragraph>
-            <dl className="lite-sync-facts">
+            <dl className="lime-sync-facts">
               <div>
                 <dt>Client</dt>
                 <dd>@rocicorp/zero</dd>
@@ -63,23 +63,23 @@ export function LiteSyncHome() {
           </YStack>
         </section>
 
-        <section className="lite-sync-section" aria-labelledby="lite-sync-start-title">
+        <section className="lime-sync-section" aria-labelledby="lime-sync-start-title">
           <YStack gap="$4" maxW={700}>
-            <H2 id="lite-sync-start-title" color="$color12" className="lite-sync-heading">
+            <H2 id="lime-sync-start-title" color="$color12" className="lime-sync-heading">
               Start here
             </H2>
-            <Paragraph color="$color10" className="lite-sync-copy">
+            <Paragraph color="$color10" className="lime-sync-copy">
               The Cloudflare host is in preview. Read the setup and limitations before
               deploying it.
             </Paragraph>
-            <XStack className="lite-sync-links" items="center" gap="$5" flexWrap="wrap">
-              <AppLink href="/docs/cloudflare" className="lite-sync-link">
+            <XStack className="lime-sync-links" items="center" gap="$5" flexWrap="wrap">
+              <AppLink href="/docs/cloudflare" className="lime-sync-link">
                 Cloudflare setup
               </AppLink>
-              <AppLink href="/docs/limitations" className="lite-sync-link">
+              <AppLink href="/docs/limitations" className="lime-sync-link">
                 Limitations
               </AppLink>
-              <AppLink href="/docs/packages" className="lite-sync-link">
+              <AppLink href="/docs/packages" className="lime-sync-link">
                 Packages
               </AppLink>
             </XStack>

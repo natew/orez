@@ -1,14 +1,14 @@
-# Orez and Lite Sync websites
+# Orez and Lime Sync websites
 
 This One app builds two independent documentation sites from one shared
 component and styling system:
 
 - Orez: https://orez-docs.natewienert.workers.dev
-- Lite Sync: https://lite-sync-docs.natewienert.workers.dev
+- Lime Sync: https://lime-sync.natewienert.workers.dev
 
-Orez documents the local runner around stock zero-cache. Lite Sync documents
+Orez documents the local runner around stock zero-cache. Lime Sync documents
 the Rust and SQLite replacement sync server. Orez MDX lives in `data/docs`;
-Lite Sync MDX lives in `data/lite-sync-docs`.
+Lime Sync MDX lives in `data/lime-sync-docs`.
 
 ## Develop
 
@@ -17,7 +17,7 @@ bun install
 bun dev
 ```
 
-`bun dev` starts the Orez site. Use `bun run dev:lite-sync` for Lite Sync.
+`bun dev` starts the Orez site. Use `bun run dev:lime-sync` for Lime Sync.
 
 ## Build
 
@@ -25,7 +25,7 @@ bun dev
 bun run build
 ```
 
-The command builds Orez into `dist/orez` and Lite Sync into `dist/lite-sync`.
+The command builds Orez into `dist/orez` and Lime Sync into `dist/lime-sync`.
 Each output contains pre-rendered pages under `client` and an independent
 Cloudflare Worker under `worker`.
 

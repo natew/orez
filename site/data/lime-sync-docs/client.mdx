@@ -1,12 +1,12 @@
 ---
 title: Client transport
-description: Connect the stock Zero client to Lite Sync over HTTP.
+description: Connect the stock Zero client to Lime Sync over HTTP.
 ---
 
 # Client transport
 
-Lite Sync uses the real `@rocicorp/zero` client API and local cache. The
-browser transport that connects it to Lite Sync is currently provided by `orez-lite/client`,
+Lime Sync uses the real `@rocicorp/zero` client API and local cache. The
+browser transport that connects it to Lime Sync is currently provided by `orez-lite/client`,
 so the client and server halves of the wire protocol ship together.
 
 Install the transport before constructing `Zero`:
@@ -40,7 +40,7 @@ shim.
 ## Application endpoints
 
 Use `pullOrigin` and `pushOrigin` when the authoritative HTTP endpoints live
-at a different base URL from the Lite Sync host:
+at a different base URL from the Lime Sync host:
 
 ```ts
 const transport = createZeroClientTransport({

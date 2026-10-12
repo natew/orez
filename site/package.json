@@ -5,13 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "VITE_SITE=orez one dev",
-    "dev:lite-sync": "VITE_SITE=lite-sync one dev",
-    "build": "rm -rf dist && bun run build:orez && bun run build:lite-sync",
+    "dev:lime-sync": "VITE_SITE=lime-sync one dev",
+    "build": "rm -rf dist && bun run build:orez && bun run build:lime-sync",
     "build:orez": "VITE_SITE=orez one build",
-    "build:lite-sync": "VITE_SITE=lite-sync one build",
+    "build:lime-sync": "VITE_SITE=lime-sync one build",
     "serve": "bun run serve:orez",
     "serve:orez": "VITE_SITE=orez one serve --outDir=dist/orez",
-    "serve:lite-sync": "VITE_SITE=lite-sync one serve --outDir=dist/lite-sync",
+    "serve:lime-sync": "VITE_SITE=lime-sync one serve --outDir=dist/lime-sync",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

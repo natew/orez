@@ -6,8 +6,8 @@ import { defineConfig } from 'vite'
 const satteriWasiStub = fileURLToPath(new URL('./satteri-wasi-stub.mjs', import.meta.url))
 const siteId = process.env.VITE_SITE
 
-if (siteId !== 'orez' && siteId !== 'lite-sync') {
-  throw new Error('VITE_SITE must be either "orez" or "lite-sync"')
+if (siteId !== 'orez' && siteId !== 'lime-sync') {
+  throw new Error('VITE_SITE must be either "orez" or "lime-sync"')
 }
 
 export default defineConfig({

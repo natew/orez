@@ -1,7 +1,7 @@
-import { LiteSyncHome } from '~/features/home/LiteSyncHome'
+import { LimeSyncHome } from '~/features/home/LimeSyncHome'
 import { OrezHome } from '~/features/home/OrezHome'
-import { isLiteSyncSite } from '~/lib/site-config'
+import { isLimeSyncSite } from '~/lib/site-config'
 
 export default function HomePage() {
-  return isLiteSyncSite ? <LiteSyncHome /> : <OrezHome />
+  return isLimeSyncSite ? <LimeSyncHome /> : <OrezHome />
 }

@@ -1,7 +1,7 @@
 import { H1, H2, H3, Paragraph, SizableText, Text, XStack, YStack } from 'tamagui'
 
 import { AppLink } from './AppLink'
-import { EvidenceLedger, VerifiedBuildCard } from './LiteSyncEvidence'
+import { EvidenceLedger, VerifiedBuildCard } from './LimeSyncEvidence'
 
 import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 

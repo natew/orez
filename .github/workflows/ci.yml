@@ -679,7 +679,7 @@ jobs:
           toolchain: 1.94.0
 
       - name: test exact-SHA evidence identity
-        run: bun test scripts/generate-lite-sync-evidence.test.ts
+        run: bun test scripts/generate-lime-sync-evidence.test.ts
 
       - name: collect qualified fault traces
         uses: actions/download-artifact@v4
@@ -702,14 +702,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           OREZ_REGRESSION_TRACES_URL: ${{ steps.regression-traces.outputs.artifact-url }}
           OREZ_REGRESSION_TRACES_PATH: qualified-traces
-        run: bun scripts/generate-lite-sync-evidence.ts generate
+        run: bun scripts/generate-lime-sync-evidence.ts generate
 
       - name: validate exact-SHA release gate
         env:
           EXPECTED_EVIDENCE_SHA: ${{ github.sha }}
-        run: bun scripts/generate-lite-sync-evidence.ts check
+        run: bun scripts/generate-lime-sync-evidence.ts check
 
-      - name: build Orez and Lite Sync sites
+      - name: build Orez and Lime Sync sites
         run: |
           cd site
           bun install --frozen-lockfile
@@ -718,8 +718,8 @@ jobs:
       - name: upload immutable evidence ledger
         uses: actions/upload-artifact@v4
         with:
-          name: lite-sync-evidence-${{ github.sha }}
-          path: site/data/lite-sync-evidence.json
+          name: lime-sync-evidence-${{ github.sha }}
+          path: site/data/lime-sync-evidence.json
           if-no-files-found: error
           retention-days: 90
 
@@ -731,11 +731,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: upload Lite Sync site built from evidence JSON
+      - name: upload Lime Sync site built from evidence JSON
         uses: actions/upload-artifact@v4
         with:
-          name: lite-sync-site-${{ github.sha }}
-          path: site/dist/lite-sync/
+          name: lime-sync-site-${{ github.sha }}
+          path: site/dist/lime-sync/
           if-no-files-found: error
           retention-days: 90
 
@@ -749,10 +749,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: aa20b480cc813f2131bc005e2b7fd140
         run: bunx wrangler@4.110.0 deploy --config dist/orez/worker/wrangler.json --name orez-docs
 
-      - name: deploy Lite Sync docs site to Cloudflare
+      - name: deploy Lime Sync docs site to Cloudflare
         if: github.ref == 'refs/heads/main'
         working-directory: site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: aa20b480cc813f2131bc005e2b7fd140
-        run: bunx wrangler@4.110.0 deploy --config dist/lite-sync/worker/wrangler.json --name lite-sync-docs
+        run: bunx wrangler@4.110.0 deploy --config dist/lime-sync/worker/wrangler.json --name lime-sync

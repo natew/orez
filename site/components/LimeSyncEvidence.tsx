@@ -1,4 +1,4 @@
-import evidence from '~/data/lite-sync-evidence.json' with { type: 'json' }
+import evidence from '~/data/lime-sync-evidence.json' with { type: 'json' }
 import { classifyEvidenceIdentity } from '~/lib/evidence-identity'
 
 import { AppLink } from './AppLink'
