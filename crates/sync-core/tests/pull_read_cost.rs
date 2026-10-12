@@ -173,7 +173,7 @@ fn steady_pull_read_cost() {
     for (sql, n) in counts.iter().take(15) {
         println!("  {n:4} x {}", Meter::short(sql));
     }
-    assert!(h.stmts < 42, "steady pull issued {} statements", h.stmts);
+    assert!(h.stmts < 24, "steady pull issued {} statements", h.stmts);
     assert!(h.rows < 500, "steady pull read {} rows", h.rows);
 }
 

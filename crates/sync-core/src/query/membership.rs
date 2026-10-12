@@ -975,72 +975,190 @@ fn collect_dependent_rows(
     Ok(())
 }
 
-// touched-pk narrowing: is any touched row actually relevant to this query? a
-// touched row in a non-root dependency table (an EXISTS/related child) is
-// conservatively relevant (its effect on parents is not cheaply localized). a
-// touched ROOT row is relevant only if it is a current member (it may leave or
-// its data changed) or it matches the query predicate (it may enter, possibly
-// shifting a limited window). so a new message in channel Y probes as a
-// non-member non-match for channel X's query and is skipped.
-fn query_relevant(
+// touched-pk narrowing, batched over every narrowable query at once: a pull
+// that missed another client's writes since its cookie must test each touched
+// row against each query on its table. per query that was two statements (a
+// membership check plus a predicate probe), so a 100-query group paid ~200
+// crossings to skip 99 queries. this resolves the same relevance for all of
+// them in a few statements: one DISTINCT-hash membership probe per root table
+// (grouped, since members are keyed by table), then one UNION ALL of tagged
+// EXISTS predicate probes for the queries no membership hit.
+//
+// relevance per query is unchanged: a touched row in a non-root dependency
+// table (an EXISTS/related child) is conservatively relevant (its effect on
+// parents is not cheaply localized). a touched ROOT row is relevant only if it
+// is a current member (it may leave or its data changed) or it matches the
+// query predicate (it may enter, possibly shifting a limited window). so a new
+// message in channel Y still probes as a non-member non-match for channel X's
+// query and is skipped. returns the hashes that must recompute.
+fn batched_relevance(
     db: &mut dyn SyncDb,
     tables: &Tables,
     group: &str,
-    q: &ActiveQuery,
+    candidates: &[&ActiveQuery],
     changed: &BTreeSet<(String, String)>,
-) -> Result<bool, EngineError> {
-    let mut root_pks: Vec<&String> = Vec::new();
-    for (table, pk) in changed {
-        if !q.deps.iter().any(|d| d == table) {
-            continue;
-        }
-        if table != &q.root_table {
-            return Ok(true); // non-root dependency change
-        }
-        root_pks.push(pk);
+) -> Result<BTreeSet<String>, EngineError> {
+    struct Pending<'a> {
+        hash: &'a str,
+        ast: &'a Ast,
+        root_table: &'a str,
+        root_pks: Vec<&'a String>,
     }
-    if root_pks.is_empty() {
-        return Ok(false);
-    }
-    let probe = compile_predicate_probe(&q.ast, tables)?;
-    // one membership check and one predicate probe per chunk of changed keys,
-    // sized to the bind limit, instead of both per key: a pull that missed every
-    // other client's writes since its cookie probes each of them against each
-    // query on their table. the membership check stays a point lookup per key on
-    // the full _zsync_query_rows primary key, never the query's whole set.
-    let per_chunk = (SQL_BIND_LIMIT.saturating_sub(probe.params.len()) / probe.primary_key.len())
-        .clamp(1, SQL_BIND_LIMIT - 3);
-    for chunk in root_pks.chunks(per_chunk) {
-        let mut params = vec![text(group), text(&q.hash), text(&q.root_table)];
-        params.extend(chunk.iter().map(|pk| text(pk.as_str())));
-        let member = !db
-            .query(
-                &format!(
-                    "SELECT 1 FROM _zsync_query_rows
-                     WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk IN ({})
-                     LIMIT 1",
-                    vec!["?"; chunk.len()].join(", ")
-                ),
-                &params,
-            )?
-            .is_empty();
-        if member {
-            return Ok(true);
+    let mut relevant = BTreeSet::new();
+    let mut pending: Vec<Pending> = Vec::new();
+    for q in candidates {
+        let mut root_pks = Vec::new();
+        let mut early = false;
+        for (table, pk) in changed {
+            if !q.deps.iter().any(|d| d == table) {
+                continue;
+            }
+            if table != &q.root_table {
+                early = true; // non-root dependency change
+                break;
+            }
+            root_pks.push(pk);
         }
-        let mut params =
-            Vec::with_capacity(chunk.len() * probe.primary_key.len() + probe.params.len());
-        for pk in chunk {
-            let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
-            for col in &probe.primary_key {
-                params.push(json_pk_to_sql(pk_obj.get(col)));
+        if early {
+            relevant.insert(q.hash.clone());
+        } else if !root_pks.is_empty() {
+            pending.push(Pending {
+                hash: &q.hash,
+                ast: &q.ast,
+                root_table: &q.root_table,
+                root_pks,
+            });
+        }
+    }
+    if pending.is_empty() {
+        return Ok(relevant);
+    }
+    // phase 1: membership, grouped by root table. members are keyed
+    // (group, hash, table, pk), so one DISTINCT-hash statement per
+    // (table, hash-tile, key-tile) covers a whole group. tiles hold the bind
+    // count (group + table + hashes + keys) under the DO limit.
+    let mut by_table: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, p) in pending.iter().enumerate() {
+        by_table.entry(p.root_table).or_default().push(i);
+    }
+    for (table, idxs) in &by_table {
+        let mut keys: Vec<&String> = Vec::new();
+        let mut seen_keys: BTreeSet<&str> = BTreeSet::new();
+        let mut hashes: Vec<&str> = Vec::new();
+        for &i in idxs {
+            hashes.push(pending[i].hash);
+            for pk in &pending[i].root_pks {
+                if seen_keys.insert(pk.as_str()) {
+                    keys.push(pk);
+                }
             }
         }
-        params.extend(probe.params.iter().cloned());
-        if !db.query(&probe.sql(chunk.len()), &params)?.is_empty() {
-            return Ok(true);
+        // tile the (hash, key) matrix into <=100-bind cells (2 fixed binds
+        // for group and table): the small dim goes whole whenever it fits, so
+        // one query over many keys chunks exactly like the old per-query
+        // check, and many queries over few keys share one cell per ~97.
+        let budget = SQL_BIND_LIMIT - 2;
+        let (hc, kc) = if hashes.len() + keys.len() <= budget {
+            (hashes.len().max(1), keys.len().max(1))
+        } else if keys.len() <= budget / 2 {
+            (budget - keys.len(), keys.len())
+        } else if hashes.len() <= budget / 2 {
+            (hashes.len(), budget - hashes.len())
+        } else {
+            let hc = ((budget * hashes.len() + (hashes.len() + keys.len()) / 2)
+                / (hashes.len() + keys.len()))
+            .clamp(1, budget - 1);
+            (hc, budget - hc)
+        };
+        for key_chunk in keys.chunks(kc) {
+            for hash_chunk in hashes.chunks(hc) {
+                let mut params = vec![text(group), text(*table)];
+                params.extend(hash_chunk.iter().map(|h| text(*h)));
+                params.extend(key_chunk.iter().map(|pk| text(pk.as_str())));
+                let rows = db.query(
+                    &format!(
+                        "SELECT DISTINCT hash FROM _zsync_query_rows
+                         WHERE clientGroupID = ? AND rowTable = ?
+                           AND hash IN ({}) AND rowPk IN ({})",
+                        vec!["?"; hash_chunk.len()].join(", "),
+                        vec!["?"; key_chunk.len()].join(", "),
+                    ),
+                    &params,
+                )?;
+                for row in &rows {
+                    relevant.insert(str_col(row.get("hash"))?);
+                }
+            }
         }
     }
-    Ok(false)
+    // phase 2: predicate probes for what membership missed, as one UNION ALL
+    // of tagged EXISTS branches per bind-budget statement. a branch is one
+    // query's probe over a key chunk; the tag travels as a bind (hashes are
+    // client-chosen, never interpolated). duplicate tags across a query's own
+    // chunks collapse in the set.
+    struct Branch {
+        sql: String,
+        params: Vec<SqlValue>,
+    }
+    let mut branches: Vec<Branch> = Vec::new();
+    for p in &pending {
+        if relevant.contains(p.hash) {
+            continue;
+        }
+        let probe = compile_predicate_probe(p.ast, tables)?;
+        // 1 tag bind + keys x pk columns + predicate binds <= limit
+        // (saturating: a giant predicate overflows the DO limit exactly as
+        // the old per-query probe did, never panics here).
+        let per_key = probe.primary_key.len().max(1);
+        let kb = (SQL_BIND_LIMIT.saturating_sub(1 + probe.params.len()) / per_key).max(1);
+        for key_chunk in p.root_pks.chunks(kb) {
+            let mut params = Vec::with_capacity(1 + key_chunk.len() * per_key + probe.params.len());
+            params.push(text(p.hash));
+            for pk in key_chunk {
+                let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
+                for col in &probe.primary_key {
+                    params.push(json_pk_to_sql(pk_obj.get(col)));
+                }
+            }
+            params.extend(probe.params.iter().cloned());
+            branches.push(Branch {
+                sql: format!(
+                    "SELECT ? AS h WHERE EXISTS ({})",
+                    probe.sql(key_chunk.len())
+                ),
+                params,
+            });
+        }
+    }
+    let mut union_sql = String::new();
+    let mut union_params: Vec<SqlValue> = Vec::new();
+    let flush = |db: &mut dyn SyncDb,
+                 sql: &mut String,
+                 params: &mut Vec<SqlValue>,
+                 relevant: &mut BTreeSet<String>|
+     -> Result<(), EngineError> {
+        if sql.is_empty() {
+            return Ok(());
+        }
+        for row in db.query(sql, params)? {
+            relevant.insert(str_col(row.get("h"))?);
+        }
+        sql.clear();
+        params.clear();
+        Ok(())
+    };
+    for b in &branches {
+        if !union_sql.is_empty() && union_params.len() + b.params.len() > SQL_BIND_LIMIT {
+            flush(db, &mut union_sql, &mut union_params, &mut relevant)?;
+        }
+        if !union_sql.is_empty() {
+            union_sql.push_str(" UNION ALL ");
+        }
+        union_sql.push_str(&b.sql);
+        union_params.extend(b.params.iter().cloned());
+    }
+    flush(db, &mut union_sql, &mut union_params, &mut relevant)?;
+    Ok(relevant)
 }
 
 // recompute every active query for the group, diff each against durable
@@ -1099,6 +1217,22 @@ pub(crate) fn recompute_group_with_rehydrate(
     // computed-marker set is loaded once so a skip costs no SQL.
     let touched: BTreeSet<&str> = changed.iter().map(|(t, _)| t.as_str()).collect();
     let mut computed: BTreeSet<String> = read_query_state(db, group)?;
+    // touched-pk narrowing, resolved once for every narrowable query: which
+    // computed, non-rehydrated, dependency-touched queries have a touched row
+    // that is a member or a predicate match. batched_relevance answers for all
+    // of them in a few statements instead of two per query.
+    let mut narrowable: BTreeSet<&str> = BTreeSet::new();
+    let mut narrow_candidates: Vec<&ActiveQuery> = Vec::new();
+    for q in &queries {
+        if computed.contains(&q.hash)
+            && !(rehydrate_all || rehydrate.contains(&q.hash))
+            && q.deps.iter().any(|t| touched.contains(t.as_str()))
+        {
+            narrowable.insert(q.hash.as_str());
+            narrow_candidates.push(q);
+        }
+    }
+    let relevant = batched_relevance(db, tables, group, &narrow_candidates, changed)?;
 
     // net reference delta per (table, pk), and the live rows for puts. rows stay
     // raw until one is emitted: a steady recompute re-reads every member but
@@ -1111,13 +1245,9 @@ pub(crate) fn recompute_group_with_rehydrate(
     for q in &queries {
         let rehydrate_query = rehydrate_all || rehydrate.contains(&q.hash);
         if computed.contains(&q.hash) && !rehydrate_query {
-            // (a) dependency-intersection: skip if no dependency table was touched
-            let dep_touched = q.deps.iter().any(|t| touched.contains(t.as_str()));
-            if !dep_touched {
-                continue;
-            }
-            // (b) touched-pk narrowing: skip if no touched row is relevant
-            if !query_relevant(db, tables, group, q, changed)? {
+            // (a) dependency-intersection and (b) touched-pk narrowing, both
+            // resolved above: skip unless a touched row can affect this query.
+            if !narrowable.contains(q.hash.as_str()) || !relevant.contains(&q.hash) {
                 continue;
             }
         } else if computed.insert(q.hash.clone()) {
@@ -1153,7 +1283,7 @@ pub(crate) fn recompute_group_with_rehydrate(
             &compiled.sql,
             &compiled.params,
             &ast.table,
-            &ast,
+            ast,
             0,
             &mut live,
             &mut values,
