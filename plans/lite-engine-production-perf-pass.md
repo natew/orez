@@ -1,6 +1,7 @@
 # Lite engine production performance pass
 
 Owner direction, 2026-10-12 (Nate, voice):
+
 - "send a whole agent into OREZ let's have them do a big huge optimization
   pass. They can just spend as long as they need just optimizing. They should
   just land things. Piece by piece as they validate them and just keep going."
