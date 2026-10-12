@@ -835,60 +835,92 @@ fn read_ref(db: &mut dyn SyncDb, group: &str, table: &str, pk: &str) -> Result<i
     }
 }
 
-// apply a refcount change, stamping membership transitions with the watermark
+// current refcounts for a set of (table, pk) keys in tiled row-value-IN
+// reads: one statement per ~49 keys instead of one point lookup per key.
+// missing keys read 0, exactly like read_ref.
+fn batch_read_refs(
+    db: &mut dyn SyncDb,
+    group: &str,
+    keys: &BTreeSet<(String, String)>,
+) -> Result<BTreeMap<(String, String), i64>, EngineError> {
+    let mut out: BTreeMap<(String, String), i64> = BTreeMap::new();
+    let ordered: Vec<&(String, String)> = keys.iter().collect();
+    for chunk in ordered.chunks((SQL_BIND_LIMIT - 1) / 2) {
+        let mut params = Vec::with_capacity(1 + chunk.len() * 2);
+        params.push(text(group));
+        for (table, pk) in chunk {
+            params.extend([text(table), text(pk)]);
+        }
+        for row in db.query(
+            &format!(
+                "SELECT rowTable, rowPk, CAST(refcount AS TEXT) AS c FROM _zsync_row_refs
+                 WHERE clientGroupID = ? AND (rowTable, rowPk) IN ({})",
+                vec!["(?, ?)"; chunk.len()].join(", "),
+            ),
+            &params,
+        )? {
+            let table = str_col(row.get("rowTable"))?;
+            let pk = str_col(row.get("rowPk"))?;
+            let count = match row.get("c") {
+                Some(SqlValue::Text(s)) => s.parse().unwrap_or(0),
+                _ => 0,
+            };
+            out.insert((table, pk), count);
+        }
+    }
+    Ok(out)
+}
+
+// apply refcount changes, stamping membership transitions with the watermark
 // that observed them. positive -> 0 keeps the row as a tombstone carrying
 // removedVersion instead of deleting it, and 0 -> positive stamps addedVersion
 // (clearing any tombstone), so a later pull from another client of the group
-// can replay the transition against its own cookie.
-fn set_ref(
+// can replay the transition against its own cookie. one multi-row upsert per
+// ~16 rows instead of a read plus a write per row; each entry is (table, pk,
+// new refcount, removedVersion-or-null). the caller never submits a row
+// staying non-positive (no row and no arrival, or a tombstone staying one):
+// writing one would corrupt tombstone replay.
+//
+// the CASEs derive the three outcomes from the conflicting row: a live row
+// keeps its addedVersion, a revived one takes the new addedVersion and clears
+// the tombstone, and a departure stamps removedVersion. a plain insert takes
+// the excluded row whole, which is always an arrival (a non-positive never
+// reaches an insert).
+fn batch_apply_refs(
     db: &mut dyn SyncDb,
     group: &str,
-    table: &str,
-    pk: &str,
-    old: i64,
-    count: i64,
     version: i64,
+    writes: &[(String, String, i64, Option<i64>)],
 ) -> Result<(), EngineError> {
-    if count <= 0 {
-        if old > 0 {
-            db.exec(
-                "UPDATE _zsync_row_refs SET refcount = 0, removedVersion = ?
-                 WHERE clientGroupID = ? AND rowTable = ? AND rowPk = ?",
-                &[
-                    SqlValue::Integer(version),
-                    text(group),
-                    text(table),
-                    text(pk),
-                ],
-            )?;
-        }
-    } else if old <= 0 {
-        db.exec(
-            "INSERT INTO _zsync_row_refs
-               (clientGroupID, rowTable, rowPk, refcount, addedVersion, removedVersion)
-             VALUES (?, ?, ?, ?, ?, NULL)
-             ON CONFLICT (clientGroupID, rowTable, rowPk) DO UPDATE SET
-               refcount = excluded.refcount,
-               addedVersion = excluded.addedVersion,
-               removedVersion = NULL",
-            &[
+    for chunk in writes.chunks(SQL_BIND_LIMIT / 6) {
+        let mut params = Vec::with_capacity(chunk.len() * 6);
+        for (table, pk, count, removed) in chunk {
+            params.extend([
                 text(group),
                 text(table),
                 text(pk),
                 SqlValue::Text(count.to_string()),
                 SqlValue::Integer(version),
-            ],
-        )?;
-    } else {
+                match removed {
+                    Some(v) => SqlValue::Integer(*v),
+                    None => SqlValue::Null,
+                },
+            ]);
+        }
         db.exec(
-            "UPDATE _zsync_row_refs SET refcount = ?
-             WHERE clientGroupID = ? AND rowTable = ? AND rowPk = ?",
-            &[
-                SqlValue::Text(count.to_string()),
-                text(group),
-                text(table),
-                text(pk),
-            ],
+            &format!(
+                "INSERT INTO _zsync_row_refs
+                   (clientGroupID, rowTable, rowPk, refcount, addedVersion, removedVersion)
+                 VALUES {}
+                 ON CONFLICT (clientGroupID, rowTable, rowPk) DO UPDATE SET
+                   refcount = excluded.refcount,
+                   addedVersion = CASE WHEN _zsync_row_refs.refcount <= 0
+                     THEN excluded.addedVersion ELSE _zsync_row_refs.addedVersion END,
+                   removedVersion = CASE WHEN excluded.refcount <= 0
+                     THEN excluded.removedVersion ELSE NULL END",
+                vec!["(?, ?, ?, ?, ?, ?)"; chunk.len()].join(", "),
+            ),
+            &params,
         )?;
     }
     Ok(())
@@ -1241,6 +1273,11 @@ pub(crate) fn recompute_group_with_rehydrate(
     let mut ref_delta: BTreeMap<(String, String), i64> = BTreeMap::new();
     let mut values: BTreeMap<(String, String), Row> = BTreeMap::new();
     let mut rehydrate_rows: BTreeSet<(String, String)> = BTreeSet::new();
+    // membership rows to write, applied batched below: one multi-row INSERT
+    // per ~25 arrivals and one row-value-IN DELETE per ~32 departures instead
+    // of one statement per row.
+    let mut arrivals: Vec<(String, String, String)> = Vec::new();
+    let mut departures: Vec<(String, String, String)> = Vec::new();
 
     for q in &queries {
         let rehydrate_query = rehydrate_all || rehydrate.contains(&q.hash);
@@ -1295,19 +1332,11 @@ pub(crate) fn recompute_group_with_rehydrate(
 
         let durable = read_query_row_keys(db, group, &q.hash)?;
         for key in live.difference(&durable) {
-            db.exec(
-                "INSERT OR IGNORE INTO _zsync_query_rows (clientGroupID, hash, rowTable, rowPk)
-                 VALUES (?, ?, ?, ?)",
-                &[text(group), text(&q.hash), text(&key.0), text(&key.1)],
-            )?;
+            arrivals.push((q.hash.clone(), key.0.clone(), key.1.clone()));
             *ref_delta.entry(key.clone()).or_insert(0) += 1;
         }
         for key in durable.difference(&live) {
-            db.exec(
-                "DELETE FROM _zsync_query_rows
-                 WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk = ?",
-                &[text(group), text(&q.hash), text(&key.0), text(&key.1)],
-            )?;
+            departures.push((q.hash.clone(), key.0.clone(), key.1.clone()));
             *ref_delta.entry(key.clone()).or_insert(0) -= 1;
         }
     }
@@ -1345,11 +1374,7 @@ pub(crate) fn recompute_group_with_rehydrate(
     for hash in &deactivated {
         let rows = read_query_row_keys(db, group, hash)?;
         for (table, pk) in rows {
-            db.exec(
-                "DELETE FROM _zsync_query_rows
-                 WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk = ?",
-                &[text(group), text(hash), text(&table), text(&pk)],
-            )?;
+            departures.push((hash.clone(), table.clone(), pk.clone()));
             *ref_delta.entry((table, pk)).or_insert(0) -= 1;
         }
         // The definition is derived from a client's put operation. Once the
@@ -1364,18 +1389,83 @@ pub(crate) fn recompute_group_with_rehydrate(
         super::wake::forget_query(db, group, Some(hash))?;
     }
 
+    // apply the collected membership writes batched: multi-row INSERT OR
+    // IGNORE for arrivals, one row-value-IN DELETE per tile for departures.
+    // set effects are identical to the old one-row-per-statement loop (same
+    // rows, same IGNORE/conflict behavior); only the statement count changes.
+    for chunk in arrivals.chunks(SQL_BIND_LIMIT / 4) {
+        let mut params = Vec::with_capacity(chunk.len() * 4);
+        for (hash, table, pk) in chunk {
+            params.extend([text(group), text(hash), text(table), text(pk)]);
+        }
+        db.exec(
+            &format!(
+                "INSERT OR IGNORE INTO _zsync_query_rows (clientGroupID, hash, rowTable, rowPk)
+                 VALUES {}",
+                vec!["(?, ?, ?, ?)"; chunk.len()].join(", "),
+            ),
+            &params,
+        )?;
+    }
+    for chunk in departures.chunks((SQL_BIND_LIMIT - 1) / 3) {
+        let mut params = Vec::with_capacity(1 + chunk.len() * 3);
+        params.push(text(group));
+        for (hash, table, pk) in chunk {
+            params.extend([text(hash), text(table), text(pk)]);
+        }
+        db.exec(
+            &format!(
+                "DELETE FROM _zsync_query_rows
+                 WHERE clientGroupID = ? AND (hash, rowTable, rowPk) IN ({})",
+                vec!["(?, ?, ?)"; chunk.len()].join(", "),
+            ),
+            &params,
+        )?;
+    }
+
     // apply net deltas; emit a put on 0 -> positive, a del on positive -> 0.
     // transitions are stamped with the caller's watermark so other clients of
     // the group replay them from their own cookies (see _zsync_row_refs).
+    // current refcounts arrive in one row-value-IN read per tile (plus the
+    // changed-but-live keys the re-emit below needs), and the writes go out as
+    // one multi-row upsert per tile instead of a read plus a write per row.
+    let mut ref_keys: BTreeSet<(String, String)> = BTreeSet::new();
+    for (key, delta) in &ref_delta {
+        if *delta != 0 {
+            ref_keys.insert(key.clone());
+        }
+    }
+    for (table, pk) in changed {
+        let key = (table.clone(), pk.clone());
+        if values.contains_key(&key) {
+            ref_keys.insert(key);
+        }
+    }
+    let olds = batch_read_refs(db, group, &ref_keys)?;
+    // (table, pk, new refcount, removedVersion-or-null): rows whose write the
+    // old code skipped (no row and no arrival, or a tombstone staying one)
+    // never enter this list, exactly as before.
+    let mut ref_writes: Vec<(String, String, i64, Option<i64>)> = Vec::new();
     let mut patch: Vec<Value> = Vec::new();
     let mut emitted: BTreeSet<(String, String)> = BTreeSet::new();
     for ((table, pk), delta) in &ref_delta {
         if *delta == 0 {
             continue;
         }
-        let old = read_ref(db, group, table, pk)?;
+        let old = olds.get(&(table.clone(), pk.clone())).copied().unwrap_or(0);
         let new = old + delta;
-        set_ref(db, group, table, pk, old, new, version)?;
+        // a write here must never touch a row staying non-positive: the old
+        // code skipped it (no row and no arrival, or a tombstone staying one),
+        // and writing would corrupt tombstone replay (see batch_apply_refs).
+        if old <= 0 && new <= 0 {
+            continue;
+        }
+        ref_writes.push((
+            table.clone(),
+            pk.clone(),
+            new,
+            if new <= 0 { Some(version) } else { None },
+        ));
         if old == 0 && new > 0 {
             let row = values
                 .remove(&(table.clone(), pk.clone()))
@@ -1400,17 +1490,25 @@ pub(crate) fn recompute_group_with_rehydrate(
             emitted.insert((table.clone(), pk.clone()));
         }
     }
+    // one multi-row upsert per tile for the refcount writes above. runs after
+    // the emit decisions (which only need olds) and before everything below
+    // that reads refs back (re-emit is decided from olds, transitions replay
+    // from the durable rows this writes).
+    batch_apply_refs(db, group, version, &ref_writes)?;
 
     // re-emit rows whose data changed but whose membership did not (still
     // referenced, without duplicating a put/del from a membership flip). only a
     // recomputed query holds a live value, so the refcount read is skipped for
     // every changed row no recompute reached, which on a narrowed pull is all.
+    // decided from the pre-update olds: a key this pull emitted is skipped
+    // above, and every other key's refcount is untouched by this pull, so the
+    // pre-update value answers identically to a fresh read.
     for (table, pk) in changed {
         let key = (table.clone(), pk.clone());
         if emitted.contains(&key) || !values.contains_key(&key) {
             continue;
         }
-        if read_ref(db, group, table, pk)? > 0
+        if olds.get(&key).copied().unwrap_or(0) > 0
             && let Some(row) = values.remove(&key)
         {
             let value = live_zero_row(tables, table, &row)?;
@@ -1470,7 +1568,15 @@ pub(crate) fn transitions_since(
             SqlValue::Integer(cookie),
         ],
     )?;
-    let mut patch = Vec::new();
+    // pass 1, in transition order: emit dels inline, stage live re-reads.
+    // pass 2 replays the staged puts in that same order from one IN query
+    // per (table, key-tile) instead of one point lookup per row.
+    enum Staged {
+        Del(Value),
+        Live { table: String, pk: String },
+    }
+    let mut ops: Vec<Staged> = Vec::new();
+    let mut live_by_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for row in &rows {
         let table = str_col(row.get("rowTable"))?;
         let pk = str_col(row.get("rowPk"))?;
@@ -1489,34 +1595,85 @@ pub(crate) fn transitions_since(
             .expect("member table has physical mapping");
         let pk_obj: Value = serde_json::from_str(&pk).unwrap_or(Value::Null);
         if live {
-            let predicate = spec
-                .primary_key
-                .iter()
-                .map(|col| format!("\"{col}\" = ?"))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            let params: Vec<SqlValue> = spec
-                .primary_key
-                .iter()
-                .map(|col| json_pk_to_sql(pk_obj.get(col)))
-                .collect();
-            let sql = format!("SELECT * FROM \"{physical_table}\" WHERE {predicate}");
-            let Some(app_row) = db.query(&sql, &params)?.into_iter().next() else {
-                // membership says live but the row is gone: the departure will
-                // settle on the next recompute; skip rather than invent state.
-                continue;
-            };
-            patch.push(json!({
-                "op": "put",
-                "tableName": physical_table,
-                "value": zero_row(tables, &table, spec, &app_row)?,
-            }));
+            live_by_table
+                .entry(table.clone())
+                .or_default()
+                .push(pk.clone());
+            ops.push(Staged::Live { table, pk });
         } else {
-            patch.push(json!({
+            ops.push(Staged::Del(json!({
                 "op": "del",
                 "tableName": physical_table,
                 "id": zero_pk_id(tables, &table, spec, &pk_obj)?,
-            }));
+            })));
+        }
+    }
+    // live rows by (table, pk): the refs carry canonical keys, so the map is
+    // keyed by the same text the staged ops hold.
+    let mut live_rows: BTreeMap<(String, String), Row> = BTreeMap::new();
+    for (table, pks) in &live_by_table {
+        let spec = tables
+            .get(table)
+            .ok_or_else(|| EngineError::internal(format!("member table '{table}' missing")))?;
+        let physical_table = tables
+            .physical_name(table)
+            .expect("member table has physical mapping");
+        let pk_cols = &spec.primary_key;
+        for pk_chunk in pks.chunks((SQL_BIND_LIMIT / pk_cols.len().max(1)).max(1)) {
+            let mut params = Vec::with_capacity(pk_chunk.len() * pk_cols.len());
+            let mut holes: Vec<String> = Vec::with_capacity(pk_chunk.len());
+            for pk in pk_chunk {
+                let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
+                let mut row_holes = Vec::with_capacity(pk_cols.len());
+                for col in pk_cols {
+                    params.push(json_pk_to_sql(pk_obj.get(col)));
+                    row_holes.push("?");
+                }
+                holes.push(format!("({})", row_holes.join(", ")));
+            }
+            let predicate = if pk_cols.len() == 1 {
+                format!("\"{}\" IN ({})", pk_cols[0], holes.join(", "))
+            } else {
+                format!(
+                    "({}) IN ({})",
+                    pk_cols
+                        .iter()
+                        .map(|col| format!("\"{col}\""))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    holes.join(", "),
+                )
+            };
+            let sql = format!("SELECT * FROM \"{physical_table}\" WHERE {predicate}");
+            for app_row in db.query(&sql, &params)? {
+                let pk_obj = raw_pk(spec, &app_row);
+                live_rows.insert((table.clone(), canonical_pk(spec, &pk_obj)), app_row);
+            }
+        }
+    }
+    let mut patch = Vec::new();
+    for op in ops {
+        match op {
+            Staged::Del(value) => patch.push(value),
+            Staged::Live { table, pk } => {
+                let Some(app_row) = live_rows.remove(&(table.clone(), pk.clone())) else {
+                    // membership says live but the row is gone: the departure
+                    // will settle on the next recompute; skip rather than
+                    // invent state.
+                    continue;
+                };
+                let spec = tables.get(&table).ok_or_else(|| {
+                    EngineError::internal(format!("member table '{table}' missing"))
+                })?;
+                let physical_table = tables
+                    .physical_name(&table)
+                    .expect("member table has physical mapping");
+                patch.push(json!({
+                    "op": "put",
+                    "tableName": physical_table,
+                    "value": zero_row(tables, &table, spec, &app_row)?,
+                }));
+            }
         }
     }
     Ok(patch)

@@ -265,3 +265,115 @@ fn pull_path_never_scans_the_packed_ledger() {
     );
     println!("checked {checked} ledger statements, none scans the segments table");
 }
+
+// A bulk membership flip must not cost a statement per row: 500 departures
+// arrive as tiled multi-row writes, and the tombstones they stamp must replay
+// to a lagging client of the same group (otherwise its rows ghost forever).
+// The replay half is what would fail if the batched refcount upsert stamped
+// addedVersion/removedVersion wrong.
+#[test]
+fn bulk_departure_write_cost_and_tombstone_replay() {
+    let mut h = Meter::new();
+    let tables = item_tables();
+    init_schema(&mut h, &tables).unwrap();
+    init_query_schema(&mut h).unwrap();
+    for i in 0..2000 {
+        h.db.exec(
+            "INSERT INTO item_record VALUES (?, ?, ?, 0, NULL)",
+            &[
+                SqlValue::Text(format!("i{i}")),
+                SqlValue::Text(format!("l{i}")),
+                SqlValue::Real(i as f64),
+            ],
+        )
+        .unwrap();
+    }
+    let full = json!({
+        "clientID": "c1", "clientGroupID": "g1", "cookie": Value::Null,
+        "queries": { "version": 1, "patch": [{ "op": "put", "hash": "q", "ast": { "table": "item" } }] },
+    });
+    let first = h
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &full, "u1"))
+        .unwrap();
+    let cookie0 = first["cookie"].clone();
+    // a second client of the same group, fully synced, then left behind.
+    let c2body = json!({
+        "clientID": "c2", "clientGroupID": "g1", "cookie": cookie0,
+        "queries": { "version": 1, "patch": [{ "op": "put", "hash": "q", "ast": { "table": "item" } }] },
+    });
+    let c2first = h
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &c2body, "u1"))
+        .unwrap();
+    assert_eq!(
+        c2first["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["op"] == "put")
+            .count(),
+        2000
+    );
+    for i in 0..500 {
+        h.db.exec(
+            &format!("DELETE FROM item_record WHERE item_id = 'i{i}'"),
+            &[],
+        )
+        .unwrap();
+    }
+    h.reset();
+    let before = h.db.conn.total_changes();
+    let flip = h
+        .transaction(|db| {
+            handle_query_pull(
+                db,
+                &tables,
+                4096,
+                &json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie0 }),
+                "u1",
+            )
+        })
+        .unwrap();
+    let written = h.db.conn.total_changes() as i64 - before as i64;
+    let dels = flip["rowsPatch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|op| op["op"] == "del")
+        .count();
+    assert_eq!(dels, 500, "the flip must depart exactly the deleted rows");
+    println!(
+        "bulk 500-departure pull: {} statements, {} rows read, {written} rows written",
+        h.stmts, h.rows
+    );
+    assert!(
+        h.stmts < 120,
+        "bulk departure issued {} statements (one per row would be ~1,500)",
+        h.stmts
+    );
+    assert_eq!(
+        written, 1000,
+        "500 membership deletes plus 500 refcount tombstones, no more"
+    );
+    // the lagging client replays the same 500 departures from the tombstones.
+    let replay = h
+        .transaction(|db| {
+            handle_query_pull(
+                db,
+                &tables,
+                4096,
+                &json!({ "clientID": "c2", "clientGroupID": "g1", "cookie": cookie0 }),
+                "u1",
+            )
+        })
+        .unwrap();
+    let replay_dels = replay["rowsPatch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|op| op["op"] == "del")
+        .count();
+    assert_eq!(
+        replay_dels, 500,
+        "a lagging client must replay every tombstoned departure or rows ghost"
+    );
+}
