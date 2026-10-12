@@ -38,3 +38,5 @@ Owner direction, 2026-10-12 (Nate, voice):
 ## Log
 
 (the pass appends one line per landed change: sha, workload, before -> after)
+
+- `69698620` ten-slice pull (2k rows/10 queries/1 change): steady 45 -> 38 stmts, 446 -> 439 rows; caught-up 13 -> 7 stmts, 20 -> 14 rows (watermark+floor read once per pull)
