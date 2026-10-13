@@ -572,6 +572,18 @@ class ZeroHttpSocket {
   private readonly clientGroupID: string
   private readonly wsid: string
   private cookie: string | null
+  // the latest server cursor to pull from. advances on every pull response,
+  // even when the response carries nothing Zero has not seen and no poke is
+  // emitted. this.cookie stays the last cookie DELIVERED to zero so a real
+  // effect chains its poke from it; a reconnect resumes from that durable
+  // cookie.
+  private httpCookie: number | null = null
+  // every mutation id already delivered to zero on this socket. the server
+  // repeats the map on pulls that carry no new acknowledgements.
+  private readonly deliveredLastMutationIDs = new Map<string, number>()
+  // whether zero has received any poke on this socket yet. the first changed
+  // pull always pokes so initial hydration establishes a cookie.
+  private hasPoked = false
   private pendingGotQueriesPatch: GotQueryPatchOp[] = []
   // a snapshot clear removes both rows and got-query marks from Replicache.
   // remember every delivered mark so a clear-bearing poke can restore them.
@@ -640,6 +652,8 @@ class ZeroHttpSocket {
     this.emitLifecycle('created')
     const baseCookie = this.connectURL.searchParams.get('baseCookie')
     this.cookie = baseCookie ? baseCookie : null
+    this.httpCookie = toHttpCookie(this.cookie)
+    this.hasPoked = this.cookie !== null
     // the local cookie ID is encoded into the suffix of any cookie we
     // already advanced past (toLocalWebSocketCookie). reconnects rehydrate
     // this.cookie from the URL baseCookie param replicache persisted, so we
@@ -767,7 +781,7 @@ class ZeroHttpSocket {
     this.pullAbort = abort
     this.pullInFlight = this.fetchPull(
       this.clientGroupID,
-      this.cookie,
+      this.httpCookie,
       true,
       deletedClientIDs,
       abort.signal
@@ -779,7 +793,7 @@ class ZeroHttpSocket {
         if (response.unchanged) {
           this.emitGotQueriesPatch(response.cookie)
         } else {
-          this.emitPoke(response)
+          this.emitPokeIfEffective(response)
         }
         this.emitLifecycle('pull')
       })
@@ -1207,7 +1221,7 @@ class ZeroHttpSocket {
 
   private async fetchPull(
     clientGroupID: string,
-    cookie: string | null,
+    cookie: string | number | null,
     includeQueries: boolean,
     deletedClientIDs: readonly string[] = [],
     signal?: AbortSignal
@@ -1215,7 +1229,7 @@ class ZeroHttpSocket {
     const body: Record<string, unknown> = {
       clientID: this.clientID,
       clientGroupID,
-      cookie: toHttpCookie(cookie),
+      cookie: typeof cookie === 'number' ? cookie : toHttpCookie(cookie),
     }
     // ship the un-acked desired-query delta with the pull; remember what we
     // sent so the server ack can clear exactly that prefix. a recovery pull
@@ -1395,6 +1409,54 @@ class ZeroHttpSocket {
     if (this.readyState !== this.CLOSED) this.close(1000, errorMessage(error))
   }
 
+  // a changed pull pokes zero only when it carries something zero has not
+  // seen: rows, a new mutation id, or a new got-query mark. a bare namespace
+  // cursor advance (new cookie, empty rows, repeated mutation map and got
+  // patch) only moves the http cursor so the next pull resumes from it; the
+  // durable zero cookie stays until a real effect chains its poke from it.
+  // every poke makes the stock client rebase and commit to its local store,
+  // so these suppressed pokes are the phone's per-pull transaction and gc
+  // cost. initial hydration, clears, new rows, new mutation ids, new or
+  // removed marks, and server resets still poke. never throttles.
+  private emitPokeIfEffective(response: Exclude<PullResponse, { unchanged: true }>) {
+    if (this.httpCookie !== null && response.cookie < this.httpCookie) {
+      throw new Error(
+        `Orez HTTP pull returned stale cookie ${response.cookie} for ${this.cookie}`
+      )
+    }
+    const hasRowEffect = response.rowsPatch.length > 0
+    const hasMutationEffect = this.hasNewLastMutationIDs(response.lastMutationIDChanges)
+    const hasGotEffect = this.hasNewGotQueriesEffect(
+      dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
+    )
+    this.httpCookie = response.cookie
+    if (!this.hasPoked || hasRowEffect || hasMutationEffect || hasGotEffect) {
+      this.emitPoke(response)
+      return
+    }
+    this.pendingGotQueriesPatch = []
+  }
+
+  private hasNewLastMutationIDs(changes: Readonly<Record<string, number>>): boolean {
+    return Object.entries(changes).some(
+      ([clientID, id]) => this.deliveredLastMutationIDs.get(clientID) !== id
+    )
+  }
+
+  // a got patch carries a new effect when it clears, puts an undelivered
+  // hash, or deletes a delivered one. a clear resets the delivered set, so
+  // puts after it in the same patch still count even when their hashes were
+  // delivered before the clear.
+  private hasNewGotQueriesEffect(deduped: GotQueryPatchOp[]): boolean {
+    if (deduped.length === 0) return false
+    if (deduped.some((op) => op.op === 'clear')) return true
+    return deduped.some((op) => {
+      if (op.op === 'put') return !this.ackedGotHashes.has(op.hash)
+      if (op.op === 'del') return this.ackedGotHashes.has(op.hash)
+      return true
+    })
+  }
+
   private emitPoke(response: Exclude<PullResponse, { unchanged: true }>) {
     const currentServer = toHttpCookie(this.cookie)
     let nextCookie: string
@@ -1460,16 +1522,27 @@ class ZeroHttpSocket {
     }
     this.emitMessage(['pokeEnd', { pokeID, cookie: nextCookie }])
     this.cookie = nextCookie
+    this.httpCookie = response.cookie
+    for (const [clientID, id] of Object.entries(response.lastMutationIDChanges)) {
+      this.deliveredLastMutationIDs.set(clientID, id)
+    }
+    this.hasPoked = true
   }
 
   private emitGotQueriesPatch(cookie: number | null) {
     if (this.pendingGotQueriesPatch.length === 0) return
 
-    const serverCookie = cookie ?? toHttpCookie(this.cookie)
+    const serverCookie = cookie ?? this.httpCookie ?? toHttpCookie(this.cookie)
     if (serverCookie === null) return
+    const gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
+    if (!this.hasNewGotQueriesEffect(gotQueries)) {
+      this.pendingGotQueriesPatch = []
+      if (cookie !== null) this.httpCookie = cookie
+      return
+    }
+    if (cookie !== null) this.httpCookie = cookie
     const nextCookie = toLocalWebSocketCookie(serverCookie, ++this.nextLocalCookieID)
     const pokeID = `orez-http-${++this.state.nextPokeID}`
-    const gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
     this.pendingGotQueriesPatch = []
     this.recordAckedGotQueries(gotQueries)
 
@@ -1494,6 +1567,7 @@ class ZeroHttpSocket {
     ])
     this.emitMessage(['pokeEnd', { pokeID, cookie: nextCookie }])
     this.cookie = nextCookie
+    this.hasPoked = true
   }
 
   private recordAckedGotQueries(patch: GotQueryPatchOp[]) {
