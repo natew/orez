@@ -17,8 +17,9 @@ test('orez-lite/client stays a browser-only leaf package', async () => {
     'packages/orez-lite/src/client/transport.ts',
   ])
   // Byte-bounded request/response streaming and the cross-socket query ack
-  // cost ~1.5 KiB in the browser leaf, and superseding a stale pull ~1.1 KiB.
-  // Keep that resilience budget explicit while still catching a server
-  // dependency graph entering this package.
-  expect(bundle.outputFiles[0]?.contents.byteLength).toBeLessThan(44_000)
+  // cost ~1.5 KiB in the browser leaf, superseding a stale pull ~1.1 KiB, and
+  // suppressing pokes for empty HTTP pulls ~3.3 KiB. Keep that resilience
+  // budget explicit while still catching a server dependency graph entering
+  // this package.
+  expect(bundle.outputFiles[0]?.contents.byteLength).toBeLessThan(48_000)
 })
