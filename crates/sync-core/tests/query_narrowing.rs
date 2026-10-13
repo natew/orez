@@ -525,3 +525,55 @@ fn narrowing_benchmark() {
         all_ch_ms / one_ch_ms.max(0.001)
     );
 }
+
+#[test]
+fn batched_probes_stay_within_the_do_compound_select_limit() {
+    // workerd (DO SQLite + D1) hard-sets SQLITE_LIMIT_COMPOUND_SELECT to 5;
+    // stock SQLite defaults to 500, so the harness must pin the DO limit or
+    // this passes locally while prod 500s. eight non-matching queries over
+    // ten touched rows union eight probe branches without the term cap.
+    let mut db = TestDb::memory();
+    db.conn
+        .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_COMPOUND_SELECT, 5);
+    db.exec("CREATE TABLE t0 (id TEXT PRIMARY KEY, v INTEGER)", &[])
+        .unwrap();
+    let tables = tables(1);
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    for i in 0..20 {
+        db.exec(
+            "INSERT INTO t0 VALUES (?, ?)",
+            &[
+                sync_core::SqlValue::Text(format!("r{i}")),
+                sync_core::SqlValue::Integer(i),
+            ],
+        )
+        .unwrap();
+    }
+    for i in 0..8 {
+        register_query(
+            &mut db,
+            &tables,
+            G,
+            &format!("q{i}"),
+            &json!({ "table": "t0", "where": { "type": "simple", "op": "=", "left": { "type": "column", "name": "v" }, "right": { "type": "literal", "value": 100 + i } } }),
+            0,
+        )
+        .unwrap();
+        set_desire(&mut db, G, "c", &format!("q{i}"), 1).unwrap();
+    }
+    db.transaction(|d| recompute_group(d, &tables, G, &changed(&[])))
+        .unwrap();
+    let touched: BTreeSet<(String, String)> = (0..10)
+        .map(|i| {
+            (
+                "t0".to_string(),
+                json!({ "id": format!("r{i}") }).to_string(),
+            )
+        })
+        .collect();
+    let patch = db
+        .transaction(|d| recompute_group(d, &tables, G, &touched))
+        .unwrap();
+    assert!(put_keys(&patch).is_empty());
+}

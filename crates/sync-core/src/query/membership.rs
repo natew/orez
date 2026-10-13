@@ -43,6 +43,11 @@ use super::{compile, parse_ast};
 // bound parameters one statement may carry: the Durable Object SQL limit
 const SQL_BIND_LIMIT: usize = 100;
 
+// union branches one statement may carry: workerd hard-sets
+// SQLITE_LIMIT_COMPOUND_SELECT to 5 (stock SQLite defaults to 500), so a
+// bind-budgeted union that is fine locally 500s on the DO past 5 branches.
+const SQL_COMPOUND_TERM_LIMIT: usize = 5;
+
 // bind a pk column (parsed from a canonical pk json) as a sqlite value
 pub(crate) fn json_pk_to_sql(v: Option<&Value>) -> SqlValue {
     match v {
@@ -1145,7 +1150,9 @@ fn batched_relevance(
     // of tagged EXISTS branches per bind-budget statement. a branch is one
     // query's probe over a key chunk; the tag travels as a bind (hashes are
     // client-chosen, never interpolated). duplicate tags across a query's own
-    // chunks collapse in the set.
+    // chunks collapse in the set. statements are capped by bind count AND by
+    // union branch count: the DO compound-select limit is 5, far below what
+    // the bind budget alone would pack into one statement.
     struct Branch {
         sql: String,
         params: Vec<SqlValue>,
@@ -1197,15 +1204,21 @@ fn batched_relevance(
         params.clear();
         Ok(())
     };
+    let mut union_terms = 0usize;
     for b in &branches {
-        if !union_sql.is_empty() && union_params.len() + b.params.len() > SQL_BIND_LIMIT {
+        if !union_sql.is_empty()
+            && (union_params.len() + b.params.len() > SQL_BIND_LIMIT
+                || union_terms >= SQL_COMPOUND_TERM_LIMIT)
+        {
             flush(db, &mut union_sql, &mut union_params, &mut relevant)?;
+            union_terms = 0;
         }
         if !union_sql.is_empty() {
             union_sql.push_str(" UNION ALL ");
         }
         union_sql.push_str(&b.sql);
         union_params.extend(b.params.iter().cloned());
+        union_terms += 1;
     }
     flush(db, &mut union_sql, &mut union_params, &mut relevant)?;
     Ok(relevant)
