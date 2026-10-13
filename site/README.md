@@ -29,10 +29,12 @@ The command builds Orez into `dist/orez` and Lime Sync into `dist/lime-sync`.
 Each output contains pre-rendered pages under `client` and an independent
 Cloudflare Worker under `worker`.
 
-Pushes to `main` build and deploy both sites after every required CI job
-passes. The GitHub repository must have a `CLOUDFLARE_API_TOKEN` Actions secret
-with Workers Scripts write access for the Lightstrike Labs account. Tags build
-and archive both sites but do not deploy them.
+Pushes to `main` build and deploy both sites from an independent CI job, so
+an engine red never holds docs delivery. The GitHub repository must have a
+`CLOUDFLARE_API_TOKEN` Actions secret with Workers Scripts write access for
+the Lightstrike Labs account. The verified evidence ledger still regenerates
+only after every required CI job passes, and green runs redeploy with verified
+build evidence. Tags build and archive both sites but do not deploy them.
 
 The MDX parser runs only at build time. The `@vite-ignore` annotations on its
 dynamic imports and the WASI alias in `vite.config.ts` keep the parser's native

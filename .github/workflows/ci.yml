@@ -648,6 +648,45 @@ jobs:
             harness/results/
           if-no-files-found: error
 
+  # Public docs sites deploy from every main push, independent of the engine
+  # jobs. An engine red must not hold docs delivery: interim deploys build
+  # from the checked-in unverified evidence fallback ("Awaiting green CI"),
+  # and the evidence job below still regenerates the qualified ledger and
+  # redeploys with verified build evidence once everything is green.
+  site:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: build Orez and Lime Sync sites
+        run: |
+          cd site
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: deploy Orez docs site to Cloudflare
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # must match the account the CLOUDFLARE_API_TOKEN repo secret is
+          # scoped to (currently borrowed from soot per Nate, 2026-07-15)
+          CLOUDFLARE_ACCOUNT_ID: aa20b480cc813f2131bc005e2b7fd140
+        run: bunx wrangler@4.110.0 deploy --config dist/orez/worker/wrangler.json --name orez-docs
+
+      - name: deploy Lime Sync docs site to Cloudflare
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: aa20b480cc813f2131bc005e2b7fd140
+        run: bunx wrangler@4.110.0 deploy --config dist/lime-sync/worker/wrangler.json --name lime-sync
+
   # This is the exact-identity evidence gate. GitHub does not start it until
   # every required job above is green. The generator independently checks the
   # run event/ref, job conclusions, build SHA, and immutable release-tag SHA
