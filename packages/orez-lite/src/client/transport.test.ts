@@ -1202,6 +1202,209 @@ describe('Orez HTTP transport', () => {
     expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000004')
   })
 
+  test('empty cursor advances after hydration emit no Zero poke but advance the pull cursor', async () => {
+    const requests: RequestRecord[] = []
+    const responses: Array<any> = [
+      {
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch: [{ op: 'clear' }],
+      },
+      { cookie: 2, lastMutationIDChanges: {}, rowsPatch: [] },
+      { cookie: 3, lastMutationIDChanges: {}, rowsPatch: [] },
+      {
+        cookie: 4,
+        lastMutationIDChanges: {},
+        rowsPatch: [
+          {
+            op: 'put',
+            tableName: 'project_record',
+            value: { project_id: 'p2', owner_id: 'u1', project_name: 'second' },
+          },
+        ],
+      },
+    ]
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      const response = responses.shift()
+      if (!response) throw new Error('missing canned response')
+      return jsonResponse(response)
+    })
+    const transport = install(fetch)
+    const messages = openRawSocket()
+
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    )
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000001')
+    messages.length = 0
+
+    await transport.pull()
+    expect(messages.filter((message) => message[0].startsWith('poke'))).toEqual([])
+    expect(requests[1].body.cookie).toBe(1)
+
+    await transport.pull()
+    expect(messages.filter((message) => message[0].startsWith('poke'))).toEqual([])
+    expect(requests[2].body.cookie).toBe(2)
+
+    await transport.pull()
+    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('00000000000000000001')
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000004')
+    expect(requests[3].body.cookie).toBe(3)
+  })
+
+  test('repeated mutation IDs and got marks without rows emit no poke', async () => {
+    const requests: RequestRecord[] = []
+    const responses: Array<any> = [
+      {
+        cookie: 1,
+        lastMutationIDChanges: { c1: 1 },
+        rowsPatch: [{ op: 'clear' }],
+        gotQueries: { version: 1, patch: [{ op: 'put', hash: 'h1' }] },
+      },
+      {
+        cookie: 2,
+        lastMutationIDChanges: { c1: 1 },
+        rowsPatch: [],
+        gotQueries: { version: 1, patch: [{ op: 'put', hash: 'h1' }] },
+      },
+      { cookie: 3, lastMutationIDChanges: { c1: 2 }, rowsPatch: [] },
+      {
+        cookie: 4,
+        lastMutationIDChanges: { c1: 2 },
+        rowsPatch: [],
+        gotQueries: { version: 2, patch: [{ op: 'put', hash: 'h2' }] },
+      },
+      {
+        cookie: 5,
+        lastMutationIDChanges: { c1: 2 },
+        rowsPatch: [],
+        gotQueries: { version: 2, patch: [{ op: 'put', hash: 'h2' }] },
+      },
+    ]
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      const response = responses.shift()
+      if (!response) throw new Error('missing canned response')
+      return jsonResponse(response)
+    })
+    const transport = install(fetch)
+    const messages = openRawSocket()
+
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    )
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000001')
+    messages.length = 0
+
+    await transport.pull()
+    expect(messages.filter((message) => message[0].startsWith('poke'))).toEqual([])
+    expect(requests[1].body.cookie).toBe(1)
+
+    await transport.pull()
+    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('00000000000000000001')
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000003')
+    messages.length = 0
+
+    await transport.pull()
+    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('00000000000000000003')
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000004')
+    messages.length = 0
+
+    await transport.pull()
+    expect(messages.filter((message) => message[0].startsWith('poke'))).toEqual([])
+    expect(requests[4].body.cookie).toBe(4)
+  })
+
+  test('a got clear followed by puts still pokes even when the puts repeat', async () => {
+    const requests: RequestRecord[] = []
+    const responses: Array<any> = [
+      {
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch: [{ op: 'clear' }],
+        gotQueries: { version: 1, patch: [{ op: 'put', hash: 'h1' }] },
+      },
+      {
+        cookie: 2,
+        lastMutationIDChanges: {},
+        rowsPatch: [],
+        gotQueries: { version: 2, patch: [{ op: 'clear' }, { op: 'put', hash: 'h1' }] },
+      },
+    ]
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      const response = responses.shift()
+      if (!response) throw new Error('missing canned response')
+      return jsonResponse(response)
+    })
+    const transport = install(fetch)
+    const messages = openRawSocket()
+
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    )
+    messages.length = 0
+
+    await transport.pull()
+    expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    const poke = messages.find(
+      (message) => message[0] === 'pokePart' && Array.isArray(message[1].gotQueriesPatch)
+    )
+    expect(poke?.[1].gotQueriesPatch).toContainEqual({ op: 'clear' })
+    expect(poke?.[1].gotQueriesPatch).toContainEqual({ op: 'put', hash: 'h1' })
+  })
+
+  test('unchanged pulls repeat got marks without a poke until a new mark arrives', async () => {
+    const requests: RequestRecord[] = []
+    let pulls = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      pulls++
+      if (pulls === 1) {
+        return jsonResponse({
+          cookie: 1,
+          lastMutationIDChanges: {},
+          rowsPatch: [{ op: 'clear' }],
+          gotQueries: { version: 1, patch: [{ op: 'put', hash: 'h1' }] },
+        })
+      }
+      if (pulls === 2) {
+        return jsonResponse({
+          cookie: 1,
+          unchanged: true,
+          gotQueries: { version: 1, patch: [{ op: 'put', hash: 'h1' }] },
+        })
+      }
+      return jsonResponse({
+        cookie: 1,
+        unchanged: true,
+        gotQueries: { version: 2, patch: [{ op: 'put', hash: 'h2' }] },
+      })
+    })
+    const transport = install(fetch)
+    const messages = openRawSocket()
+
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    )
+    messages.length = 0
+
+    await transport.pull()
+    expect(messages.filter((message) => message[0].startsWith('poke'))).toEqual([])
+
+    await transport.pull()
+    expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+    const poke = messages.find(
+      (message) => message[0] === 'pokePart' && Array.isArray(message[1].gotQueriesPatch)
+    )
+    expect(poke?.[1].gotQueriesPatch).toEqual([{ op: 'put', hash: 'h2' }])
+  })
+
   test('unchanged pull flushes late query registration to complete', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
