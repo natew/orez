@@ -54,7 +54,11 @@ const isGeneratorSourceFile = (name: string) =>
 // and building a TS program per query/model for type resolution — runs every
 // boot otherwise, even when the output is already current (the configureServer
 // watcher re-runs it on real edits, so the boot-time pass is pure redundancy).
-function hashInputTree(sourceRoots: string[], generatedDir: string): string {
+function hashInputTree(
+  sourceRoots: string[],
+  generatedDir: string,
+  dependencyPaths: string[]
+): string {
   const parts: string[] = []
   const seen = new Set<string>()
   const walk = (dir: string) => {
@@ -80,6 +84,14 @@ function hashInputTree(sourceRoots: string[], generatedDir: string): string {
     }
   }
   for (const root of sourceRoots) walk(root)
+  // imported types can live outside the data roots, including transitive
+  // re-exports and package declarations. use the compiler's resolved inputs.
+  for (const path of dependencyPaths) {
+    if (seen.has(path) || path.startsWith(`${generatedDir}/`) || !existsSync(path))
+      continue
+    seen.add(path)
+    parts.push(`${path}\0${readFileSync(path, 'utf-8')}`)
+  }
   return hash(parts.join('\0'))
 }
 
@@ -976,7 +988,7 @@ async function generateWithProject(
     : null
   const needsSqliteZeroSchema = needsDrizzleSchema && externalZeroConfig === null
   const inputHash = hash(
-    `${hashInputTree(layout.sourceRoots, generatedDir)}\0${metadataHash}\0${externalZeroConfig}`
+    `${hashInputTree(layout.sourceRoots, generatedDir, await project.sourceFilePaths())}\0${metadataHash}\0${externalZeroConfig}`
   )
   if (
     !force &&

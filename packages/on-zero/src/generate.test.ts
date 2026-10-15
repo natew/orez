@@ -69,6 +69,50 @@ describe('generate', () => {
     expect(second.filesChanged).toBe(0)
   })
 
+  test('refreshes validators when a transitive imported union changes', async () => {
+    const dataDir = join(testDir, 'data')
+    const kindsPath = join(testDir, 'protocol/kinds.ts')
+    writeFileSync(kindsPath, `export type Kind = 'send'`)
+    writeFileSync(
+      join(testDir, 'protocol/index.ts'),
+      `export type { Kind } from './kinds'`
+    )
+    writeFileSync(
+      join(dataDir, 'command/mutations.ts'),
+      `import type { Kind } from '../../protocol'
+export const schema = table('command').columns({ id: string() }).primaryKey('id')
+export const mutate = mutations(schema, permission, {
+  dispatch: async (ctx, args: { kind: Kind }) => {},
+})`
+    )
+    const validator = () => {
+      const context = { v, exports: {} as { mutationValidators?: any } }
+      runInNewContext(
+        readFileSync(join(dataDir, 'generated/syncedMutations.ts'), 'utf8')
+          .replace(/^import .*$/m, '')
+          .replace('export const', 'exports.mutationValidators ='),
+        context
+      )
+      return context.exports.mutationValidators!.command.dispatch
+    }
+
+    await generate({ dir: dataDir, silent: true })
+    expect(v.safeParse(validator(), { kind: 'send' }).success).toBe(true)
+    expect(v.safeParse(validator(), { kind: 'throttle' }).success).toBe(false)
+    expect((await generate({ dir: dataDir, silent: true })).filesChanged).toBe(0)
+
+    writeFileSync(kindsPath, `export type Kind = 'send' | 'throttle'`)
+    await generate({ dir: dataDir, silent: true })
+    expect(v.safeParse(validator(), { kind: 'throttle' }).success).toBe(true)
+    expect(v.safeParse(validator(), { kind: 'unknown' }).success).toBe(false)
+    expect((await generate({ dir: dataDir, silent: true })).filesChanged).toBe(0)
+
+    writeFileSync(kindsPath, `export type Kind = 'throttle'`)
+    await generate({ dir: dataDir, silent: true })
+    expect(v.safeParse(validator(), { kind: 'send' }).success).toBe(false)
+    expect(v.safeParse(validator(), { kind: 'throttle' }).success).toBe(true)
+  })
+
   test('force regenerates without source changes', async () => {
     writeFileSync(
       join(testDir, 'post/mutations.ts'),

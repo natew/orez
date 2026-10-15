@@ -10,6 +10,7 @@ process.env.GOMAXPROCS ??= '2'
 
 export type NativeTypeScriptProject = {
   projectForFile(path: string): Project
+  sourceFilePaths(): Promise<string[]>
   sourceFile(path: string): SourceFile
   hasParseErrors(path: string): boolean
   close(): Promise<void>
@@ -151,6 +152,14 @@ export async function createNativeTypeScriptProject(
 
   let closed = false
   return {
+    async sourceFilePaths() {
+      const paths = new Set<string>()
+      const projects = new Map([...projectsByFile.values()].map((p) => [p.id, p]))
+      for (const project of projects.values()) {
+        for (const path of await project.program.getSourceFileNames()) paths.add(path)
+      }
+      return [...paths].sort()
+    },
     projectForFile(path) {
       const project = projectsByFile.get(resolve(path))
       if (!project)
