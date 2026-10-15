@@ -235,7 +235,7 @@ a {
 
 .lime-sync-title {
   margin: 0;
-  font-size: clamp(38px, 5vw, 52px) !important;
+  font-size: clamp(24px, 3vw, 32px) !important;
   line-height: 1.12 !important;
   font-weight: 650 !important;
 }
@@ -969,7 +969,7 @@ a {
   }
 
   .lime-sync-title {
-    font-size: 38px !important;
+    font-size: 26px !important;
   }
 
   .lime-sync-section {

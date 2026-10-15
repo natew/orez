@@ -12,7 +12,7 @@ export function LimeSyncHome() {
         <section className="lime-sync-hero">
           <YStack gap="$4" maxW={640}>
             <H1 color="$color12" className="lime-sync-title">
-              Zero on SQLite
+              SQLite sync engine
             </H1>
             <Paragraph color="$color10" className="lime-sync-lede">
               Lime Sync is a Rust sync server for Zero backed by SQLite. It uses the stock
