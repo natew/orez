@@ -6,12 +6,18 @@ SQLITE_SRC_FILES = sqlite-src/sqlite3.c sqlite-src/sqlite3.h
 
 JS_PRE_FILES = native/api.js native/vfs-pre.js
 JS_LIB_FILES = native/vfs.js
-OBJECT_FILES = build/sqlite3.o build/vfs.o build/sqlite-vec.o build/sqlite-vec-init.o
+OBJECT_FILES = build/sqlite3.o build/vfs.o build/sqlite-vec.o build/sqlite-vec-init.o build/better-trigram.o build/fts5-html.o build/lexbor.a
 EXPORTED_FUNCS_JSON = build/exp_funcs.json
 
 # upstream sqlite-vec v0.1.9 amalgamation, also used by nitro sqlite vec 10.1.0
 SQLITE_VEC_URL = https://github.com/asg017/sqlite-vec/releases/download/v0.1.9/sqlite-vec-0.1.9-amalgamation.tar.gz
 SQLITE_VEC_SHA256 = 3acd67cb4aff080c7050926fd3cf8227905fe5b7ee3829d8ee5024ab1283cf61
+
+# exact native sources from the original Notesnook app, including its Lexbor copy.
+# extract new C/header files only; never apply its SQLite or bridge patches.
+FTS_APP_PIN = 5748795b9920a4ba71f5456e126f5227bd5b8a51
+FTS_PATCH_URL = https://raw.githubusercontent.com/streetwriters/notesnook/$(FTS_APP_PIN)/apps/mobile/patches/react-native-quick-sqlite+8.2.7.patch
+FTS_PATCH_SHA256 = 3cc27458802c4897114d3162b9d18869eec586dff08635c31185938ee490868c
 
 # compile flags — bedrock-sqlite is shared by zero-cache and the soot
 # compat sqlite stubs (op-sqlite, expo-sqlite, nitro-sqlite,
@@ -156,6 +162,32 @@ build/sqlite-vec.o: build/sqlite-vec/.ready sqlite-src/sqlite3.h
 build/sqlite-vec-init.o: native/sqlite-vec-init.c build/sqlite-vec/.ready sqlite-src/sqlite3.h
 	emcc $(EM_FLAGS) -DSQLITE_CORE -DSQLITE_VEC_STATIC -I sqlite-src -I build/sqlite-vec -c $< -o $@
 
+build/fts/.ready: Makefile
+	rm -rf build/fts
+	mkdir -p build/fts
+	curl -fsSL $(FTS_PATCH_URL) -o build/fts.patch
+	echo '$(FTS_PATCH_SHA256)  build/fts.patch' | sha256sum -c -
+	cd build/fts && GIT_CEILING_DIRECTORIES='$(CURDIR)/build' git apply -p3 --whitespace=nowarn \
+		$(foreach dir,better-trigram sqlite3-fts5-html lexbor,$(foreach ext,c h,--include='$(dir)/*.$(ext)')) ../fts.patch
+	touch $@
+
+build/better-trigram.o: build/fts/.ready sqlite-src/sqlite3.h Makefile
+	emcc $(EM_FLAGS) -DSQLITE_CORE -DSQLITE_PRIVATE= -I sqlite-src -c build/fts/better-trigram/better-trigram.c -o $@
+
+build/fts5-html.o: build/fts/.ready sqlite-src/sqlite3.h Makefile
+	emcc $(EM_FLAGS) -DSQLITE_CORE -DSQLITE_PRIVATE= -I sqlite-src -I build/fts -c build/fts/sqlite3-fts5-html/fts5-html.c -o $@
+
+build/lexbor.a: build/fts/.ready Makefile
+	rm -rf build/lexbor
+	rm -f $@
+	mkdir -p build/lexbor
+	while read -r source; do \
+		object="build/lexbor/$${source#build/fts/lexbor/}"; \
+		mkdir -p "$$(dirname "$$object")"; \
+		emcc $(EM_FLAGS) -DLEXBOR_STATIC -I build/fts -c "$$source" -o "$${object%.c}.o" || exit; \
+	done < <(find build/fts/lexbor -name '*.c' ! -path '*/ports/windows_nt/*' | LC_ALL=C sort)
+	emar rcs $@ $$(find build/lexbor -name '*.o' | LC_ALL=C sort)
+
 $(EXPORTED_FUNCS_JSON): native/api.js
 	mkdir -p build
 	echo '[' > $@
@@ -167,8 +199,7 @@ $(EXPORTED_FUNCS_JSON): native/api.js
 # copy bedrock sqlite source from zero-sqlite3
 $(SQLITE_SRC_FILES):
 	mkdir -p sqlite-src
-	cp $(ZERO_SQLITE3_DIR)/sqlite3.c sqlite-src/
-	cp $(ZERO_SQLITE3_DIR)/sqlite3.h sqlite-src/
+	cp $(ZERO_SQLITE3_DIR)/$(@F) $@
 
 .PHONY: clean
 clean:

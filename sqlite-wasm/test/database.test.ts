@@ -428,6 +428,139 @@ describeIfBuilt('FTS5', () => {
   })
 })
 
+describeIfBuilt('FTS5 native tokenizers', () => {
+  it('segments words and CJK on independent connections and after reopen', () => {
+    const filename = testDb()
+    const connections = [new Database(filename), new Database(':memory:')]
+    try {
+      for (const db of connections) {
+        db.exec(`
+          CREATE VIRTUAL TABLE notes USING fts5(body, tokenize='better_trigram');
+          INSERT INTO notes VALUES ('i am a bird 李红');
+          CREATE VIRTUAL TABLE terms USING fts5vocab(notes, 'row');
+          CREATE VIRTUAL TABLE html_notes USING fts5(body, tokenize='html better_trigram');
+          INSERT INTO html_notes VALUES ('<p>i am a bird 李红</p>');
+        `)
+        expect(db.prepare('SELECT term FROM terms ORDER BY term').pluck().all()).toEqual([
+          'a',
+          'am',
+          'bir',
+          'i',
+          'ird',
+          '李',
+          '红',
+        ])
+        expect(
+          db.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all('a bird')
+        ).toEqual([{ rowid: 1 }])
+        expect(
+          db.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all('李')
+        ).toEqual([{ rowid: 1 }])
+        expect(
+          db
+            .prepare('SELECT rowid FROM html_notes WHERE html_notes MATCH ?')
+            .all('a bird')
+        ).toEqual([{ rowid: 1 }])
+      }
+    } finally {
+      for (const db of connections) db.close()
+    }
+    const reopened = new Database(filename)
+    try {
+      expect(
+        reopened.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all('红')
+      ).toEqual([{ rowid: 1 }])
+      reopened.prepare('INSERT INTO notes VALUES (?)').run('another bird')
+      expect(
+        reopened.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all('bird')
+      ).toEqual([{ rowid: 1 }, { rowid: 2 }])
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('chains HTML parsing with real entity, diacritic and CJK tokenization', () => {
+    const db = new Database(':memory:')
+    try {
+      db.exec(`
+        CREATE VIRTUAL TABLE notes USING fts5(body, tokenize='html better_trigram remove_diacritics 1');
+        CREATE VIRTUAL TABLE terms USING fts5vocab(notes, 'row');
+        CREATE VIRTUAL TABLE words USING fts5(body, tokenize='html unicode61');
+        CREATE VIRTUAL TABLE vectors USING vec0(embedding float[3]);
+      `)
+      const html =
+        '<p>Caf&eacute; &amp; &#x4E2D;&#x6587;</p><script>secret</script><style>hidden</style>'
+      db.prepare('INSERT INTO notes VALUES (?)').run(html)
+      db.prepare('INSERT INTO words VALUES (?)').run(html)
+      expect(db.prepare('SELECT term FROM terms ORDER BY term').pluck().all()).toEqual([
+        '&',
+        'afe',
+        'caf',
+        '中',
+        '文',
+      ])
+      for (const query of ['cafe', '中', '文']) {
+        expect(
+          db.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all(query)
+        ).toEqual([{ rowid: 1 }])
+      }
+      for (const query of ['secret', 'hidden', 'amp', 'p']) {
+        expect(
+          db.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all(query)
+        ).toEqual([])
+      }
+      expect(
+        db.prepare('SELECT rowid FROM words WHERE words MATCH ?').all('cafe')
+      ).toEqual([{ rowid: 1 }])
+      db.prepare('INSERT INTO vectors(rowid, embedding) VALUES (?, ?)').run(1, '[1,0,0]')
+      expect(
+        db
+          .prepare('SELECT rowid, distance FROM vectors WHERE embedding MATCH ? AND k=1')
+          .all('[1,0,0]')
+      ).toEqual([{ rowid: 1, distance: 0 }])
+      const abort = db.transaction(() => {
+        db.prepare('UPDATE notes SET body=? WHERE rowid=1').run('<b>replacement</b>')
+        throw new Error('abort HTML update')
+      })
+      expect(abort).toThrow('abort HTML update')
+      expect(
+        db.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all('cafe')
+      ).toEqual([{ rowid: 1 }])
+      expect(
+        db.prepare('SELECT rowid FROM notes WHERE notes MATCH ?').all('replacement')
+      ).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('returns upstream constructor errors without leaving a table behind', () => {
+    const db = new Database(':memory:')
+    try {
+      for (const tokenizer of [
+        'html',
+        'html missing',
+        'better_trigram missing 1',
+        'better_trigram case_sensitive 1 remove_diacritics 1',
+      ]) {
+        expect(() =>
+          db.exec(`CREATE VIRTUAL TABLE bad USING fts5(body, tokenize='${tokenizer}')`)
+        ).toThrow('error in tokenizer constructor')
+        expect(
+          db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'bad%'").all()
+        ).toEqual([])
+      }
+      db.exec("CREATE VIRTUAL TABLE bad USING fts5(body, tokenize='html better_trigram')")
+      db.prepare('INSERT INTO bad VALUES (?)').run('<p>still working</p>')
+      expect(
+        db.prepare('SELECT rowid FROM bad WHERE bad MATCH ?').all('working')
+      ).toEqual([{ rowid: 1 }])
+    } finally {
+      db.close()
+    }
+  })
+})
+
 describeIfBuilt('JSON functions', () => {
   it('json_extract works', () => {
     const db = new Database(':memory:')

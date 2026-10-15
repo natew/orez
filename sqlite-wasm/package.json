@@ -30,7 +30,10 @@
     "bedrock-sqlite.d.ts",
     "bedrock-sqlite-async.d.ts",
     "bedrock-sqlite-browser.d.ts",
-    "LICENSE.sqlite-vec"
+    "LICENSE.sqlite-vec",
+    "LICENSE.lexbor",
+    "LICENSE.fts5-tokenizers",
+    "FTS5-SOURCES.md"
   ],
   "repository": {
     "type": "git",
