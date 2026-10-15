@@ -107,6 +107,8 @@ export function SiteHeader() {
             unstyled
             height={36}
             px="$3"
+            items="center"
+            justify="center"
             rounded="$10"
             borderWidth={1}
             borderColor="$color4"
