@@ -390,7 +390,7 @@ generates all files needed to connect your mutations and queries:
 
 - `dir` - base directory containing namespace files/folders (default: `src/data`)
 - `--watch` - watch for changes and regenerate automatically
-- `--after` - command to run after generation completes
+- `--after` - command to run after generation completes; successful output changes are included in the cache
 - `--force` - ignore cached inputs and regenerate all outputs
 
 **examples:**
