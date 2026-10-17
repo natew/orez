@@ -132,6 +132,14 @@ gate pins that cost at `3N + 3` billable writes for an exact helper batch and
 envelopes and the data clients read; it does not claim fewer physical writes
 while opaque trigger side effects must remain observable.
 
+If raw writes grow the active payload past the rotation threshold before a
+helper captures trigger keys, commit first merges those keys into its change
+set, then clears the old segment's pending keys and capture mode before
+rotating. The drain is one segment update, independent of the number of keys;
+it replaces the rotation's capture-mode reset when that mode is still active.
+The drain, rotation and new envelope share the application transaction, so a
+failed commit restores the original ledger and application rows together.
+
 At current volumes none of this costs anything. The 50-million-writes included
 tier covers roughly 8 million captured changes per month before a single dollar
 is billed, so this is a number to watch as a namespace grows rather than a

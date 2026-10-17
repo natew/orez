@@ -423,6 +423,19 @@ export async function commitPackedLedger(
     return
   }
   if (new TextEncoder().encode(active.payload).byteLength >= ROTATE_AT_BYTES) {
+    if (active.pending !== '[]') {
+      // changes now owns these keys. drain the old segment in this transaction
+      // before rotating, so neither retained segments nor the new one replay them.
+      const drained = await tx.exec(
+        `UPDATE "_zsync_log_segments" SET "pending" = '[]', "captureMode" = 0
+         WHERE "startVersion" = ?`,
+        [counter(active.startVersion, 'start version')]
+      )
+      if (drained.changes !== 1) {
+        throw new MutationWriteSetError('packed ledger drain missed its active segment')
+      }
+      active = { ...active, pending: '[]', captureMode: 0 }
+    }
     active = await rotatePackedLedger(tx, active)
     payload = parsePayload(active.payload)
   }

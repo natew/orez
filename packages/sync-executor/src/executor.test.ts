@@ -262,6 +262,83 @@ describe('sync executor', () => {
     }
   })
 
+  test('rotation drains pending helper and trigger keys after a raw write crosses the threshold', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec(`
+      CREATE TRIGGER item_pending AFTER INSERT ON item BEGIN
+        UPDATE _zsync_log_segments
+        SET pending = json_insert(pending, '$[#]', json_array('item', json_object('id', NEW.id)))
+        WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+          AND captureMode = 1;
+      END;
+      CREATE TRIGGER item_side_effect AFTER INSERT ON item WHEN NEW.id = 'helper' BEGIN
+        INSERT INTO item (id, value) VALUES ('side-effect', 'v');
+      END;
+    `)
+    const rawID = 'x'.repeat(17_000)
+    const mutators = {
+      warm: async () => {},
+      mixed: async ({ tx }) => {
+        await tx.dbTransaction.wrappedTransaction.exec(
+          'INSERT INTO item (id, value) VALUES (?, ?)',
+          [rawID, 'v']
+        )
+        await tx.mutate.item.insert({ id: 'helper', value: 'v' })
+      },
+      oversized: async ({ tx }) => {
+        await tx.dbTransaction.wrappedTransaction.exec(
+          'INSERT INTO item (id, value) VALUES (?, ?)',
+          [`rollback-${rawID}`, 'v']
+        )
+        await tx.mutate.item.insert({ id: 'y'.repeat(1_048_576), value: 'v' })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+    await executor.push(push('warm'), { userID: 'user-1' })
+    const before = Number(sqlite.prepare('SELECT total_changes() AS total').get()!.total)
+    await expect(executor.push(push('mixed', 2), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: { mutations: [{ id: { clientID: 'client-1', id: 2 }, result: {} }] },
+    })
+    const written =
+      Number(sqlite.prepare('SELECT total_changes() AS total').get()!.total) - before
+    expect(written).toBe(11)
+    const segments = sqlite
+      .prepare('SELECT * FROM _zsync_log_segments ORDER BY startVersion')
+      .all()
+    expect(segments).toHaveLength(2)
+    expect(
+      segments.map(({ pending, captureMode }) => ({ pending, captureMode }))
+    ).toEqual([
+      { pending: '[]', captureMode: 0 },
+      { pending: '[]', captureMode: 0 },
+    ])
+    expect(packedPayload(sqlite).transactions).toEqual([
+      {
+        version: '3',
+        changes: [
+          ['item', { id: 'helper' }],
+          ['item', { id: 'side-effect' }],
+        ],
+      },
+    ])
+    expect(JSON.parse(String(segments[0]!.payload)).transactions).toEqual([
+      { version: '1', changes: [] },
+      { version: '2', changes: [['item', { id: rawID }]] },
+    ])
+    expect(storedLMID(sqlite)).toBe(2)
+    expect(sqlite.prepare('SELECT COUNT(*) AS count FROM item').get()!.count).toBe(3)
+    await expect(
+      executor.push(push('oversized', 3), { userID: 'user-1' })
+    ).rejects.toThrow('packed ledger transaction exceeds the 1 MiB limit')
+    expect(
+      sqlite.prepare('SELECT * FROM _zsync_log_segments ORDER BY startVersion').all()
+    ).toEqual(segments)
+    expect(storedLMID(sqlite)).toBe(2)
+    expect(sqlite.prepare('SELECT COUNT(*) AS count FROM item').get()!.count).toBe(3)
+    await executor.push(push('warm', 3), { userID: 'user-1' })
+    expect(storedLMID(sqlite)).toBe(3)
+  })
+
   test('a large LMID checkpoint does not wedge the next mutation', async () => {
     const { database, sqlite } = sqliteDatabase()
     const mutators = {
