@@ -12,6 +12,10 @@ SQLite's actual schema filename. `updateHook(callback)` installs one callback
 per connection with operation code, database name, table name and row ID.
 Row IDs above JavaScript's safe integer range remain bigint. Passing null
 removes the callback; closing a connection removes it and closes its sessions.
+`commitHook(callback)` and `rollbackHook(callback)` likewise use SQLite native
+hooks. The commit callback returns zero to accept the commit or nonzero to
+roll it back. Hook callbacks run inside SQLite and must not modify that
+connection. Passing null removes a hook.
 
 `createSession(databaseName)` creates a native SQLite session. Its `attach`,
 `enable`, `changeset` and `close` methods call the SQLite session API. A null

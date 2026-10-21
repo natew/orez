@@ -106,6 +106,8 @@ Module.onRuntimeInitialized = () => {
     backup_step: [n, n2],
     backup_finish: [n, n1],
     update_hook: [n, n3],
+    commit_hook: [n, n3],
+    rollback_hook: [n, n3],
     session_create: [n, [n, s, n]],
     session_attach: [n, [n, s]],
     session_enable: [n, n2],
@@ -316,6 +318,8 @@ Module.onRuntimeInitialized = () => {
       this._functions = new Map()
       this._sessions = new Set()
       this._updateHook = 0
+      this._commitHook = 0
+      this._rollbackHook = 0
 
       // set busy timeout to 5s by default
       this.exec('PRAGMA busy_timeout = 5000')
@@ -589,6 +593,29 @@ Module.onRuntimeInitialized = () => {
       return this
     }
 
+    // sqlite calls these inside step; returning nonzero from commit vetoes it.
+    commitHook(fn) {
+      this._assertOpen()
+      if (fn !== null && typeof fn !== 'function')
+        throw new TypeError('Expected first argument to be a function or null')
+      const previous = this._commitHook
+      this._commitHook = fn === null ? null : addFunction(() => fn(), 'ii')
+      sqlite3.commit_hook(this._ptr, this._commitHook ?? NULL, NULL)
+      if (previous) removeFunction(previous)
+      return this
+    }
+
+    rollbackHook(fn) {
+      this._assertOpen()
+      if (fn !== null && typeof fn !== 'function')
+        throw new TypeError('Expected first argument to be a function or null')
+      const previous = this._rollbackHook
+      this._rollbackHook = fn === null ? null : addFunction(() => fn(), 'vi')
+      sqlite3.rollback_hook(this._ptr, this._rollbackHook ?? NULL, NULL)
+      if (previous) removeFunction(previous)
+      return this
+    }
+
     // sqlite3_db_filename
     filename(databaseName = 'main') {
       this._assertOpen()
@@ -712,6 +739,8 @@ Module.onRuntimeInitialized = () => {
       if (!this._open) return
       for (const session of this._sessions) session.close()
       this.updateHook(null)
+      this.commitHook(null)
+      this.rollbackHook(null)
 
       // finalize all statements
       for (const stmt of this._statements) {

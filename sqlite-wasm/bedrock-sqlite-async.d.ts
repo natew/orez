@@ -81,6 +81,8 @@ declare module "bedrock-sqlite/async" {
     filename(databaseName?: string): string;
     backupTo(destination: Database, sourceName?: string, destinationName?: string): void;
     updateHook(callback: ((operation: number, database: string, table: string, rowid: number | bigint) => void) | null): this;
+    commitHook(callback: (() => number) | null): this;
+    rollbackHook(callback: (() => void) | null): this;
     createSession(databaseName?: string): Session;
     applyChangeset(changeset: Uint8Array | ArrayBuffer, onConflict?: (reason: number) => number): void;
     invertChangeset(changeset: Uint8Array | ArrayBuffer): Uint8Array;
