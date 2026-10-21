@@ -1,5 +1,11 @@
 SHELL := /bin/bash
 
+# emscripten 5 reads EMSDK_PYTHON, not the PYTHON homebrew's emcc wrapper sets,
+# and otherwise runs the first python3 on PATH, which non-interactive mac
+# shells resolve to the system 3.9 it refuses. prefer a python3.1x on PATH.
+EMSDK_PYTHON ?= $(firstword $(shell command -v python3.14 python3.13 python3.12 python3.11 python3.10 2>/dev/null))
+export EMSDK_PYTHON
+
 # bedrock sqlite source from @rocicorp/zero-sqlite3
 ZERO_SQLITE3_DIR ?= ../node_modules/@rocicorp/zero-sqlite3/deps/sqlite3
 SQLITE_SRC_FILES = sqlite-src/sqlite3.c sqlite-src/sqlite3.h
