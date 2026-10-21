@@ -100,10 +100,24 @@ Module.onRuntimeInitialized = () => {
     result_int64: [v, n2],
     result_error: [v, n3],
     get_autocommit: [n, n1],
+    free: [v, n1],
+    db_filename: [s, [n, s]],
+    backup_init: [n, [n, s, n, s]],
+    backup_step: [n, n2],
+    backup_finish: [n, n1],
+    update_hook: [n, n3],
+    session_create: [n, [n, s, n]],
+    session_attach: [n, [n, s]],
+    session_enable: [n, n2],
+    session_delete: [v, n1],
+    session_changeset: [n, n3],
+    changeset_apply: [n, [n, n, n, n, n, n]],
+    changeset_invert: [n, n4],
   }
 
   for (const [name, sig] of Object.entries(signatures)) {
-    sqlite3[name] = cwrap(`sqlite3_${name}`, sig[0], sig[1])
+    const prefix = /^(session|changeset)_/.test(name) ? 'sqlite3' : 'sqlite3_'
+    sqlite3[name] = cwrap(`${prefix}${name}`, sig[0], sig[1])
   }
 
   // helpers
@@ -300,6 +314,8 @@ Module.onRuntimeInitialized = () => {
       this._name = filename
       this._statements = new Set()
       this._functions = new Map()
+      this._sessions = new Set()
+      this._updateHook = 0
 
       // set busy timeout to 5s by default
       this.exec('PRAGMA busy_timeout = 5000')
@@ -548,8 +564,145 @@ Module.onRuntimeInitialized = () => {
       return this
     }
 
+    databaseFilename(name = 'main') {
+      this._assertOpen()
+      return sqlite3.db_filename(this._ptr, name)
+    }
+
+    backupTo(destination, sourceName = 'main', destinationName = 'main') {
+      this._assertOpen()
+      destination._assertOpen()
+      const backup = sqlite3.backup_init(
+        destination._ptr,
+        destinationName,
+        this._ptr,
+        sourceName
+      )
+      if (!backup) throw new SqliteError(sqlite3.errmsg(destination._ptr))
+      const rc = sqlite3.backup_step(backup, -1)
+      const finish = sqlite3.backup_finish(backup)
+      if (rc !== SQLITE_DONE || finish !== SQLITE_OK) {
+        throw new SqliteError(sqlite3.errmsg(destination._ptr), finish || rc)
+      }
+    }
+
+    updateHook(callback) {
+      this._assertOpen()
+      sqlite3.update_hook(this._ptr, NULL, NULL)
+      if (this._updateHook) removeFunction(this._updateHook)
+      this._updateHook = callback
+        ? addFunction((context, operation, database, table, rowid) => {
+            callback(
+              operation,
+              UTF8ToString(database),
+              UTF8ToString(table),
+              toNumberOrNot(rowid)
+            )
+          }, 'viiiij')
+        : 0
+      sqlite3.update_hook(this._ptr, this._updateHook, NULL)
+    }
+
+    createSession(databaseName = 'main') {
+      this._assertOpen()
+      const rc = sqlite3.session_create(this._ptr, databaseName, temp)
+      if (rc !== SQLITE_OK) throw new SqliteError(sqlite3.errmsg(this._ptr), rc)
+      const pointer = getValue(temp, 'i32')
+      const database = this
+      let closed = false
+      const check = () => {
+        database._assertOpen()
+        if (closed) throw new SqliteError('The session is closed', 21)
+      }
+      const session = {
+        attach(table = null) {
+          check()
+          const result = sqlite3.session_attach(pointer, table)
+          if (result !== SQLITE_OK)
+            throw new SqliteError(sqlite3.errmsg(database._ptr), result)
+        },
+        enable(enabled) {
+          check()
+          sqlite3.session_enable(pointer, enabled ? 1 : 0)
+        },
+        changeset() {
+          check()
+          const output = _malloc(8)
+          try {
+            const result = sqlite3.session_changeset(pointer, output, output + 4)
+            if (result !== SQLITE_OK)
+              throw new SqliteError(sqlite3.errmsg(database._ptr), result)
+            const size = getValue(output, 'i32')
+            const buffer = getValue(output + 4, 'i32')
+            try {
+              return HEAPU8.slice(buffer, buffer + size)
+            } finally {
+              sqlite3.free(buffer)
+            }
+          } finally {
+            _free(output)
+          }
+        },
+        close() {
+          if (closed) return
+          sqlite3.session_delete(pointer)
+          closed = true
+          database._sessions.delete(session)
+        },
+      }
+      this._sessions.add(session)
+      return session
+    }
+
+    applyChangeset(changeset, onConflict = () => 2) {
+      this._assertOpen()
+      const input = arrayToHeap(changeset)
+      const conflict = addFunction((context, reason) => onConflict(reason), 'iiii')
+      try {
+        const rc = sqlite3.changeset_apply(
+          this._ptr,
+          changeset.byteLength,
+          input,
+          NULL,
+          conflict,
+          NULL
+        )
+        if (rc !== SQLITE_OK) throw new SqliteError(sqlite3.errmsg(this._ptr), rc)
+      } finally {
+        removeFunction(conflict)
+        _free(input)
+      }
+    }
+
+    invertChangeset(changeset) {
+      this._assertOpen()
+      const input = arrayToHeap(changeset)
+      const output = _malloc(8)
+      try {
+        const rc = sqlite3.changeset_invert(
+          changeset.byteLength,
+          input,
+          output,
+          output + 4
+        )
+        if (rc !== SQLITE_OK) throw new SqliteError(sqlite3.errmsg(this._ptr), rc)
+        const size = getValue(output, 'i32')
+        const buffer = getValue(output + 4, 'i32')
+        try {
+          return HEAPU8.slice(buffer, buffer + size)
+        } finally {
+          sqlite3.free(buffer)
+        }
+      } finally {
+        _free(output)
+        _free(input)
+      }
+    }
+
     close() {
       if (!this._open) return
+      for (const session of this._sessions) session.close()
+      this.updateHook(null)
 
       // finalize all statements
       for (const stmt of this._statements) {

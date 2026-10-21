@@ -49,6 +49,13 @@ declare module "bedrock-sqlite/async" {
     bind(...params: any[]): this;
   }
 
+  interface Session {
+    attach(table?: string | null): void;
+    enable(enabled: boolean): void;
+    changeset(): Uint8Array;
+    close(): void;
+  }
+
   interface Database {
     readonly open: boolean;
     readonly readonly: boolean;
@@ -71,6 +78,12 @@ declare module "bedrock-sqlite/async" {
       options?: FunctionOptions
     ): this;
     aggregate(name: string, options: AggregateOptions): this;
+    databaseFilename(name?: string): string;
+    backupTo(destination: Database, sourceName?: string, destinationName?: string): void;
+    updateHook(callback: ((operation: number, database: string, table: string, rowid: number | bigint) => void) | null): void;
+    createSession(databaseName?: string): Session;
+    applyChangeset(changeset: Uint8Array, onConflict?: (reason: number) => number): void;
+    invertChangeset(changeset: Uint8Array): Uint8Array;
     close(): void;
   }
 
@@ -103,6 +116,7 @@ declare module "bedrock-sqlite/async" {
 
   export type {
     RunResult,
+    Session,
     ColumnDefinition,
     DatabaseOptions,
     FunctionOptions,
