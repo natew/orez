@@ -659,3 +659,45 @@ describeIfBuilt('sqlite-vec', () => {
     }
   })
 })
+
+describeIfBuilt('native backup and session callback ownership', () => {
+  it('backs up and transfers native changesets while releasing callbacks and sessions on close', () => {
+    const source = new Database(':memory:')
+    const target = new Database(':memory:')
+    try {
+      source.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)')
+      source.backupTo(target)
+      const events: Array<[number, string, string, number | bigint]> = []
+      source.updateHook((...event: [number, string, string, number | bigint]) =>
+        events.push(event)
+      )
+      const session = source.createSession()
+      session.attach('t')
+      source.exec("INSERT INTO t VALUES(1, 'synthetic')")
+      expect(events).toEqual([[18, 'main', 't', 1]])
+      const changeset = session.changeset()
+      expect(changeset.byteLength).toBeGreaterThan(0)
+      target.applyChangeset(changeset)
+      expect(target.prepare('SELECT value FROM t').get()).toEqual({ value: 'synthetic' })
+      expect(() => target.applyChangeset(changeset)).toThrow()
+      target.applyChangeset(changeset, () => 1)
+      target.applyChangeset(source.invertChangeset(changeset))
+      expect(target.prepare('SELECT count(*) n FROM t').get()).toEqual({ n: 0 })
+      source.exec("INSERT INTO t VALUES(9007199254740993, 'large')")
+      expect(events.at(-1)?.[3]).toBe(9007199254740993n)
+      source.updateHook(null)
+      source.exec("UPDATE t SET value='silent' WHERE id=1")
+      expect(events).toHaveLength(2)
+      source.backupTo(target)
+      expect(target.prepare('SELECT value FROM t WHERE id=1').get()).toEqual({
+        value: 'silent',
+      })
+      source.close()
+      expect(() => session.changeset()).toThrow()
+      session.close()
+    } finally {
+      source.close()
+      target.close()
+    }
+  })
+})

@@ -51,6 +51,13 @@ declare module "bedrock-sqlite/browser" {
     bind(...params: any[]): this;
   }
 
+  interface Session {
+    attach(table?: string | null): void;
+    enable(enabled: boolean): void;
+    changeset(): Uint8Array;
+    close(): void;
+  }
+
   interface Database {
     readonly open: boolean;
     readonly readonly: boolean;
@@ -73,17 +80,12 @@ declare module "bedrock-sqlite/browser" {
       options?: FunctionOptions
     ): this;
     aggregate(name: string, options: AggregateOptions): this;
-    updateHook(
-      fn:
-        | ((
-            op: number,
-            databaseName: string,
-            tableName: string,
-            rowid: number | bigint
-          ) => void)
-        | null
-    ): this;
     filename(databaseName?: string): string;
+    backupTo(destination: Database, sourceName?: string, destinationName?: string): void;
+    updateHook(callback: ((operation: number, database: string, table: string, rowid: number | bigint) => void) | null): this;
+    createSession(databaseName?: string): Session;
+    applyChangeset(changeset: Uint8Array | ArrayBuffer, onConflict?: (reason: number) => number): void;
+    invertChangeset(changeset: Uint8Array | ArrayBuffer): Uint8Array;
     close(): void;
   }
 
@@ -115,6 +117,7 @@ declare module "bedrock-sqlite/browser" {
 
   export type {
     RunResult,
+    Session,
     ColumnDefinition,
     DatabaseOptions,
     FunctionOptions,

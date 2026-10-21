@@ -45,6 +45,8 @@ SQLITE_FLAGS = \
 	-DSQLITE_ENABLE_JSON1 \
 	-DSQLITE_ENABLE_MATH_FUNCTIONS \
 	-DSQLITE_ENABLE_RTREE \
+	-DSQLITE_ENABLE_SESSION \
+	-DSQLITE_ENABLE_PREUPDATE_HOOK \
 	-DSQLITE_ENABLE_STAT4 \
 	-DSQLITE_ENABLE_STMT_SCANSTATUS \
 	-DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
@@ -188,11 +190,11 @@ build/lexbor.a: build/fts/.ready Makefile
 	done < <(find build/fts/lexbor -name '*.c' ! -path '*/ports/windows_nt/*' | LC_ALL=C sort)
 	emar rcs $@ $$(find build/lexbor -name '*.o' | LC_ALL=C sort)
 
-$(EXPORTED_FUNCS_JSON): native/api.js
+$(EXPORTED_FUNCS_JSON): native/api.js Makefile
 	mkdir -p build
 	echo '[' > $@
 	perl -p0e 's/.*signatures = \{\n(.+?)\s*\}.*/\1/smg' native/api.js | \
-		perl -pe 's/\s*(.+):.*/"_sqlite3_\1"/' | \
+		perl -pe 's/\s*(.+):.*/"_sqlite3_\1"/; s/sqlite3_(session|changeset)_/sqlite3$$1_/' | \
 		paste -sd "," - >> $@
 	echo ',"_malloc","_free"]' >> $@
 
