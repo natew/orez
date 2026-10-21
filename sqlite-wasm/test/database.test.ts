@@ -326,6 +326,31 @@ describeIfBuilt('custom functions', () => {
   })
 })
 
+describeIfBuilt('update hook', () => {
+  it('reports each changed row until removed', () => {
+    const path = testDb()
+    const db = new Database(path)
+    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
+    const seen: unknown[][] = []
+    db.updateHook((...change: unknown[]) => seen.push(change))
+    db.prepare('INSERT INTO t (v) VALUES (?), (?)').run('a', 'b')
+    db.prepare('UPDATE t SET v = ? WHERE id = 2').run('c')
+    db.prepare('DELETE FROM t WHERE id > 0').run()
+    expect(seen).toEqual([
+      [18, 'main', 't', 1],
+      [18, 'main', 't', 2],
+      [23, 'main', 't', 2],
+      [9, 'main', 't', 1],
+      [9, 'main', 't', 2],
+    ])
+    expect(db.filename()).toBe(path)
+    db.updateHook(null)
+    db.prepare('INSERT INTO t (v) VALUES (?)').run('d')
+    expect(seen).toHaveLength(5)
+    db.close()
+  })
+})
+
 describeIfBuilt('aggregate functions', () => {
   it('registers aggregate function', () => {
     const db = new Database(':memory:')

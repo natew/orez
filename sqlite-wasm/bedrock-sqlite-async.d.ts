@@ -71,6 +71,17 @@ declare module "bedrock-sqlite/async" {
       options?: FunctionOptions
     ): this;
     aggregate(name: string, options: AggregateOptions): this;
+    updateHook(
+      fn:
+        | ((
+            op: number,
+            databaseName: string,
+            tableName: string,
+            rowid: number | bigint
+          ) => void)
+        | null
+    ): this;
+    filename(databaseName?: string): string;
     close(): void;
   }
 

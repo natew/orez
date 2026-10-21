@@ -100,6 +100,8 @@ Module.onRuntimeInitialized = () => {
     result_int64: [v, n2],
     result_error: [v, n3],
     get_autocommit: [n, n1],
+    update_hook: [n, n3],
+    db_filename: [s, [n, s]],
   }
 
   for (const [name, sig] of Object.entries(signatures)) {
@@ -300,6 +302,7 @@ Module.onRuntimeInitialized = () => {
       this._name = filename
       this._statements = new Set()
       this._functions = new Map()
+      this._updateHook = null
 
       // set busy timeout to 5s by default
       this.exec('PRAGMA busy_timeout = 5000')
@@ -548,6 +551,32 @@ Module.onRuntimeInitialized = () => {
       return this
     }
 
+    // sqlite3_update_hook: fn(op, databaseName, tableName, rowid) runs for
+    // each row an INSERT (18), UPDATE (23) or DELETE (9) changes, from inside
+    // the step that changed it. null removes the hook.
+    updateHook(fn) {
+      this._assertOpen()
+      if (fn !== null && typeof fn !== 'function')
+        throw new TypeError('Expected first argument to be a function or null')
+
+      const previous = this._updateHook
+      this._updateHook =
+        fn === null
+          ? null
+          : addFunction((_arg, op, databaseName, tableName, rowid) => {
+              fn(op, UTF8ToString(databaseName), UTF8ToString(tableName), toNumberOrNot(rowid))
+            }, 'viiiij')
+      sqlite3.update_hook(this._ptr, this._updateHook ?? NULL, NULL)
+      if (previous) removeFunction(previous)
+      return this
+    }
+
+    // sqlite3_db_filename
+    filename(databaseName = 'main') {
+      this._assertOpen()
+      return sqlite3.db_filename(this._ptr, databaseName)
+    }
+
     close() {
       if (!this._open) return
 
@@ -565,6 +594,12 @@ Module.onRuntimeInitialized = () => {
         removeFunction(func)
       }
       this._functions.clear()
+
+      if (this._updateHook) {
+        sqlite3.update_hook(this._ptr, NULL, NULL)
+        removeFunction(this._updateHook)
+        this._updateHook = null
+      }
 
       const rc = sqlite3.close_v2(this._ptr)
       if (rc !== SQLITE_OK) {
