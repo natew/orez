@@ -33,7 +33,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
@@ -127,7 +127,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
@@ -158,7 +158,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
@@ -202,7 +202,7 @@ jobs:
         with:
           node-version: '24'
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
           components: rustfmt, clippy
@@ -265,6 +265,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.plan.outputs.version }}
+      source_revision: ${{ steps.plan.outputs.source_revision }}
 
     steps:
       - uses: actions/checkout@v4
@@ -277,6 +278,7 @@ jobs:
         id: plan
         run: |
           echo "version=$(bun scripts/sync-native-package.ts version)" >> "$GITHUB_OUTPUT"
+          echo "source_revision=$(bun -e 'import { syncNativeSourceRevision } from "./scripts/sync-native-release-plan.ts"; console.log(syncNativeSourceRevision())')" >> "$GITHUB_OUTPUT"
           echo "matrix=$(bun scripts/sync-native-package.ts matrix)" >> "$GITHUB_OUTPUT"
 
   # build the same package artifacts the release workflow will publish, on
@@ -298,6 +300,7 @@ jobs:
           target: ${{ matrix.target }}
           executable: ${{ matrix.executable }}
           version: ${{ needs.sync-native-package-plan.outputs.version }}
+          source-revision: ${{ needs.sync-native-package-plan.outputs.source_revision }}
           libc: ${{ matrix.libc }}
 
   # Checker-boundary self-tests only. These prove the pinned Elle binary accepts
@@ -356,7 +359,7 @@ jobs:
       # is built for that ABI. pinning a different node risks a prebuild ABI
       # mismatch (NODE_MODULE_VERSION), so mirror the harness job's environment.
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
 
@@ -471,7 +474,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
 
@@ -550,7 +553,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
@@ -713,7 +716,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
 

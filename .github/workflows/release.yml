@@ -65,7 +65,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         if: steps.candidate.outputs.release == 'true'
         with:
           toolchain: 1.94.0
@@ -153,7 +153,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
