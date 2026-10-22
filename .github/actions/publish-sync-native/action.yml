@@ -72,7 +72,7 @@ runs:
         # npm 12 refuses tarball URLs unless remote fetches are allowed.
         install="npm install --allow-remote=all --cache .release/smoke-cache --prefix .release/smoke --ignore-scripts --omit=optional"
         if [ '${{ inputs.libc }}' = 'musl' ]; then
-          docker run --rm -v "$PWD/.release:/work/.release" -w /work node:24-alpine \
+          docker run --rm -v "$PWD/.release:/work/.release" -w /work node:24.22.1-alpine \
             sh -euc "$install \"\$1\" \"\$2\" >&2 && .release/smoke/node_modules/.bin/sync-native --version" \
             sh "$launcher_tarball" "$platform_tarball" > .release/smoke-version
           actual="$(cat .release/smoke-version)"

@@ -52,7 +52,7 @@
     "oxfmt": "^0.16.0",
     "oxlint": "^1.31.0",
     "react": "*",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   },
   "publishConfig": {
     "access": "public"

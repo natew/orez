@@ -52,7 +52,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         if: steps.candidate.outputs.release == 'true'
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
@@ -63,7 +63,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         if: steps.candidate.outputs.release == 'true'
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         if: steps.candidate.outputs.release == 'true'
@@ -142,7 +142,7 @@ jobs:
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
@@ -151,7 +151,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:

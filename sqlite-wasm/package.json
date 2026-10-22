@@ -58,7 +58,7 @@
     "prepublishOnly": "test -f dist/sqlite3.wasm || (echo 'Run build:wasm first' && exit 1)"
   },
   "devDependencies": {
-    "vitest": "^3.0.0",
+    "vitest": "^3.2.7",
     "typescript": "^5.7.0"
   }
 }
