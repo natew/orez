@@ -2,6 +2,7 @@
  * skills command group - manage repository agent skills
  */
 
+import { randomUUID } from 'node:crypto'
 import {
   existsSync,
   lstatSync,
@@ -9,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
   rmdirSync,
   symlinkSync,
@@ -19,6 +21,18 @@ import { join, relative, resolve } from 'node:path'
 
 import { defineCommand } from 'citty'
 import pc from 'picocolors'
+
+function publishSkillFile(path: string, content: string, linkTarget?: string) {
+  const temporary = `${path}.${randomUUID()}.tmp`
+  try {
+    if (linkTarget === undefined) writeFileSync(temporary, content, 'utf-8')
+    else symlinkSync(linkTarget, temporary)
+    // another generator can publish between our read and write.
+    renameSync(temporary, path)
+  } finally {
+    rmSync(temporary, { force: true })
+  }
+}
 
 // --- doc skills generation ---
 
@@ -201,24 +215,28 @@ async function generateDocSkills(
               shouldCreate = false
             }
           }
-          if (shouldCreate) {
-            unlinkSync(skillFile)
+        } catch (error) {
+          if (
+            !error ||
+            typeof error !== 'object' ||
+            !('code' in error) ||
+            error.code !== 'ENOENT'
+          ) {
+            throw error
           }
-        } catch {
-          // nothing exists
         }
 
         if (!shouldCreate) continue
 
         if (isSymlinkTarget) {
-          symlinkSync(relativePath, skillFile)
+          publishSkillFile(skillFile, content, relativePath)
           symlinked++
 
           console.info(
             `  ${pc.green('⟷')} ${skillName} ${pc.dim(`(${relative(cwd, skillsDir)})`)}`
           )
         } else {
-          writeFileSync(skillFile, targetContent, 'utf-8')
+          publishSkillFile(skillFile, targetContent)
           generated++
 
           console.info(
