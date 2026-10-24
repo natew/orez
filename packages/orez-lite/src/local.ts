@@ -1,3 +1,8 @@
+import {
+  LOCAL_SYNC_ADMIN_TOKEN_ENV,
+  LOCAL_SYNC_NOTIFY_URL_ENV,
+} from './local-application-sql.js'
+
 export { createLocalApplicationSqlClientFactory } from './local-application-sql.js'
 export type {
   LocalApplicationSqlClient,
@@ -160,10 +165,19 @@ export async function startLocalSyncHost(
         { headers: { 'x-admin-key': adminToken } }
       )
       if (response.ok) {
+        // application SQL in this process, and the app the CLI spawns after this,
+        // notify the host through these after committing writes.
+        const notifyURL = `http://${config.host ?? '127.0.0.1'}:${config.port}`
+        process.env[LOCAL_SYNC_NOTIFY_URL_ENV] = notifyURL
+        process.env[LOCAL_SYNC_ADMIN_TOKEN_ENV] = adminToken
         return {
           child,
           exited,
           async close() {
+            if (process.env[LOCAL_SYNC_ADMIN_TOKEN_ENV] === adminToken) {
+              delete process.env[LOCAL_SYNC_NOTIFY_URL_ENV]
+              delete process.env[LOCAL_SYNC_ADMIN_TOKEN_ENV]
+            }
             if (child.exitCode !== null || child.signalCode !== null) return
             expectedExit = true
             child.kill('SIGTERM')

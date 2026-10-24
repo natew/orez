@@ -30,6 +30,47 @@ export interface LocalApplicationSqlClientFactory {
   close(): Promise<void>
 }
 
+// startLocalSyncHost publishes these for its own process and the app it spawns.
+// the host wakes clients only for writes it makes itself, so a commit from this
+// separate connection must tell it, or open clients wait for their safety pull.
+export const LOCAL_SYNC_NOTIFY_URL_ENV = 'OREZ_LOCAL_SYNC_NOTIFY_URL'
+export const LOCAL_SYNC_ADMIN_TOKEN_ENV = 'OREZ_LOCAL_SYNC_ADMIN_TOKEN'
+
+/** one notify in flight per namespace; commits during it coalesce into one more. */
+function createLocalSyncNotifier(namespace: string) {
+  let inFlight = false
+  let pending = false
+  const send = async () => {
+    const url = process.env[LOCAL_SYNC_NOTIFY_URL_ENV]
+    const token = process.env[LOCAL_SYNC_ADMIN_TOKEN_ENV]
+    if (!url || !token) return
+    inFlight = true
+    try {
+      const response = await fetch(
+        `${url}/${encodeURIComponent(namespace)}/admin/notify`,
+        { method: 'POST', headers: { 'x-admin-key': token } }
+      )
+      if (!response.ok) {
+        console.error(
+          `[orez-lite] local sync host refused notify for ${namespace}: ${response.status}`
+        )
+      }
+    } catch (error) {
+      console.error(`[orez-lite] local sync host notify failed for ${namespace}`, error)
+    } finally {
+      inFlight = false
+    }
+    if (pending) {
+      pending = false
+      void send()
+    }
+  }
+  return () => {
+    if (inFlight) pending = true
+    else void send()
+  }
+}
+
 function sqliteBindings(params: readonly unknown[]): SQLInputValue[] {
   return params.map((param) => {
     if (typeof param === 'boolean') return param ? 1 : 0
@@ -73,6 +114,9 @@ export function createLocalApplicationSqlClientFactory(options: {
     // write lock as it waits for ours, instead of failing the mutation at once
     database.exec('PRAGMA busy_timeout = 5000')
     connections.push(database)
+    const notifySyncHost = createLocalSyncNotifier(namespace)
+    const totalChanges = () =>
+      Number(database.prepare('SELECT total_changes() AS count').get()?.count)
 
     const client: LocalApplicationSqlClient = {
       async transaction(compileQuery, work, queryBudget) {
@@ -117,6 +161,7 @@ export function createLocalApplicationSqlClientFactory(options: {
             // take the write lock up front: a deferred transaction that reads and
             // then writes cannot wait out another writer, whatever the timeout
             database.exec('BEGIN IMMEDIATE')
+            const changesBefore = totalChanges()
             try {
               const value = await work({
                 exec,
@@ -142,7 +187,10 @@ export function createLocalApplicationSqlClientFactory(options: {
                   )
                 },
               })
+              // a read-only transaction must not wake: clients would pull for nothing
+              const wrote = totalChanges() !== changesBefore
               database.exec('COMMIT')
+              if (wrote) notifySyncHost()
               return value
             } catch (error) {
               database.exec('ROLLBACK')
