@@ -440,6 +440,23 @@ function projectedRow(table: ProjectedTable, row: unknown): unknown {
   return projected
 }
 
+/**
+ * Declare which of each table's columns are optional in this worker's schema.
+ * A sync host one schema version behind stores the rest of the row and leaves
+ * these out, so an additive column can deploy here before the host models it.
+ * Only tables that have optional columns are named.
+ */
+function declareOptionalColumns(
+  projected: JsonRecord,
+  tables: Iterable<ProjectedTable>
+): void {
+  const declared: Record<string, string[]> = {}
+  for (const table of tables) {
+    if (table.optionalColumns.size > 0) declared[table.name] = [...table.optionalColumns]
+  }
+  if (Object.keys(declared).length > 0) projected.optionalColumns = declared
+}
+
 function isInternalCursorTable(tableName: string): boolean {
   const name = stripPublicPrefix(tableName)
   return (
@@ -488,21 +505,25 @@ function projectFeedBody(
         projected.unpublishedTables = [stripPublicPrefix(snapshotTable)]
       } else {
         projected.rows = value.rows.map((row) => projectedRow(table, row))
+        declareOptionalColumns(projected, [table])
       }
     }
   }
 
   if (isRecord(value.tables)) {
     const tables: Record<string, unknown> = {}
+    const included = new Set<ProjectedTable>()
     for (const [rawName, rows] of Object.entries(value.tables)) {
       const table = feedTables.get(stripPublicPrefix(rawName))
       if (!table) continue
+      included.add(table)
       tables[table.name] = Array.isArray(rows)
         ? rows.map((row) => projectedRow(table, row))
         : rows
     }
     tables.syncCursor = [{ id: 'zero-http', watermark: Number(value.watermark ?? 0) }]
     projected.tables = tables
+    declareOptionalColumns(projected, included)
   }
 
   if (Array.isArray(value.changes)) {
@@ -513,6 +534,7 @@ function projectFeedBody(
     // syncCursor marker. name the dropped tables so the replica can compare
     // them against its own schema and refuse to diverge in silence.
     const unpublishedTables = new Set<string>()
+    const included = new Set<ProjectedTable>()
     let trailingUnpublishedChange: JsonRecord | undefined
     for (const rawChange of value.changes) {
       if (!isRecord(rawChange)) continue
@@ -535,6 +557,7 @@ function projectFeedBody(
         trailingUnpublishedChange = rawChange
         continue
       }
+      included.add(table)
       changes.push({
         ...rawChange,
         tableName: table.name,
@@ -543,6 +566,7 @@ function projectFeedBody(
       })
       trailingUnpublishedChange = undefined
     }
+    declareOptionalColumns(projected, included)
     // The upstream watermark is the feed head, not the last row in this page.
     // If the page ends with private rows, filtering them all would leave the
     // replica at its old cursor and make it replay the same page forever.

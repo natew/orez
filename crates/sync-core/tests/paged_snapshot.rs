@@ -86,6 +86,7 @@ fn pages_commit_progress_and_resume_from_the_opaque_cursor() {
                 "item",
                 &[item("a", "one"), item("b", "two")],
                 Some(opaque),
+                &Default::default(),
             )
         })
         .unwrap();
@@ -109,6 +110,7 @@ fn pages_commit_progress_and_resume_from_the_opaque_cursor() {
                 "item",
                 &[item("c", "three")],
                 None,
+                &Default::default(),
             )
         })
         .unwrap();
@@ -308,6 +310,7 @@ fn invalid_page_rolls_back_rows_and_cursor_together() {
                 "item",
                 &[item("good", "good"), invalid],
                 Some("must-not-commit"),
+                &Default::default(),
             )
         })
         .unwrap_err();
@@ -348,6 +351,7 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
             "item",
             &[item("a", "page-old")],
             None,
+            &Default::default(),
         )
     })
     .unwrap();
@@ -359,6 +363,7 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
 
     let batch = UpstreamBatch {
         watermark: 102,
+        optional_columns: Default::default(),
         changes: vec![
             UpstreamChange {
                 watermark: 101,
@@ -460,7 +465,15 @@ fn cutover_restores_live_index_names_so_generations_never_compound_them() {
             .unwrap()
             .generation;
         db.transaction(|db| {
-            apply_snapshot_page(db, &tables, generation, "item", &[item("a", "one")], None)
+            apply_snapshot_page(
+                db,
+                &tables,
+                generation,
+                "item",
+                &[item("a", "one")],
+                None,
+                &Default::default(),
+            )
         })
         .unwrap();
         db.transaction(|db| finalize_snapshot_generation(db, &tables, generation, start))
@@ -539,6 +552,7 @@ fn failed_cutover_rolls_back_every_table_and_the_epoch_change() {
             "a",
             &[row(json!({ "id": "new-a", "value": "new" }))],
             None,
+            &Default::default(),
         )
     })
     .unwrap();
@@ -550,6 +564,7 @@ fn failed_cutover_rolls_back_every_table_and_the_epoch_change() {
             "b",
             &[row(json!({ "id": "new-b", "value": "new" }))],
             None,
+            &Default::default(),
         )
     })
     .unwrap();
@@ -592,6 +607,7 @@ fn abandoned_generations_are_cleaned_in_bounded_batches() {
             "item",
             &rows,
             Some("not-done"),
+            &Default::default(),
         )
     })
     .unwrap();
@@ -613,6 +629,7 @@ fn abandoned_generations_are_cleaned_in_bounded_batches() {
             "item",
             &[],
             Some("still-paging"),
+            &Default::default(),
         )
     })
     .unwrap();
@@ -630,6 +647,7 @@ fn abandoned_generations_are_cleaned_in_bounded_batches() {
             "item",
             &[],
             Some("still-paging-2"),
+            &Default::default(),
         )
     })
     .unwrap();

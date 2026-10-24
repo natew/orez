@@ -27,6 +27,7 @@ import {
   engine_apply_snapshot_page,
   engine_apply_upstream,
   engine_begin_snapshot_generation,
+  engine_dropped_feed_columns_need_snapshot,
   engine_finalize,
   engine_finalize_snapshot_generation,
   engine_handle_query_pull,
@@ -113,6 +114,9 @@ type UpstreamBatch = {
   // tables whose changes the upstream feed dropped because it does not publish
   // them. absent on an upstream that predates the field.
   unpublishedTables?: string[]
+  // the feed's optional columns per table, so a host one schema version behind
+  // can store the rest of each row. absent on an upstream that predates it.
+  optionalColumns?: Record<string, string[]>
   changes: Array<{
     watermark: number
     tableName: string
@@ -189,6 +193,7 @@ type SnapshotPage = {
   rows: Record<string, unknown>[]
   nextCursor: string | null
   unpublishedTables?: string[]
+  optionalColumns?: Record<string, string[]>
 }
 // A hibernatable socket outlives the object holding the hub, so anything the
 // hub must not lose lives here. Identity is recorded at the authenticated
@@ -814,6 +819,10 @@ export function createSyncDurableObject<
     #bootID = crypto.randomUUID()
     #initialized = false
     #initSkipped = false
+    // whether this instance has asked the engine if a column it dropped while
+    // running behind its feed is now modeled. the answer lives in the engine's
+    // own table until a snapshot settles it, so once per instance is enough.
+    #droppedFeedColumnsChecked = false
     #lastRequestAt = 0
     #hibernations = 0
     #dropNextPushResponse = false
@@ -1471,6 +1480,19 @@ export function createSyncDurableObject<
           : Promise.resolve(0)
       }
       this.#ingestPromise = (async () => {
+        if (!this.#droppedFeedColumnsChecked) {
+          this.#droppedFeedColumnsChecked = true
+          // rows written while this replica ran a schema version behind its
+          // feed hold no value for the columns it has since started modeling;
+          // only a fresh snapshot recovers them.
+          if (
+            this.#wasm(() =>
+              engine_dropped_feed_columns_need_snapshot(this.#engineDb, config.schema)
+            )
+          ) {
+            forceSnapshot = true
+          }
+        }
         let progress = this.#snapshotProgress()
         this.#ingestBreaker.assertReady()
         const startingWatermark = this.#engineState().watermark
@@ -1517,7 +1539,8 @@ export function createSyncDurableObject<
                         activeProgress.generation,
                         table,
                         pageToApply.rows,
-                        pageToApply.nextCursor
+                        pageToApply.nextCursor,
+                        pageToApply.optionalColumns
                       )
                     )
                   )

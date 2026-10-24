@@ -32,7 +32,15 @@ pub struct UpstreamBatch {
     /// only advances to its final applied change, never past unseen changes.
     pub watermark: i64,
     pub changes: Vec<UpstreamChange>,
+    /// The feed's optional columns for the tables in this page. A feed one
+    /// schema version ahead of this host declares here which of its extra
+    /// columns are additive, so the host can store the rest of the row.
+    #[serde(default)]
+    pub optional_columns: FeedOptionalColumns,
 }
+
+/// Feed table name to the columns that table's schema marks optional.
+pub type FeedOptionalColumns = BTreeMap<String, BTreeSet<String>>;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +73,8 @@ pub struct SnapshotProgress {
 pub struct UpstreamSnapshot {
     pub watermark: i64,
     pub tables: BTreeMap<String, Vec<Map<String, Value>>>,
+    #[serde(default)]
+    pub optional_columns: FeedOptionalColumns,
 }
 
 pub fn upstream_watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
@@ -114,17 +124,77 @@ fn sql_value(ty: ZeroColumnType, value: &Value) -> Result<SqlValue, EngineError>
     })
 }
 
-fn validate_columns(
-    table: &str,
-    spec: &TableSpec,
-    row: &Map<String, Value>,
-) -> Result<(), EngineError> {
-    for column in row.keys() {
-        if spec.column_type(column).is_none() {
-            return Err(schema_refresh(format!("unknown column {table}.{column}")));
+// feed-only columns whose values this replica could not store, as
+// (table, column). recorded so the replica re-snapshots once it models them.
+type DroppedColumns = BTreeSet<(String, String)>;
+
+/// What one feed response declares about its rows, and the feed-only values
+/// applying them had to drop.
+struct FeedRows<'a> {
+    optional: &'a FeedOptionalColumns,
+    dropped: DroppedColumns,
+}
+
+impl<'a> FeedRows<'a> {
+    fn new(optional: &'a FeedOptionalColumns) -> Self {
+        Self {
+            optional,
+            dropped: DroppedColumns::new(),
         }
     }
-    Ok(())
+}
+
+fn feed_declares_optional(feed_optional: &FeedOptionalColumns, table: &str, column: &str) -> bool {
+    feed_optional
+        .get(table)
+        .is_some_and(|columns| columns.contains(column))
+}
+
+/// The feed and this host can run adjacent schema versions while a rollout is
+/// in flight, in either order. One-sided additive differences are accepted by
+/// declaration: a column only the feed carries must be one the feed declares
+/// optional, and a column only this host models must be optional in this
+/// host's schema. A required column on either side, or a row that differs in
+/// both directions at once (the shape of a rename), is a real mismatch.
+/// Returns the modeled columns the row omits; writes leave them untouched.
+fn reconcile_row<'a>(
+    table: &str,
+    tables: &Tables,
+    spec: &'a TableSpec,
+    row: &Map<String, Value>,
+    feed: &mut FeedRows,
+) -> Result<BTreeSet<&'a str>, EngineError> {
+    let mut feed_only = false;
+    for (column, value) in row {
+        if spec.column_type(column).is_some() {
+            continue;
+        }
+        if !feed_declares_optional(feed.optional, table, column) {
+            return Err(schema_refresh(format!("unknown column {table}.{column}")));
+        }
+        feed_only = true;
+        if !value.is_null() {
+            feed.dropped.insert((table.to_string(), column.clone()));
+        }
+    }
+    let mut absent = BTreeSet::new();
+    for (column, _) in &spec.columns {
+        if row.contains_key(column) {
+            continue;
+        }
+        if !tables.is_optional_column(table, column) {
+            return Err(schema_refresh(format!(
+                "upstream row for {table} is missing required column {column}"
+            )));
+        }
+        absent.insert(column.as_str());
+    }
+    if feed_only && !absent.is_empty() {
+        return Err(schema_refresh(format!(
+            "{table} differs from the feed in both directions; only a one-sided additive change can roll"
+        )));
+    }
+    Ok(absent)
 }
 
 fn delete_row_from(
@@ -134,8 +204,15 @@ fn delete_row_from(
     target: &str,
     spec: &TableSpec,
     row: &Map<String, Value>,
+    feed_optional: &FeedOptionalColumns,
 ) -> Result<(), EngineError> {
-    validate_columns(table, spec, row)?;
+    for column in row.keys() {
+        if spec.column_type(column).is_none()
+            && !feed_declares_optional(feed_optional, table, column)
+        {
+            return Err(schema_refresh(format!("unknown column {table}.{column}")));
+        }
+    }
     let mut params = Vec::with_capacity(spec.primary_key.len());
     for column in &spec.primary_key {
         let value = row.get(column).ok_or_else(|| {
@@ -179,21 +256,17 @@ fn upsert_row_into(
     target: &str,
     spec: &TableSpec,
     row: &Map<String, Value>,
+    feed: &mut FeedRows,
 ) -> Result<(), EngineError> {
-    validate_columns(table, spec, row)?;
-    let columns = spec
-        .columns
-        .iter()
-        .map(|(column, _)| column)
-        .collect::<Vec<_>>();
-    let mut params = Vec::with_capacity(columns.len());
+    let absent = reconcile_row(table, tables, spec, row, feed)?;
+    let mut columns = Vec::with_capacity(spec.columns.len());
+    let mut params = Vec::with_capacity(spec.columns.len());
     for (column, ty) in &spec.columns {
-        let value = row.get(column).ok_or_else(|| {
-            EngineError::bad_request(format!(
-                "upstream full row for {table} is missing column {column}"
-            ))
-        })?;
-        params.push(sql_value(*ty, value)?);
+        if absent.contains(column.as_str()) {
+            continue;
+        }
+        columns.push(column);
+        params.push(sql_value(*ty, &row[column])?);
     }
     let quoted = columns
         .iter()
@@ -245,25 +318,13 @@ fn upsert_row_into(
     Ok(())
 }
 
-fn upsert_row(
-    db: &mut dyn SyncDb,
-    tables: &Tables,
-    table: &str,
-    spec: &TableSpec,
-    row: &Map<String, Value>,
-) -> Result<(), EngineError> {
-    let target = tables
-        .physical_name(table)
-        .expect("validated table has physical mapping");
-    upsert_row_into(db, tables, table, target, spec, row)
-}
-
 fn apply_change_to(
     db: &mut dyn SyncDb,
     tables: &Tables,
     target: &str,
     spec: &TableSpec,
     change: &UpstreamChange,
+    feed: &mut FeedRows,
 ) -> Result<(), EngineError> {
     match change.op.as_str() {
         "INSERT" => upsert_row_into(
@@ -276,6 +337,7 @@ fn apply_change_to(
                 .row_data
                 .as_ref()
                 .ok_or_else(|| EngineError::bad_request("upstream insert is missing rowData"))?,
+            feed,
         ),
         "UPDATE" => {
             let row = change
@@ -285,9 +347,17 @@ fn apply_change_to(
             if let Some(old) = &change.old_data
                 && !same_key(spec, old, row)
             {
-                delete_row_from(db, tables, &change.table_name, target, spec, old)?;
+                delete_row_from(
+                    db,
+                    tables,
+                    &change.table_name,
+                    target,
+                    spec,
+                    old,
+                    feed.optional,
+                )?;
             }
-            upsert_row_into(db, tables, &change.table_name, target, spec, row)
+            upsert_row_into(db, tables, &change.table_name, target, spec, row, feed)
         }
         "DELETE" => delete_row_from(
             db,
@@ -299,11 +369,72 @@ fn apply_change_to(
                 .old_data
                 .as_ref()
                 .ok_or_else(|| EngineError::bad_request("upstream delete is missing oldData"))?,
+            feed.optional,
         ),
         op => Err(EngineError::bad_request(format!(
             "unknown upstream op {op}"
         ))),
     }
+}
+
+// one write per newly dropped (table, column) and none once recorded, so a
+// replica that runs behind its feed for a whole rollout pays nothing per page.
+fn note_dropped_columns(db: &mut dyn SyncDb, dropped: &DroppedColumns) -> Result<(), EngineError> {
+    for (table, column) in dropped {
+        db.exec(
+            "INSERT INTO _zsync_dropped_feed_columns (tableName, columnName) VALUES (?, ?)
+             ON CONFLICT (tableName, columnName) DO NOTHING",
+            &[
+                SqlValue::Text(table.clone()),
+                SqlValue::Text(column.clone()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn dropped_columns_now_modeled(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+) -> Result<Vec<(String, String)>, EngineError> {
+    let mut modeled = Vec::new();
+    for row in db.query(
+        "SELECT tableName, columnName FROM _zsync_dropped_feed_columns",
+        &[],
+    )? {
+        let table = required_text(&row, "tableName")?;
+        let column = required_text(&row, "columnName")?;
+        if tables
+            .get(table)
+            .is_some_and(|spec| spec.column_type(column).is_some())
+        {
+            modeled.push((table.to_string(), column.to_string()));
+        }
+    }
+    Ok(modeled)
+}
+
+/// True when this replica once dropped values for a column it now models: it
+/// ran behind a feed that had already added the column, so rows written in
+/// that window hold no value here. A fresh snapshot is the only way to recover
+/// them; the host runs one before serving further ingest.
+pub fn dropped_feed_columns_need_snapshot(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+) -> Result<bool, EngineError> {
+    Ok(!dropped_columns_now_modeled(db, tables)?.is_empty())
+}
+
+// a completed rebuild stored every modeled column, so it settles each record
+// for a column this replica models; records for still-unmodeled columns stay.
+fn resolve_dropped_columns(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), EngineError> {
+    for (table, column) in dropped_columns_now_modeled(db, tables)? {
+        db.exec(
+            "DELETE FROM _zsync_dropped_feed_columns WHERE tableName = ? AND columnName = ?",
+            &[SqlValue::Text(table), SqlValue::Text(column)],
+        )?;
+    }
+    Ok(())
 }
 
 const SNAPSHOT_CLEANUP_BATCH_ROWS: usize = 2_000;
@@ -800,6 +931,7 @@ pub fn apply_snapshot_page(
     table: &str,
     rows: &[Map<String, Value>],
     next_cursor: Option<&str>,
+    feed_optional: &FeedOptionalColumns,
 ) -> Result<SnapshotProgress, EngineError> {
     cleanup_one_snapshot_batch(db)?;
     let progress = generation_progress(db, generation)?;
@@ -818,9 +950,11 @@ pub fn apply_snapshot_page(
         .get(table)
         .ok_or_else(|| schema_refresh(format!("snapshot table {table} is not modeled")))?;
     let stage = stage_table_name(generation, table);
+    let mut feed = FeedRows::new(feed_optional);
     for row in rows {
-        upsert_row_into(db, tables, table, &stage, spec, row)?;
+        upsert_row_into(db, tables, table, &stage, spec, row, &mut feed)?;
     }
+    note_dropped_columns(db, &feed.dropped)?;
 
     if let Some(cursor) = next_cursor {
         db.exec(
@@ -878,6 +1012,7 @@ pub fn apply_snapshot_changes(
     let mut cursor = progress.catchup_watermark;
     let initial_cursor = cursor;
     let mut applied = 0;
+    let mut feed = FeedRows::new(&batch.optional_columns);
     let mut last_batch_watermark = None;
     for change in &batch.changes {
         if last_batch_watermark.is_some_and(|previous| change.watermark <= previous) {
@@ -892,10 +1027,11 @@ pub fn apply_snapshot_changes(
             continue;
         };
         let stage = stage_table_name(generation, &change.table_name);
-        apply_change_to(db, tables, &stage, spec, change)?;
+        apply_change_to(db, tables, &stage, spec, change, &mut feed)?;
         cursor = change.watermark;
         applied += 1;
     }
+    note_dropped_columns(db, &feed.dropped)?;
     if cursor > initial_cursor {
         db.exec(
             "UPDATE _zsync_snapshot_progress SET catchupWatermark = ?
@@ -1010,6 +1146,7 @@ pub fn finalize_snapshot_generation(
         }
     }
     store::invalidate(db)?;
+    resolve_dropped_columns(db, tables)?;
     db.exec(
         "UPDATE _zsync_meta SET upstream_watermark = ? WHERE lock = 1",
         &[store::counter(watermark)],
@@ -1040,6 +1177,7 @@ pub fn apply_upstream(
     let mut cursor = upstream_watermark(db)?;
     let initial_cursor = cursor;
     let mut applied = 0;
+    let mut feed = FeedRows::new(&batch.optional_columns);
     let mut last_batch_watermark = None;
     for change in &batch.changes {
         if last_batch_watermark.is_some_and(|previous| change.watermark <= previous) {
@@ -1059,10 +1197,11 @@ pub fn apply_upstream(
         let target = tables
             .physical_name(&change.table_name)
             .expect("modeled table has physical mapping");
-        apply_change_to(db, tables, target, spec, change)?;
+        apply_change_to(db, tables, target, spec, change, &mut feed)?;
         cursor = change.watermark;
         applied += 1;
     }
+    note_dropped_columns(db, &feed.dropped)?;
     if cursor > initial_cursor {
         db.exec(
             "UPDATE _zsync_meta SET upstream_watermark = ? WHERE lock = 1",
@@ -1088,7 +1227,7 @@ pub fn apply_upstream_snapshot(
     // deliberately excluded from client sync). ignore snapshot tables this host
     // does not model rather than rejecting the rebuild; every modeled table
     // still rebuilds atomically. column drift on a modeled table stays a hard
-    // refresh via upsert_row's validation.
+    // refresh via reconcile_row.
     for (table, _) in tables.iter() {
         let physical_table = tables
             .physical_name(table)
@@ -1096,15 +1235,21 @@ pub fn apply_upstream_snapshot(
         db.exec(&format!("DELETE FROM {}", quote_ident(physical_table)), &[])?;
     }
     let mut applied = 0;
+    let mut feed = FeedRows::new(&snapshot.optional_columns);
     for (table, rows) in &snapshot.tables {
         let Some(spec) = tables.get(table) else {
             continue;
         };
+        let target = tables
+            .physical_name(table)
+            .expect("modeled table has physical mapping");
         for row in rows {
-            upsert_row(db, tables, table, spec, row)?;
+            upsert_row_into(db, tables, table, target, spec, row, &mut feed)?;
             applied += 1;
         }
     }
+    resolve_dropped_columns(db, tables)?;
+    note_dropped_columns(db, &feed.dropped)?;
     db.exec(
         "UPDATE _zsync_meta SET upstream_watermark = ? WHERE lock = 1",
         &[store::counter(snapshot.watermark)],

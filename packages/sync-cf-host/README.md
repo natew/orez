@@ -254,6 +254,29 @@ Engine metadata, client last-mutation IDs, operator controls, and the
 authoritative upstream database are preserved. The legacy single-response
 `/snapshot` endpoint remains for small datasets and older harnesses.
 
+## Rolling schema changes
+
+The data worker and this host deploy separately, so for a while one side runs
+a schema version the other does not. An additive column, one the Zero schema
+marks `optional` (nullable or defaulted), can deploy on either side first with
+no failed request:
+
+- Each `/changes` and `/snapshot` response from `createOrezDataWorker` carries
+  `optionalColumns`, the optional columns of every table in that response. A
+  host one version behind stores the rest of each row and leaves out a column
+  only when the feed declares it optional. It records each column it had to
+  drop a value for, and once it models that column it re-snapshots one time to
+  recover the values written in the window.
+- A host one version ahead accepts a row without a column it models as
+  optional. The write leaves that column untouched.
+
+Everything else stays a `409 schema refresh required` on every pull: a column
+the feed does not declare optional, a missing required column, or a row that
+differs in both directions at once, which is the shape of a rename. Change a
+required column, a type or a key in steps that are each additive.
+`bun run test:rolling-schema` replays both deploy orders and both required
+column cases against a real data worker and host.
+
 ## Delegated service addresses
 
 `mutateBinding` selects the service binding that owns the application's mutate
@@ -295,6 +318,7 @@ bun install
 bun run typecheck             # builds probe-enabled wasm for all TS declarations
 bun run test:platform         # M0 boundary regression: 36 local workerd assertions
 bun run test:integration      # production host: pull/push/rollback/wake/eviction
+bun run test:rolling-schema   # additive column in both deploy orders
 bun run bundle                # Wrangler dry-run bundle report
 bun run measure               # cold start/CPU/storage/memory baseline
 cargo test -p sync-core       # engine/model/reference/soot suites (from repo root)

@@ -1,0 +1,26 @@
+name = "orez-rolling-schema-harness"
+main = "../orez-lite/test-workers/rolling-schema-worker.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["orez-sync-cf-host/wasm-module.wasm"]
+fallthrough = true
+
+[[durable_objects.bindings]]
+name = "SYNC_DO"
+class_name = "SyncDurableObject"
+
+[[durable_objects.bindings]]
+name = "ZERO_SQL_DO"
+class_name = "ZeroDO"
+
+[[services]]
+binding = "DATA"
+service = "orez-rolling-schema-harness"
+entrypoint = "DataService"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncDurableObject", "ZeroDO"]

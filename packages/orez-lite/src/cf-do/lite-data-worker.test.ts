@@ -290,6 +290,7 @@ describe('Orez Lite feed projection', () => {
           oldData: null,
         },
       ],
+      optionalColumns: { widget: ['location'] },
     })
   })
 })

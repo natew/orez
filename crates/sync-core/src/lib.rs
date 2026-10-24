@@ -63,10 +63,10 @@ pub fn schema_revision() -> String {
     )
 }
 pub use upstream::{
-    ApplyUpstreamResult, SnapshotProgress, SnapshotState, UpstreamBatch, UpstreamChange,
-    UpstreamSnapshot, apply_snapshot_changes, apply_snapshot_page, apply_upstream,
-    apply_upstream_snapshot, begin_snapshot_generation, finalize_snapshot_generation,
-    read_snapshot_progress, upstream_watermark,
+    ApplyUpstreamResult, FeedOptionalColumns, SnapshotProgress, SnapshotState, UpstreamBatch,
+    UpstreamChange, UpstreamSnapshot, apply_snapshot_changes, apply_snapshot_page, apply_upstream,
+    apply_upstream_snapshot, begin_snapshot_generation, dropped_feed_columns_need_snapshot,
+    finalize_snapshot_generation, read_snapshot_progress, upstream_watermark,
 };
 pub use value::{
     ZeroColumnType, canonical_pk, canonical_pk_text, to_zero_value, to_zero_value_json,

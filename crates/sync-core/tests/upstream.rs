@@ -70,6 +70,7 @@ fn upstream_json_values_persist_and_hydrate_with_their_original_types() {
         &tables,
         &UpstreamBatch {
             watermark: json_values.len() as i64,
+            optional_columns: Default::default(),
             changes,
         },
     )
@@ -103,6 +104,7 @@ fn applies_ordered_pages_and_is_watermark_idempotent() {
     let (mut db, tables) = setup();
     let batch = UpstreamBatch {
         watermark: 2,
+        optional_columns: Default::default(),
         changes: vec![
             change(1, "INSERT", Some(item("a", "one")), None),
             change(2, "INSERT", Some(item("b", "two")), None),
@@ -127,6 +129,7 @@ fn update_and_delete_use_full_images_and_advance_the_change_log() {
         &tables,
         &UpstreamBatch {
             watermark: 1,
+            optional_columns: Default::default(),
             changes: vec![change(1, "INSERT", Some(item("a", "one")), None)],
         },
     )
@@ -136,6 +139,7 @@ fn update_and_delete_use_full_images_and_advance_the_change_log() {
         &tables,
         &UpstreamBatch {
             watermark: 3,
+            optional_columns: Default::default(),
             changes: vec![
                 change(
                     2,
@@ -162,6 +166,7 @@ fn rejects_out_of_order_and_classifies_schema_drift_as_refresh() {
     let (mut db, tables) = setup();
     let ordered_batch = UpstreamBatch {
         watermark: 2,
+        optional_columns: Default::default(),
         changes: vec![
             change(2, "INSERT", Some(item("b", "two")), None),
             change(1, "INSERT", Some(item("a", "one")), None),
@@ -187,6 +192,7 @@ fn rejects_out_of_order_and_classifies_schema_drift_as_refresh() {
         &tables,
         &UpstreamBatch {
             watermark: 1,
+            optional_columns: Default::default(),
             changes: vec![change(1, "INSERT", Some(unknown), None)],
         },
     )
@@ -222,12 +228,14 @@ fn retention_gap_snapshot_replaces_rows_atomically() {
         &tables,
         &UpstreamBatch {
             watermark: 1,
+            optional_columns: Default::default(),
             changes: vec![change(1, "INSERT", Some(item("stale", "old")), None)],
         },
     )
     .unwrap();
     let snapshot = UpstreamSnapshot {
         watermark: 50,
+        optional_columns: Default::default(),
         tables: [("item".into(), vec![row(item("fresh", "snapshot"))])]
             .into_iter()
             .collect(),
@@ -256,6 +264,7 @@ fn snapshot_ignores_tables_absent_from_host_schema() {
     // so a subset replica can still rebuild, instead of failing the rebuild.
     let snapshot = UpstreamSnapshot {
         watermark: 42,
+        optional_columns: Default::default(),
         tables: [
             ("item".into(), vec![row(item("fresh", "snapshot"))]),
             (
@@ -300,6 +309,7 @@ fn changes_skip_tables_absent_from_host_schema() {
         &tables,
         &UpstreamBatch {
             watermark: 1,
+            optional_columns: Default::default(),
             changes: vec![unknown],
         },
     )
@@ -314,6 +324,7 @@ fn changes_skip_tables_absent_from_host_schema() {
         &tables,
         &UpstreamBatch {
             watermark: 2,
+            optional_columns: Default::default(),
             changes: vec![change(2, "INSERT", Some(item("a", "one")), None)],
         },
     )

@@ -19,7 +19,7 @@ use crate::error::EngineError;
 use crate::value::ZeroColumnType;
 
 // bump whenever init_schema changes a durable DDL or migration surface.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone)]
 pub struct TableSpec {
@@ -78,6 +78,9 @@ pub struct ResolvedColumn<'a> {
 struct TableMapping {
     physical_name: String,
     physical_columns: Vec<(String, String)>,
+    // logical columns the schema marks optional: nullable or defaulted, so a
+    // row may legitimately arrive without them during a schema rollout
+    optional_columns: BTreeSet<String>,
 }
 
 // an ordered map of logical sync table name -> spec + physical SQLite mapping.
@@ -120,6 +123,7 @@ impl Tables {
                 .iter()
                 .map(|(column, _)| (column.clone(), column.clone()))
                 .collect(),
+            optional_columns: BTreeSet::new(),
         };
         self.0.push((name, spec, mapping));
     }
@@ -130,6 +134,7 @@ impl Tables {
         physical_name: String,
         spec: TableSpec,
         physical_columns: Vec<(String, String)>,
+        optional_columns: BTreeSet<String>,
     ) {
         self.0.push((
             logical_name,
@@ -137,6 +142,7 @@ impl Tables {
             TableMapping {
                 physical_name,
                 physical_columns,
+                optional_columns,
             },
         ));
     }
@@ -182,6 +188,13 @@ impl Tables {
                     .find(|(logical, _)| logical == logical_column)
                     .map(|(_, physical)| physical.as_str())
             })
+    }
+
+    pub fn is_optional_column(&self, logical_table: &str, logical_column: &str) -> bool {
+        self.0
+            .iter()
+            .find(|(logical, _, _)| logical == logical_table)
+            .is_some_and(|(_, _, mapping)| mapping.optional_columns.contains(logical_column))
     }
 
     pub fn resolve_column(
@@ -356,6 +369,7 @@ impl Tables {
             let mut physical_columns = Vec::new();
             let mut encrypted_columns = BTreeSet::new();
             let mut encrypted_physical_columns = BTreeSet::new();
+            let mut optional_columns = BTreeSet::new();
             let mut seen_logical_columns = BTreeSet::new();
             let mut seen_physical_columns = BTreeSet::new();
             for (col, spec) in columns_obj {
@@ -419,6 +433,15 @@ impl Tables {
                     encrypted_columns.insert(col.clone());
                     encrypted_physical_columns.insert(physical_column.clone());
                 }
+                match spec.get("optional") {
+                    None | Some(serde_json::Value::Bool(false)) => {}
+                    Some(serde_json::Value::Bool(true)) => {
+                        optional_columns.insert(col.clone());
+                    }
+                    Some(_) => {
+                        return Err(format!("column '{name}.{col}'.optional must be a boolean"));
+                    }
+                }
                 columns.push((col.clone(), ZeroColumnType::from_type_str(ty)));
                 physical_columns.push((col.clone(), physical_column));
             }
@@ -471,6 +494,7 @@ impl Tables {
                     encrypted_physical_columns,
                 },
                 physical_columns,
+                optional_columns,
             );
         }
         Ok(tables)
@@ -664,6 +688,16 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
     // durable high-water mark: max watermark ever assigned. survives full
     // pruning and restart, so cookies never regress even if the log is emptied
     // (invariant 7: durable watermark = max(state, MAX(log))).
+    // feed columns this replica dropped values for while it ran a schema
+    // version behind its feed (upstream.rs reconcile_row)
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_dropped_feed_columns (
+            tableName TEXT NOT NULL,
+            columnName TEXT NOT NULL,
+            PRIMARY KEY (tableName, columnName)
+        )",
+        &[],
+    )?;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_watermark (
             lock INTEGER PRIMARY KEY CHECK (lock = 1),

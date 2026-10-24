@@ -64,6 +64,7 @@ fn failed_upstream_transaction_rolls_back_rows_log_and_cursor() {
     let (mut db, tables) = setup();
     let batch = UpstreamBatch {
         watermark: 3,
+        optional_columns: Default::default(),
         changes: vec![
             change(1, "would-have-been-written"),
             UpstreamChange {
@@ -94,6 +95,7 @@ fn successful_upstream_batch_commits_rows_log_and_cursor_together() {
     let (mut db, tables) = setup();
     let batch = UpstreamBatch {
         watermark: 3,
+        optional_columns: Default::default(),
         changes: vec![change(1, "a"), change(2, "b"), change(3, "c")],
     };
 
@@ -139,6 +141,7 @@ fn trigger_cdc_does_not_capture_its_own_metadata_writes() {
     let (mut db, tables) = setup();
     let batch = UpstreamBatch {
         watermark: 1,
+        optional_columns: Default::default(),
         changes: vec![change(1, "one")],
     };
     db.transaction(|tx| apply_upstream(tx, &tables, &batch))
@@ -222,6 +225,7 @@ fn schema_drift_rolls_back_and_legacy_metadata_upgrade_is_idempotent() {
     drifted["newColumn"] = json!(true);
     let batch = UpstreamBatch {
         watermark: 1,
+        optional_columns: Default::default(),
         changes: vec![UpstreamChange {
             watermark: 1,
             table_name: "item".into(),

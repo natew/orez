@@ -28,6 +28,9 @@ export const engine_apply_snapshot_changes = withWasm(
   generated.engine_apply_snapshot_changes
 )
 export const engine_apply_snapshot_page = withWasm(generated.engine_apply_snapshot_page)
+export const engine_dropped_feed_columns_need_snapshot = withWasm(
+  generated.engine_dropped_feed_columns_need_snapshot
+)
 export const engine_apply_upstream = withWasm(generated.engine_apply_upstream)
 export const engine_assemble_push_response = withWasm(
   generated.engine_assemble_push_response

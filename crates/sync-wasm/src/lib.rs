@@ -398,6 +398,17 @@ pub fn engine_init_schema(db: &JsSyncDb, schema: JsValue) -> Result<(), JsValue>
     sync_core::init_schema(&mut db, &tables).map_err(js_err)
 }
 
+/// True when the replica dropped values for a feed column it now models and
+/// must re-snapshot before further ingest.
+#[wasm_bindgen]
+pub fn engine_dropped_feed_columns_need_snapshot(
+    db: &JsSyncDb,
+    schema: JsValue,
+) -> Result<bool, JsValue> {
+    let tables = tables_from_js(schema)?;
+    sync_core::dropped_feed_columns_need_snapshot(&mut WasmDb(db), &tables).map_err(engine_error)
+}
+
 /// Apply one ordered page from the upstream ZeroSqlDO change feed. The host
 /// owns one transaction around this call; application triggers append the
 /// ordinary engine change-log entries consumed by pull/CVR code.
@@ -487,11 +498,19 @@ pub fn engine_apply_snapshot_page(
     table: &str,
     rows: JsValue,
     next_cursor: Option<String>,
+    optional_columns: JsValue,
 ) -> Result<JsValue, JsValue> {
     let mut db = WasmDb(db);
     let tables = tables_from_js(schema)?;
     let generation = parse_counter(generation, "snapshot generation")?;
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = from_js(rows)?;
+    // absent on a feed that predates the declaration
+    let optional_columns: sync_core::FeedOptionalColumns =
+        if optional_columns.is_undefined() || optional_columns.is_null() {
+            Default::default()
+        } else {
+            from_js(optional_columns)?
+        };
     let progress = sync_core::apply_snapshot_page(
         &mut db,
         &tables,
@@ -499,6 +518,7 @@ pub fn engine_apply_snapshot_page(
         table,
         &rows,
         next_cursor.as_deref(),
+        &optional_columns,
     )
     .map_err(engine_error)?;
     to_js(&SnapshotProgressWire::from(progress))
