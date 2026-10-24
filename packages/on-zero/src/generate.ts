@@ -456,15 +456,17 @@ async function tsTypeToValibot(
   seen = new Set<number>()
 ): Promise<string> {
   const checker = project.checker
-  // prevent infinite recursion on circular types
-  // only track structured types (objects, intersections) — not primitives/unions
+  // prevent infinite recursion on circular types. `seen` holds only the
+  // structured types (objects, intersections) on the current path, so a type
+  // reused by siblings, such as `string[]`, still converts every time.
   const flags = type.flags
+  let path = seen
   if (flags & (TypeFlags.Object | TypeFlags.Intersection)) {
     if (seen.has(type.id)) return 'v.unknown()'
-    seen.add(type.id)
+    path = new Set(seen).add(type.id)
   }
 
-  const recurse = (value: Type) => tsTypeToValibot(project, value, seen)
+  const recurse = (value: Type) => tsTypeToValibot(project, value, path)
 
   // primitives
   if (flags & TypeFlags.String) return 'v.string()'

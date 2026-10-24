@@ -113,6 +113,32 @@ export const mutate = mutations(schema, permission, {
     expect(v.safeParse(validator(), { kind: 'throttle' }).success).toBe(true)
   })
 
+  test('validates a type reused by siblings and stops at a cycle', async () => {
+    const dataDir = join(testDir, 'data')
+    writeFileSync(
+      join(dataDir, 'command/mutations.ts'),
+      `type Tree = { name: string; children: Tree[] }
+export const schema = table('command').columns({ id: string() }).primaryKey('id')
+export const mutate = mutations(schema, permission, {
+  dispatch: async (ctx, args: { a: string[]; b: string[]; nested: { c: string[] }; tree: Tree }) => {},
+})`
+    )
+    await generate({ dir: dataDir, silent: true })
+    const context = { v, exports: {} as { mutationValidators?: any } }
+    runInNewContext(
+      readFileSync(join(dataDir, 'generated/syncedMutations.ts'), 'utf8')
+        .replace(/^import .*$/m, '')
+        .replace('export const', 'exports.mutationValidators ='),
+      context
+    )
+    const validator = context.exports.mutationValidators!.command.dispatch
+    const tree = { name: 'root', children: [{ name: 'leaf', children: [] }] }
+    const valid = { a: ['x'], b: ['y'], nested: { c: ['z'] }, tree }
+    expect(v.safeParse(validator, valid).success).toBe(true)
+    expect(v.safeParse(validator, { ...valid, b: [1] }).success).toBe(false)
+    expect(v.safeParse(validator, { ...valid, nested: { c: [1] } }).success).toBe(false)
+  })
+
   test('force regenerates without source changes', async () => {
     writeFileSync(
       join(testDir, 'post/mutations.ts'),
