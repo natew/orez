@@ -7,6 +7,7 @@
 export {
   ApplicationSqlSessionPreemptedError,
   createApplicationSqlClient,
+  isApplicationSqlBusyError,
   ZeroDO,
 } from './cf-do/worker.js'
 export type {

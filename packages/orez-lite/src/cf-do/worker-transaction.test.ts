@@ -121,6 +121,8 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   zero.applicationSqlQueue = []
   zero.applicationSqlTurns = []
   zero.applicationSqlGrantStalls = []
+  zero.applicationSqlGrantTimeouts = []
+  zero.applicationSqlEvictions = []
   zero.applicationSqlDidCommit = () => {}
   zero.ctx = {
     id: { toString: () => 'test-object-id', name: 'test-write-attribution' },
@@ -719,6 +721,93 @@ describe('ZeroDO trusted application transaction', () => {
       { id: 'row-1', enabled: 1 },
     ])
     zero.releaseApplicationSqlTurn(next)
+  })
+
+  it('takes the turn back from an idle remote holder once another session waits', async () => {
+    vi.useFakeTimers()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const { isApplicationSqlBusyError } = await import('./worker.js')
+      const { zero } = await createTestZero(async (work) => await work())
+      const holder = await zero.applicationSqlSession('stalled-holder')
+      await holder.begin()
+      await holder.exec('UPDATE item SET enabled = 0')
+
+      // idle with nobody waiting: the holder keeps its turn
+      await vi.advanceTimersByTimeAsync(25_000)
+      await expect(holder.query('SELECT id FROM item')).resolves.toHaveLength(1)
+
+      const waiter = await zero.applicationSqlSession('waiter')
+      let admitted = false
+      const admission = waiter.begin().then(() => {
+        admitted = true
+      })
+      await vi.advanceTimersByTimeAsync(9_000)
+      expect(admitted).toBe(false)
+      await vi.advanceTimersByTimeAsync(1_500)
+      await admission
+      expect(admitted).toBe(true)
+
+      const late = holder.query('SELECT id FROM item')
+      await expect(late).rejects.toSatisfy(isApplicationSqlBusyError)
+      await expect(holder.commit()).rejects.toSatisfy(isApplicationSqlBusyError)
+      holder[Symbol.dispose]()
+
+      await expect(waiter.query('SELECT id FROM item')).resolves.toHaveLength(1)
+      await waiter.commit()
+
+      const response = await zero.fetch(
+        new Request('https://example.test/_orez/status', {
+          headers: { 'x-orez-admin-token': 'operator-token' },
+        })
+      )
+      const status = await response.json()
+      expect(status.applicationSql.evictions).toHaveLength(1)
+      expect(status.applicationSql.evictions[0]).toMatchObject({
+        sessionID: 'stalled-holder',
+        readOnly: false,
+        remote: true,
+        statements: 2,
+        queueDepth: 1,
+      })
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('orez_sql_session_evicted'))
+    } finally {
+      log.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('names the holders when a waiter times out behind a session that is still working', async () => {
+    vi.useFakeTimers()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const { isApplicationSqlBusyError } = await import('./worker.js')
+      const { zero } = await createTestZero(async (work) => await work())
+      // a local session is the object's own work, so it is never evicted
+      const holder = zero.openApplicationSqlSession('local-holder')
+      await holder.begin()
+      const waiter = await zero.applicationSqlSession('timed-out')
+      const admission = waiter.begin()
+      const settled = admission.catch((error: unknown) => error)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(isApplicationSqlBusyError(await settled)).toBe(true)
+
+      const response = await zero.fetch(
+        new Request('https://example.test/_orez/status', {
+          headers: { 'x-orez-admin-token': 'operator-token' },
+        })
+      )
+      const status = await response.json()
+      expect(status.applicationSql.grantTimeouts).toHaveLength(1)
+      expect(status.applicationSql.grantTimeouts[0]).toMatchObject({
+        sessionID: 'timed-out',
+        holders: [{ sessionID: 'local-holder', readOnly: false, remote: false }],
+      })
+      zero.releaseApplicationSqlTurn(holder)
+    } finally {
+      log.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it('admits waiting sessions in arrival order', async () => {

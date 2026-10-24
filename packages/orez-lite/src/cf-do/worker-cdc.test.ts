@@ -67,6 +67,8 @@ async function createWorkerCore() {
   zero.applicationSqlQueue = []
   zero.applicationSqlTurns = []
   zero.applicationSqlGrantStalls = []
+  zero.applicationSqlGrantTimeouts = []
+  zero.applicationSqlEvictions = []
   zero.applicationSqlDidCommit = () => {}
   // A real transaction boundary: an abort has to roll the SQLite side back, or
   // the cache-staleness regressions below cannot be observed at all.

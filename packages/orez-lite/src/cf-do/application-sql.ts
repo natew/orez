@@ -35,6 +35,26 @@ export type ApplicationSqlExecManyOutcome =
   | { results: ApplicationSqlExecResult[] }
   | { failedIndex: number; message: string }
 
+export const APPLICATION_SQL_ACQUIRE_TIMEOUT_MESSAGE =
+  'timed out acquiring the application SQLite session'
+export const APPLICATION_SQL_EVICTED_MESSAGE =
+  'application SQLite session gave up its turn after idling while others waited'
+
+/**
+ * the namespace was too busy to give this caller a turn, or took the turn back
+ * from a caller that went quiet. nothing it asked for was applied, so it is an
+ * overload to answer with a retryable status, never a server fault. matched on
+ * the message because workerd rpc carries an error's message, not its class;
+ * callers that prefix the namespace onto the message still match.
+ */
+export function isApplicationSqlBusyError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes(APPLICATION_SQL_ACQUIRE_TIMEOUT_MESSAGE) ||
+      error.message.includes(APPLICATION_SQL_EVICTED_MESSAGE))
+  )
+}
+
 export class ApplicationSqlStatementError extends Error {
   constructor(
     readonly statementIndex: number,

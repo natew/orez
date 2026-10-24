@@ -18,6 +18,8 @@ import {
   type RowWriteBudgetTrip,
 } from '../do-sql-tracking.js'
 import {
+  APPLICATION_SQL_ACQUIRE_TIMEOUT_MESSAGE,
+  APPLICATION_SQL_EVICTED_MESSAGE,
   applicationSqlPreemptibleValue,
   applicationSqlSessionTransaction,
 } from './application-sql.js'
@@ -74,6 +76,7 @@ import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-exe
 export {
   ApplicationSqlSessionPreemptedError,
   createApplicationSqlClient,
+  isApplicationSqlBusyError,
 } from './application-sql.js'
 export type {
   ApplicationSqlClient,
@@ -235,6 +238,13 @@ const WRITE_BUDGET_TRIPPED_KEY = '_orez_write_budget_tripped_at'
 const SCHEMA_PROVISIONING_WAIT_MS = 20_000
 const SCHEMA_PROVISIONING_MAX_DELAY_MS = 500
 const APPLICATION_SQL_TURN_WAIT_MS = 30_000
+// a session driven over RPC that has no call in flight for this long while
+// another session waits gives its turn up. a caller stalled between statements
+// (a hung isolate, a network call inside the transaction) otherwise holds the
+// namespace without bound and every waiter times out at once. it sits well
+// under the wait deadline so two stalled holders in a row still cannot starve
+// a waiter that queued behind them.
+const APPLICATION_SQL_IDLE_HOLD_MS = 10_000
 const WRITE_GRANT_WAIT_SAMPLE_CAPACITY = 4_096
 const DEFAULT_SQL_TELEMETRY_SAMPLE_RATE = 0.01
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
@@ -405,6 +415,33 @@ type ApplicationSqlGrantStall = {
   holders: ApplicationSqlTurn[]
 }
 
+type ApplicationSqlHolder = {
+  sessionID: string
+  readOnly: boolean
+  priority: ApplicationSqlSessionPriority
+  remote: boolean
+  admittedAt: number
+  lastCallAt: number
+  callsInFlight: number
+  statements: number
+}
+
+type ApplicationSqlEviction = ApplicationSqlHolder & {
+  evictedAt: number
+  idleMs: number
+  queueDepth: number
+}
+
+type ApplicationSqlGrantTimeout = {
+  sessionID: string
+  readOnly: boolean
+  priority: ApplicationSqlSessionPriority
+  queuedAt: number
+  timedOutAt: number
+  queueDepth: number
+  holders: ApplicationSqlHolder[]
+}
+
 type ApplicationSqlWaiter = {
   session: ApplicationSqlSessionTarget
   queuedAt: number
@@ -414,6 +451,7 @@ type ApplicationSqlWaiter = {
 }
 
 const APPLICATION_SQL_ACQUIRE = Symbol('applicationSqlAcquire')
+const APPLICATION_SQL_CALL = Symbol('applicationSqlCall')
 const APPLICATION_SQL_QUERY = Symbol('applicationSqlQuery')
 const APPLICATION_SQL_QUERY_PREEMPTIBLE = Symbol('applicationSqlQueryPreemptible')
 const APPLICATION_SQL_EXEC = Symbol('applicationSqlExec')
@@ -467,6 +505,12 @@ class ApplicationSqlSessionTarget extends RpcTarget {
   telemetryFinished = false
   admittedAt = 0
   statements = 0
+  /** opened over RPC, so its caller's pace between statements is not ours */
+  remote = false
+  callsInFlight = 0
+  lastCallAt = 0
+  idleTimer: ReturnType<typeof setTimeout> | null = null
+  evicted = false
 
   constructor(
     readonly owner: ZeroDO,
@@ -486,14 +530,18 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     sql: string,
     params: readonly unknown[] = []
   ): Promise<Row[]> {
-    return this.owner[APPLICATION_SQL_QUERY](this, sql, params)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_QUERY](this, sql, params)
+    )
   }
 
   queryPreemptible<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params: readonly unknown[] = []
   ): Promise<ApplicationSqlPreemptibleResult<Row[]>> {
-    return this.owner[APPLICATION_SQL_QUERY_PREEMPTIBLE](this, sql, params)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_QUERY_PREEMPTIBLE](this, sql, params)
+    )
   }
 
   exec(
@@ -501,13 +549,17 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult> {
-    return this.owner[APPLICATION_SQL_EXEC](this, sql, params, metadata)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_EXEC](this, sql, params, metadata)
+    )
   }
 
   execMany(
     statements: readonly ApplicationSqlStatement[]
   ): Promise<ApplicationSqlExecManyOutcome> {
-    return this.owner[APPLICATION_SQL_EXEC_MANY](this, statements)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_EXEC_MANY](this, statements)
+    )
   }
 
   queryPlan<Result = unknown>(
@@ -515,7 +567,9 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     queryName?: string,
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<Result> {
-    return this.owner[APPLICATION_SQL_QUERY_PLAN](this, plan, queryName, queryBudget)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_QUERY_PLAN](this, plan, queryName, queryBudget)
+    )
   }
 
   queryPlanPreemptible<Result = unknown>(
@@ -523,16 +577,20 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     queryName?: string,
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<ApplicationSqlPreemptibleResult<Result>> {
-    return this.owner[APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE](
-      this,
-      plan,
-      queryName,
-      queryBudget
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_QUERY_PLAN_PREEMPTIBLE](
+        this,
+        plan,
+        queryName,
+        queryBudget
+      )
     )
   }
 
   registerTables(tables: readonly ApplicationSqlTable[]): Promise<void> {
-    return this.owner[APPLICATION_SQL_REGISTER_TABLES](this, tables)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_REGISTER_TABLES](this, tables)
+    )
   }
 
   commit(): Promise<void> {
@@ -594,6 +652,8 @@ export class ZeroDO extends DurableObject {
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
   private applicationSqlTurns: ApplicationSqlTurn[] = []
   private applicationSqlGrantStalls: ApplicationSqlGrantStall[] = []
+  private applicationSqlGrantTimeouts: ApplicationSqlGrantTimeout[] = []
+  private applicationSqlEvictions: ApplicationSqlEviction[] = []
   protected applicationSqlDidCommit(_published: boolean, _changedData: boolean): void {}
 
   private durableObjectIdentity(): { objectId: string; objectName: string | null } {
@@ -1243,6 +1303,8 @@ export class ZeroDO extends DurableObject {
         queuedWriters: this.applicationSqlQueue.length - queuedReadSessions,
         writeGrantWaitMs: this.writeGrantWaitMs.status(),
         grantStalls: this.applicationSqlGrantStalls,
+        grantTimeouts: this.applicationSqlGrantTimeouts,
+        evictions: this.applicationSqlEvictions,
       },
       writeBudget: {
         enabled: !this.writeBudgetDisabled,
@@ -2110,6 +2172,7 @@ export class ZeroDO extends DurableObject {
     const admitted = session.readOnly
       ? this.applicationSqlReaders.has(session)
       : this.applicationSqlWriter === session
+    if (session.evicted) throw new Error(APPLICATION_SQL_EVICTED_MESSAGE)
     if (session.state !== 'active' || !admitted) {
       // the three fields distinguish the failure modes: a stale session that
       // already closed, a reader evicted from the set, and a writer displaced
@@ -2156,6 +2219,8 @@ export class ZeroDO extends DurableObject {
       const now = performance.now()
       waiter.session.state = 'active'
       waiter.session.admittedAt = now
+      waiter.session.lastCallAt = now
+      this.armApplicationSqlIdleEviction(waiter.session)
       if (waiter.session.telemetry) {
         waiter.session.telemetry.admittedAt = now
       }
@@ -2220,7 +2285,8 @@ export class ZeroDO extends DurableObject {
           if (index < 0) return
           this.applicationSqlQueue.splice(index, 1)
           session.state = 'closed'
-          reject(new Error('timed out acquiring the application SQLite session'))
+          this.recordApplicationSqlGrantTimeout(waiter)
+          reject(new Error(APPLICATION_SQL_ACQUIRE_TIMEOUT_MESSAGE))
         }, APPLICATION_SQL_TURN_WAIT_MS),
       }
       const firstLowerPriority = this.applicationSqlQueue.findIndex((queued) => {
@@ -2248,6 +2314,111 @@ export class ZeroDO extends DurableObject {
       this.pumpApplicationSqlQueue()
     })
     return admission
+  }
+
+  /** one RPC call on a session; the idle clock runs only between calls */
+  async [APPLICATION_SQL_CALL]<Value>(
+    session: ApplicationSqlSessionTarget,
+    call: () => Promise<Value>
+  ): Promise<Value> {
+    session.callsInFlight++
+    if (session.idleTimer) clearTimeout(session.idleTimer)
+    session.idleTimer = null
+    try {
+      return await call()
+    } finally {
+      session.callsInFlight--
+      session.lastCallAt = performance.now()
+      if (session.callsInFlight === 0) this.armApplicationSqlIdleEviction(session)
+    }
+  }
+
+  private armApplicationSqlIdleEviction(session: ApplicationSqlSessionTarget): void {
+    if (!session.remote || session.state !== 'active') return
+    if (session.idleTimer) clearTimeout(session.idleTimer)
+    session.idleTimer = setTimeout(
+      () => this.evictIdleApplicationSqlSession(session),
+      APPLICATION_SQL_IDLE_HOLD_MS
+    )
+  }
+
+  /**
+   * hand the turn of a session whose caller went quiet to the queue.
+   *
+   * nothing changes for an idle holder nobody is waiting on. once someone is,
+   * the holder's writes roll back exactly as a dispose would, and its next call
+   * fails with APPLICATION_SQL_EVICTED_MESSAGE instead of running against a turn
+   * it no longer owns.
+   */
+  private evictIdleApplicationSqlSession(session: ApplicationSqlSessionTarget): void {
+    session.idleTimer = null
+    if (session.state !== 'active' || session.callsInFlight > 0) return
+    if (this.applicationSqlQueue.length === 0) {
+      this.armApplicationSqlIdleEviction(session)
+      return
+    }
+    const now = performance.now()
+    const eviction: ApplicationSqlEviction = {
+      ...this.applicationSqlHolder(session),
+      evictedAt: now,
+      idleMs: now - session.lastCallAt,
+      queueDepth: this.applicationSqlQueue.length,
+    }
+    this.applicationSqlEvictions.push(eviction)
+    if (this.applicationSqlEvictions.length > 8) this.applicationSqlEvictions.shift()
+    this.logApplicationSqlAdmission('orez_sql_session_evicted', eviction)
+    try {
+      this.closeApplicationSqlSession(session)
+      this.finishApplicationSqlTelemetry(session, 'rolled_back')
+    } catch (error) {
+      this.finishApplicationSqlTelemetry(session, 'error', error)
+    } finally {
+      session.evicted = true
+    }
+  }
+
+  private applicationSqlHolder(session: ApplicationSqlSessionTarget): ApplicationSqlHolder {
+    return {
+      sessionID: session.sessionID.slice(0, 200),
+      readOnly: session.readOnly,
+      priority: session.priority,
+      remote: session.remote,
+      admittedAt: session.admittedAt,
+      lastCallAt: session.lastCallAt,
+      callsInFlight: session.callsInFlight,
+      statements: session.statements,
+    }
+  }
+
+  private recordApplicationSqlGrantTimeout(waiter: ApplicationSqlWaiter): void {
+    const holders = [...this.applicationSqlReaders]
+    if (this.applicationSqlWriter) holders.push(this.applicationSqlWriter)
+    const timeout: ApplicationSqlGrantTimeout = {
+      sessionID: waiter.session.sessionID.slice(0, 200),
+      readOnly: waiter.session.readOnly,
+      priority: waiter.session.priority,
+      queuedAt: waiter.queuedAt,
+      timedOutAt: performance.now(),
+      queueDepth: this.applicationSqlQueue.length,
+      holders: holders.map((holder) => this.applicationSqlHolder(holder)),
+    }
+    this.applicationSqlGrantTimeouts.push(timeout)
+    if (this.applicationSqlGrantTimeouts.length > 8) this.applicationSqlGrantTimeouts.shift()
+    this.logApplicationSqlAdmission('orez_sql_grant_timeout', timeout)
+  }
+
+  private logApplicationSqlAdmission(event: string, record: object): void {
+    try {
+      console.log(
+        JSON.stringify({
+          event,
+          ...this.durableObjectIdentity(),
+          bootID: this.bootID,
+          observedAt: Date.now(),
+          ...record,
+        })
+      )
+    } catch {}
   }
 
   private recordApplicationSqlTurn(session: ApplicationSqlSessionTarget): void {
@@ -2300,6 +2471,8 @@ export class ZeroDO extends DurableObject {
     }
     this.assertApplicationSqlSession(session)
     this.recordApplicationSqlTurn(session)
+    if (session.idleTimer) clearTimeout(session.idleTimer)
+    session.idleTimer = null
     session.state = 'closed'
     if (session.readOnly) this.applicationSqlReaders.delete(session)
     else {
@@ -2542,7 +2715,9 @@ export class ZeroDO extends DurableObject {
         } catch {}
       }
     }
-    return this.openApplicationSqlSession(sessionID, options)
+    const session = this.openApplicationSqlSession(sessionID, options)
+    session.remote = true
+    return session
   }
 
   private openApplicationSqlSession(

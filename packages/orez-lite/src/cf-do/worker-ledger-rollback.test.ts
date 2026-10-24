@@ -81,6 +81,8 @@ async function createWorkerCore() {
   zero.applicationSqlQueue = []
   zero.applicationSqlTurns = []
   zero.applicationSqlGrantStalls = []
+  zero.applicationSqlGrantTimeouts = []
+  zero.applicationSqlEvictions = []
   const runTransaction = <T>(work: () => T): T => {
     storage.nativeDb.exec('BEGIN')
     try {
