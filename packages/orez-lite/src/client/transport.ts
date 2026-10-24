@@ -604,6 +604,7 @@ class ZeroHttpSocket {
   private inFlightPuts = new Set<string>()
   private nextPullTimer: ReturnType<typeof setTimeout> | undefined
   private lastPullEndedAt = Number.NEGATIVE_INFINITY
+  private lastWakePullAt = Number.NEGATIVE_INFINITY
   private pendingPushes: unknown[] = []
   private pushInFlight = false
   private pushCompletion: Promise<void> = Promise.resolve()
@@ -930,11 +931,10 @@ class ZeroHttpSocket {
         this.wakeSocket = undefined
         this.scheduleWakeReconnect()
       }
-      // route through requestPullAfterCurrent, NOT pull() directly: a wake
-      // storm must coalesce into one leading pull plus one trailing pull, and
-      // only this path applies the spacing window that gets that. pull() no
-      // longer drops a request that lands mid-flight, but it also ignores the
-      // spacing, so a storm of five wakes would issue five pulls.
+      // a wake frame means another client committed rows this one has not
+      // seen, so it pulls at once instead of waiting out the spacing window
+      // after this client's own last pull (requestWakePull). a storm still
+      // coalesces into one leading pull plus one spaced trailing pull.
       //
       // connecting is also a nudge. a commit can land after the initial pull
       // reads its snapshot but before the server accepts this subscription. no
@@ -948,7 +948,7 @@ class ZeroHttpSocket {
       }
       socket.onmessage = (event) => {
         // old hosts answer ping in the message handler; new hosts auto-respond.
-        if (event?.data !== 'pong') this.requestPullAfterCurrent()
+        if (event?.data !== 'pong') this.requestWakePull()
       }
       socket.onclose = socket.onerror = reconnect
     })()
@@ -1134,6 +1134,30 @@ class ZeroHttpSocket {
       () => this.pendingUpstream.delete(promise),
       () => this.pendingUpstream.delete(promise)
     )
+  }
+
+  // the spacing window exists to stop back-to-back pulls rebasing a deep
+  // pending queue. with nothing pending that cost is gone, so a wake is spaced
+  // only from the last wake that pulled at once, not from any pull: a trailing
+  // pull this client scheduled for its own push's echo must not hold another
+  // client's rows. a storm still coalesces, since wakes during a pull mark one
+  // trailing pull and wakes within the window join the spaced one.
+  private requestWakePull() {
+    if (this.pushInFlight || this.pendingPushes.length > 0) {
+      this.requestPullAfterCurrent()
+      return
+    }
+    if (this.pullInFlight) {
+      this.pullAfterCurrent = true
+      return
+    }
+    const now = performance.now()
+    if (now - this.lastWakePullAt < MIN_PULL_SPACING_MS) {
+      this.requestPullAfterCurrent()
+      return
+    }
+    this.lastWakePullAt = now
+    this.run(this.pull())
   }
 
   private requestPullAfterCurrent() {

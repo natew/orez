@@ -492,14 +492,19 @@ describe('Orez HTTP transport', () => {
 
     await eventually(() => expect(fetch).toHaveBeenCalledTimes(1))
     await eventually(() => expect(wakeSockets).toHaveLength(1))
-    // let the connect pull age past the spacing window so the first wake of
-    // the storm pulls immediately (leading edge)
-    await sleep(300)
 
+    // let the connect pull finish, then open the socket, which schedules a
+    // spaced catch-up pull. a wake landing inside that window still pulls at
+    // once: another client's rows never wait out this client's own spacing
+    await sleep(20)
+    wakeSockets[0].onopen?.()
+    const woke = performance.now()
     for (let i = 0; i < 5; i++) wakeSockets[0].onmessage?.()
+    await eventually(() => expect(fetch).toHaveBeenCalledTimes(2))
+    expect(performance.now() - woke).toBeLessThan(150)
 
-    // one immediate pull, and the four wakes that landed during it coalesce
-    // into ONE trailing pull after the spacing window — never one per wake
+    // the four wakes that landed during that pull coalesce into ONE trailing
+    // pull after the spacing window — never one per wake
     await eventually(() => expect(fetch).toHaveBeenCalledTimes(3))
     await sleep(400)
     expect(fetch).toHaveBeenCalledTimes(3)
