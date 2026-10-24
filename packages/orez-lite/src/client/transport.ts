@@ -931,10 +931,8 @@ class ZeroHttpSocket {
         this.wakeSocket = undefined
         this.scheduleWakeReconnect()
       }
-      // a wake frame means another client committed rows this one has not
-      // seen, so it pulls at once instead of waiting out the spacing window
-      // after this client's own last pull (requestWakePull). a storm still
-      // coalesces into one leading pull plus one spaced trailing pull.
+      // a wake pulls at once; a storm still coalesces into one leading pull
+      // plus one spaced trailing pull.
       //
       // connecting is also a nudge. a commit can land after the initial pull
       // reads its snapshot but before the server accepts this subscription. no
@@ -948,7 +946,7 @@ class ZeroHttpSocket {
       }
       socket.onmessage = (event) => {
         // old hosts answer ping in the message handler; new hosts auto-respond.
-        if (event?.data !== 'pong') this.requestWakePull()
+        if (event?.data !== 'pong') this.requestPullAfterCurrent(true)
       }
       socket.onclose = socket.onerror = reconnect
     })()
@@ -1136,41 +1134,23 @@ class ZeroHttpSocket {
     )
   }
 
-  // the spacing window exists to stop back-to-back pulls rebasing a deep
-  // pending queue. with nothing pending that cost is gone, so a wake is spaced
-  // only from the last wake that pulled at once, not from any pull: a trailing
-  // pull this client scheduled for its own push's echo must not hold another
-  // client's rows. a storm still coalesces, since wakes during a pull mark one
-  // trailing pull and wakes within the window join the spaced one.
-  private requestWakePull() {
-    if (this.pushInFlight || this.pendingPushes.length > 0) {
-      this.requestPullAfterCurrent()
-      return
-    }
+  // a wake is spaced only from the last wake that pulled at once, so a pull
+  // this client scheduled after its own push never holds another client's rows
+  private requestPullAfterCurrent(wake = false) {
     if (this.pullInFlight) {
       this.pullAfterCurrent = true
       return
     }
+    const pushing = this.pushInFlight || this.pendingPushes.length > 0
     const now = performance.now()
-    if (now - this.lastWakePullAt < MIN_PULL_SPACING_MS) {
-      this.requestPullAfterCurrent()
-      return
-    }
-    this.lastWakePullAt = now
-    this.run(this.pull())
-  }
-
-  private requestPullAfterCurrent() {
-    if (this.pullInFlight) {
-      this.pullAfterCurrent = true
+    if (wake && !pushing && now - this.lastWakePullAt >= MIN_PULL_SPACING_MS) {
+      this.lastWakePullAt = now
+      this.run(this.pull())
       return
     }
     if (this.nextPullTimer !== undefined) return
-    const spacing =
-      this.pushInFlight || this.pendingPushes.length > 0
-        ? MIN_PULL_SPACING_WHILE_PUSHING_MS
-        : MIN_PULL_SPACING_MS
-    const wait = this.lastPullEndedAt + spacing - performance.now()
+    const spacing = pushing ? MIN_PULL_SPACING_WHILE_PUSHING_MS : MIN_PULL_SPACING_MS
+    const wait = this.lastPullEndedAt + spacing - now
     if (wait <= 0) {
       this.run(this.pull())
       return
