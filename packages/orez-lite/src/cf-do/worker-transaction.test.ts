@@ -777,6 +777,46 @@ describe('ZeroDO trusted application transaction', () => {
     }
   })
 
+  it('never takes the turn from a holder whose commit is still in flight', async () => {
+    vi.useFakeTimers()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      let gate: Promise<void> | null = null
+      const { zero } = await createTestZero(async (work) => {
+        if (gate) await gate
+        return await work()
+      })
+      zero.watermarks = { invalidateCache() {}, ensureTables() {} }
+      const holder = await zero.applicationSqlSession('committing-holder')
+      await holder.begin()
+      await holder.exec('UPDATE item SET enabled = 0')
+      const waiter = await zero.applicationSqlSession('waiter')
+      let admitted = false
+      const admission = waiter.begin().then(() => {
+        admitted = true
+      })
+
+      let open!: () => void
+      gate = new Promise<void>((resolve) => {
+        open = resolve
+      })
+      const commit = holder.commit()
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(admitted).toBe(false)
+      expect(zero.applicationSqlEvictions).toEqual([])
+
+      gate = null
+      open()
+      await expect(commit).resolves.toBeUndefined()
+      await admission
+      expect(admitted).toBe(true)
+      await waiter.commit()
+    } finally {
+      log.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('names the holders when a waiter times out behind a session that is still working', async () => {
     vi.useFakeTimers()
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})

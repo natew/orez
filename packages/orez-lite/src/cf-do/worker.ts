@@ -523,7 +523,9 @@ class ApplicationSqlSessionTarget extends RpcTarget {
   }
 
   begin(): Promise<void> {
-    return this.owner[APPLICATION_SQL_ACQUIRE](this)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_ACQUIRE](this)
+    )
   }
 
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -594,15 +596,21 @@ class ApplicationSqlSessionTarget extends RpcTarget {
   }
 
   commit(): Promise<void> {
-    return this.owner[APPLICATION_SQL_COMMIT](this)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_COMMIT](this)
+    )
   }
 
   commitPreemptible(): Promise<ApplicationSqlPreemptibleResult<void>> {
-    return this.owner[APPLICATION_SQL_COMMIT_PREEMPTIBLE](this)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_COMMIT_PREEMPTIBLE](this)
+    )
   }
 
   rollback(): Promise<void> {
-    return this.owner[APPLICATION_SQL_ROLLBACK](this)
+    return this.owner[APPLICATION_SQL_CALL](this, () =>
+      this.owner[APPLICATION_SQL_ROLLBACK](this)
+    )
   }
 
   [Symbol.dispose](): void {
