@@ -705,15 +705,6 @@ export function createOrezDataWorker<
         )
       }
       this.orezInstance = instance ?? ''
-      ctx.storage.sql.exec(
-        `CREATE TABLE IF NOT EXISTS ${readyTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL)`
-      )
-      ctx.storage.sql.exec(
-        `CREATE TABLE IF NOT EXISTS ${attemptTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL, attempt_count INTEGER NOT NULL, last_error TEXT)`
-      )
-      ctx.storage.sql.exec(
-        `CREATE TABLE IF NOT EXISTS ${restoreTable} (id INTEGER PRIMARY KEY CHECK (id = 1), started_at INTEGER NOT NULL)`
-      )
     }
 
     protected applicationSqlDidCommit(published: boolean, changedData: boolean): void {
@@ -809,8 +800,41 @@ export function createOrezDataWorker<
       await this.orezRunApplicationSchema(schemaVersion, this.orezInstance)
     }
 
+    // the schema state tables are created on the first write so a read-only open
+    // of an empty namespace persists nothing
+    private orezStateTables = false
+
+    private orezStateTablesExist(): boolean {
+      if (this.orezStateTables) return true
+      this.orezStateTables = Boolean(
+        this.orezStorage.sql
+          .exec(
+            `SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?`,
+            readyTable
+          )
+          .toArray()[0]
+      )
+      return this.orezStateTables
+    }
+
+    private orezEnsureStateTables(): void {
+      if (this.orezStateTablesExist()) return
+      const sql = this.orezStorage.sql
+      sql.exec(
+        `CREATE TABLE IF NOT EXISTS ${readyTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL)`
+      )
+      sql.exec(
+        `CREATE TABLE IF NOT EXISTS ${attemptTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL, attempt_count INTEGER NOT NULL, last_error TEXT)`
+      )
+      sql.exec(
+        `CREATE TABLE IF NOT EXISTS ${restoreTable} (id INTEGER PRIMARY KEY CHECK (id = 1), started_at INTEGER NOT NULL)`
+      )
+      this.orezStateTables = true
+    }
+
     protected override applicationNamespaceProvisioned(): boolean {
       if (this.orezApplicationSchemaReady() || this.orezRestoreInProgress()) return true
+      if (!this.orezStateTablesExist()) return false
       // a reconcile that has started (or failed) recorded an attempt, and a
       // ready marker from an older schema version also proves the namespace
       // holds data, so only a namespace with neither is unprovisioned
@@ -844,6 +868,7 @@ export function createOrezDataWorker<
       if (!runOptions.force && this.orezApplicationSchemaReady()) {
         return
       }
+      this.orezEnsureStateTables()
       if (!runOptions.force) {
         const attemptKey = this.orezSchemaAttemptKey()
         const attempt = this.orezStorage.sql
@@ -931,12 +956,14 @@ export function createOrezDataWorker<
       }
       const ready = this.orezApplicationSchemaReady()
       const attemptKey = this.orezSchemaAttemptKey()
-      const attempt = this.orezStorage.sql
-        .exec(
-          `SELECT attempt_count, last_error FROM ${attemptTable} WHERE id = 1 AND version = ?`,
-          attemptKey
-        )
-        .toArray()[0]
+      const attempt = this.orezStateTablesExist()
+        ? this.orezStorage.sql
+            .exec(
+              `SELECT attempt_count, last_error FROM ${attemptTable} WHERE id = 1 AND version = ?`,
+              attemptKey
+            )
+            .toArray()[0]
+        : undefined
       return {
         schemaVersion,
         ready,
@@ -952,6 +979,7 @@ export function createOrezDataWorker<
 
     private orezApplicationSchemaReady(): boolean {
       if (this.orezReadyVersion === schemaVersion) return true
+      if (!this.orezStateTablesExist()) return false
       const stored = this.orezStorage.sql
         .exec(`SELECT version FROM ${readyTable} WHERE id = 1`)
         .toArray()[0]
@@ -962,6 +990,7 @@ export function createOrezDataWorker<
 
     orezBeginApplicationSchemaReconcile(): void {
       this.orezReadyVersion = null
+      this.orezEnsureStateTables()
       this.orezStorage.sql.exec(`DELETE FROM ${readyTable} WHERE id = 1`)
     }
 
@@ -991,10 +1020,13 @@ export function createOrezDataWorker<
     }
 
     private orezRestoreInProgress(): boolean {
-      return Boolean(
-        this.orezStorage.sql
-          .exec(`SELECT id FROM ${restoreTable} WHERE id = 1`)
-          .toArray()[0]
+      return (
+        this.orezStateTablesExist() &&
+        Boolean(
+          this.orezStorage.sql
+            .exec(`SELECT id FROM ${restoreTable} WHERE id = 1`)
+            .toArray()[0]
+        )
       )
     }
 

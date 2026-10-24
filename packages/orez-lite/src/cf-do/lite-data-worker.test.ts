@@ -919,6 +919,7 @@ describe('createOrezDataWorker', () => {
     }
     zero.applicationSqlLocalClient = () => ({})
     zero.orezRestoreInProgress = () => false
+    zero.orezStateTablesExist = () => true
     zero.invalidateSchemaCaches = () => {}
     zero.orezSchemaRunVersion = null
     zero.orezSchemaRun = null
@@ -997,6 +998,7 @@ describe('createOrezDataWorker', () => {
     zero.orezInstance = 'ns:proj-unsynced'
     zero.applicationSqlLocalClient = () => ({})
     zero.orezRestoreInProgress = () => false
+    zero.orezStateTablesExist = () => true
     zero.invalidateSchemaCaches = () => {}
     zero.orezSchemaRunVersion = null
     zero.orezSchemaRun = null

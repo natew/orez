@@ -67,6 +67,9 @@ const dataWorker = createOrezDataWorker({
 
 export class ZeroDO extends dataWorker.ZeroDO {
   resetForProof() { this.ctx.abort('snapshot restart proof') }
+  storageTables() {
+    return this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf_%' AND name NOT LIKE '__miniflare_%'").toArray().map((row) => row.name)
+  }
   async checkCurrentSchema(instance) {
     return orezAppSchema.migrate({ instance, client: this.applicationSqlLocalClient(instance) })
   }
@@ -186,6 +189,11 @@ export default {
       return Response.json(
         await client.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('alpha', 'beta') ORDER BY name")
       )
+    }
+    if (action === 'storage-tables') {
+      // raw storage of the named object, read without any admission
+      const stub = env.ZERO_SQL_DO.get(env.ZERO_SQL_DO.idFromName('ns:' + namespace))
+      return Response.json(await stub.storageTables())
     }
     if (action === 'migrate') {
       const result = await dataWorker.ensureNamespaceSchema(env, namespace, { force: true })
@@ -316,12 +324,14 @@ try {
   // snapshot; the migration's first write to it records both here.
   // the shared read preflight inspects six schema rows in one statement and
   // session before the two migration writers. its overhead writes no rows.
+  // the first migration of a namespace also creates the three schema state
+  // tables (one existence probe, three CREATE statements, six schema rows).
   assert.deepEqual(cost, {
-    rowsRead: 321,
-    rowsWritten: 44,
+    rowsRead: 329,
+    rowsWritten: 50,
     sessions: 3,
     readSessions: 1,
-    statements: 70,
+    statements: 74,
     callbacks: 0,
   })
   const currentBefore = await fetch(`${base}/status/${namespace}`).then((r) => r.json())
@@ -359,6 +369,11 @@ try {
   const untouched = `proj-bogus-${crypto.randomUUID()}`
   assert.deepEqual(
     await fetch(`${base}/unprovisioned-read/${untouched}`).then((r) => r.json()),
+    []
+  )
+  // and the object it opened persisted no table at all
+  assert.deepEqual(
+    await fetch(`${base}/storage-tables/${untouched}`).then((r) => r.json()),
     []
   )
   assert.deepEqual(
