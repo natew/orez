@@ -11,6 +11,7 @@ process.env.GOMAXPROCS ??= '2'
 export type NativeTypeScriptProject = {
   projectForFile(path: string): Project
   sourceFilePaths(): Promise<string[]>
+  loadSources(): Promise<void>
   sourceFile(path: string): SourceFile
   hasParseErrors(path: string): boolean
   close(): Promise<void>
@@ -116,7 +117,8 @@ export function collectTypeScriptSourcePaths(roots: string[]): string[] {
 
 export async function createNativeTypeScriptProject(
   root: string,
-  sourcePaths: string[]
+  sourcePaths: string[],
+  options: { deferSources?: boolean } = {}
 ): Promise<NativeTypeScriptProject> {
   if (sourcePaths.length === 0) {
     throw new Error(`[on-zero] no TypeScript source files found under ${root}`)
@@ -127,14 +129,14 @@ export async function createNativeTypeScriptProject(
   const projectsByFile = new Map<string, Project>()
   const parseErrors = new Set<string>()
 
-  try {
+  const loadSources = async () => {
     for (const path of sourcePaths) {
-      const project = await snapshot.getDefaultProjectForFile(path)
+      if (sources.has(path)) continue
+      const project = projectsByFile.get(path)
       if (!project) throw new Error(`[on-zero] TypeScript did not open ${path}`)
       const source = await project.program.getSourceFile(path)
       if (!source) throw new Error(`[on-zero] TypeScript did not parse ${path}`)
       sources.set(path, source)
-      projectsByFile.set(path, project)
       try {
         parse(readFileSync(path, 'utf8'), {
           plugins: ['jsx', 'typescript'],
@@ -144,6 +146,15 @@ export async function createNativeTypeScriptProject(
         parseErrors.add(path)
       }
     }
+  }
+
+  try {
+    for (const path of sourcePaths) {
+      const project = await snapshot.getDefaultProjectForFile(path)
+      if (!project) throw new Error(`[on-zero] TypeScript did not open ${path}`)
+      projectsByFile.set(path, project)
+    }
+    if (!options.deferSources) await loadSources()
   } catch (error) {
     await snapshot.dispose()
     releaseCompiler(session, releaseTurn)
@@ -152,6 +163,7 @@ export async function createNativeTypeScriptProject(
 
   let closed = false
   return {
+    loadSources,
     async sourceFilePaths() {
       const paths = new Set<string>()
       const projects = new Map([...projectsByFile.values()].map((p) => [p.id, p]))
