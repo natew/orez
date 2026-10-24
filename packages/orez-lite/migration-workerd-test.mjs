@@ -53,6 +53,7 @@ writeFileSync(
 writeFileSync(
   join(fixture, 'worker.ts'),
   `import { createOrezDataWorker } from '../src/cf-do/lite-data-worker.js'
+import { createApplicationSqlClient } from '../src/cf-do/application-sql.js'
 import { orezAppSchema } from './migration.js'
 
 const notificationAttempts = new Map<string, number>()
@@ -176,6 +177,14 @@ export default {
         await client.query(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('alpha', 'beta') ORDER BY name"
         )
+      )
+    }
+    if (action === 'unprovisioned-read') {
+      // a read that declines to provision answers no rows and leaves the
+      // namespace without a schema
+      const client = createApplicationSqlClient(env.ZERO_SQL_DO, 'ns:' + namespace, { provision: false })
+      return Response.json(
+        await client.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('alpha', 'beta') ORDER BY name")
       )
     }
     if (action === 'migrate') {
@@ -345,6 +354,21 @@ try {
   )
   assert.equal(firstTouch.status, 200, await firstTouch.clone().text())
   assert.deepEqual(await firstTouch.json(), [{ name: 'alpha' }, { name: 'beta' }])
+  // a read that asks not to provision leaves a never-touched namespace
+  // untouched, and still reads a provisioned one
+  const untouched = `proj-bogus-${crypto.randomUUID()}`
+  assert.deepEqual(
+    await fetch(`${base}/unprovisioned-read/${untouched}`).then((r) => r.json()),
+    []
+  )
+  assert.deepEqual(
+    await fetch(`${base}/first-touch/${untouched}`).then((r) => r.json()),
+    [{ name: 'alpha' }, { name: 'beta' }]
+  )
+  assert.deepEqual(
+    await fetch(`${base}/unprovisioned-read/${untouched}`).then((r) => r.json()),
+    [{ name: 'alpha' }, { name: 'beta' }]
+  )
   const proofResponse = await fetch(
     `${base}/backup-proof/proj-backup-${crypto.randomUUID()}`,
     { method: 'POST' }

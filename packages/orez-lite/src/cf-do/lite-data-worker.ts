@@ -809,6 +809,20 @@ export function createOrezDataWorker<
       await this.orezRunApplicationSchema(schemaVersion, this.orezInstance)
     }
 
+    protected override applicationNamespaceProvisioned(): boolean {
+      if (this.orezApplicationSchemaReady() || this.orezRestoreInProgress()) return true
+      // a reconcile that has started (or failed) recorded an attempt, and a
+      // ready marker from an older schema version also proves the namespace
+      // holds data, so only a namespace with neither is unprovisioned
+      return Boolean(
+        this.orezStorage.sql
+          .exec(
+            `SELECT 1 AS found FROM ${attemptTable} UNION ALL SELECT 1 FROM ${readyTable} LIMIT 1`
+          )
+          .toArray()[0]
+      )
+    }
+
     async orezRunApplicationSchema(
       requestedSchemaVersion: string,
       instance: string,

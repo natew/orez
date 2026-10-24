@@ -242,7 +242,7 @@ export type ApplicationSqlRpc = {
   applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[],
-    options?: Pick<ApplicationSqlSessionOptions, 'priority'>
+    options?: ApplicationSqlQueryOptions
   ): Promise<Row[]>
 }
 
@@ -288,9 +288,19 @@ export type ApplicationSqlClient = {
   ): Promise<Value>
 }
 
+export type ApplicationSqlQueryOptions = Pick<ApplicationSqlSessionOptions, 'priority'> & {
+  /**
+   * false: a namespace that was never provisioned answers no rows instead of
+   * being created and migrated by the read. for callers that decide access
+   * from a namespace they do not yet know exists.
+   */
+  provision?: false
+}
+
 export type ApplicationSqlClientOptions = {
   signal?: AbortSignal
   priority?: ApplicationSqlSessionPriority
+  provision?: false
 }
 
 function canceled(signal: AbortSignal): unknown {
@@ -470,7 +480,9 @@ export function createApplicationSqlClient(
         target.applicationSqlQuery(
           sql,
           params,
-          options.priority ? { priority: options.priority } : undefined
+          options.priority || options.provision === false
+            ? { priority: options.priority, provision: options.provision }
+            : undefined
         )
       ),
     exec: (sql, params = [], metadata) =>

@@ -64,6 +64,7 @@ import type {
   ApplicationSqlClientOptions,
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
+  ApplicationSqlQueryOptions,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
   ApplicationSqlExecManyOutcome,
@@ -85,6 +86,7 @@ export type {
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
   ApplicationSqlQueryCompiler,
+  ApplicationSqlQueryOptions,
   ApplicationSqlRpc,
   ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
@@ -2693,6 +2695,15 @@ export class ZeroDO extends DurableObject {
   protected admitApplicationSql(): Promise<void> | void {}
 
   /**
+   * whether this namespace has ever been provisioned. a read that asks not to
+   * provision (`provision: false`) answers no rows for one that has not. the
+   * base object owns no schema, so it is always provisioned.
+   */
+  protected applicationNamespaceProvisioned(): boolean {
+    return true
+  }
+
+  /**
    * private durable object RPC surface for the application SQLite client. the
    * disposable target exists before admission, so a queued caller can cancel by
    * disposing it and an active one rolls its transaction back. this method is
@@ -2770,9 +2781,12 @@ export class ZeroDO extends DurableObject {
   >(
     sql: string,
     params: readonly unknown[] = [],
-    options: Pick<ApplicationSqlSessionOptions, 'priority'> = {}
+    options: ApplicationSqlQueryOptions = {}
   ): Promise<Row[]> {
     this.assertApplicationSqlRecovery()
+    if (options.provision === false && !this.applicationNamespaceProvisioned()) {
+      return []
+    }
     await this.admitApplicationSql()
     return this.withLocalApplicationSqlSession(
       true,
