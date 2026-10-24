@@ -288,7 +288,10 @@ export type ApplicationSqlClient = {
   ): Promise<Value>
 }
 
-export type ApplicationSqlQueryOptions = Pick<ApplicationSqlSessionOptions, 'priority'> & {
+export type ApplicationSqlQueryOptions = Pick<
+  ApplicationSqlSessionOptions,
+  'priority'
+> & {
   /**
    * false: a namespace that was never provisioned answers no rows instead of
    * being created and migrated by the read. for callers that decide access

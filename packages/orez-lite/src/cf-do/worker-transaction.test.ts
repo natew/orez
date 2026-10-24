@@ -770,7 +770,9 @@ describe('ZeroDO trusted application transaction', () => {
         statements: 2,
         queueDepth: 1,
       })
-      expect(log).toHaveBeenCalledWith(expect.stringContaining('orez_sql_session_evicted'))
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('orez_sql_session_evicted')
+      )
     } finally {
       log.mockRestore()
       vi.useRealTimers()

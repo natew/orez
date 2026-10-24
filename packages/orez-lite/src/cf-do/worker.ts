@@ -2387,7 +2387,9 @@ export class ZeroDO extends DurableObject {
     }
   }
 
-  private applicationSqlHolder(session: ApplicationSqlSessionTarget): ApplicationSqlHolder {
+  private applicationSqlHolder(
+    session: ApplicationSqlSessionTarget
+  ): ApplicationSqlHolder {
     return {
       sessionID: session.sessionID.slice(0, 200),
       readOnly: session.readOnly,
@@ -2413,7 +2415,8 @@ export class ZeroDO extends DurableObject {
       holders: holders.map((holder) => this.applicationSqlHolder(holder)),
     }
     this.applicationSqlGrantTimeouts.push(timeout)
-    if (this.applicationSqlGrantTimeouts.length > 8) this.applicationSqlGrantTimeouts.shift()
+    if (this.applicationSqlGrantTimeouts.length > 8)
+      this.applicationSqlGrantTimeouts.shift()
     this.logApplicationSqlAdmission('orez_sql_grant_timeout', timeout)
   }
 
