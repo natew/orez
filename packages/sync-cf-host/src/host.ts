@@ -452,6 +452,15 @@ async function namespaceHash(namespace: string): Promise<string> {
   ).join('')
 }
 
+function withServerTiming(response: Response, stages: [string, number][]): Response {
+  if (response.webSocket) return response
+  const wrapped = new Response(response.body, response)
+  const value = stages.map(([name, ms]) => `${name};dur=${ms.toFixed(1)}`).join(', ')
+  const existing = wrapped.headers.get('server-timing')
+  wrapped.headers.set('server-timing', existing ? `${existing}, ${value}` : value)
+  return wrapped
+}
+
 type WorkerStage = 'authenticate' | 'sync_do_forward'
 
 async function timeWorkerStage<Value>(
@@ -659,6 +668,8 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         headers.delete(WAKE_ISSUED_AT_HEADER)
         headers.delete(NOTIFY_IF_SUBSCRIBED_HEADER)
         let forwardedBody: ForwardedSyncBody | null = null
+        const stages: [string, number][] = []
+        const stageStarted = performance.now()
         // /wake and /realtime/produce are both websocket upgrades and have no
         // body to put claims in. wake authentication is normalized from its
         // WebSocket subprotocol above; each route has its own authorization check
@@ -691,6 +702,7 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           } catch (error) {
             return errorResponse(error)
           }
+          stages.push(['worker_authenticate', performance.now() - stageStarted])
           if (
             !claims ||
             typeof claims.userID !== 'string' ||
@@ -722,6 +734,7 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
         if (wakeUserID) headers.set(IDENTITY_HEADER, encodeURIComponent(wakeUserID))
         if (wakeIssuedAt !== null)
           headers.set(WAKE_ISSUED_AT_HEADER, String(wakeIssuedAt))
+        const prepared = performance.now()
         const hashedNamespace = await namespaceHash(namespace)
         headers.set(NAMESPACE_HEADER, hashedNamespace)
         try {
@@ -735,7 +748,9 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           ? jsonBodyRequest(request, headers, forwardedBody)
           : new Request(request, { headers })
         const id = env.SYNC_DO.idFromName(namespace)
-        return timeWorkerStage(
+        stages.push(['worker_prepare', performance.now() - prepared])
+        const forwardStarted = performance.now()
+        const doResponse = await timeWorkerStage(
           {
             hostVersion: config.hostVersion,
             requestKind,
@@ -745,6 +760,8 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           },
           () => env.SYNC_DO.get(id).fetch(forwarded)
         )
+        stages.push(['worker_do_forward', performance.now() - forwardStarted])
+        return withServerTiming(doResponse, stages)
       }
       return withCors(await handle())
     },
@@ -2082,7 +2099,7 @@ export function createSyncDurableObject<
           wasmBoundaryCalls: this.#counters.wasmBoundaryCalls,
           sql: this.#engineDb.stats,
         })
-        const result = json(response)
+        const result = withServerTiming(json(response), [['do_tx', transactionMs]])
         const clientGroupID =
           typeof body.clientGroupID === 'string' ? body.clientGroupID : ''
         this.#servingLag.onVersionServed(clientGroupID, response.cookie)
@@ -2813,20 +2830,27 @@ export function createSyncDurableObject<
         if (clientGroupID) this.#beginActivePull(clientGroupID)
         try {
           // pull and push both establish the upstream schema and snapshot barrier.
+          const ingestStarted = performance.now()
           try {
             await this.#ingest(upstreamPath)
           } catch (error) {
             return errorResponse(error)
           }
-          if (route === '/pull') {
-            return await this.#pull(forwarded.request, forwarded.claims, namespace)
-          }
-          return await this.#push(
-            forwarded.request,
-            forwarded.claims,
-            namespace,
-            upstreamPath
-          )
+          const ingestMs = performance.now() - ingestStarted
+          const handlerStarted = performance.now()
+          const response =
+            route === '/pull'
+              ? await this.#pull(forwarded.request, forwarded.claims, namespace)
+              : await this.#push(
+                  forwarded.request,
+                  forwarded.claims,
+                  namespace,
+                  upstreamPath
+                )
+          return withServerTiming(response, [
+            ['do_ingest', ingestMs],
+            ['do_handle', performance.now() - handlerStarted],
+          ])
         } finally {
           if (clientGroupID) this.#endActivePull(clientGroupID)
         }
