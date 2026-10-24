@@ -95,6 +95,14 @@ The feed carries full row images: `rowData` is the complete row after an
 Ingest binds those images directly and uses `oldData` only to remove a changed
 primary key or a deleted row.
 
+The data worker bounds `/changes` by both the requested row count and a 4 MiB
+serialized UTF-8 budget (with metadata headroom). It reads the ordered cursor
+only through the first row that does not fit. One indivisible change always
+advances, even above the page target. The feed head remains the source head;
+consumers resume from the last delivered change, including snapshot catch-up.
+This keeps repeated full row images from streaming updates from stranding a
+replica behind the sync host's 8 MiB response guard. Paging performs no writes.
+
 Each page also carries `oldestCommitTimeMs` from the already-selected change
 rows and `sourceTimeMs` from the data worker clock. The host brackets that
 request on its own clock to record `orez.replication.upstream_clock_skew`, then

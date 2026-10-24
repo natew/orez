@@ -1842,7 +1842,14 @@ export class ZeroDO extends DurableObject {
           { status: 410 }
         )
       }
-      const changes = this.readChangesSince(watermark, changeLimit)
+      // reserve space for the feed metadata below the sync host's 8 mib cap.
+      // full row images include every streaming update, so a row limit alone
+      // can produce a page much larger than the current application data.
+      const changes = this.readChangesSince(
+        watermark,
+        changeLimit,
+        4 * 1024 * 1024 - 1024
+      )
       return Response.json({
         watermark: head,
         changes,
@@ -3576,33 +3583,40 @@ export class ZeroDO extends DurableObject {
     return deletePendingChanges(this.sql, transactionID)
   }
 
-  private readChangesSince(watermark: number, limit?: number) {
+  private readChangesSince(watermark: number, limit?: number, maxBytes?: number) {
     this.watermarks.ensureTables()
     const statement =
       'SELECT watermark, table_name, op, row_data, old_data, created_at FROM _zero_changes WHERE watermark > ? ORDER BY watermark' +
       (limit === undefined ? '' : ' LIMIT ?')
     const params = limit === undefined ? [watermark] : [watermark, limit]
-    return this.sql
-      .exec(statement, ...params)
-      .toArray()
-      .map((row: any) => {
-        const tableName = String(row.table_name)
-        const rowData = row.row_data ? JSON.parse(String(row.row_data)) : null
-        const oldData = row.old_data ? JSON.parse(String(row.old_data)) : null
-        return {
-          watermark: Number(row.watermark),
-          // Existing databases store unixepoch() seconds. Accept millisecond
-          // values too so a future precision migration is wire-compatible.
-          commitTimeMs:
-            Number(row.created_at) < 10_000_000_000
-              ? Number(row.created_at) * 1_000
-              : Number(row.created_at),
-          tableName,
-          op: String(row.op),
-          rowData: rowData ? this.normalizeRow(tableName, rowData) : null,
-          oldData: oldData ? this.normalizeRow(tableName, oldData) : null,
-        }
-      })
+    const changes = []
+    const encoder = new TextEncoder()
+    let bytes = 0
+    for (const row of this.sql.exec(statement, ...params)) {
+      const tableName = String(row.table_name)
+      const rowData = row.row_data ? JSON.parse(String(row.row_data)) : null
+      const oldData = row.old_data ? JSON.parse(String(row.old_data)) : null
+      const change = {
+        watermark: Number(row.watermark),
+        // existing databases store unixepoch() seconds. accept milliseconds too.
+        commitTimeMs:
+          Number(row.created_at) < 10_000_000_000
+            ? Number(row.created_at) * 1_000
+            : Number(row.created_at),
+        tableName,
+        op: String(row.op),
+        rowData: rowData ? this.normalizeRow(tableName, rowData) : null,
+        oldData: oldData ? this.normalizeRow(tableName, oldData) : null,
+      }
+      if (maxBytes !== undefined) {
+        const changeBytes = encoder.encode(JSON.stringify(change)).byteLength + 1
+        // one indivisible row must advance even when it exceeds the page target.
+        if (changes.length > 0 && bytes + changeBytes > maxBytes) break
+        bytes += changeBytes
+      }
+      changes.push(change)
+    }
+    return changes
   }
 
   private watermark(): number {

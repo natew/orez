@@ -34,6 +34,7 @@ function createSqliteStorage() {
     }
     return {
       toArray: () => rows,
+      [Symbol.iterator]: () => rows[Symbol.iterator](),
       one: () => rows[0],
       columnNames: stmt.reader ? stmt.columns().map((column: any) => column.name) : [],
       rowsWritten,
@@ -1692,6 +1693,47 @@ describe('ZeroDO legacy snapshot feed', () => {
 })
 
 describe('ZeroDO changes feed', () => {
+  it('pages full row images by wire bytes without writes or missing versions', async () => {
+    const { sql, zero } = await createWorkerCore()
+    const value = '雪\\"'.repeat(100_000)
+    for (let i = 0; i < 6; i++) {
+      zero.appendTrackedChange({
+        tableName: 'item',
+        op: 'UPDATE',
+        rowData: { id: String(i), value },
+        oldData: { id: String(i), value },
+      })
+    }
+    const before = Number(sql.exec('SELECT total_changes() AS n').one().n)
+    // an indivisible image must advance even when larger than the page target.
+    expect(
+      zero.readChangesSince(0, 1000, 64).map((change: any) => change.watermark)
+    ).toEqual([1])
+    const versions: number[] = []
+    let cursor = 0
+    while (cursor < 6) {
+      const response = await zero.fetch(
+        new Request(`http://do/changes?watermark=${cursor}&limit=1000`)
+      )
+      expect(response.status).toBe(200)
+      const text = await response.text()
+      expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(
+        4 * 1024 * 1024
+      )
+      const body = JSON.parse(text)
+      expect(body.watermark).toBe(6)
+      expect(body.changes.length).toBeGreaterThan(0)
+      for (const change of body.changes) {
+        versions.push(change.watermark)
+        expect(change.rowData.value).toBe(value)
+        expect(change.oldData.value).toBe(value)
+      }
+      cursor = body.changes.at(-1).watermark
+    }
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6])
+    expect(Number(sql.exec('SELECT total_changes() AS n').one().n)).toBe(before)
+  })
+
   it('bounds the SQL read with the requested limit and preserves the response shape', async () => {
     const { sql, zero } = await createWorkerCore()
     for (const id of ['a', 'b', 'c']) {

@@ -15,6 +15,10 @@ class FakeResult {
     return this.rows[0]
   }
 
+  [Symbol.iterator]() {
+    return this.rows[Symbol.iterator]()
+  }
+
   toArray() {
     return this.rows
   }
