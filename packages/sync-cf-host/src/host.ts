@@ -846,6 +846,8 @@ export function createSyncDurableObject<
     // during the replay wait for it instead of racing past into an empty hub.
     #realtimeReady: Promise<void> | null = null
     #ingestPromise: Promise<number> | null = null
+    // set by a commit notification that reached a running alarm's ingest late
+    #notifyPending = false
     #recordingIngestBillable = false
     #ingestBreaker = new IngestCircuitBreaker({
       budgetRows: ingestBudgetRows,
@@ -2781,6 +2783,14 @@ export function createSyncDurableObject<
         return this.#realtimeProduce(request, this.env)
       }
       if (route === '/notify' && request.method === 'POST') {
+        // a commit notification arrives at the depth of the request that wrote,
+        // and ingesting inline would add this object's upstream read to that
+        // chain until the runtime refuses it. the alarm ingests from depth zero.
+        if (request.headers.get(NOTIFY_IF_SUBSCRIBED_HEADER) === '1') {
+          this.#notifyPending = true
+          await this.ctx.storage.setAlarm(Date.now())
+          return json({ ok: true, scheduled: true })
+        }
         try {
           const applied = await this.#ingestAfterCurrent(upstreamPath)
           return json({ ok: true, applied })
@@ -2827,8 +2837,9 @@ export function createSyncDurableObject<
     async alarm(): Promise<void> {
       if (this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG).length === 0) return
       this.#initialize()
+      this.#notifyPending = false
       try {
-        await this.#ingest()
+        await this.#ingestAfterCurrent(null)
       } catch (error) {
         console.error(
           JSON.stringify({
@@ -2840,8 +2851,13 @@ export function createSyncDurableObject<
       } finally {
         if (this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG).length > 0) {
           const retryAfterMs = this.#ingestBreaker.status().retryAfterMs
+          // a notification during this ingest may name a commit it did not
+          // read, and this re-arm replaces the alarm that notification set
           await this.ctx.storage.setAlarm(
-            Date.now() + Math.max(upstreamIntervalMs, retryAfterMs)
+            Date.now() +
+              (this.#notifyPending
+                ? retryAfterMs
+                : Math.max(upstreamIntervalMs, retryAfterMs))
           )
         }
       }
