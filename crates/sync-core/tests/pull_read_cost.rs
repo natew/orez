@@ -357,14 +357,14 @@ fn global_tombstone_prune_preserves_retained_and_live_membership() {
         .unwrap();
     let mut searches = 0;
     for row in plan {
-        if let Some(SqlValue::Text(detail)) = row.get("detail") {
-            if detail.starts_with("SEARCH _zsync_row_refs") {
-                assert!(
-                    detail.contains("clientGroupID=?"),
-                    "replay must seek within its group: {detail}"
-                );
-                searches += 1;
-            }
+        if let Some(SqlValue::Text(detail)) = row.get("detail")
+            && detail.starts_with("SEARCH _zsync_row_refs")
+        {
+            assert!(
+                detail.contains("clientGroupID=?"),
+                "replay must seek within its group: {detail}"
+            );
+            searches += 1;
         }
     }
     assert!(
