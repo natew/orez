@@ -957,6 +957,72 @@ try {
     1_000,
     'post-idle wake'
   )
+  // a push still wakes readers its rows reach only through a correlation or a
+  // claims-scoped query, and not readers whose queries it cannot change
+  const subscribe = async (clientID, userID, name, args) => {
+    const pulled = await post(
+      '/pull',
+      {
+        clientID,
+        clientGroupID: `group-${clientID}`,
+        cookie: null,
+        queries: { version: 1, patch: [{ op: 'put', hash: `${clientID}-q`, name, args }] },
+      },
+      userID
+    )
+    equal(pulled.status, 200, `${clientID} registers ${name}`)
+    return openWake(clientID, userID)
+  }
+  const joined = await subscribe('wake-join', 'user-a', 'projectById', [{ id: 'p3' }])
+  const joinedElsewhere = await subscribe('wake-join-other', 'user-a', 'projectById', [
+    { id: 'p4' },
+  ])
+  const exists = await subscribe('wake-exists', 'user-a', 'projectsWithUserMember', [
+    { userId: 'wake-member' },
+  ])
+  const owned = await subscribe('wake-owned', 'wake-owner', 'myProjects', [])
+  const ownedByOther = await subscribe('wake-owned-other', 'user-a', 'myProjects', [])
+  const readers = { joined, joinedElsewhere, exists, owned, ownedByOther }
+  const wakesFrom = async (id, name, args, woken, label) => {
+    const before = Object.fromEntries(
+      Object.entries(readers).map(([key, reader]) => [key, reader.messages.length])
+    )
+    response = await post('/push', mutation('wake-pusher', id, name, args), 'user-b')
+    equal(response.status, 200, `${label} push status`)
+    await eventually(
+      () => {
+        for (const key of woken) assert.ok(readers[key].messages.length > before[key], key)
+      },
+      1_000,
+      label
+    )
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    for (const [key, reader] of Object.entries(readers)) {
+      equal(reader.messages.length > before[key], woken.includes(key), `${label}: ${key}`)
+    }
+  }
+  await wakesFrom(
+    3,
+    'member.add',
+    { id: 'wake-join-member', projectId: 'p3', userId: 'u7' },
+    ['joined'],
+    'a child row wakes the parent query holder'
+  )
+  await wakesFrom(
+    4,
+    'member.add',
+    { id: 'wake-exists-member', projectId: 'p5', userId: 'wake-member' },
+    ['exists'],
+    'a child row that makes a parent exist wakes the exists query'
+  )
+  await wakesFrom(
+    5,
+    'project.create',
+    { id: 'wake-owned-project', ownerId: 'wake-owner', name: 'owned' },
+    ['owned'],
+    'a row wakes only the user whose claims-scoped query selects it'
+  )
+  for (const reader of Object.values(readers)) reader.socket.close()
   receiver.socket.close()
   bystander.socket.close()
   pusher.socket.close()
