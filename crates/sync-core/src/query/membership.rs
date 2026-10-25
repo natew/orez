@@ -112,11 +112,12 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 // place by copy and rename, keeping every row, so no client resyncs.
 pub(crate) const QUERY_SCHEMA_VERSION: i64 = 6;
 
-// the per-row membership tables, keyed only by their primary key. the name is a
-// parameter so the v5 rebuild can create the new shape beside the old table.
-fn query_rows_table_sql(name: &str) -> String {
+// the per-row membership tables, keyed only by their primary key. the statement
+// head is a parameter so the v5 rebuild can create the new shape beside the old
+// table, and fail on a stray one rather than write into it.
+fn query_rows_table_sql(head: &str) -> String {
     format!(
-        "CREATE TABLE IF NOT EXISTS {name} (
+        "{head} (
             clientGroupID TEXT NOT NULL,
             hash TEXT NOT NULL,
             rowTable TEXT NOT NULL,
@@ -126,9 +127,9 @@ fn query_rows_table_sql(name: &str) -> String {
     )
 }
 
-fn row_refs_table_sql(name: &str) -> String {
+fn row_refs_table_sql(head: &str) -> String {
     format!(
-        "CREATE TABLE IF NOT EXISTS {name} (
+        "{head} (
             clientGroupID TEXT NOT NULL,
             rowTable TEXT NOT NULL,
             rowPk TEXT NOT NULL,
@@ -239,12 +240,12 @@ fn rebuild_membership_without_rowid(db: &mut dyn SyncDb) -> Result<(), EngineErr
     for (table, create, columns) in [
         (
             "_zsync_query_rows",
-            query_rows_table_sql("_zsync_query_rows_v6"),
+            query_rows_table_sql("CREATE TABLE _zsync_query_rows_v6"),
             "clientGroupID, hash, rowTable, rowPk",
         ),
         (
             "_zsync_row_refs",
-            row_refs_table_sql("_zsync_row_refs_v6"),
+            row_refs_table_sql("CREATE TABLE _zsync_row_refs_v6"),
             "clientGroupID, rowTable, rowPk, refcount, addedVersion, removedVersion",
         ),
     ] {
@@ -320,10 +321,16 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
         )",
         &[],
     )?;
-    db.exec(&query_rows_table_sql("_zsync_query_rows"), &[])?;
-    db.exec(&row_refs_table_sql("_zsync_row_refs"), &[])?;
+    db.exec(
+        &query_rows_table_sql("CREATE TABLE IF NOT EXISTS _zsync_query_rows"),
+        &[],
+    )?;
+    db.exec(
+        &row_refs_table_sql("CREATE TABLE IF NOT EXISTS _zsync_row_refs"),
+        &[],
+    )?;
     // the transition replay in every non-full pull filters by version; without
-    // these the OR predicate scans the group's whole membership each pull.
+    // these each of its branches walks the group's whole membership each pull.
     db.exec(
         "CREATE INDEX IF NOT EXISTS _zsync_row_refs_added
          ON _zsync_row_refs (clientGroupID, addedVersion)",
