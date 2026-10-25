@@ -203,8 +203,8 @@ row data.
 
 ## Wake targeting
 
-After an ingest applies a batch, the Cloudflare host wakes only the clients whose
-group can see a changed row (`crates/sync-core/src/query/wake.rs`). Waking every
+After an ingest applies a batch or a local push commits, the Cloudflare host
+wakes only the clients whose group can see a changed row (`crates/sync-core/src/query/wake.rs`). Waking every
 socket on every commit made arrivals cost the object one pull per connected
 client per commit, nearly all of them empty. Each registered query stores a
 plan: anchor keys for nodes whose predicate pins `column = literal`, and
@@ -215,7 +215,9 @@ grows with changed rows rather than with connected groups. A node nothing can
 bound, and everything below a NOT EXISTS, registers its group under `all` for
 its table. The answer must be a superset of the groups whose next pull changes;
 `crates/sync-core/tests/wake_targets.rs` checks that against real pulls. A
-completed snapshot, a reset, or a batch over 512 rows still wakes everyone.
+completed snapshot, a reset, or a batch over 512 rows still wakes everyone. A
+local push also wakes the other clients of the pushing group, whose next pull
+carries the advanced lmid even when the mutation changed no row.
 
 ## Paged upstream resnapshot
 

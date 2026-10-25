@@ -903,7 +903,19 @@ try {
   equal(response.status, 200, 'the refused mutation id is still available')
   equal(response.body.pushResponse.mutations[0].result, {}, 'the retry applies')
 
+  // a push wakes only the clients whose queries its committed rows reach
+  const receiverPull = await post('/pull', {
+    clientID: 'wake-receiver',
+    clientGroupID: 'group-wake-receiver',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [{ op: 'put', hash: 'wake-projects', name: 'allProjects', args: [] }],
+    },
+  })
+  equal(receiverPull.status, 200, 'wake receiver registers its query')
   const receiver = await openWake('wake-receiver', 'user-a')
+  const bystander = await openWake('wake-bystander', 'user-a')
   const pusher = await openWake('wake-pusher', 'user-b')
   response = await post(
     '/push',
@@ -922,13 +934,14 @@ try {
   )
   await new Promise((resolve) => setTimeout(resolve, 50))
   equal(pusher.messages, [], 'pusher excluded from wake')
+  equal(bystander.messages, [], 'a client no committed row reaches is not woken')
 
   const beforeIdle = await admin('/admin/status')
   await new Promise((resolve) => setTimeout(resolve, beforeIdle.idleTeardownMs + 100))
   const afterIdle = await admin('/admin/status')
   assert.notEqual(afterIdle.bootID, beforeIdle.bootID, 'idle teardown changes boot ID')
   assertions++
-  equal(afterIdle.connectedWakeSockets, 2, 'hibernating sockets survive teardown model')
+  equal(afterIdle.connectedWakeSockets, 3, 'hibernating sockets survive teardown model')
 
   await post(
     '/push',
@@ -945,6 +958,7 @@ try {
     'post-idle wake'
   )
   receiver.socket.close()
+  bystander.socket.close()
   pusher.socket.close()
 
   console.log(

@@ -1971,6 +1971,17 @@ export function createSyncDurableObject<
       }
     }
 
+    #pushWakeTargets(since: string, clientGroupID: unknown): ReadonlySet<string> | null {
+      const reached = this.#wakeTargets(since)
+      if (reached === null || typeof clientGroupID !== 'string') return reached
+      const targets = new Set(reached)
+      for (const socket of this.ctx.getWebSockets(`group:${clientGroupID}`)) {
+        const attachment = socketAttachment(socket)
+        if (attachment) targets.add(attachment.clientID)
+      }
+      return targets
+    }
+
     #enqueueWake(
       originClientID: string,
       tables: Iterable<string> = [],
@@ -2351,6 +2362,9 @@ export function createSyncDurableObject<
           'push_after_write_before_commit'
         )
         const txStarted = performance.now()
+        // every change after this watermark is this push's, or a concurrent
+        // commit's; targeting from it wakes a superset of the reached clients.
+        const pushWatermark = this.#engineState().watermark
         let result
         try {
           result = await this.#executor.push(body, claims)
@@ -2361,6 +2375,7 @@ export function createSyncDurableObject<
 
         const mutationResults =
           'mutations' in result.pushResponse ? result.pushResponse.mutations : []
+        let targets: ReadonlySet<string> | null | undefined
         for (const mutation of mutationResults) {
           if (
             'error' in mutation.result &&
@@ -2373,7 +2388,11 @@ export function createSyncDurableObject<
             this.#counters.applicationErrors++
             resultClass = 'application_error'
           }
-          this.ctx.waitUntil(this.#enqueueWake(mutation.id.clientID))
+          // wake the clients the committed rows reach, and the pusher's own
+          // group, whose next pull carries the advanced lmid even when the
+          // mutation changed no row.
+          targets ??= this.#pushWakeTargets(pushWatermark, body.clientGroupID)
+          this.ctx.waitUntil(this.#enqueueWake(mutation.id.clientID, [], targets))
         }
 
         if (mutationResults.length > 0) {
@@ -2576,7 +2595,11 @@ export function createSyncDurableObject<
         clientID,
         identity,
       } satisfies SocketAttachment)
-      this.ctx.acceptWebSocket(server, [WAKE_SUBSCRIBER_TAG, `client:${clientID}`])
+      this.ctx.acceptWebSocket(server, [
+        WAKE_SUBSCRIBER_TAG,
+        `client:${clientID}`,
+        ...(clientGroupID ? [`group:${clientGroupID}`] : []),
+      ])
       if (isRealtimeIdentity(identity)) {
         const host = this.#realtimeHost()
         if (host) {
