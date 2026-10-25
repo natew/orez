@@ -299,6 +299,16 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
          ON _zsync_row_refs (clientGroupID, removedVersion) WHERE refcount = 0",
         &[],
     )?;
+    // global retention pruning has no group predicate, so the replay index
+    // above scans every retained tombstone. keep both range access paths:
+    // one extra index entry per tombstone avoids that scan on every pull.
+    // additive initialization upgrades existing databases without resetting
+    // query state or changing the retention floor; restarts write no rows.
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS _zsync_row_refs_removed_global
+         ON _zsync_row_refs (removedVersion) WHERE refcount = 0",
+        &[],
+    )?;
     // marks a (group, query) whose membership has been computed at least once.
     // recomputation narrowing skips a query whose dependency tables were not
     // touched, EXCEPT one with no marker yet (a newly desired query, or one

@@ -232,6 +232,7 @@ fn pull_path_never_scans_engine_tables() {
         if !line.contains("_zsync_log_segments")
             && !line.contains("_zsync_client_group_seen")
             && !line.contains("_zsync_desires")
+            && !line.contains("_zsync_row_refs")
         {
             continue;
         }
@@ -247,6 +248,7 @@ fn pull_path_never_scans_engine_tables() {
                     "_zsync_log_segments",
                     "_zsync_client_group_seen",
                     "_zsync_desires",
+                    "_zsync_row_refs",
                 ] {
                     assert!(
                         !detail.contains(&format!("SCAN {table}")),
@@ -274,6 +276,147 @@ fn pull_path_never_scans_engine_tables() {
         "expected the prune drain to remove several stale segments, saw {drains}"
     );
     println!("checked {checked} ledger statements, none scans the segments table");
+}
+
+// upgrade a populated v5 database without resetting membership or its floor.
+// pruning must seek even when every tombstone belongs to another group.
+#[test]
+fn global_tombstone_prune_preserves_retained_and_live_membership() {
+    let (mut h, cookie) = steady_host();
+    let tables = item_tables();
+    h.db.conn
+        .execute_batch(
+            "DROP INDEX IF EXISTS _zsync_row_refs_removed_global;
+         WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 50000)
+         INSERT INTO _zsync_row_refs
+         SELECT 'other' || (n % 100), 'item', '{\"id\":\"old' || n || '\"}', 0, 0, 1 FROM rows;
+         INSERT INTO _zsync_row_refs VALUES
+           ('other0', 'item', '{\"id\":\"live\"}', 1, 0, 0),
+           ('other0', 'item', '{\"id\":\"null\"}', 0, 0, NULL);",
+        )
+        .unwrap();
+    let refs =
+        h.db.query(
+            "SELECT * FROM _zsync_row_refs ORDER BY clientGroupID, rowTable, rowPk",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect::<Vec<_>>();
+    let floor = sync_core::pull::floor(&mut h.db).unwrap();
+    assert_eq!(floor, 0);
+    let before = h.db.conn.total_changes();
+    init_query_schema(&mut h).unwrap();
+    init_query_schema(&mut h).unwrap();
+    assert_eq!(
+        h.db.conn.total_changes(),
+        before,
+        "upgrade and restart must write no data rows"
+    );
+    assert_eq!(sync_core::pull::floor(&mut h.db).unwrap(), floor);
+    assert_eq!(
+        h.db.query(
+            "SELECT * FROM _zsync_row_refs ORDER BY clientGroupID, rowTable, rowPk",
+            &[]
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect::<Vec<_>>(),
+        refs
+    );
+
+    h.reset();
+    let response = h
+        .transaction(|db| {
+            handle_query_pull(
+                db,
+                &tables,
+                4096,
+                &json!({"clientID": "c1", "clientGroupID": "g1", "cookie": cookie}),
+                "u1",
+            )
+        })
+        .unwrap();
+    assert_eq!(response["rowsPatch"].as_array().unwrap().len(), 1);
+    let replay = h
+        .log
+        .iter()
+        .find(|line| line.contains("addedVersion > ?"))
+        .expect("real incremental pull must read group transitions");
+    let plan =
+        h.db.query(
+            &format!(
+                "EXPLAIN QUERY PLAN {}",
+                replay.strip_prefix("query ").unwrap()
+            )
+            .replace('?', "0"),
+            &[],
+        )
+        .unwrap();
+    let mut searches = 0;
+    for row in plan {
+        if let Some(SqlValue::Text(detail)) = row.get("detail") {
+            if detail.starts_with("SEARCH _zsync_row_refs") {
+                assert!(
+                    detail.contains("clientGroupID=?"),
+                    "replay must seek within its group: {detail}"
+                );
+                searches += 1;
+            }
+        }
+    }
+    assert!(
+        searches >= 2,
+        "both replay branches must seek within the group"
+    );
+    let prune = h
+        .log
+        .iter()
+        .find_map(|line| line.strip_prefix("exec DELETE FROM _zsync_row_refs WHERE refcount = 0"))
+        .expect("real pull must prune tombstones");
+    let sql = format!("DELETE FROM _zsync_row_refs WHERE refcount = 0{prune}");
+    let mut statement = h.db.conn.prepare(&sql).unwrap();
+    assert_eq!(statement.execute([floor]).unwrap(), 0);
+    let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+    assert!(
+        steps < 100,
+        "empty cutoff examined retained tombstones: {steps} VM steps"
+    );
+    println!("global prune with 50000 retained tombstones: {steps} VM steps, zero deletions");
+    drop(statement);
+
+    h.db.conn
+        .execute_batch(
+            "INSERT INTO _zsync_row_refs VALUES
+           ('other0', 'item', '{\"id\":\"eligible\"}', 0, 0, 0),
+           ('other99', 'item', '{\"id\":\"eligible\"}', 0, 0, 0);
+         UPDATE item_record SET item_label = 'again' WHERE item_id = 'i612';",
+        )
+        .unwrap();
+    h.transaction(|db| {
+        handle_query_pull(
+            db,
+            &tables,
+            4096,
+            &json!({"clientID": "c1", "clientGroupID": "g1", "cookie": response["cookie"]}),
+            "u1",
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        h.db.query(
+            "SELECT * FROM _zsync_row_refs ORDER BY clientGroupID, rowTable, rowPk",
+            &[]
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.values)
+        .collect::<Vec<_>>(),
+        refs,
+        "prune must remove exactly the two eligible rows across groups, preserving retained, null-version and live refs"
+    );
 }
 
 // A bulk membership flip must not cost a statement per row: 500 departures
@@ -365,6 +508,13 @@ fn bulk_departure_write_cost_and_tombstone_replay() {
         "500 membership deletes plus 500 refcount tombstones, no more"
     );
     // the lagging client replays the same 500 departures from the tombstones.
+    // upgrade/restart between the first departure and the lagging replay.
+    h.db.exec("DROP INDEX IF EXISTS _zsync_row_refs_removed_global", &[])
+        .unwrap();
+    let before = h.db.conn.total_changes();
+    init_query_schema(&mut h).unwrap();
+    init_query_schema(&mut h).unwrap();
+    assert_eq!(h.db.conn.total_changes(), before);
     let replay = h
         .transaction(|db| {
             handle_query_pull(
