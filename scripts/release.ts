@@ -395,6 +395,10 @@ if (into) {
   if (selectedPkgDirs.length === 0)
     throw new Error('No upstream packages are installed in the target')
   const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
+  // installs unpack beside their destination: the system temp dir can sit on
+  // another volume, where the final rename fails with EXDEV
+  mkdirSync(join(targetDir, 'node_modules'), { recursive: true })
+  const installDir = mkdtempSync(join(targetDir, 'node_modules', '.orez-release-into-'))
   const nativeNames = new Set(['orez-sync-native', nativePlatform.npmPackage])
   let released = 0
   try {
@@ -460,7 +464,7 @@ if (into) {
 
       const tgzPath = join(tmpDir, packed)
       for (const [index, destDir] of destDirs.entries()) {
-        const extracted = join(tmpDir, `install-${released}-${index}`)
+        const extracted = join(installDir, `install-${released}-${index}`)
         mkdirSync(extracted)
         execFileSync('tar', ['-xzf', tgzPath, '-C', extracted, '--strip-components=1'])
         if (existsSync(destDir) && !lstatSync(destDir).isSymbolicLink()) {
@@ -478,6 +482,7 @@ if (into) {
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
+    rmSync(installDir, { recursive: true, force: true })
   }
 
   console.info(`\nreleased ${released} package(s) into ${targetDir}`)
