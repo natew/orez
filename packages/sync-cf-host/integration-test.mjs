@@ -966,7 +966,10 @@ try {
         clientID,
         clientGroupID: `group-${clientID}`,
         cookie: null,
-        queries: { version: 1, patch: [{ op: 'put', hash: `${clientID}-q`, name, args }] },
+        queries: {
+          version: 1,
+          patch: [{ op: 'put', hash: `${clientID}-q`, name, args }],
+        },
       },
       userID
     )
@@ -991,7 +994,8 @@ try {
     equal(response.status, 200, `${label} push status`)
     await eventually(
       () => {
-        for (const key of woken) assert.ok(readers[key].messages.length > before[key], key)
+        for (const key of woken)
+          assert.ok(readers[key].messages.length > before[key], key)
       },
       1_000,
       label
