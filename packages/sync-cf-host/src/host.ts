@@ -1971,8 +1971,11 @@ export function createSyncDurableObject<
       }
     }
 
-    #pushWakeTargets(since: string, clientGroupID: unknown): ReadonlySet<string> | null {
-      const reached = this.#wakeTargets(since)
+    #pushWakeTargets(
+      since: string | null,
+      clientGroupID: unknown
+    ): ReadonlySet<string> | null {
+      const reached = since === null ? null : this.#wakeTargets(since)
       if (reached === null || typeof clientGroupID !== 'string') return reached
       const targets = new Set(reached)
       for (const socket of this.ctx.getWebSockets(`group:${clientGroupID}`)) {
@@ -2364,7 +2367,7 @@ export function createSyncDurableObject<
         const txStarted = performance.now()
         // every change after this watermark is this push's, or a concurrent
         // commit's; targeting from it wakes a superset of the reached clients.
-        const pushWatermark = this.#engineState().watermark
+        const pushWatermark = this.#engineStateBestEffort()?.watermark ?? null
         let result
         try {
           result = await this.#executor.push(body, claims)
@@ -2375,7 +2378,7 @@ export function createSyncDurableObject<
 
         const mutationResults =
           'mutations' in result.pushResponse ? result.pushResponse.mutations : []
-        let targets: ReadonlySet<string> | null | undefined
+        const wakeOrigins: string[] = []
         for (const mutation of mutationResults) {
           if (
             'error' in mutation.result &&
@@ -2388,11 +2391,16 @@ export function createSyncDurableObject<
             this.#counters.applicationErrors++
             resultClass = 'application_error'
           }
+          wakeOrigins.push(mutation.id.clientID)
+        }
+        if (wakeOrigins.length > 0) {
           // wake the clients the committed rows reach, and the pusher's own
           // group, whose next pull carries the advanced lmid even when the
           // mutation changed no row.
-          targets ??= this.#pushWakeTargets(pushWatermark, body.clientGroupID)
-          this.ctx.waitUntil(this.#enqueueWake(mutation.id.clientID, [], targets))
+          const targets = this.#pushWakeTargets(pushWatermark, body.clientGroupID)
+          for (const origin of wakeOrigins) {
+            this.ctx.waitUntil(this.#enqueueWake(origin, [], targets))
+          }
         }
 
         if (mutationResults.length > 0) {
