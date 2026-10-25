@@ -105,7 +105,40 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 // GLOB. reset derived query state and bump the epoch so groups wedged by a
 // previously stored long pattern resend their desires through the fixed
 // compiler without requiring a fresh browser context.
-pub(crate) const QUERY_SCHEMA_VERSION: i64 = 5;
+//
+// v6: _zsync_query_rows and _zsync_row_refs became WITHOUT ROWID. a rowid table
+// keeps its composite primary key in a second b-tree, so every membership insert
+// or delete wrote two rows and Cloudflare billed both. a v5 store is rebuilt in
+// place by copy and rename, keeping every row, so no client resyncs.
+pub(crate) const QUERY_SCHEMA_VERSION: i64 = 6;
+
+// the per-row membership tables, keyed only by their primary key. the name is a
+// parameter so the v5 rebuild can create the new shape beside the old table.
+fn query_rows_table_sql(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (
+            clientGroupID TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            rowTable TEXT NOT NULL,
+            rowPk TEXT NOT NULL,
+            PRIMARY KEY (clientGroupID, hash, rowTable, rowPk)
+        ) WITHOUT ROWID"
+    )
+}
+
+fn row_refs_table_sql(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (
+            clientGroupID TEXT NOT NULL,
+            rowTable TEXT NOT NULL,
+            rowPk TEXT NOT NULL,
+            refcount INTEGER NOT NULL,
+            addedVersion INTEGER NOT NULL,
+            removedVersion INTEGER,
+            PRIMARY KEY (clientGroupID, rowTable, rowPk)
+        ) WITHOUT ROWID"
+    )
+}
 
 fn table_exists(db: &mut dyn SyncDb, name: &str) -> Result<bool, EngineError> {
     let rows = db.query(
@@ -132,8 +165,9 @@ fn read_query_meta_version(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
 // needs an explicit migration. the query-aware state is fully reconstructable from
 // clients' next desiredQueriesPatch + recompute and the old rows carry no client
 // group to backfill, so an out-of-date version RESETS the query-aware tables (init
-// recreates them at the current version). a version NEWER than this engine fails
-// loud rather than silently downgrading. baseline _zsync_* tables are untouched.
+// recreates them at the current version). v5 differs only in storage and is
+// rebuilt in place instead. a version NEWER than this engine fails loud rather
+// than silently downgrading. baseline _zsync_* tables are untouched.
 fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     // determine the stored version: from _zsync_query_meta if present, else infer
     // from the _zsync_queries shape (pre-versioning installs have no meta table —
@@ -167,6 +201,9 @@ fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     if stored_version == QUERY_SCHEMA_VERSION {
         return Ok(());
     }
+    if stored_version == 5 {
+        return rebuild_membership_without_rowid(db);
+    }
 
     // out of date: reset the query-aware tables (init recreates them at the current
     // version) AND bump the epoch, so every client's cookie is stale and it
@@ -191,6 +228,34 @@ fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
         db.exec(&format!("DROP TABLE IF EXISTS {table}"), &[])?;
     }
     crate::store::invalidate(db)?;
+    Ok(())
+}
+
+// v5 to v6: the membership tables keep their columns and rows and only change
+// storage, so copy each into its new shape and rename it over the old one. the
+// host runs init in one transaction, so a failure leaves the v5 tables intact.
+// dropping the old table drops its indexes; init recreates them over the copy.
+fn rebuild_membership_without_rowid(db: &mut dyn SyncDb) -> Result<(), EngineError> {
+    for (table, create, columns) in [
+        (
+            "_zsync_query_rows",
+            query_rows_table_sql("_zsync_query_rows_v6"),
+            "clientGroupID, hash, rowTable, rowPk",
+        ),
+        (
+            "_zsync_row_refs",
+            row_refs_table_sql("_zsync_row_refs_v6"),
+            "clientGroupID, rowTable, rowPk, refcount, addedVersion, removedVersion",
+        ),
+    ] {
+        db.exec(&create, &[])?;
+        db.exec(
+            &format!("INSERT INTO {table}_v6 ({columns}) SELECT {columns} FROM {table}"),
+            &[],
+        )?;
+        db.exec(&format!("DROP TABLE {table}"), &[])?;
+        db.exec(&format!("ALTER TABLE {table}_v6 RENAME TO {table}"), &[])?;
+    }
     Ok(())
 }
 
@@ -255,28 +320,8 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
         )",
         &[],
     )?;
-    db.exec(
-        "CREATE TABLE IF NOT EXISTS _zsync_query_rows (
-            clientGroupID TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            rowTable TEXT NOT NULL,
-            rowPk TEXT NOT NULL,
-            PRIMARY KEY (clientGroupID, hash, rowTable, rowPk)
-        )",
-        &[],
-    )?;
-    db.exec(
-        "CREATE TABLE IF NOT EXISTS _zsync_row_refs (
-            clientGroupID TEXT NOT NULL,
-            rowTable TEXT NOT NULL,
-            rowPk TEXT NOT NULL,
-            refcount INTEGER NOT NULL,
-            addedVersion INTEGER NOT NULL,
-            removedVersion INTEGER,
-            PRIMARY KEY (clientGroupID, rowTable, rowPk)
-        )",
-        &[],
-    )?;
+    db.exec(&query_rows_table_sql("_zsync_query_rows"), &[])?;
+    db.exec(&row_refs_table_sql("_zsync_row_refs"), &[])?;
     // the transition replay in every non-full pull filters by version; without
     // these the OR predicate scans the group's whole membership each pull.
     db.exec(
@@ -1599,11 +1644,19 @@ pub(crate) fn transitions_since(
     cookie: i64,
     skip: &BTreeSet<(String, String)>,
 ) -> Result<Vec<Value>, EngineError> {
+    // two disjoint branches, each seeking its own index. sqlite does not use
+    // a multi-index OR on a WITHOUT ROWID table, so an OR here would walk the
+    // group's whole membership on every pull.
     let rows = db.query(
         "SELECT rowTable, rowPk, CAST(refcount AS TEXT) AS c FROM _zsync_row_refs
-         WHERE clientGroupID = ?
-           AND (addedVersion > ? OR (refcount = 0 AND removedVersion > ?))",
+         WHERE clientGroupID = ? AND addedVersion > ?
+         UNION ALL
+         SELECT rowTable, rowPk, CAST(refcount AS TEXT) AS c FROM _zsync_row_refs
+         WHERE clientGroupID = ? AND refcount = 0 AND removedVersion > ?
+           AND addedVersion <= ?",
         &[
+            text(group),
+            SqlValue::Integer(cookie),
             text(group),
             SqlValue::Integer(cookie),
             SqlValue::Integer(cookie),

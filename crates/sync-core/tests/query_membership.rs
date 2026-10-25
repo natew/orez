@@ -469,6 +469,188 @@ fn future_query_schema_version_fails_loud() {
     );
 }
 
+// v6 changed only how the membership tables are stored. a v5 store must keep
+// every membership row, its indexes, and its epoch, so no client resyncs and
+// the next recompute still diffs against the membership it already delivered.
+#[test]
+fn v5_membership_is_rebuilt_without_rowid_keeping_every_row() {
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE issue (id TEXT PRIMARY KEY, title TEXT, closed INTEGER, priority INTEGER)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO issue VALUES ('i1', 't-i1', 0, 5), ('i2', 't-i2', 1, 3), ('i3', 't-i3', 0, 1)",
+        &[],
+    )
+    .unwrap();
+    let tables = schema();
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    register_query(
+        &mut db,
+        &tables,
+        G,
+        "open",
+        &json!({ "table": "issue", "where": where_eq("closed", json!(false)) }),
+        0,
+    )
+    .unwrap();
+    set_desire(&mut db, G, "c", "open", 1).unwrap();
+    let first = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert_eq!(put_ids(&first), vec!["i1", "i3"]);
+
+    // put the store back in the v5 shape: the same columns as rowid tables
+    for (table, create) in [
+        (
+            "_zsync_query_rows",
+            "CREATE TABLE _zsync_query_rows (clientGroupID TEXT NOT NULL, hash TEXT NOT NULL,
+                rowTable TEXT NOT NULL, rowPk TEXT NOT NULL,
+                PRIMARY KEY (clientGroupID, hash, rowTable, rowPk))",
+        ),
+        (
+            "_zsync_row_refs",
+            "CREATE TABLE _zsync_row_refs (clientGroupID TEXT NOT NULL, rowTable TEXT NOT NULL,
+                rowPk TEXT NOT NULL, refcount INTEGER NOT NULL, addedVersion INTEGER NOT NULL,
+                removedVersion INTEGER, PRIMARY KEY (clientGroupID, rowTable, rowPk))",
+        ),
+    ] {
+        db.exec(&format!("ALTER TABLE {table} RENAME TO {table}_old"), &[])
+            .unwrap();
+        db.exec(create, &[]).unwrap();
+        db.exec(
+            &format!("INSERT INTO {table} SELECT * FROM {table}_old"),
+            &[],
+        )
+        .unwrap();
+        db.exec(&format!("DROP TABLE {table}_old"), &[]).unwrap();
+    }
+    for index in [
+        "CREATE INDEX _zsync_row_refs_added ON _zsync_row_refs (clientGroupID, addedVersion)",
+        "CREATE INDEX _zsync_row_refs_removed ON _zsync_row_refs (clientGroupID, removedVersion)
+            WHERE refcount = 0",
+        "CREATE INDEX _zsync_row_refs_removed_global ON _zsync_row_refs (removedVersion)
+            WHERE refcount = 0",
+        "CREATE INDEX _zsync_row_refs_holders ON _zsync_row_refs (rowTable, rowPk)
+            WHERE refcount > 0",
+    ] {
+        db.exec(index, &[]).unwrap();
+    }
+
+    let keys = |rows: Vec<sync_core::Row>| -> Vec<String> {
+        rows.iter()
+            .map(|r| match r.get("k") {
+                Some(SqlValue::Text(s)) => s.clone(),
+                other => panic!("missing key: {other:?}"),
+            })
+            .collect()
+    };
+    let snapshot = |db: &mut TestDb| {
+        let rows = db
+            .query(
+                "SELECT clientGroupID || '|' || hash || '|' || rowTable || '|' || rowPk AS k
+                 FROM _zsync_query_rows ORDER BY k",
+                &[],
+            )
+            .unwrap();
+        let refs = db
+            .query(
+                "SELECT rowTable || '|' || rowPk || '|' || refcount || '|' || addedVersion
+                    || '|' || COALESCE(removedVersion, '-') AS k
+                 FROM _zsync_row_refs ORDER BY k",
+                &[],
+            )
+            .unwrap();
+        (keys(rows), keys(refs))
+    };
+    db.exec(
+        "UPDATE _zsync_query_meta SET version = 5 WHERE lock = 1",
+        &[],
+    )
+    .unwrap();
+    let before = snapshot(&mut db);
+    assert_eq!(before.1.len(), 2);
+    assert_eq!(before.0.len(), 2);
+    let floor_before = db.transaction(|d| sync_core::pull::floor(d)).unwrap();
+
+    init_query_schema(&mut db).unwrap();
+
+    assert_eq!(snapshot(&mut db), before, "the rebuild kept every row");
+    let floor_after = db.transaction(|d| sync_core::pull::floor(d)).unwrap();
+    assert_eq!(
+        floor_after, floor_before,
+        "the rebuild must not bump the epoch"
+    );
+    let shapes = db
+        .query(
+            "SELECT name, sql FROM sqlite_master
+             WHERE name IN ('_zsync_query_rows', '_zsync_row_refs') ORDER BY name",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(shapes.len(), 2);
+    for shape in &shapes {
+        match shape.get("sql") {
+            Some(SqlValue::Text(sql)) => assert!(sql.contains("WITHOUT ROWID"), "{sql}"),
+            other => panic!("missing table sql: {other:?}"),
+        }
+    }
+    let indexes = db
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = '_zsync_row_refs'
+               AND name NOT LIKE 'sqlite_autoindex%' ORDER BY name",
+            &[],
+        )
+        .unwrap();
+    let names: Vec<_> = indexes
+        .iter()
+        .filter_map(|r| match r.get("name") {
+            Some(SqlValue::Text(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "_zsync_row_refs_added",
+            "_zsync_row_refs_holders",
+            "_zsync_row_refs_removed",
+            "_zsync_row_refs_removed_global",
+        ]
+    );
+    let v = db
+        .query(
+            "SELECT CAST(version AS TEXT) AS v FROM _zsync_query_meta WHERE lock = 1",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        v.first().and_then(|r| r.get("v")),
+        Some(&SqlValue::Text("6".to_string()))
+    );
+
+    // the delivered membership still drives the diff: nothing resends, and a
+    // row leaving the query is deleted against the migrated refcounts
+    let unchanged = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert!(
+        unchanged.is_empty(),
+        "migrated membership resent {unchanged:?}"
+    );
+    db.exec("UPDATE issue SET closed = 1 WHERE id = 'i1'", &[])
+        .unwrap();
+    let changed: BTreeSet<(String, String)> =
+        [("issue".to_string(), json!({ "id": "i1" }).to_string())].into();
+    let closed = db
+        .transaction(|d| recompute_group(d, &tables, G, &changed))
+        .unwrap();
+    assert_eq!(del_ids(&closed), vec!["i1"]);
+}
+
 // CRITICAL-2 companion: a transform-version bump on a group's query forces a
 // recompute so a tightened permission transform cannot retain older, more-
 // permissive rows even if the AST text were unchanged.
