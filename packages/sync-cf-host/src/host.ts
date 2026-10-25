@@ -78,6 +78,9 @@ const WAKE_SUBSCRIBER_TAG = 'orez:wake-subscriber'
 const IDENTITY_HEADER = 'x-orez-sync-identity'
 const WAKE_ISSUED_AT_HEADER = 'x-orez-wake-issued-at'
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
+// a fresh replica pages every modeled table; the first page of each is small
+// and fetched concurrently so the snapshot costs one round trip, not one per table.
+const SNAPSHOT_PREFETCH_PAGE_ROWS = 250
 const MIN_SNAPSHOT_PAGE_ROWS = 100
 const WORKER_STAGE_TELEMETRY_SAMPLE_RATE = 0.01
 const WORKER_STAGE_WAITING_MS = 5_000
@@ -840,6 +843,11 @@ export function createSyncDurableObject<
     // running behind its feed is now modeled. the answer lives in the engine's
     // own table until a snapshot settles it, so once per instance is enough.
     #droppedFeedColumnsChecked = false
+    #snapshotPrefetch: {
+      generation: string
+      pages: Map<string, Promise<SnapshotPage | null>>
+    } | null = null
+    #upstreamFetches = 0
     #lastRequestAt = 0
     #hibernations = 0
     #dropNextPushResponse = false
@@ -1250,6 +1258,7 @@ export function createSyncDurableObject<
     }
 
     async #fetchUpstreamJson(endpoint: URL) {
+      this.#upstreamFetches++
       const result = await fetchBoundedUpstreamJson(
         this.#serviceBinding(),
         endpoint.toString(),
@@ -1481,6 +1490,35 @@ export function createSyncDurableObject<
       return { progress, page, pageLimit }
     }
 
+    // starts the first page of every other modeled table once the generation's
+    // start watermark is known, so each prefetched page reads at or after it and
+    // the catch-up pass still covers every later change.
+    #prefetchSnapshotFirstPages(path: string, generation: string, firstTable: string) {
+      if (this.#snapshotPrefetch?.generation === generation) return
+      const pages = new Map<string, Promise<SnapshotPage | null>>()
+      for (const table of Object.keys(config.schema.tables)) {
+        if (table === firstTable) continue
+        pages.set(
+          table,
+          this.#fetchSnapshotPage(path, table, null, SNAPSHOT_PREFETCH_PAGE_ROWS).catch(
+            () => null
+          )
+        )
+      }
+      this.#snapshotPrefetch = { generation, pages }
+    }
+
+    async #takePrefetchedSnapshotPage(
+      generation: string,
+      table: string
+    ): Promise<SnapshotPage | null> {
+      const prefetch = this.#snapshotPrefetch
+      if (prefetch?.generation !== generation) return null
+      const page = prefetch.pages.get(table) ?? null
+      prefetch.pages.delete(table)
+      return page ? await page : null
+    }
+
     #ingest(upstreamPath?: string | null, forceSnapshot = false): Promise<number> {
       if (!config.upstream) {
         return forceSnapshot
@@ -1532,6 +1570,15 @@ export function createSyncDurableObject<
             }
             let page: SnapshotPage | null = pendingPage
             try {
+              if (snapshotPageLimit === DEFAULT_SNAPSHOT_PAGE_ROWS) {
+                this.#prefetchSnapshotFirstPages(path, activeProgress.generation, table)
+                if (activeProgress.cursor === null) {
+                  page ??= await this.#takePrefetchedSnapshotPage(
+                    activeProgress.generation,
+                    table
+                  )
+                }
+              }
               page ??= await this.#fetchSnapshotPage(
                 path,
                 table,
@@ -1804,6 +1851,7 @@ export function createSyncDurableObject<
         }
         return total
       })().finally(() => {
+        this.#snapshotPrefetch = null
         this.#ingestPromise = null
       })
       return this.#ingestPromise
@@ -2831,12 +2879,14 @@ export function createSyncDurableObject<
         try {
           // pull and push both establish the upstream schema and snapshot barrier.
           const ingestStarted = performance.now()
+          const fetchesBefore = this.#upstreamFetches
           try {
             await this.#ingest(upstreamPath)
           } catch (error) {
             return errorResponse(error)
           }
           const ingestMs = performance.now() - ingestStarted
+          const upstreamFetches = this.#upstreamFetches - fetchesBefore
           const handlerStarted = performance.now()
           const response =
             route === '/pull'
@@ -2849,6 +2899,7 @@ export function createSyncDurableObject<
                 )
           return withServerTiming(response, [
             ['do_ingest', ingestMs],
+            ['do_upstream_fetches', upstreamFetches],
             ['do_handle', performance.now() - handlerStarted],
           ])
         } finally {
