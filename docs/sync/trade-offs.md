@@ -36,6 +36,21 @@ for a chat server's write rate but is not a database you point a bulk import at.
 Work that fans out (many servers, many projects) scales by having many
 namespaces, each its own object.
 
+## Values in synced columns
+
+The authoritative SQLite store rejects writes that the sync wire cannot
+represent. A Zero number column accepts finite numeric values, numeric text and
+the timestamp text forms understood by the sync engine. Numeric SQLite values
+in any synced column must fit the JavaScript safe integer range. A rejected
+write rolls back with the rest of its statement, including trigger effects.
+The same rule applies to raw SQL and schema initialization.
+
+Existing invalid cells are left in place. Other fields can still be updated,
+and the invalid cell can be repaired explicitly. A replica retains the original
+value when it reads an older upstream store; it does not substitute a null or
+silently omit the row. Until query-level error reporting is available, a pull
+that reads an invalid value fails.
+
 ## Write amplification on Cloudflare
 
 This is the trade-off that caused real incidents, so it gets the most detail.

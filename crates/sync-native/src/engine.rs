@@ -122,7 +122,11 @@ pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), St
         .map_err(|error| error.0)?
         .is_empty();
     if !is_current {
+        let before = sync_core::schema::invalid_number_cells(db, &ctx.tables).map_err(|e| e.0)?;
+        sync_core::schema::init_number_storage_guards(db, &ctx.tables).map_err(|e| e.0)?;
         (ctx.init_fn)(db)?;
+        sync_core::schema::validate_number_storage_changes(db, &ctx.tables, &before)
+            .map_err(|e| e.0)?;
         db.exec(
             "INSERT INTO _zsync_app_init (lock, version) VALUES (1, ?)
              ON CONFLICT (lock) DO UPDATE SET version = excluded.version",
@@ -131,6 +135,7 @@ pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), St
         .map_err(|error| error.0)?;
     }
     sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;
+    sync_core::schema::init_number_storage_guards(db, &ctx.tables).map_err(|e| e.0)?;
     sync_core::query::init_query_schema(db).map_err(|e| e.message)?;
     Ok(())
 }
@@ -209,7 +214,12 @@ pub fn push(
             }
         }
     }
-    let mut txor = ConnTransactor { conn, faults, ns };
+    let mut txor = ConnTransactor {
+        conn,
+        faults,
+        ns,
+        tables: &ctx.tables,
+    };
     let mutator = CallbackMutator {
         f: ctx.mutate_fn.clone(),
     };
@@ -328,6 +338,7 @@ struct ConnTransactor<'c> {
     conn: &'c Connection,
     faults: &'c FaultRegistry,
     ns: &'c str,
+    tables: &'c Tables,
 }
 
 impl<'c> Transactor for ConnTransactor<'c> {
@@ -337,7 +348,7 @@ impl<'c> Transactor for ConnTransactor<'c> {
     ) -> Result<T, E> {
         self.conn.execute_batch("BEGIN").expect("BEGIN failed");
         let outcome = {
-            let mut db = RusqliteDb::new(self.conn);
+            let mut db = RusqliteDb::guarded(self.conn, self.tables);
             body(&mut db)
         };
         // fault: the mutation's app rows are written, before this per-mutation

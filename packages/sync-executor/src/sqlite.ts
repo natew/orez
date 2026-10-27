@@ -1,6 +1,11 @@
 import type { ApplicationDatabase, ApplicationTransaction } from './types.js'
 
 export { encodeSqlParams, encodeSqlValue } from './sql-wire.js'
+export {
+  createTableIfAbsentTarget,
+  numberStoragePredicate,
+  wireStoragePredicate,
+} from './number-storage.js'
 export type { SqlWireValue } from './sql-wire.js'
 
 export function createSQLiteApplicationDatabase(options: {

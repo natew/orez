@@ -7,6 +7,7 @@ import {
   type TransactionQueryBudget,
 } from 'orez-sync-cf-host/transaction-query'
 import { trackBillableCursorRows } from 'orez-sync-executor/sql-billing'
+import { createTableIfAbsentTarget } from 'orez-sync-executor/sqlite'
 
 import {
   classifySql,
@@ -36,6 +37,7 @@ import {
   type NamespaceBackupSnapshotOptions,
   type NamespaceBackupStatement,
 } from './namespace-backup.js'
+import { NumberStorageGuards } from './number-guards.js'
 import {
   appendPendingChange,
   deletePendingChanges,
@@ -73,7 +75,11 @@ import type {
   ApplicationSqlTable,
   ApplicationSqlTransactionWork,
 } from './application-sql.js'
-import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-executor'
+import type {
+  SqlStatementMetadata,
+  TransactionQueryFormat,
+  ZeroSchemaConfig,
+} from 'orez-sync-executor'
 
 export {
   ApplicationSqlSessionPreemptedError,
@@ -641,6 +647,7 @@ export class ZeroDO extends DurableObject {
   private sql: any
   private watermarks: DurableWatermarkState
   private cdc: TransactionalCdc
+  private numberGuards: NumberStorageGuards | null
   private schemaTables = new Set<string>()
   // `null` records a table confirmed absent from _zero_schema_tables
   private tableSchemas = new Map<string, SchemaTable | null>()
@@ -868,9 +875,10 @@ export class ZeroDO extends DurableObject {
     return Response.json(error.toJSON(), { status: 429 })
   }
 
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: Env, schema?: ZeroSchemaConfig) {
     super(ctx, env)
     this.sql = ctx.storage.sql
+    this.numberGuards = schema ? new NumberStorageGuards(this.sql, schema) : null
     this.writeBudgetDisabled = /^(?:1|true)$/i.test(
       env.OREZ_DO_WRITE_BUDGET_DISABLED ?? ''
     )
@@ -977,6 +985,7 @@ export class ZeroDO extends DurableObject {
       if (!this.recoveryFailure) {
         this.dropZeroHttpJournalResidue()
         this.dropBackupSnapshotTables()
+        this.atomicallySync(() => this.numberGuards?.reconcile())
       }
       if (!this.writeBudgetDisabled) {
         const persisted = await ctx.storage.get<number | PersistedWriteBudgetTrip>(
@@ -1652,6 +1661,7 @@ export class ZeroDO extends DurableObject {
       // wrapping every /exec adds ~2-5ms and materially slows large schemas.
       const needsAtomicCapture =
         !!body.track ||
+        (!!this.numberGuards && isSqlMutation(sql) && !isSqlRowMutation(sql)) ||
         (this.cdc.active && (isSqlRowMutation(sql) || this.cdc.capturesSchemaChange(sql)))
       const result = await this.withSchemaProvisioningWait(() =>
         needsAtomicCapture
@@ -3166,7 +3176,12 @@ export class ZeroDO extends DurableObject {
   private rollbackAtomicallyWithoutForeignKeys<T>(work: () => T): T {
     this.sql.exec('PRAGMA foreign_keys = OFF').toArray()
     try {
-      return this.atomicallySync(work)
+      return this.atomicallySync(() => {
+        this.numberGuards?.suspend()
+        const result = work()
+        this.numberGuards?.reconcile()
+        return result
+      })
     } finally {
       this.restoreForeignKeyEnforcement()
     }
@@ -3339,6 +3354,18 @@ export class ZeroDO extends DurableObject {
       }
     }
 
+    const schemaChange = isSqlMutation(sql) && !isSqlRowMutation(sql)
+    if (schemaChange && /_orez_number_guard_/i.test(sql)) {
+      throw new Error('sync storage guards are host-owned')
+    }
+    const existing = schemaChange ? createTableIfAbsentTarget(sql) : undefined
+    const checkGuard =
+      schemaChange &&
+      !(
+        existing &&
+        this.sql.exec(`PRAGMA table_xinfo(${quoteIdent(existing)})`).toArray().length
+      )
+    const invalidCells = checkGuard ? this.numberGuards?.invalidCells() : undefined
     const suspendedCdc = this.cdc.beginSchemaChange(sql)
     let cursor: ReturnType<DurableSqlStorage['exec']>
     try {
@@ -3353,6 +3380,7 @@ export class ZeroDO extends DurableObject {
     this.cdc.finishSchemaChange(suspendedCdc)
     const columns = Array.isArray(cursor.columnNames) ? cursor.columnNames : []
     const rows = this.cursorRows(cursor, columns)
+    if (checkGuard) this.numberGuards?.reconcile(invalidCells)
     const { mutation, rowMutation } = classifySql(sql)
     const changes = rowMutation
       ? Number(this.sql.exec('SELECT changes() AS changes').one()?.changes ?? 0)
@@ -3825,6 +3853,7 @@ export class ZeroDO extends DurableObject {
   }
 
   private ensureSchemaTables(clientSchema: ClientSchema) {
+    this.numberGuards ??= new NumberStorageGuards(this.sql, clientSchema)
     this.ensureSchemaMetadataTable()
     for (const [name, def] of Object.entries(clientSchema.tables)) {
       this.tableSchemas.set(name, def)
@@ -3837,6 +3866,7 @@ export class ZeroDO extends DurableObject {
       )
       this.schemaTables.add(name)
     }
+    this.numberGuards.reconcile()
   }
 
   private createSchemaTable(name: string, def: SchemaTable) {

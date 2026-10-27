@@ -398,6 +398,33 @@ pub fn engine_init_schema(db: &JsSyncDb, schema: JsValue) -> Result<(), JsValue>
     sync_core::init_schema(&mut db, &tables).map_err(js_err)
 }
 
+/// Install number guards on the database that owns application writes.
+#[wasm_bindgen]
+pub fn engine_init_number_storage_guards(db: &JsSyncDb, schema: JsValue) -> Result<(), JsValue> {
+    let tables = tables_from_js(schema)?;
+    sync_core::schema::init_number_storage_guards(&mut WasmDb(db), &tables).map_err(js_err)
+}
+
+#[wasm_bindgen]
+pub fn engine_invalid_number_cells(db: &JsSyncDb, schema: JsValue) -> Result<JsValue, JsValue> {
+    let tables = tables_from_js(schema)?;
+    let cells =
+        sync_core::schema::invalid_number_cells(&mut WasmDb(db), &tables).map_err(js_err)?;
+    to_js(&cells)
+}
+
+#[wasm_bindgen]
+pub fn engine_validate_number_storage_changes(
+    db: &JsSyncDb,
+    schema: JsValue,
+    before: JsValue,
+) -> Result<(), JsValue> {
+    let tables = tables_from_js(schema)?;
+    let before: Vec<Vec<String>> = from_js(before)?;
+    sync_core::schema::validate_number_storage_changes(&mut WasmDb(db), &tables, &before)
+        .map_err(js_err)
+}
+
 /// True when the replica dropped values for a feed column it now models and
 /// must re-snapshot before further ingest.
 #[wasm_bindgen]

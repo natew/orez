@@ -726,9 +726,10 @@ async fn admin_sql(
                     json!({ "error": "transaction control is not allowed in a query step" }),
                 );
             }
+            let tables = state.ctx.clone();
             let result = namespace
                 .tx_query(id, move |conn| {
-                    let mut db = RusqliteDb::new(conn);
+                    let mut db = RusqliteDb::guarded(conn, &tables.tables);
                     db.query(&query, &params)
                 })
                 .await;
@@ -771,10 +772,11 @@ async fn admin_sql(
         (None, Some(_)) => json_status(400, json!({ "error": "missing transaction id" })),
         (Some(_), None) => json_status(400, json!({ "error": "missing transaction step" })),
         (None, None) => {
+            let tables = state.ctx.clone();
             let result = namespace
                 .run(move |conn| {
                     let total_changes = conn.total_changes();
-                    let mut db = RusqliteDb::new(conn);
+                    let mut db = RusqliteDb::guarded(conn, &tables.tables);
                     let rows = db.query(&query, &params);
                     (rows, rows_changed(conn, total_changes))
                 })

@@ -619,6 +619,20 @@ export function createOrezDataWorker<
   }
   // Validate once and retain the immutable projection for the worker lifetime.
   const feedTables = schemaFeedTables(options.schema)
+  const physicalTables = new Map(
+    options.schema.publicTables
+      .filter((table) => table.publish !== false)
+      .map((table) => [feedTables.get(stripPublicPrefix(table.table))?.name, table.table])
+  )
+  const guardSchema = {
+    ...options.schema.schema,
+    tables: Object.fromEntries(
+      Object.entries(options.schema.schema.tables).map(([name, table]) => [
+        name,
+        { ...table, serverName: physicalTables.get(name) ?? table.serverName },
+      ])
+    ),
+  }
   const namespaceOptions: NamespaceRoutingOptions = {
     ...options.namespace,
     nsHeader: options.namespace?.nsHeader ?? 'x-orez-ns',
@@ -689,7 +703,8 @@ export function createOrezDataWorker<
                   }
                 : null),
             }
-          : env) as never
+          : env) as never,
+        guardSchema
       )
       this.orezStorage = ctx.storage
       this.orezWorkerVersion = env.CF_VERSION?.id ?? ''

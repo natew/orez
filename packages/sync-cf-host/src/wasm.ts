@@ -49,6 +49,13 @@ export const engine_finalize_snapshot_generation = withWasm(
 export const engine_handle_query_pull = withWasm(generated.engine_handle_query_pull)
 export const engine_init_query_schema = withWasm(generated.engine_init_query_schema)
 export const engine_init_schema = withWasm(generated.engine_init_schema)
+export const engine_init_number_storage_guards = withWasm(
+  generated.engine_init_number_storage_guards
+)
+export const engine_invalid_number_cells = withWasm(generated.engine_invalid_number_cells)
+export const engine_validate_number_storage_changes = withWasm(
+  generated.engine_validate_number_storage_changes
+)
 export const engine_invalidate = withWasm(generated.engine_invalidate)
 export const engine_memory_bytes = withWasm(generated.engine_memory_bytes)
 export const engine_preflight = withWasm(generated.engine_preflight)

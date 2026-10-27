@@ -112,6 +112,7 @@ function isInternalObject(name: string): boolean {
     INTERNAL_TABLES.has(name) ||
     name.startsWith('_cf_') ||
     name.startsWith('_orez_tx_') ||
+    name.startsWith('_orez_number_guard_') ||
     name.startsWith('_orez_bk_') ||
     name.startsWith('sqlite_')
   )

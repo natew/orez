@@ -18,6 +18,103 @@ use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema, trigger_ddl};
 const INJECT: &str = r#"x" AFTER INSERT ON "victim" BEGIN DELETE FROM "victim"; END; --"#;
 
 #[test]
+fn authoritative_number_guard_rejects_bad_writes_and_allows_legacy_repairs() {
+    let tables = Tables::from_zero_schema(&json!({"tables":{"item":{
+        "columns":{"id":{"type":"string"},"amount":{"type":"number"},"label":{"type":"string"}},
+        "primaryKey":["id"]
+    }}}))
+    .unwrap();
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE item (id TEXT PRIMARY KEY, amount NUMERIC DEFAULT 'invalid', label BLOB)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO item VALUES ('legacy', 'invalid', 'before')",
+        &[],
+    )
+    .unwrap();
+    sync_core::schema::init_number_storage_guards(&mut db, &tables).unwrap();
+    sync_core::schema::init_number_storage_guards(&mut db, &tables).unwrap();
+
+    for sql in [
+        "INSERT INTO item (id, amount) VALUES ('bad', 'invalid')",
+        "INSERT INTO item (id) VALUES ('bad')",
+        "INSERT OR REPLACE INTO item VALUES ('legacy', 'invalid2', 'after')",
+        "UPDATE item SET amount = 'invalid2' WHERE id = 'legacy'",
+        "UPDATE item SET id = 'moved' WHERE id = 'legacy'",
+        "INSERT INTO item (id, amount) VALUES ('unsafe', 9007199254740992)",
+        "UPDATE item SET label = 1e999 WHERE id = 'legacy'",
+    ] {
+        assert!(db.exec(sql, &[]).is_err(), "accepted {sql}");
+    }
+    db.exec(
+        "INSERT INTO item (id, amount) VALUES ('safe', 9007199254740991)",
+        &[],
+    )
+    .unwrap();
+    db.exec("UPDATE item SET label = 'after' WHERE id = 'legacy'", &[])
+        .unwrap();
+    db.exec(
+        "UPDATE item SET amount = '2026-07-11 13:34:46.000+00' WHERE id = 'legacy'",
+        &[],
+    )
+    .unwrap();
+    db.exec("CREATE TABLE source (id TEXT PRIMARY KEY)", &[])
+        .unwrap();
+    db.exec("CREATE TRIGGER source_insert AFTER INSERT ON source BEGIN INSERT INTO item (id, amount) VALUES (NEW.id, 'invalid'); END", &[]).unwrap();
+    assert!(
+        db.exec("INSERT INTO source VALUES ('side-effect')", &[])
+            .is_err()
+    );
+    assert!(db.query("SELECT id FROM source", &[]).unwrap().is_empty());
+    let stored = db
+        .query("SELECT amount, label FROM item WHERE id = 'legacy'", &[])
+        .unwrap();
+    assert_eq!(
+        stored[0].get("amount"),
+        Some(&SqlValue::Text("2026-07-11 13:34:46.000+00".into()))
+    );
+    assert_eq!(
+        stored[0].get("label"),
+        Some(&SqlValue::Text("after".into()))
+    );
+}
+
+#[test]
+fn initialization_cannot_add_poison_and_preserves_existing_invalid_cells() {
+    let tables = Tables::from_zero_schema(&json!({"tables":{"item":{
+        "columns":{"id":{"type":"string"},"amount":{"type":"number"}},
+        "primaryKey":["id"]
+    },"new_item":{
+        "columns":{"id":{"type":"string"},"amount":{"type":"number"}},
+        "primaryKey":["id"]
+    }}}))
+    .unwrap();
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE item (id TEXT PRIMARY KEY, amount TEXT)", &[])
+        .unwrap();
+    db.exec("INSERT INTO item VALUES ('legacy', 'garbage')", &[])
+        .unwrap();
+    let before = sync_core::schema::invalid_number_cells(&mut db, &tables).unwrap();
+    sync_core::schema::init_number_storage_guards(&mut db, &tables).unwrap();
+    assert!(
+        db.exec("INSERT INTO item VALUES ('new', 'garbage')", &[])
+            .is_err()
+    );
+    db.exec(
+        "CREATE TABLE new_item AS SELECT 'new' AS id, 'garbage' AS amount",
+        &[],
+    )
+    .unwrap();
+    assert!(sync_core::schema::validate_number_storage_changes(&mut db, &tables, &before).is_err());
+    db.exec("UPDATE new_item SET amount = '2026-07-11 13:34:46+00'", &[])
+        .unwrap();
+    sync_core::schema::validate_number_storage_changes(&mut db, &tables, &before).unwrap();
+}
+
+#[test]
 fn from_zero_schema_rejects_injection_shaped_table_name() {
     let schema = json!({
         "tables": {

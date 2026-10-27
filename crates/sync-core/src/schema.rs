@@ -12,14 +12,14 @@
 //   exact returned keys with the cookie in one envelope; lmid checkpoints live
 //   in _zsync_clients, never in the ledger payload.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::{DbError, SqlValue, SyncDb};
 use crate::error::EngineError;
 use crate::value::ZeroColumnType;
 
 // bump whenever init_schema changes a durable DDL or migration surface.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct TableSpec {
@@ -845,6 +845,258 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 // idempotent, and the version feeds schema_revision so hosts re-run the
 // schema pass exactly once when new bodies ship.
 pub const TRIGGER_VERSION: u32 = 6;
+
+// the same sqlite predicate is used by the authoritative data worker. keeping
+// it in one file makes the accepted storage values independent of the host.
+fn number_storage_predicate(value: &str) -> String {
+    static PREDICATE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PREDICATE
+        .get_or_init(|| {
+            let lines: Vec<String> = serde_json::from_str(include_str!(
+                "../../../packages/sync-executor/src/zero-number-predicate.json"
+            ))
+            .expect("number storage predicate must be a JSON string array");
+            lines.join("\n")
+        })
+        .replace("__OREZ_NUMBER_VALUE__", value)
+}
+
+fn storage_predicate(value: &str, kind: ZeroColumnType) -> String {
+    static PREDICATE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let wire = PREDICATE
+        .get_or_init(|| {
+            let lines: Vec<String> = serde_json::from_str(include_str!(
+                "../../../packages/sync-executor/src/zero-wire-predicate.json"
+            ))
+            .expect("wire storage predicate must be a JSON string array");
+            lines.join("\n")
+        })
+        .replace("__OREZ_NUMBER_VALUE__", value);
+    if kind == ZeroColumnType::Number {
+        format!("({wire}) AND ({})", number_storage_predicate(value))
+    } else {
+        wire
+    }
+}
+
+/// Identify invalid cells by their physical value and primary key. Used around
+/// initialization, where a consumer may create and populate tables in one
+/// statement before SQLite can install row triggers.
+pub fn invalid_number_cells(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+) -> Result<Vec<Vec<String>>, DbError> {
+    let mut cells = Vec::new();
+    for (table, spec) in tables.iter() {
+        let physical_table = tables.physical_name(table).expect("table mapping");
+        let present: BTreeSet<String> = db
+            .query(
+                &format!("PRAGMA table_xinfo({})", quote_ident(physical_table)),
+                &[],
+            )?
+            .into_iter()
+            .filter_map(|row| match row.get("name") {
+                Some(SqlValue::Text(name)) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        if present.is_empty() {
+            continue;
+        }
+        let keys: Vec<&str> = spec
+            .primary_key
+            .iter()
+            .map(|key| tables.physical_column(table, key).expect("key mapping"))
+            .filter(|key| present.contains(*key))
+            .collect();
+        for (column, kind) in &spec.columns {
+            let physical_column = tables
+                .physical_column(table, column)
+                .expect("column mapping");
+            if !present.contains(physical_column) {
+                continue;
+            }
+            let fields: Vec<String> = keys
+                .iter()
+                .copied()
+                .chain(std::iter::once(physical_column))
+                .flat_map(|name| {
+                    let field = quote_ident(name);
+                    [
+                        format!("typeof({field})"),
+                        format!("hex(CAST({field} AS BLOB))"),
+                    ]
+                })
+                .collect();
+            let field = quote_ident(physical_column);
+            let query = format!(
+                "SELECT {} FROM {} WHERE NOT ({})",
+                fields.join(","),
+                quote_ident(physical_table),
+                storage_predicate(&field, *kind)
+            );
+            for row in db.query(&query, &[])? {
+                let mut identity = vec![physical_table.to_string(), physical_column.to_string()];
+                for value in row.values {
+                    match value {
+                        SqlValue::Text(value) => identity.push(value),
+                        other => {
+                            return Err(DbError(format!(
+                                "unexpected number guard identity: {other:?}"
+                            )));
+                        }
+                    }
+                }
+                cells.push(identity);
+            }
+        }
+    }
+    Ok(cells)
+}
+
+pub fn validate_number_storage_changes(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    before: &[Vec<String>],
+) -> Result<(), DbError> {
+    let mut remaining = BTreeMap::new();
+    for cell in before {
+        *remaining.entry(cell).or_insert(0usize) += 1;
+    }
+    for cell in invalid_number_cells(db, tables)? {
+        match remaining.get_mut(&cell) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => {
+                return Err(DbError(format!(
+                    "invalid number storage in {}.{}",
+                    cell[0], cell[1]
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Install write guards only where this database is authoritative. A replica
+/// must still ingest legacy rows so its queries can report the affected data.
+pub fn init_number_storage_guards(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> {
+    let mut guards = Vec::new();
+    let mut expected = BTreeSet::new();
+    for (table, spec) in tables.iter() {
+        let physical_table = tables.physical_name(table).expect("table mapping");
+        let present: BTreeSet<String> = db
+            .query(
+                &format!("PRAGMA table_xinfo({})", quote_ident(physical_table)),
+                &[],
+            )?
+            .into_iter()
+            .filter_map(|row| match row.get("name") {
+                Some(SqlValue::Text(name)) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let columns: Vec<(&str, ZeroColumnType)> = spec
+            .columns
+            .iter()
+            .map(|(column, kind)| {
+                (
+                    tables
+                        .physical_column(table, column)
+                        .expect("column mapping"),
+                    *kind,
+                )
+            })
+            .filter(|(column, _)| present.contains(*column))
+            .collect();
+        if columns.is_empty() {
+            continue;
+        }
+        let encode = |name: &str| {
+            name.bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let signature = std::iter::once(encode(physical_table))
+            .chain(
+                columns
+                    .iter()
+                    .map(|(column, kind)| format!("{}_{kind:?}", encode(column))),
+            )
+            .chain(
+                spec.primary_key
+                    .iter()
+                    .map(|key| encode(tables.physical_column(table, key).expect("key mapping"))),
+            )
+            .collect::<Vec<_>>()
+            .join("_");
+        // bump the version when the shared predicate or guard bodies change.
+        let insert_name = format!("_zsync_number_{signature}_v2_insert");
+        let update_name = format!("_zsync_number_{signature}_v2_update");
+        expected.insert(insert_name.clone());
+        expected.insert(update_name.clone());
+        let mut insert = String::new();
+        let mut update = String::new();
+        let mut key_changed = spec
+            .primary_key
+            .iter()
+            .filter(|column| {
+                let physical = tables.physical_column(table, column).expect("key mapping");
+                present.contains(physical)
+            })
+            .map(|column| {
+                let physical = tables.physical_column(table, column).expect("key mapping");
+                let quoted = quote_ident(physical);
+                format!("OLD.{quoted} IS NOT NEW.{quoted}")
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if key_changed.is_empty() {
+            key_changed.push('0');
+        }
+        for (column, kind) in columns {
+            let quoted = quote_ident(column);
+            let valid = storage_predicate(&format!("NEW.{quoted}"), kind);
+            let message = quote_str(&format!(
+                "invalid number storage in {physical_table}.{column}"
+            ));
+            insert.push_str(&format!(
+                "SELECT CASE WHEN NOT ({valid}) THEN RAISE(ABORT, {message}) END;"
+            ));
+            update.push_str(&format!("SELECT CASE WHEN (OLD.{quoted} IS NOT NEW.{quoted} OR ({key_changed})) AND NOT ({valid}) THEN RAISE(ABORT, {message}) END;"));
+        }
+        guards.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS {} AFTER INSERT ON {} BEGIN {insert} END",
+            quote_ident(&insert_name),
+            quote_ident(physical_table)
+        ));
+        guards.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS {} AFTER UPDATE ON {} BEGIN {update} END",
+            quote_ident(&update_name),
+            quote_ident(physical_table)
+        ));
+    }
+    let stale: Vec<String> = db
+        .query(
+            "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name GLOB '_zsync_number_*'",
+            &[],
+        )?
+        .into_iter()
+        .filter_map(|row| match row.values.first() {
+            Some(SqlValue::Text(name)) if !expected.contains(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    for name in stale {
+        db.exec(
+            &format!("DROP TRIGGER IF EXISTS {}", quote_ident(&name)),
+            &[],
+        )?;
+    }
+    for guard in guards {
+        db.exec(&guard, &[])?;
+    }
+    Ok(())
+}
 
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();

@@ -3,6 +3,7 @@ import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
 import { TransactionalCdc } from './cdc.js'
+import { NumberStorageGuards } from './number-guards.js'
 import {
   rollbackTxJournal,
   snapshotTxSchema,
@@ -1565,6 +1566,70 @@ describe('ZeroDO write budget stickiness', () => {
   })
 })
 
+describe('ZeroDO authoritative number storage', () => {
+  it('guards raw writes and schema-created cells while retaining legacy values for rollback', async () => {
+    const { sql, zero } = await createWorkerCore()
+    const schema = {
+      tables: {
+        item: {
+          name: 'item',
+          primaryKey: ['id'],
+          columns: {
+            id: { type: 'string' },
+            amount: { type: 'number' },
+            extra: { type: 'number' },
+          },
+        },
+      },
+    }
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, amount NUMERIC)')
+    sql.exec("INSERT INTO item VALUES ('legacy', 'garbage')")
+    zero.numberGuards = new NumberStorageGuards(sql, schema)
+    zero.numberGuards.reconcile()
+    await expect(
+      zero.atomically(() => zero.executeSQL("INSERT INTO item VALUES ('bad', 'garbage')"))
+    ).rejects.toThrow('invalid number storage')
+    await expect(
+      zero.atomically(() =>
+        zero.executeSQL("INSERT INTO item VALUES ('unsafe', 9007199254740992)")
+      )
+    ).rejects.toThrow('invalid number storage')
+    await zero.atomically(() =>
+      zero.executeSQL("INSERT INTO item VALUES ('safe', 9007199254740991)")
+    )
+    await expect(
+      zero.atomically(() =>
+        zero.executeSQL("ALTER TABLE item ADD COLUMN extra TEXT DEFAULT 'bad'")
+      )
+    ).rejects.toThrow('invalid number storage')
+    expect(
+      sql
+        .exec('PRAGMA table_info(item)')
+        .toArray()
+        .map((row) => row.name)
+    ).toEqual(['id', 'amount'])
+    await zero.atomically(() =>
+      zero.executeSQL('ALTER TABLE item ADD COLUMN extra TEXT DEFAULT NULL')
+    )
+    await zero.atomically(() =>
+      zero.executeSQL(
+        "UPDATE item SET amount = '2026-07-11 13:34:46+00' WHERE id = 'legacy'"
+      )
+    )
+    zero.rollbackAtomicallyWithoutForeignKeys(() =>
+      sql.exec("UPDATE item SET amount = 'garbage' WHERE id = 'legacy'")
+    )
+    expect(sql.exec("SELECT amount FROM item WHERE id = 'legacy'").one()?.amount).toBe(
+      'garbage'
+    )
+    await expect(
+      zero.atomically(() =>
+        zero.executeSQL("INSERT INTO item (id, amount) VALUES ('bad', 'garbage')")
+      )
+    ).rejects.toThrow('invalid number storage')
+  })
+})
+
 describe('ZeroDO snapshot feed timestamp fidelity', () => {
   // The sync-cf-host rust engine ingests /snapshot for initial sync of any
   // namespace whose change log has been pruned below the client cursor (every
@@ -1576,6 +1641,14 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
     const { sql, zero } = await createWorkerCore()
     zero.tableSchemas = new Map()
     zero.schemaTables = new Set<string>()
+    sql.exec('CREATE TABLE message (id TEXT PRIMARY KEY, createdAt REAL)')
+    for (const row of rows) {
+      sql.exec(
+        'INSERT INTO "message" ("id", "createdAt") VALUES (?, ?)',
+        row.id,
+        row.createdAt
+      )
+    }
     zero.ensureSchemaTables({
       tables: {
         message: {
@@ -1587,13 +1660,6 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
         },
       },
     })
-    for (const row of rows) {
-      sql.exec(
-        'INSERT INTO "message" ("id", "createdAt") VALUES (?, ?)',
-        row.id,
-        row.createdAt
-      )
-    }
     expect(sql.exec('SELECT * FROM "message" ORDER BY "id"').toArray()).toEqual(rows)
     expect(
       sql

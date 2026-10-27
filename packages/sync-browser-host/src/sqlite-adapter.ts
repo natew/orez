@@ -132,7 +132,13 @@ export class BedrockSyncDb implements JsSyncDb {
 
 /** Synchronous application SQL used only while the host owns the operation. */
 export class BedrockDirectSql implements SyncSql {
+  private schemaGuard?: <T>(sql: string, run: () => T) => T
+
   constructor(private readonly db: Database) {}
+
+  setSchemaGuard(guard: <T>(sql: string, run: () => T) => T): void {
+    this.schemaGuard = guard
+  }
 
   exec(
     sql: string,
@@ -140,6 +146,12 @@ export class BedrockDirectSql implements SyncSql {
     _metadata?: SqlStatementMetadata
   ): SQLiteExecResult {
     assertConsumerSql(sql)
+    return this.schemaGuard
+      ? this.schemaGuard(sql, () => this.execRaw(sql, params))
+      : this.execRaw(sql, params)
+  }
+
+  private execRaw(sql: string, params: readonly unknown[]): SQLiteExecResult {
     if (params.length === 0) {
       this.db.exec(sql)
       const statement = this.db.prepare('SELECT changes() AS changes')
@@ -166,6 +178,15 @@ export class BedrockDirectSql implements SyncSql {
     params: readonly unknown[] = []
   ): Row[] {
     assertConsumerSql(sql)
+    return this.schemaGuard
+      ? this.schemaGuard(sql, () => this.queryRaw<Row>(sql, params))
+      : this.queryRaw<Row>(sql, params)
+  }
+
+  private queryRaw<Row extends Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[]
+  ): Row[] {
     const statement = this.db.prepare(sql)
     try {
       enableSafeIntegers(statement)

@@ -1,12 +1,16 @@
 import createSqliteModule from 'bedrock-sqlite/browser'
 import { resolveQueryPatch } from 'orez-sync-cf-host/query-patch'
 import { beginWriteSetCapture, createSyncExecutor } from 'orez-sync-executor/core'
+import { createTableIfAbsentTarget } from 'orez-sync-executor/sqlite'
 
 import {
   engine_compile_query,
   engine_handle_query_pull,
   engine_init_query_schema,
   engine_init_schema,
+  engine_init_number_storage_guards,
+  engine_invalid_number_cells,
+  engine_validate_number_storage_changes,
   engine_prune,
 } from './generated/sync_wasm.js'
 import initSyncWasm from './generated/sync_wasm.js'
@@ -446,9 +450,41 @@ class BrowserSyncHostImpl<
     const host = new BrowserSyncHostImpl(config, module, db, snapshots, hooks)
     try {
       await host.#writeTransaction('bootstrap', async () => {
+        const invalidBefore = engine_invalid_number_cells(host.#engineDb, config.schema)
+        engine_init_number_storage_guards(host.#engineDb, config.schema)
         config.initialize(host.#directSql)
+        engine_validate_number_storage_changes(
+          host.#engineDb,
+          config.schema,
+          invalidBefore
+        )
         engine_init_schema(host.#engineDb, config.schema)
+        engine_init_number_storage_guards(host.#engineDb, config.schema)
         engine_init_query_schema(host.#engineDb)
+      })
+      host.#directSql.setSchemaGuard((sql, run) => {
+        if (!/\b(?:create|alter|drop|reindex)\b/i.test(sql)) return run()
+        if (/_zsync_number_/i.test(sql))
+          throw new Error('sync storage guards are host-owned')
+        const existing = createTableIfAbsentTarget(sql)
+        if (
+          existing &&
+          host.#directSql.query(`PRAGMA table_xinfo("${existing.replaceAll('"', '""')}")`)
+            .length > 0
+        )
+          return run()
+        db.exec('SAVEPOINT _orez_guard_schema')
+        try {
+          const before = engine_invalid_number_cells(host.#engineDb, config.schema)
+          const result = run()
+          engine_validate_number_storage_changes(host.#engineDb, config.schema, before)
+          engine_init_number_storage_guards(host.#engineDb, config.schema)
+          db.exec('RELEASE _orez_guard_schema')
+          return result
+        } catch (error) {
+          db.exec('ROLLBACK TO _orez_guard_schema; RELEASE _orez_guard_schema')
+          throw error
+        }
       })
       return host
     } catch (error) {

@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import { createSyncExecutor, isMutationRetryError } from 'orez-sync-executor/core'
 import { createSocketHost } from 'orez-sync-executor/realtime'
+import { createTableIfAbsentTarget } from 'orez-sync-executor/sqlite'
 
 import { validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'
@@ -33,6 +34,9 @@ import {
   engine_handle_query_pull,
   engine_init_query_schema,
   engine_init_schema,
+  engine_init_number_storage_guards,
+  engine_invalid_number_cells,
+  engine_validate_number_storage_changes,
   engine_invalidate,
   engine_memory_bytes,
   engine_preflight,
@@ -922,6 +926,11 @@ export function createSyncDurableObject<
         ): Promise<Value> =>
           this.ctx.storage.transaction(async () => {
             let applicationWrite = false
+            let schemaFailure: { error: unknown } | undefined
+            const guarded = <T>(sql: string, run: () => T): T =>
+              this.#guardSchema(sql, run, (error) => {
+                schemaFailure = { error }
+              })
             const tx: ApplicationTransaction = {
               exec: async (sql, params, metadata) => {
                 if (
@@ -931,9 +940,9 @@ export function createSyncDurableObject<
                 ) {
                   applicationWrite = true
                 }
-                return this.#mutatorSql.exec(sql, params, metadata)
+                return guarded(sql, () => this.#directSql.exec(sql, params, metadata))
               },
-              query: (sql, params) => {
+              query: async (sql, params) => {
                 // exact helper statements use sqlite returning so the executor
                 // can prove the physical primary keys that changed. Keep the
                 // host's pre-commit fault boundary after those writes too.
@@ -943,12 +952,13 @@ export function createSyncDurableObject<
                 ) {
                   applicationWrite = true
                 }
-                return this.#mutatorSql.query(sql, params)
+                return guarded(sql, () => this.#directSql.query(sql, params))
               },
               queryAst: (ast, format, queryName) =>
                 this.#mutatorSql.queryAst(ast, format, queryName),
             }
             const value = await work(tx)
+            if (schemaFailure) throw schemaFailure.error
             if (applicationWrite && this.#executorBeforeCommitFault) {
               const fault = this.#executorBeforeCommitFault
               this.#executorBeforeCommitFault = null
@@ -956,7 +966,8 @@ export function createSyncDurableObject<
             }
             return value
           }),
-        query: (sql, params) => this.#mutatorSql.query(sql, params),
+        query: async (sql, params) =>
+          this.#guardStandalone(sql, () => this.#directSql.query(sql, params)),
       }
       this.#executor = config.mutators
         ? createSyncExecutor({
@@ -987,6 +998,48 @@ export function createSyncDurableObject<
       if (!config.upstream) {
         ctx.blockConcurrencyWhile(async () => this.#initialize())
       }
+    }
+
+    #guardSchema<T>(sql: string, run: () => T, failed?: (error: unknown) => void): T {
+      const schema = /\b(?:create|alter|drop|reindex)\b/i.test(sql)
+      const replicaWrite =
+        config.upstream && /\b(?:insert|update|delete|replace)\b/i.test(sql)
+      if (!schema && !replicaWrite) return run()
+      if (/_zsync_number_/i.test(sql))
+        throw new Error('sync storage guards are host-owned')
+      const existing = createTableIfAbsentTarget(sql)
+      if (
+        existing &&
+        this.#directSql.query(`PRAGMA table_xinfo("${existing.replaceAll('"', '""')}")`)
+          .length > 0
+      )
+        return run()
+      const before = this.#wasm(() =>
+        engine_invalid_number_cells(this.#engineDb, config.schema)
+      )
+      const result = run()
+      try {
+        this.#wasm(() =>
+          engine_validate_number_storage_changes(this.#engineDb, config.schema, before)
+        )
+        if (!config.upstream) {
+          this.#wasm(() =>
+            engine_init_number_storage_guards(this.#engineDb, config.schema)
+          )
+        }
+      } catch (error) {
+        failed?.(error)
+        throw error
+      }
+      return result
+    }
+
+    #guardStandalone<T>(sql: string, run: () => T): T {
+      const mutation = config.upstream
+        ? /\b(?:create|alter|drop|reindex|insert|update|delete|replace)\b/i.test(sql)
+        : /\b(?:create|alter|drop|reindex)\b/i.test(sql)
+      if (!mutation) return run()
+      return this.ctx.storage.transactionSync(() => this.#guardSchema(sql, run))
     }
 
     #initialize(): void {
@@ -1023,11 +1076,31 @@ export function createSyncDurableObject<
           this.#directSql.exec(
             'CREATE TRIGGER IF NOT EXISTS trg_revocations_insert INSTEAD OF INSERT ON revocations BEGIN INSERT INTO orez_revocations(user_id, revoked_at) VALUES (NEW.user_id, NEW.revoked_at); END;'
           )
+          const invalidBefore = config.upstream
+            ? null
+            : this.#wasm(() => engine_invalid_number_cells(this.#engineDb, config.schema))
+          if (!config.upstream)
+            this.#wasm(() =>
+              engine_init_number_storage_guards(this.#engineDb, config.schema)
+            )
           config.initialize(this.#directSql)
+          if (!config.upstream)
+            this.#wasm(() =>
+              engine_validate_number_storage_changes(
+                this.#engineDb,
+                config.schema,
+                invalidBefore
+              )
+            )
           this.#directSql.exec(
             "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
           )
           this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
+          if (!config.upstream) {
+            this.#wasm(() =>
+              engine_init_number_storage_guards(this.#engineDb, config.schema)
+            )
+          }
           this.#wasm(() => engine_init_query_schema(this.#engineDb))
           this.#controlSet('initFingerprint', initFingerprint)
         }
@@ -2727,7 +2800,9 @@ export function createSyncDurableObject<
           if (typeof query !== 'string') return json({ error: 'query is required' }, 400)
           try {
             return json({
-              rows: this.#directSql.query(query, decodeSqlParams(params)),
+              rows: this.#guardStandalone(query, () =>
+                this.#directSql.query(query, decodeSqlParams(params))
+              ),
             })
           } catch (error) {
             if (error instanceof TypeError && error.message.startsWith('params')) {
