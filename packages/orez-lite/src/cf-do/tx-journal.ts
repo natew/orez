@@ -1134,10 +1134,14 @@ export function snapshotSideEffectWriteTables(
     edges.set(fromKey, targets)
   }
 
+  // host-owned guard triggers only validate and abort; they never write rows.
+  // treating their SELECT bodies as unknown side effects snapshots unrelated
+  // tables and can attempt a snapshot after row undo already captured writes.
   const triggers = sql
     .exec(
       "SELECT tbl_name, sql FROM sqlite_master WHERE type = 'trigger' " +
-        "AND name NOT GLOB '_orez_cdc_*'"
+        "AND name NOT GLOB '_orez_cdc_*' " +
+        "AND name NOT GLOB '_orez_number_guard_*'"
     )
     .toArray()
   for (const row of triggers) {
