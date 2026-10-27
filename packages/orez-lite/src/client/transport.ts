@@ -314,15 +314,13 @@ const HTTP_PULL_OPTION_FIELDS = [
 const HTTP_PULL_PAGE_REGISTRY = Symbol.for('on-zero.http-pull.page-registry')
 
 function isHttpPullPageRegistry(value: unknown): value is HttpPullPageRegistry {
+  const seen = value as HttpPullPageRegistry
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    'pageID' in value &&
-    typeof value.pageID === 'string' &&
-    'nextTransportGeneration' in value &&
-    typeof value.nextTransportGeneration === 'number' &&
-    'transportsByOrigin' in value &&
-    value.transportsByOrigin instanceof Map
+    typeof seen === 'object' &&
+    seen !== null &&
+    typeof seen.pageID === 'string' &&
+    typeof seen.nextTransportGeneration === 'number' &&
+    seen.transportsByOrigin instanceof Map
   )
 }
 
@@ -771,10 +769,8 @@ class ZeroHttpSocket {
       return this.pullInFlight
     }
     // a starting pull satisfies any pull the spacing timer was holding
-    if (this.nextPullTimer !== undefined) {
-      clearTimeout(this.nextPullTimer)
-      this.nextPullTimer = undefined
-    }
+    clearTimeout(this.nextPullTimer)
+    this.nextPullTimer = undefined
     const deletedClientIDs = [...this.pendingDeletedClientIDs].slice(
       0,
       MAX_DELETED_CLIENTS_PER_PULL
@@ -973,10 +969,8 @@ class ZeroHttpSocket {
 
   private closeWakeChannel() {
     clearInterval(this.wakeKeepaliveTimer)
-    if (this.wakeReconnectTimer) {
-      clearTimeout(this.wakeReconnectTimer)
-      this.wakeReconnectTimer = undefined
-    }
+    clearTimeout(this.wakeReconnectTimer)
+    this.wakeReconnectTimer = undefined
     this.wakeReconnectAttempts = 0
     const socket = this.wakeSocket
     this.wakeSocket = undefined
@@ -1091,10 +1085,8 @@ class ZeroHttpSocket {
     // rebase replays an emptied queue instead of a deep one after every batch.
     // reached only on success — a failed push propagates to fail() and must
     // not pull a failing server (the 429/500 storm tests pin this).
-    if (this.nextPullTimer !== undefined) {
-      clearTimeout(this.nextPullTimer)
-      this.nextPullTimer = undefined
-    }
+    clearTimeout(this.nextPullTimer)
+    this.nextPullTimer = undefined
     this.requestPullAfterCurrent()
   }
 
@@ -1134,10 +1126,8 @@ class ZeroHttpSocket {
 
   private trackUpstream(promise: Promise<void>) {
     this.pendingUpstream.add(promise)
-    void promise.then(
-      () => this.pendingUpstream.delete(promise),
-      () => this.pendingUpstream.delete(promise)
-    )
+    const drop = () => this.pendingUpstream.delete(promise)
+    void promise.then(drop, drop)
   }
 
   // a wake is spaced only from the last wake that pulled at once, so a pull
@@ -1331,11 +1321,6 @@ class ZeroHttpSocket {
       // the status still owns an error response when its body is unreadable
     }
     if (!response.ok) {
-      try {
-        // Validate that a JSON error remains parseable for Retry-After hints;
-        // plain-text application errors are also supported.
-        JSON.parse(responseBody)
-      } catch {}
       throw new ZeroHttpResponseError(
         path,
         response.status,
@@ -1356,6 +1341,10 @@ class ZeroHttpSocket {
     void promise.catch((error) => this.fail(error))
   }
 
+  private emitServerError(kind: string, message: string) {
+    this.emitMessage(['error', { kind, message, origin: 'server' }])
+  }
+
   private fail(error: unknown) {
     if (this.readyState === this.CLOSED) return
     this.emitLifecycle('failure', {
@@ -1363,14 +1352,7 @@ class ZeroHttpSocket {
       httpStatus: error instanceof ZeroHttpResponseError ? error.status : undefined,
     })
     if (isAuthHTTPError(error)) {
-      this.emitMessage([
-        'error',
-        {
-          kind: 'Unauthorized',
-          message: error.message,
-          origin: 'server',
-        },
-      ])
+      this.emitServerError('Unauthorized', error.message)
       if (this.readyState !== this.CLOSED) this.close(1000, error.message)
       return
     }
@@ -1380,14 +1362,7 @@ class ZeroHttpSocket {
       // mirror zero-cache's InvalidConnectionRequestBaseCookie error frame so
       // the stock client drops its local db and rebuilds from scratch instead
       // of reconnect-looping on 409 forever.
-      this.emitMessage([
-        'error',
-        {
-          kind: 'InvalidConnectionRequestBaseCookie',
-          message: error.message,
-          origin: 'server',
-        },
-      ])
+      this.emitServerError('InvalidConnectionRequestBaseCookie', error.message)
       if (this.readyState !== this.CLOSED) this.close(1000, error.message)
       return
     }
@@ -1399,14 +1374,10 @@ class ZeroHttpSocket {
       error.status !== 425 &&
       error.status !== 429
     ) {
-      this.emitMessage([
-        'error',
-        {
-          kind: error.path === '/pull' ? 'InvalidConnectionRequest' : 'InvalidPush',
-          message: error.message,
-          origin: 'server',
-        },
-      ])
+      this.emitServerError(
+        error.path === '/pull' ? 'InvalidConnectionRequest' : 'InvalidPush',
+        error.message
+      )
       if (this.readyState !== this.CLOSED) this.close(1000, error.message)
       return
     }
@@ -1481,13 +1452,25 @@ class ZeroHttpSocket {
   // puts after it in the same patch still count even when their hashes were
   // delivered before the clear.
   private hasNewGotQueriesEffect(deduped: GotQueryPatchOp[]): boolean {
-    if (deduped.length === 0) return false
-    if (deduped.some((op) => op.op === 'clear')) return true
-    return deduped.some((op) => {
-      if (op.op === 'put') return !this.ackedGotHashes.has(op.hash)
-      if (op.op === 'del') return this.ackedGotHashes.has(op.hash)
-      return true
-    })
+    return deduped.some((op) =>
+      op.op === 'clear'
+        ? true
+        : op.op === 'put'
+          ? !this.ackedGotHashes.has(op.hash)
+          : this.ackedGotHashes.has(op.hash)
+    )
+  }
+
+  private emitPokeStart(pokeID: string) {
+    this.emitMessage([
+      'pokeStart',
+      {
+        pokeID,
+        baseCookie: this.cookie,
+        schemaVersions: { minSupportedVersion: 1, maxSupportedVersion: 1 },
+        timestamp: Date.now(),
+      },
+    ])
   }
 
   private emitPoke(response: Exclude<PullResponse, { unchanged: true }>) {
@@ -1524,18 +1507,7 @@ class ZeroHttpSocket {
     }
     this.recordAckedGotQueries(gotQueries)
 
-    this.emitMessage([
-      'pokeStart',
-      {
-        pokeID,
-        baseCookie: this.cookie,
-        schemaVersions: {
-          minSupportedVersion: 1,
-          maxSupportedVersion: 1,
-        },
-        timestamp: Date.now(),
-      },
-    ])
+    this.emitPokeStart(pokeID)
     this.emitMessage([
       'pokePart',
       {
@@ -1579,18 +1551,7 @@ class ZeroHttpSocket {
     this.pendingGotQueriesPatch = []
     this.recordAckedGotQueries(gotQueries)
 
-    this.emitMessage([
-      'pokeStart',
-      {
-        pokeID,
-        baseCookie: this.cookie,
-        schemaVersions: {
-          minSupportedVersion: 1,
-          maxSupportedVersion: 1,
-        },
-        timestamp: Date.now(),
-      },
-    ])
+    this.emitPokeStart(pokeID)
     this.emitMessage([
       'pokePart',
       {
@@ -1635,9 +1596,9 @@ class ZeroHttpSocket {
   ) {
     if (this.settled) return false
     this.settled = true
-    if (this.openTimer !== undefined) clearTimeout(this.openTimer)
-    if (this.pullTimer !== undefined) clearInterval(this.pullTimer)
-    if (this.nextPullTimer !== undefined) clearTimeout(this.nextPullTimer)
+    clearTimeout(this.openTimer)
+    clearInterval(this.pullTimer)
+    clearTimeout(this.nextPullTimer)
     this.closeWakeChannel()
     this.readyState = this.CLOSED
     this.state.sockets.delete(this)
@@ -1761,7 +1722,7 @@ function jsonByteLength(value: unknown): number {
 
 function parsePushBody(value: unknown): PushBody | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return
-  if (!('mutations' in value) || !Array.isArray(value.mutations)) return
+  if (!Array.isArray((value as PushBody).mutations)) return
   // the runtime checks above establish the only fields batching reads.
   return value as PushBody
 }
