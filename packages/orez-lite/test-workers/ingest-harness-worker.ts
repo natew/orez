@@ -34,6 +34,9 @@ const schema = {
 const zql = createBuilder(schema as never) as { item: unknown }
 const queries = defineQueries({
   allItems: defineQuery(() => zql.item as never),
+  itemById: defineQuery(({ args }: { args: { id: string } }) =>
+    (zql.item as { where(column: string, value: string): never }).where('id', args.id)
+  ),
 })
 
 type Fetcher = { fetch(input: string | Request, init?: RequestInit): Promise<Response> }
@@ -52,6 +55,7 @@ const streaming = defineStreamingFields(schema, {
 const runawayNamespaces = new Set<string>()
 const unpublishedNamespaces = new Set<string>()
 const numericTextNamespaces = new Set<string>()
+const poisonNamespaces = new Map<string, boolean>()
 const jsonValueNamespaces = new Set<string>()
 const hydratedNamespaces = new Set<string>()
 const heldSnapshots = new Set<string>()
@@ -310,6 +314,48 @@ export class DataService extends WorkerEntrypoint<Env> {
             .slice(0, 2),
         })
       )
+    }
+    if (pathname.endsWith('/changes') && poisonNamespaces.has(namespace)) {
+      const params = new URL(request.url).searchParams
+      const cursor = Number(params.get('since') ?? params.get('watermark') ?? 0)
+      const repaired = poisonNamespaces.get(namespace) === true
+      const row = (id: string, rank: string | number) => ({
+        id,
+        label: id,
+        rank,
+        done: false,
+        meta: null,
+      })
+      const changes = [
+        {
+          watermark: 1,
+          tableName: 'item',
+          op: 'INSERT',
+          rowData: row('good', 42),
+          oldData: null,
+        },
+        {
+          watermark: 2,
+          tableName: 'item',
+          op: 'INSERT',
+          rowData: row('bad', 'invalid'),
+          oldData: null,
+        },
+        ...(repaired
+          ? [
+              {
+                watermark: 3,
+                tableName: 'item',
+                op: 'UPDATE',
+                rowData: row('bad', 7),
+                oldData: row('bad', 'invalid'),
+              },
+            ]
+          : []),
+      ]
+        .filter((change) => change.watermark > cursor)
+        .slice(0, 2)
+      return Response.json({ watermark: repaired ? 3 : 2, changes })
     }
     if (pathname.endsWith('/changes') && numericTextNamespaces.has(namespace)) {
       const watermark = Number(new URL(request.url).searchParams.get('watermark') ?? 0)
@@ -797,6 +843,13 @@ export default {
           else jsonValueNamespaces.delete(namespace)
           return Response.json({ ok: true, namespace })
         })
+    }
+    if (url.pathname.startsWith('/poison-control/')) {
+      const namespace = url.pathname.slice('/poison-control/'.length)
+      return request.json().then((body: { repaired?: boolean }) => {
+        poisonNamespaces.set(namespace, body.repaired === true)
+        return Response.json({ ok: true })
+      })
     }
     if (url.pathname.startsWith('/numeric-text-control/')) {
       const namespace = url.pathname.slice('/numeric-text-control/'.length)

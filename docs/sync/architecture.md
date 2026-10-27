@@ -170,6 +170,25 @@ Per-user scoping lives in the resolved query ASTs. A group never receives a del
 for a row it did not hold, and the engine never projects the full namespace to
 serve a pull.
 
+The authoritative store rejects values that the sync wire cannot represent,
+including unsafe numbers in JSON, while retaining pre-existing invalid cells
+for explicit repair. The existing feed converts JSON text to JavaScript values;
+it must not fail an entire change page on one old value, because a retained
+before-image would keep blocking the page after repair. On 2026-10-27 Contrast
+chose not to add a lossless legacy feed format after its read-only census found
+zero unsafe JSON or numeric-text cells in the latest retained dumps of 965
+namespaces and zero matching errors in retained Workers Logs since October 20.
+The dumps are historical, and 610 lacked stored Zero schema metadata; the
+census also checked the current modeled schema. This is rollout evidence, not
+proof that other deployments have no legacy invalid data.
+
+Clients advertising `per-query-v1` receive an error for each query containing
+an unrepresentable stored value while other queries continue. An errored query
+is recomputed on later pulls and completes after repair. Older clients retain
+the fail-closed pull behavior. Stock Zero's ArrayView settles its status once,
+so on-zero exposes later query errors in its shared hook layer and rematerializes
+an errored view on recovery or retry.
+
 **Push** (`POST /<namespace>/push`). A v51 custom-mutator body. In local-mutator
 mode the DO runs the app's mutator inside the push transaction, advances the
 last-mutation-id, and appends a change-log marker so peers' pulls stop reporting

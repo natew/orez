@@ -132,6 +132,85 @@ fn has_clear(resp: &Value) -> bool {
 }
 
 #[test]
+fn negotiated_pull_isolates_corrupt_queries_and_recovers_after_repair() {
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE item (id TEXT PRIMARY KEY, amount TEXT, meta TEXT)",
+        &[],
+    )
+    .unwrap();
+    db.exec("INSERT INTO item VALUES ('good', '42', '{\"n\":1}')", &[])
+        .unwrap();
+    db.exec(
+        "INSERT INTO item VALUES ('bad', 'broken', '{\"n\":1}')",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO item VALUES ('json-bad', '1', '{\"n\":9007199254740992}')",
+        &[],
+    )
+    .unwrap();
+    let tables = Tables::from_zero_schema(&json!({"tables":{"item":{
+        "columns":{"id":{"type":"string"},"amount":{"type":"number"},"meta":{"type":"json"}},
+        "primaryKey":["id"]
+    }}}))
+    .unwrap();
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    let query = |id: &str| {
+        json!({"table":"item","where":{
+            "type":"simple","op":"=","left":{"type":"column","name":"id"},
+            "right":{"type":"literal","value":id}
+        }})
+    };
+    let queries = json!({"version":1,"patch":[
+        {"op":"put","hash":"good","ast":query("good")},
+        {"op":"put","hash":"bad","ast":query("bad")},
+        {"op":"put","hash":"json-bad","ast":query("json-bad")}
+    ]});
+    let old = json!({"clientID":"old","clientGroupID":"old-group","cookie":null,"queries":queries});
+    assert!(
+        db.transaction(|db| handle_query_pull(db, &tables, 4096, &old, "u1"))
+            .is_err()
+    );
+    let body = json!({"clientID":"c1","clientGroupID":"g1","cookie":null,"queries":queries,"queryErrorMode":"per-query-v1"});
+    let first = db
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+        .unwrap();
+    assert_eq!(put_ids(&first), vec!["good"]);
+    assert_eq!(
+        first["gotQueries"]["patch"],
+        json!([{ "op":"put", "hash":"good" }])
+    );
+    assert_eq!(first["queryErrors"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        db.query("SELECT amount, meta FROM item WHERE id='bad'", &[])
+            .unwrap()[0]
+            .get("amount"),
+        Some(&SqlValue::Text("broken".into()))
+    );
+    let retry = json!({"clientID":"c1","clientGroupID":"g1","cookie":first["cookie"],"queryErrorMode":"per-query-v1"});
+    let still_bad = db
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &retry, "u1"))
+        .unwrap();
+    assert_eq!(still_bad["queryErrors"].as_array().unwrap().len(), 2);
+    db.exec("UPDATE item SET amount = '7' WHERE id = 'bad'", &[])
+        .unwrap();
+    db.exec(
+        "UPDATE item SET meta = '{\"n\":2}' WHERE id = 'json-bad'",
+        &[],
+    )
+    .unwrap();
+    let repaired = db
+        .transaction(|db| handle_query_pull(db, &tables, 4096, &retry, "u1"))
+        .unwrap();
+    assert_eq!(put_ids(&repaired), vec!["bad", "json-bad"]);
+    assert_eq!(repaired["queryErrors"], json!([]));
+    assert_eq!(repaired["gotQueries"]["patch"].as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn deleting_a_client_removes_its_queries_membership_and_preserves_lmid() {
     let mut h = QHost::new();
     let keeper = h.pull(

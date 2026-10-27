@@ -862,7 +862,7 @@ fn number_storage_predicate(value: &str) -> String {
         .replace("__OREZ_NUMBER_VALUE__", value)
 }
 
-fn storage_predicate(value: &str, kind: ZeroColumnType) -> String {
+pub(crate) fn storage_predicate(value: &str, kind: ZeroColumnType) -> String {
     static PREDICATE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let wire = PREDICATE
         .get_or_init(|| {

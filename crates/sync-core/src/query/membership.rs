@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 
 use crate::db::{Row, SqlValue, SyncDb};
 use crate::error::EngineError;
-use crate::schema::{TableSpec, Tables};
+use crate::schema::{TableSpec, Tables, quote_ident, storage_predicate};
 use crate::value::{zero_pk_id, zero_row};
 
 use super::ast::{Ast, Condition, CorrelatedSubquery};
@@ -1061,6 +1061,7 @@ fn collect_dependent_rows(
     depth: usize,
     live: &mut BTreeSet<(String, String)>,
     values: &mut BTreeMap<(String, String), Row>,
+    isolate_errors: bool,
 ) -> Result<(), EngineError> {
     for sub in dependent_subqueries(ast) {
         let cr = compile_related_of(parent_sql, parent_params, parent_table, sub, tables, depth)?;
@@ -1070,6 +1071,9 @@ fn collect_dependent_rows(
                 cr.child_table
             ))
         })?;
+        if isolate_errors {
+            validate_query_rows(db, child_spec, &cr.sql, &cr.params)?;
+        }
         for row in db.query(&cr.sql, &cr.params)? {
             let pk_obj = raw_pk(child_spec, &row);
             let key = canonical_pk(child_spec, &pk_obj);
@@ -1087,6 +1091,7 @@ fn collect_dependent_rows(
             depth + 1,
             live,
             values,
+            isolate_errors,
         )?;
     }
     Ok(())
@@ -1300,12 +1305,70 @@ pub fn recompute_group(
     group: &str,
     changed: &BTreeSet<(String, String)>,
 ) -> Result<Vec<Value>, EngineError> {
-    Ok(recompute_group_with_rehydrate(db, tables, group, changed, &BTreeSet::new(), false, 0)?.0)
+    Ok(recompute_group_with_rehydrate(
+        db,
+        tables,
+        group,
+        changed,
+        &BTreeSet::new(),
+        false,
+        0,
+        false,
+    )?
+    .0)
 }
 
 // the rows patch plus the (table, pk) keys it already covers, so the pull's
 // transition replay never double-emits a row this recompute handled
-pub(crate) type MembershipDiff = (Vec<Value>, BTreeSet<(String, String)>);
+pub(crate) type MembershipDiff = (
+    Vec<Value>,
+    BTreeSet<(String, String)>,
+    BTreeMap<String, String>,
+);
+
+// Check inside SQLite before reading the row through a JavaScript adapter. An
+// unsafe stored integer can fail at that boundary before Rust sees the value.
+fn validate_query_rows(
+    db: &mut dyn SyncDb,
+    spec: &TableSpec,
+    sql: &str,
+    params: &[SqlValue],
+) -> Result<(), EngineError> {
+    let predicates = spec
+        .columns
+        .iter()
+        .map(|(column, kind)| {
+            storage_predicate(&format!("_orez_guard_row.{}", quote_ident(column)), *kind)
+        })
+        .collect::<Vec<_>>();
+    if predicates.is_empty() {
+        return Ok(());
+    }
+    let query = format!(
+        "SELECT 1 AS invalid FROM ({sql}) AS _orez_guard_row WHERE NOT ({}) LIMIT 1",
+        predicates
+            .iter()
+            .map(|p| format!("({p})"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    );
+    if !db.query(&query, params)?.is_empty() {
+        return Err(EngineError::corrupt(
+            "query contains a stored value that cannot be represented",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn has_uncomputed_queries(
+    db: &mut dyn SyncDb,
+    group: &str,
+) -> Result<bool, EngineError> {
+    Ok(!db.query(
+        "SELECT 1 FROM _zsync_desires AS d WHERE d.clientGroupID = ? AND NOT EXISTS (SELECT 1 FROM _zsync_query_state AS s WHERE s.clientGroupID = d.clientGroupID AND s.hash = d.hash) LIMIT 1",
+        &[text(group)],
+    )?.is_empty())
+}
 
 // the zero value of a live member row (a row `values` collected above).
 fn live_zero_row(tables: &Tables, table: &str, row: &Row) -> Result<Value, EngineError> {
@@ -1323,6 +1386,7 @@ pub(crate) fn recompute_group_with_rehydrate(
     rehydrate: &BTreeSet<String>,
     rehydrate_all: bool,
     version: i64,
+    isolate_errors: bool,
 ) -> Result<MembershipDiff, EngineError> {
     let queries = active_queries(db, group)?;
     validate_queries(tables, &queries)?;
@@ -1371,18 +1435,19 @@ pub(crate) fn recompute_group_with_rehydrate(
     // of one statement per row.
     let mut arrivals: Vec<(String, String, String)> = Vec::new();
     let mut departures: Vec<(String, String, String)> = Vec::new();
+    let mut errors: BTreeMap<String, String> = BTreeMap::new();
+    let mut failed_keys: BTreeSet<(String, String)> = BTreeSet::new();
 
     for q in &queries {
-        let rehydrate_query = rehydrate_all || rehydrate.contains(&q.hash);
+        let rehydrate_query = rehydrate_all
+            || rehydrate.contains(&q.hash)
+            || (isolate_errors && !computed.contains(&q.hash));
         if computed.contains(&q.hash) && !rehydrate_query {
             // (a) dependency-intersection and (b) touched-pk narrowing, both
             // resolved above: skip unless a touched row can affect this query.
             if !narrowable.contains(q.hash.as_str()) || !relevant.contains(&q.hash) {
                 continue;
             }
-        } else if computed.insert(q.hash.clone()) {
-            // never computed for this group (newly desired, or AST changed): compute
-            set_query_state(db, group, &q.hash)?;
         }
         let spec = tables.get(&q.root_table).ok_or_else(|| {
             EngineError::internal(format!("query root table '{}' missing", q.root_table))
@@ -1393,31 +1458,55 @@ pub(crate) fn recompute_group_with_rehydrate(
         // by (table, pk). collecting into one set lets the diff/refcount logic
         // treat every member uniformly regardless of which table it came from.
         let mut live: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut query_values: BTreeMap<(String, String), Row> = BTreeMap::new();
+        let result = (|| -> Result<(), EngineError> {
+            let compiled = compile(ast, tables)?;
+            if isolate_errors {
+                validate_query_rows(db, spec, &compiled.sql, &compiled.params)?;
+            }
+            for row in db.query(&compiled.sql, &compiled.params)? {
+                let pk_obj = raw_pk(spec, &row);
+                let key = canonical_pk(spec, &pk_obj);
+                live.insert((q.root_table.clone(), key.clone()));
+                query_values.insert((q.root_table.clone(), key), row);
+            }
 
-        let compiled = compile(ast, tables)?;
-        for row in db.query(&compiled.sql, &compiled.params)? {
-            let pk_obj = raw_pk(spec, &row);
-            let key = canonical_pk(spec, &pk_obj);
-            live.insert((q.root_table.clone(), key.clone()));
-            values.insert((q.root_table.clone(), key), row);
+            // dependent rows (related output + positive-EXISTS filter subqueries),
+            // walked recursively. a parent membership change re-runs these joins, so
+            // children follow their parents even when the child table was untouched.
+            // syncing the EXISTS-filter rows is what lets the stock client re-run the
+            // query locally and reproduce the server's membership.
+            collect_dependent_rows(
+                db,
+                tables,
+                &compiled.sql,
+                &compiled.params,
+                &ast.table,
+                ast,
+                0,
+                &mut live,
+                &mut query_values,
+                isolate_errors,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if !isolate_errors || !error.corrupt_storage {
+                return Err(error);
+            }
+            db.exec(
+                "DELETE FROM _zsync_query_state WHERE clientGroupID = ? AND hash = ?",
+                &[text(group), text(&q.hash)],
+            )?;
+            computed.remove(&q.hash);
+            failed_keys.extend(read_query_row_keys(db, group, &q.hash)?);
+            errors.insert(q.hash.clone(), error.message);
+            continue;
         }
-
-        // dependent rows (related output + positive-EXISTS filter subqueries),
-        // walked recursively. a parent membership change re-runs these joins, so
-        // children follow their parents even when the child table was untouched.
-        // syncing the EXISTS-filter rows is what lets the stock client re-run the
-        // query locally and reproduce the server's membership.
-        collect_dependent_rows(
-            db,
-            tables,
-            &compiled.sql,
-            &compiled.params,
-            &ast.table,
-            ast,
-            0,
-            &mut live,
-            &mut values,
-        )?;
+        if computed.insert(q.hash.clone()) {
+            set_query_state(db, group, &q.hash)?;
+        }
+        values.extend(query_values);
 
         if rehydrate_query {
             rehydrate_rows.extend(live.iter().cloned());
@@ -1633,7 +1722,8 @@ pub(crate) fn recompute_group_with_rehydrate(
         emitted.insert(key);
     }
 
-    Ok((patch, emitted))
+    emitted.extend(failed_keys);
+    Ok((patch, emitted, errors))
 }
 
 // membership transitions the group recorded after `cookie`, for a client whose

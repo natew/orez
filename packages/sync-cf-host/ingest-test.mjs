@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict'
 
+import {
+  Zero,
+  boolean,
+  createBuilder,
+  createSchema,
+  defineQueries,
+  defineQuery,
+  json,
+  number,
+  string,
+  table,
+} from '@rocicorp/zero'
+
 import { findPort } from '../../src/port.ts'
+import { installHttpPullTransport } from '../orez-lite/src/client/transport.ts'
 
 const port = await findPort(0)
 const server = Bun.spawn(
@@ -1606,6 +1620,188 @@ try {
   )
   assert.equal(numericNativePut.value.rank, 1783776886000)
   assert.equal(typeof numericNativePut.value.rank, 'number')
+
+  // a legacy invalid cell stays in the replica while its query fails alone.
+  // repairing the upstream row makes the same query complete on the next pull.
+  const poisonNamespace = `poison-${crypto.randomUUID()}`
+  const poisonOrigin = `${base}/${poisonNamespace}`
+  const poisonControl = (repaired) =>
+    fetch(`${base}/poison-control/${poisonNamespace}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ repaired }),
+    })
+  assert.equal((await poisonControl(false)).status, 200)
+  const poisonPull = async (body) => {
+    const response = await fetch(`${poisonOrigin}/pull`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  const poisonQueries = {
+    version: 1,
+    patch: ['good', 'bad'].map((id) => ({
+      op: 'put',
+      hash: id,
+      name: 'itemById',
+      args: [{ id }],
+    })),
+  }
+  const firstPoisonPull = await poisonPull({
+    clientID: 'poison-reader',
+    clientGroupID: 'poison-group',
+    cookie: null,
+    queryErrorMode: 'per-query-v1',
+    queries: poisonQueries,
+  })
+  assert.equal(firstPoisonPull.status, 200, JSON.stringify(firstPoisonPull.body))
+  assert.deepEqual(
+    firstPoisonPull.body.queryErrors.map((error) => error.hash),
+    ['bad']
+  )
+  assert.deepEqual(
+    firstPoisonPull.body.rowsPatch
+      .filter((row) => row.op === 'put')
+      .map((row) => row.value.id),
+    ['good']
+  )
+  const legacyPoisonPull = await poisonPull({
+    clientID: 'legacy-reader',
+    clientGroupID: 'legacy-group',
+    cookie: null,
+    queries: poisonQueries,
+  })
+  assert.equal(legacyPoisonPull.status, 500)
+  const poisonStored = await fetch(`${poisonOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({ query: "SELECT rank FROM item WHERE id = 'bad'" }),
+  }).then((response) => response.json())
+  assert.deepEqual(poisonStored.rows, [{ rank: 'invalid' }])
+  assert.equal((await poisonControl(true)).status, 200)
+  const repairedPoisonPull = await poisonPull({
+    clientID: 'poison-reader',
+    clientGroupID: 'poison-group',
+    cookie: firstPoisonPull.body.cookie,
+    queryErrorMode: 'per-query-v1',
+  })
+  assert.equal(repairedPoisonPull.status, 200, JSON.stringify(repairedPoisonPull.body))
+  assert.deepEqual(repairedPoisonPull.body.queryErrors, [])
+  assert.ok(
+    repairedPoisonPull.body.rowsPatch.some(
+      (row) => row.op === 'put' && row.value.id === 'bad' && row.value.rank === 7
+    )
+  )
+
+  // connect stock Zero and the actual HTTP transport to the workerd host.
+  const transportNamespace = `poison-transport-${crypto.randomUUID()}`
+  const transportOrigin = `${base}/${transportNamespace}`
+  assert.equal(
+    (
+      await fetch(`${base}/poison-control/${transportNamespace}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ repaired: false }),
+      })
+    ).status,
+    200
+  )
+  const item = table('item')
+    .columns({
+      id: string(),
+      label: string(),
+      rank: number(),
+      done: boolean(),
+      meta: json().optional(),
+    })
+    .primaryKey('id')
+  const clientSchema = createSchema({ tables: [item] })
+  const builder = createBuilder(clientSchema)
+  const clientQueries = defineQueries({
+    itemById: defineQuery(({ args }) => builder.item.where('id', args.id)),
+  })
+  const transport = installHttpPullTransport({ origin: transportOrigin })
+  const zero = new Zero({
+    server: transportOrigin,
+    userID: 'user-a',
+    auth: 'token-user-a',
+    schema: clientSchema,
+    kvStore: 'mem',
+    storageKey: transportNamespace,
+  })
+  try {
+    const goodView = zero.materialize(clientQueries.itemById({ id: 'good' }))
+    const badView = zero.materialize(clientQueries.itemById({ id: 'bad' }))
+    const complete = new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('healthy query did not complete')),
+        5000
+      )
+      goodView.addListener((data, type) => {
+        if (type === 'complete') {
+          clearTimeout(timer)
+          resolve(data)
+        }
+      })
+    })
+    const error = new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('corrupt query did not error')),
+        5000
+      )
+      badView.addListener((_data, type, details) => {
+        if (type === 'error') {
+          clearTimeout(timer)
+          resolve(details)
+        }
+      })
+    })
+    const [healthy, fault] = await Promise.all([complete, error])
+    assert.deepEqual(
+      healthy.map((row) => row.id),
+      ['good']
+    )
+    assert.match(fault.message, /stored value/)
+    assert.equal(
+      (
+        await fetch(`${base}/poison-control/${transportNamespace}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ repaired: true }),
+        })
+      ).status,
+      200
+    )
+    await transport.pull()
+    const repairedView = zero.materialize(clientQueries.itemById({ id: 'bad' }))
+    const repairedRows = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('repaired query did not complete')),
+        5000
+      )
+      repairedView.addListener((data, type) => {
+        if (type === 'complete') {
+          clearTimeout(timer)
+          resolve(data)
+        }
+      })
+    })
+    assert.equal(repairedRows[0].rank, 7)
+    goodView.destroy()
+    badView.destroy()
+    repairedView.destroy()
+  } finally {
+    await zero.close()
+    transport.uninstall()
+  }
 
   // zero json columns carry JSON values rather than JSON-encoded strings on
   // the wire. prove every JSON kind, including strings that look like encoded

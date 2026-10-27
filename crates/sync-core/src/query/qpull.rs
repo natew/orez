@@ -21,8 +21,9 @@ use crate::wire;
 
 use super::membership::{
     advance_query_ack, canonical_pk_text, clear_desires, client_query_version, delete_clients,
-    desired_hashes, prepare_transform_version, prune_tombstones, recompute_group_with_rehydrate,
-    register_query, remove_desire, set_desire, transitions_since, validate_active_queries,
+    desired_hashes, has_uncomputed_queries, prepare_transform_version, prune_tombstones,
+    recompute_group_with_rehydrate, register_query, remove_desire, set_desire, transitions_since,
+    validate_active_queries,
 };
 
 const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
@@ -146,6 +147,11 @@ pub fn handle_query_pull(
     body: &Value,
     user_id: &str,
 ) -> Result<Value, EngineError> {
+    let isolate_errors = match body.get("queryErrorMode") {
+        None => false,
+        Some(Value::String(mode)) if mode == "per-query-v1" => true,
+        Some(_) => return Err(EngineError::bad_request("unsupported queryErrorMode")),
+    };
     let client_id = body.get("clientID").and_then(Value::as_str);
     let group = body.get("clientGroupID").and_then(Value::as_str);
     let cookie_present = body.get("cookie").is_some();
@@ -278,6 +284,7 @@ pub fn handle_query_pull(
         && cookie == Some(current)
         && applied_queries.is_none()
         && deleted_client_ids.is_empty()
+        && !has_uncomputed_queries(db, group)?
     {
         validate_active_queries(db, tables, group)?;
         return Ok(json!({ "cookie": wire::counter_to_json(current)?, "unchanged": true }));
@@ -289,7 +296,7 @@ pub fn handle_query_pull(
         scan_changed(db, tables, cookie.unwrap())?
     };
     let rehydrate = applied_queries.as_ref().cloned().unwrap_or_default();
-    let (mut rows_patch, emitted) = recompute_group_with_rehydrate(
+    let (mut rows_patch, emitted, errors) = recompute_group_with_rehydrate(
         db,
         tables,
         group,
@@ -297,6 +304,7 @@ pub fn handle_query_pull(
         &rehydrate,
         full_response,
         current,
+        isolate_errors,
     )?;
     if !full_response {
         // replay membership transitions another client of this group already
@@ -332,7 +340,9 @@ pub fn handle_query_pull(
         }
     }
     for hash in desired_hashes {
-        got_patch.push(json!({ "op": "put", "hash": hash }));
+        if !errors.contains_key(&hash) {
+            got_patch.push(json!({ "op": "put", "hash": hash }));
+        }
     }
     // the version the client is now synced to: its durable, monotonic query-state
     // version (advanced above when this request carried a patch), acknowledged
@@ -354,6 +364,14 @@ pub fn handle_query_pull(
     });
     if !deleted_client_ids.is_empty() {
         response["deletedClientIDs"] = json!(deleted_client_ids);
+    }
+    if isolate_errors {
+        let query_errors: Vec<Value> = errors
+            .into_iter()
+            .filter(|(hash, _)| desired_set.contains(hash))
+            .map(|(hash, message)| json!({ "hash": hash, "message": message }))
+            .collect();
+        response["queryErrors"] = json!(query_errors);
     }
     Ok(response)
 }

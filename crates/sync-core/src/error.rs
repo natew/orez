@@ -14,6 +14,7 @@ use crate::db::DbError;
 pub struct EngineError {
     pub status: u16,
     pub message: String,
+    pub corrupt_storage: bool,
 }
 
 impl EngineError {
@@ -21,6 +22,7 @@ impl EngineError {
         Self {
             status,
             message: message.into(),
+            corrupt_storage: false,
         }
     }
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -37,6 +39,11 @@ impl EngineError {
     }
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(500, message)
+    }
+    pub fn corrupt(message: impl Into<String>) -> Self {
+        let mut error = Self::internal(message);
+        error.corrupt_storage = true;
+        error
     }
 }
 
