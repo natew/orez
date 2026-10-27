@@ -83,6 +83,40 @@ fn authoritative_number_guard_rejects_bad_writes_and_allows_legacy_repairs() {
 }
 
 #[test]
+fn authoritative_number_guard_rejects_unsafe_numeric_text() {
+    let tables = Tables::from_zero_schema(&json!({"tables":{"item":{
+        "columns":{"id":{"type":"string"},"text_value":{"type":"number"},"untyped_value":{"type":"number"}},
+        "primaryKey":["id"]
+    }}})).unwrap();
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE item (id TEXT PRIMARY KEY, text_value TEXT, untyped_value)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO item VALUES ('legacy', '9007199254740992', '1e16')",
+        &[],
+    )
+    .unwrap();
+    sync_core::schema::init_number_storage_guards(&mut db, &tables).unwrap();
+    for sql in [
+        "INSERT INTO item VALUES ('bad-text', '9007199254740992', NULL)",
+        "INSERT INTO item VALUES ('bad-untyped', NULL, '1e16')",
+        "UPDATE item SET text_value = '-9007199254740992' WHERE id = 'legacy'",
+    ] {
+        assert!(db.exec(sql, &[]).is_err(), "accepted {sql}");
+    }
+    db.exec("UPDATE item SET text_value = '42' WHERE id = 'legacy'", &[])
+        .unwrap();
+    db.exec(
+        "UPDATE item SET untyped_value = '2026-07-11 13:34:46+00' WHERE id = 'legacy'",
+        &[],
+    )
+    .unwrap();
+}
+
+#[test]
 fn initialization_cannot_add_poison_and_preserves_existing_invalid_cells() {
     let tables = Tables::from_zero_schema(&json!({"tables":{"item":{
         "columns":{"id":{"type":"string"},"amount":{"type":"number"}},

@@ -41,7 +41,8 @@ namespaces, each its own object.
 The authoritative SQLite store rejects writes that the sync wire cannot
 represent. A Zero number column accepts finite numeric values, numeric text and
 the timestamp text forms understood by the sync engine. Numeric SQLite values
-in any synced column must fit the JavaScript safe integer range. A rejected
+in any synced column and numeric text in number columns must fit the JavaScript
+safe integer range. A rejected
 write rolls back with the rest of its statement, including trigger effects.
 The same rule applies to raw SQL and schema initialization.
 

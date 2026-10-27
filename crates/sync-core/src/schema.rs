@@ -845,6 +845,7 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 // idempotent, and the version feeds schema_revision so hosts re-run the
 // schema pass exactly once when new bodies ship.
 pub const TRIGGER_VERSION: u32 = 6;
+pub const NUMBER_GUARD_VERSION: u32 = 3;
 
 // the same sqlite predicate is used by the authoritative data worker. keeping
 // it in one file makes the accepted storage values independent of the host.
@@ -1030,8 +1031,8 @@ pub fn init_number_storage_guards(db: &mut dyn SyncDb, tables: &Tables) -> Resul
             .collect::<Vec<_>>()
             .join("_");
         // bump the version when the shared predicate or guard bodies change.
-        let insert_name = format!("_zsync_number_{signature}_v2_insert");
-        let update_name = format!("_zsync_number_{signature}_v2_update");
+        let insert_name = format!("_zsync_number_{signature}_v{NUMBER_GUARD_VERSION}_insert");
+        let update_name = format!("_zsync_number_{signature}_v{NUMBER_GUARD_VERSION}_update");
         expected.insert(insert_name.clone());
         expected.insert(update_name.clone());
         let mut insert = String::new();

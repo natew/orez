@@ -648,6 +648,7 @@ export class ZeroDO extends DurableObject {
   private watermarks: DurableWatermarkState
   private cdc: TransactionalCdc
   private numberGuards: NumberStorageGuards | null
+  private readonly configuredNumberGuards: boolean
   private schemaTables = new Set<string>()
   // `null` records a table confirmed absent from _zero_schema_tables
   private tableSchemas = new Map<string, SchemaTable | null>()
@@ -878,6 +879,7 @@ export class ZeroDO extends DurableObject {
   constructor(ctx: DurableObjectState, env: Env, schema?: ZeroSchemaConfig) {
     super(ctx, env)
     this.sql = ctx.storage.sql
+    this.configuredNumberGuards = !!schema
     this.numberGuards = schema ? new NumberStorageGuards(this.sql, schema) : null
     this.writeBudgetDisabled = /^(?:1|true)$/i.test(
       env.OREZ_DO_WRITE_BUDGET_DISABLED ?? ''
@@ -3359,8 +3361,15 @@ export class ZeroDO extends DurableObject {
       throw new Error('sync storage guards are host-owned')
     }
     const existing = schemaChange ? createTableIfAbsentTarget(sql) : undefined
+    // restore generates these exact quoted drops itself. SQLite drops the
+    // table's own triggers with it; guards on all other tables remain in force.
+    const backupDrop = this.backupMaintenance
+      ? /^DROP TABLE IF EXISTS "((?:[^"]|"")+)"$/.exec(sql)?.[1]?.replaceAll('""', '"')
+      : undefined
     const checkGuard =
+      !!this.numberGuards &&
       schemaChange &&
+      !backupDrop &&
       !(
         existing &&
         this.sql.exec(`PRAGMA table_xinfo(${quoteIdent(existing)})`).toArray().length
@@ -3853,20 +3862,39 @@ export class ZeroDO extends DurableObject {
   }
 
   private ensureSchemaTables(clientSchema: ClientSchema) {
-    this.numberGuards ??= new NumberStorageGuards(this.sql, clientSchema)
     this.ensureSchemaMetadataTable()
+    if (!this.configuredNumberGuards) {
+      for (const row of this.sql
+        .exec('SELECT name, schema_json FROM _zero_schema_tables')
+        .toArray()) {
+        const name = String(row.name)
+        if (!this.tableSchemas.has(name)) {
+          this.tableSchemas.set(name, JSON.parse(String(row.schema_json)) as SchemaTable)
+        }
+      }
+    }
     for (const [name, def] of Object.entries(clientSchema.tables)) {
-      this.tableSchemas.set(name, def)
+      const previous = this.tableSchemas.get(name)
+      const merged = {
+        ...def,
+        columns: { ...def.columns, ...previous?.columns },
+      }
+      this.tableSchemas.set(name, merged)
       this.createSchemaTable(name, def)
       this.ensureSchemaColumns(name, def)
       this.sql.exec(
         'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
         name,
-        JSON.stringify(def)
+        JSON.stringify(merged)
       )
       this.schemaTables.add(name)
     }
-    this.numberGuards.reconcile()
+    if (!this.configuredNumberGuards) {
+      const tables: Record<string, SchemaTable> = {}
+      for (const [name, table] of this.tableSchemas) if (table) tables[name] = table
+      this.numberGuards = new NumberStorageGuards(this.sql, { tables })
+    }
+    this.numberGuards?.reconcile()
   }
 
   private createSchemaTable(name: string, def: SchemaTable) {
@@ -4057,7 +4085,9 @@ export class ZeroDO extends DurableObject {
         normalized[key] =
           typeof numeric === 'number' &&
           Number.isFinite(numeric) &&
-          (typeof value !== 'string' || numberFromStorageText(value) !== undefined)
+          (typeof value !== 'string' ||
+            (Math.abs(numeric) <= Number.MAX_SAFE_INTEGER &&
+              numberFromStorageText(value) !== undefined))
             ? numeric
             : value
       } else if (type === 'json' && typeof value === 'string') {

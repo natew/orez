@@ -98,8 +98,8 @@ export class NumberStorageGuards {
             .join('')
         )
         .join('_')
-      const insertName = `${prefix}${signature}_v2_insert`
-      const updateName = `${prefix}${signature}_v2_update`
+      const insertName = `${prefix}${signature}_v3_insert`
+      const updateName = `${prefix}${signature}_v3_update`
       expected.add(insertName)
       expected.add(updateName)
       const insert: string[] = []

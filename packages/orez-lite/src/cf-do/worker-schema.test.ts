@@ -1,3 +1,5 @@
+// @ts-expect-error - CJS module
+import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('cloudflare:workers', () => ({
@@ -25,52 +27,15 @@ class FakeResult {
 }
 
 class FakeSql {
-  tables = new Map<string, Set<string>>()
+  private readonly db = new BedrockSqlite.Database(':memory:')
   alters: string[] = []
 
   exec(sql: string, ...params: unknown[]) {
-    if (sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')) {
-      return new FakeResult()
-    }
-
-    if (sql.startsWith('SELECT name FROM sqlite_master')) {
-      const tableName = String(params[0])
-      return new FakeResult(this.tables.has(tableName) ? [{ name: tableName }] : [])
-    }
-
-    if (sql.startsWith('CREATE TABLE IF NOT EXISTS')) {
-      const tableName = sql.match(/CREATE TABLE IF NOT EXISTS "([^"]+)"/)?.[1]
-      if (!tableName) throw new Error(`missing table name: ${sql}`)
-      if (this.tables.has(tableName)) return new FakeResult()
-      const columns = [...sql.matchAll(/"([^"]+)" (?:TEXT|REAL|INTEGER)/g)].map(
-        (match) => match[1]
-      )
-      this.tables.set(tableName, new Set(columns))
-      return new FakeResult()
-    }
-
-    if (sql.startsWith('PRAGMA table_info')) {
-      const tableName = sql.match(/PRAGMA table_info\("([^"]+)"\)/)?.[1]
-      if (!tableName) throw new Error(`missing pragma table name: ${sql}`)
-      return new FakeResult(
-        [...(this.tables.get(tableName) ?? [])].map((name) => ({ name }))
-      )
-    }
-
-    if (sql.startsWith('ALTER TABLE')) {
-      this.alters.push(sql)
-      const match = sql.match(/ALTER TABLE "([^"]+)" ADD COLUMN "([^"]+)"/)
-      if (!match) throw new Error(`unsupported alter: ${sql}`)
-      const [, tableName, columnName] = match
-      this.tables.get(tableName)?.add(columnName)
-      return new FakeResult()
-    }
-
-    if (sql.startsWith('INSERT OR REPLACE INTO _zero_schema_tables')) {
-      return new FakeResult()
-    }
-
-    throw new Error(`unexpected fake sql: ${sql}`)
+    if (sql.startsWith('ALTER TABLE')) this.alters.push(sql)
+    const statement = this.db.prepare(sql)
+    if (statement.reader) return new FakeResult(statement.all(...params))
+    statement.run(...params)
+    return new FakeResult()
   }
 }
 
@@ -247,14 +212,21 @@ describe('ZeroDO schema table maintenance', () => {
           columns: {
             id: { type: 'string' },
             caption: { type: 'string' },
-            syncMarker: { type: 'string' },
+            syncMarker: { type: 'number' },
           },
         },
       },
     })
 
-    expect([...sql.tables.get('post')!]).toEqual(['id', 'caption', 'syncMarker'])
-    expect(sql.alters).toEqual(['ALTER TABLE "post" ADD COLUMN "syncMarker" TEXT'])
+    expect(sql.exec('PRAGMA table_info("post")').toArray().map((row) => row.name)).toEqual([
+      'id',
+      'caption',
+      'syncMarker',
+    ])
+    expect(sql.alters).toEqual(['ALTER TABLE "post" ADD COLUMN "syncMarker" REAL'])
+    expect(() =>
+      sql.exec('INSERT INTO post (id, syncMarker) VALUES (?, ?)', 'bad', 'invalid')
+    ).toThrow('invalid number storage in post.syncMarker')
   })
 
   it('keeps transaction-tracked changes hidden until commit', async () => {

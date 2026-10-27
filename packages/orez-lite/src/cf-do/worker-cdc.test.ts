@@ -1637,11 +1637,11 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
   // declared `number` in the zero schema but the DO stores them as postgres
   // timestamp TEXT, so the snapshot must forward that text verbatim for the
   // engine to decode it — never coerce it with Number() into NaN/null.
-  async function snapshotFor(rows: Array<Record<string, unknown>>) {
+  async function snapshotFor(rows: Array<Record<string, unknown>>, affinity = 'REAL') {
     const { sql, zero } = await createWorkerCore()
     zero.tableSchemas = new Map()
     zero.schemaTables = new Set<string>()
-    sql.exec('CREATE TABLE message (id TEXT PRIMARY KEY, createdAt REAL)')
+    sql.exec(`CREATE TABLE message (id TEXT PRIMARY KEY, createdAt ${affinity})`)
     for (const row of rows) {
       sql.exec(
         'INSERT INTO "message" ("id", "createdAt") VALUES (?, ?)',
@@ -1698,6 +1698,14 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
       { id: 'space', createdAt: ' ' },
     ]
     expect(await snapshotFor(values)).toEqual(values)
+  })
+
+  it('preserves legacy numeric text beyond the safe integer range', async () => {
+    const values = [
+      { id: 'decimal', createdAt: '9007199254740992' },
+      { id: 'exponent', createdAt: '1e16' },
+    ]
+    expect(await snapshotFor(values, 'TEXT')).toEqual(values)
   })
 })
 
