@@ -1,10 +1,10 @@
 import { addContextToQuery, asQueryInternals } from '@rocicorp/zero/bindings'
-import { useQuery as zeroUseQuery } from '@rocicorp/zero/react'
+import { useQuery as zeroUseQuery, useZero } from '@rocicorp/zero/react'
 import { useContext, useEffect, useMemo, useRef, type Context } from 'react'
 
 import { IS_SERVER_RUNTIME } from './helpers/platform'
 import { useZeroDebug } from './helpers/useZeroDebug'
-import { QueryErrorRecovery } from './queryErrorRecovery'
+import { QueryErrorRecovery, useQueryFault, type QueryFaults } from './queryErrorRecovery'
 import { serializeQueryParams } from './queryJson'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery'
 
@@ -91,9 +91,11 @@ export function parseUseQueryArgs(paramsOrOptions: any, optionsArg: any) {
 export function createUseQuery<Schema extends ZeroSchema>({
   DisabledContext,
   customQueries,
+  getQueryFaults,
 }: {
   DisabledContext: Context<QueryControlMode>
   customQueries: AnyQueryRegistry
+  getQueryFaults: (zero: object) => QueryFaults | undefined
 }): UseQueryHook<Schema> {
   // SSG: return an inert hook. on-zero's bundled React copy isn't the same
   // one the SSG build's renderer initialises, so hook dispatch returns null.
@@ -157,6 +159,12 @@ export function createUseQuery<Schema extends ZeroSchema>({
       [effectiveEnabled, optionTTL]
     )
     const rawOut = zeroUseQuery(queryRequest, effectiveOptions)
+    const zero = useZero()
+    const faultOut = useQueryFault(
+      effectiveEnabled === false ? undefined : getQueryFaults(zero),
+      queryRequest,
+      rawOut
+    )
     const recovery = useMemo(() => new QueryErrorRecovery(), [queryRequest])
     useEffect(() => {
       if (recovery.changed(rawOut[0], rawOut[1].type) && rawOut[1].type === 'error') {
@@ -171,11 +179,11 @@ export function createUseQuery<Schema extends ZeroSchema>({
     // callers must never see null here. cheap drop-in: only allocates a new
     // tuple in the (rare) null case; the steady-state pass-through is one
     // identity check per render.
-    let out: any = rawOut
-    if (rawOut?.[0] === null) {
+    let out: any = faultOut
+    if (faultOut?.[0] === null) {
       const fallback = emptyResponseFor(queryRequest)
       if (fallback === EMPTY_RESPONSE_PLURAL) {
-        out = [EMPTY_PLURAL, rawOut[1] ?? RESULT_UNKNOWN]
+        out = [EMPTY_PLURAL, faultOut[1] ?? RESULT_UNKNOWN]
       }
     }
 

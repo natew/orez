@@ -166,6 +166,100 @@ test.each(['context', 'direct'] as const)(
   }
 )
 
+test.each(['context', 'direct'] as const)(
+  'a completed %s query reports later corruption and recovers after repair',
+  async (mode) => {
+    let phase: 'healthy' | 'corrupt' | 'repaired' = 'healthy'
+    let hash = ''
+    const fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body))
+      const puts = (request.queries?.patch ?? []).filter((op: any) => op.op === 'put')
+      if (puts[0]) hash = puts[0].hash
+      return new Response(
+        JSON.stringify({
+          cookie: phase === 'healthy' ? 1 : phase === 'corrupt' ? 2 : 3,
+          lastMutationIDChanges: {},
+          rowsPatch:
+            phase === 'corrupt'
+              ? []
+              : [
+                  {
+                    op: 'put',
+                    tableName: 'categorySpend',
+                    value: {
+                      category: 'Food',
+                      expenseCount: 1,
+                      spent: phase === 'healthy' ? 42 : 99,
+                    },
+                  },
+                ],
+          ...(request.queries
+            ? {
+                gotQueries: {
+                  version: request.queries.version,
+                  patch: puts.map((op: any) => ({ op: 'put', hash: op.hash })),
+                },
+              }
+            : {}),
+          queryErrors:
+            phase === 'corrupt' ? [{ hash, message: 'invalid stored value' }] : [],
+        }),
+        { headers: { 'content-type': 'application/json' } }
+      )
+    }
+    const plugin = createZeroClientTransport({ fetch })
+    const origin = `https://query-later-error-${mode}.orez.test`
+    installedTransport = plugin.install(origin)
+    const snapshots: Array<{ type: string; spent: unknown }> = []
+    let onComplete: () => void = () => {}
+    let onRepaired: () => void = () => {}
+    const complete = new Promise<void>((resolve) => {
+      onComplete = resolve
+    })
+    const repaired = new Promise<void>((resolve) => {
+      onRepaired = resolve
+    })
+    function Probe() {
+      const useQuery = mode === 'context' ? client.useQuery : client.useQueryDirect
+      const [rows, status] = useQuery(categorySpendQuery, { category: 'Food' })
+      snapshots.push({ type: status.type, spent: rows[0]?.spent })
+      if (status.type === 'complete') onComplete()
+      if (status.type === 'complete' && rows[0]?.spent === 99) onRepaired()
+      return null
+    }
+    await act(async () => {
+      root.render(
+        <client.ProvideZero
+          server={origin}
+          userID="query-later"
+          authData={{}}
+          logSink={silentLogSink}
+          transport={plugin}
+        >
+          <Probe />
+        </client.ProvideZero>
+      )
+    })
+    await act(async () => {
+      await complete
+    })
+    expect(snapshots.at(-1)).toEqual({ type: 'complete', spent: 42 })
+    phase = 'corrupt'
+    await act(async () => {
+      await installedTransport?.pull()
+    })
+    expect(snapshots.at(-1)).toEqual({ type: 'error', spent: 42 })
+    phase = 'repaired'
+    await act(async () => {
+      await installedTransport?.pull()
+    })
+    await act(async () => {
+      await repaired
+    })
+    expect(snapshots.at(-1)).toEqual({ type: 'complete', spent: 99 })
+  }
+)
+
 test('a mounted useQuery view updates after a custom mutation projects an aggregate', async () => {
   let rows: readonly { category: string; expenseCount: number; spent: number }[] = []
   function Probe() {

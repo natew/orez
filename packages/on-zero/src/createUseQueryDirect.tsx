@@ -15,7 +15,7 @@ import {
 } from './createUseQuery'
 import { useEmitterValue, type Emitter } from './helpers/emitter'
 import { IS_SERVER_RUNTIME } from './helpers/platform'
-import { QueryErrorRecovery } from './queryErrorRecovery'
+import { QueryErrorRecovery, useQueryFault, type QueryFaults } from './queryErrorRecovery'
 import { serializeQueryParams } from './queryJson'
 import { resolveQuery } from './resolveQuery'
 
@@ -61,6 +61,7 @@ export type CreateUseQueryDirect<Schema extends ZeroSchema> = (props: {
   customQueries: AnyQueryRegistry
   getZero: () => MaterializableZero | null
   zeroVersion: Emitter<number>
+  getQueryFaults: (zero: object) => QueryFaults | undefined
 }) => UseQueryHook<Schema>
 
 type DirectResultType = 'unknown' | 'complete' | 'error'
@@ -268,6 +269,7 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
   customQueries,
   getZero,
   zeroVersion,
+  getQueryFaults,
 }: Parameters<CreateUseQueryDirect<Schema>>[0]): UseQueryHook<Schema> {
   // SSG: return an inert hook — see createUseQuery for the rationale. resolve
   // each call's query shape so singular queries get [undefined, info] and
@@ -343,10 +345,15 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
     }, [queryRequest, enabled, ttl, zeroInstance])
 
     const getEmpty = () => emptyForQuery as DirectSnapshot
-    const out = useSyncExternalStore(
+    const rawOut = useSyncExternalStore(
       view ? view.subscribe : DISABLED_SUBSCRIBE,
       view ? view.getSnapshot : getEmpty,
       view ? view.getSnapshot : getEmpty
+    )
+    const out = useQueryFault(
+      zeroInstance && enabled && !disableMode ? getQueryFaults(zeroInstance) : undefined,
+      queryRequest,
+      rawOut
     )
 
     if (!disableMode) {

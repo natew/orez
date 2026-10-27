@@ -83,6 +83,62 @@ afterEach(async () => {
 })
 
 describe('Orez HTTP transport', () => {
+  test('reports a query that becomes corrupt after it was complete', async () => {
+    let corrupt = false
+    let hash = ''
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      const puts = (request.body.queries?.patch ?? []).filter(
+        (op: any) => op.op === 'put'
+      )
+      if (puts[0]) hash = puts[0].hash
+      return jsonResponse({
+        cookie: corrupt ? 2 : 1,
+        lastMutationIDChanges: {},
+        rowsPatch: corrupt
+          ? []
+          : [
+              { op: 'clear' },
+              {
+                op: 'put',
+                tableName: 'user_record',
+                value: { user_id: 'u1', display_name: 'healthy' },
+              },
+            ],
+        ...(request.body.queries
+          ? {
+              gotQueries: {
+                version: request.body.queries.version,
+                patch: puts.map((op: any) => ({ op: 'put', hash: op.hash })),
+              },
+            }
+          : {}),
+        queryErrors: corrupt ? [{ hash, message: 'invalid stored value' }] : [],
+      })
+    })
+    const transport = install(fetch)
+    const zero = createZero()
+    const view = zero.query.user.materialize()
+    expect(await waitForComplete<any[]>(view)).toEqual([{ id: 'u1', name: 'healthy' }])
+    const error = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('timed out waiting for query error')),
+        5_000
+      )
+      const unsubscribe = transport.subscribeLifecycle((event) => {
+        if (event.queryErrors?.length) {
+          clearTimeout(timer)
+          unsubscribe()
+          resolve(event.queryErrors[0])
+        }
+      })
+    })
+    corrupt = true
+    await transport.pull()
+    expect(await error).toMatchObject({ message: 'invalid stored value' })
+    view.destroy()
+  })
+
   test('delivers an isolated query error to stock Zero while another query completes', async () => {
     let repaired = false
     let failedHash: string | undefined

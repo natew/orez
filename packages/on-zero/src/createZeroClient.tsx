@@ -51,6 +51,7 @@ import {
 import { observeMutation, reportMutationInvocationError } from './helpers/useMutation'
 import { registerClientInstance } from './instanceRegistry'
 import { getAllMutationsPermissions, getMutationsPermissions } from './modelRegistry'
+import { QueryFaults } from './queryErrorRecovery'
 import { assertQueryJson } from './queryJson'
 import { registerQuery } from './queryRegistry'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery'
@@ -92,7 +93,12 @@ export type GroupedQueries = Record<string, Record<string, (...args: any[]) => a
 export type PermissionStrategy = 'optimistic' | 'optimistic-deny' | 'optimistic-allow'
 
 export type ZeroProviderTransport = {
-  install(serverURL: string): Pick<HttpPullTransport, 'subscribeLifecycle'> | undefined
+  install(
+    serverURL: string
+  ):
+    | (Pick<HttpPullTransport, 'subscribeLifecycle'> &
+        Partial<Pick<HttpPullTransport, 'pull'>>)
+    | undefined
   logClassifications?: {
     benign?: readonly ZeroLogPattern[]
   }
@@ -129,6 +135,7 @@ export type DirectQueryAdapter<Schema extends ZeroSchema> = (props: {
   customQueries: AnyQueryRegistry
   getZero: () => any
   zeroVersion: Emitter<number>
+  getQueryFaults: (zero: object) => QueryFaults | undefined
 }) => UseQueryHook<Schema>
 
 function getZeroProxyValue(instance: object, key: PropertyKey) {
@@ -335,8 +342,9 @@ export function createZeroClientInternal<
   let clientMutators: ReturnType<typeof createMutators> | null = null
   const installedTransports = new WeakMap<
     ZeroInstance,
-    Pick<HttpPullTransport, 'subscribeLifecycle'>
+    ReturnType<ZeroProviderTransport['install']>
   >()
+  const queryFaults = new WeakMap<object, QueryFaults>()
   function getClientMutators() {
     clientMutators ??= createMutators({
       models,
@@ -375,7 +383,7 @@ export function createZeroClientInternal<
     awaitReconnected,
     reload,
   }: ConstructZeroInstanceArgs): ZeroInstance {
-    let installedTransport: Pick<HttpPullTransport, 'subscribeLifecycle'> | undefined
+    let installedTransport: ReturnType<ZeroProviderTransport['install']>
     // install before construction so the instance's first connect goes through
     // HTTP. ensureHttpPullTransport is per-origin idempotent by design (a
     // rotation would otherwise chain shims), so repeat calls reuse.
@@ -433,7 +441,15 @@ export function createZeroClientInternal<
         options.onClientStateNotFound ?? recovery.onClientStateNotFound,
     })
     instanceRef.current = createdInstance
-    if (installedTransport) installedTransports.set(createdInstance, installedTransport)
+    if (installedTransport) {
+      installedTransports.set(createdInstance, installedTransport)
+      queryFaults.set(
+        createdInstance,
+        new QueryFaults(() => {
+          void installedTransport?.pull?.()
+        })
+      )
+    }
     primeGroupCache(recoveryDeps)
     return createdInstance
   }
@@ -600,6 +616,7 @@ export function createZeroClientInternal<
   const useQuery = createUseQuery<Schema>({
     DisabledContext,
     customQueries,
+    getQueryFaults: (zero) => queryFaults.get(zero),
   })
 
   const useQueryDirect = createDirectUseQuery
@@ -608,6 +625,7 @@ export function createZeroClientInternal<
         customQueries,
         getZero: () => zeroRuntime.zero,
         zeroVersion: zeroInstanceVersion!,
+        getQueryFaults: (zero) => queryFaults.get(zero),
       })
     : createUnavailableDirectUseQuery<Schema>()
 
@@ -1405,6 +1423,8 @@ export function createZeroClientInternal<
       ? installedTransport.subscribeLifecycle((event: HttpPullLifecycleEvent) => {
           if (event.type === 'pull' && event.clientID === zeroInstance.clientID) {
             authRefreshAttempts = 0
+            if (event.queryErrors)
+              queryFaults.get(zeroInstance)?.update(event.queryErrors)
           }
         })
       : undefined

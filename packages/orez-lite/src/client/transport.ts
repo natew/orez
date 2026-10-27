@@ -267,6 +267,7 @@ export type HttpPullLifecycleEvent = {
   httpStatus?: number
   pushFrameCount?: number
   mutationCount?: number
+  queryErrors?: Array<{ name: string; args: readonly unknown[]; message: string }>
 }
 
 type HttpPullPageRegistry = {
@@ -590,7 +591,10 @@ class ZeroHttpSocket {
   // version that bumps on each change, and the version/length of the delta the
   // in-flight pull sent so the server's ack can clear that prefix.
   private queryPatch: QueryPatchOp[] = []
-  private readonly queryNames = new Map<string, string>()
+  private readonly queryNames = new Map<
+    string,
+    { name: string; args: readonly unknown[] }
+  >()
   private queryVersion = 0
   private ackVersion = 0
   private sentVersion: number | undefined
@@ -795,7 +799,13 @@ class ZeroHttpSocket {
           this.emitPokeIfEffective(response)
         }
         if (queryErrors.length > 0) this.emitMessage(['transformError', queryErrors])
-        this.emitLifecycle('pull')
+        this.emitLifecycle('pull', {
+          queryErrors: response.queryErrors?.map(({ hash, message }) => ({
+            name: this.queryNames.get(hash)?.name ?? 'legacy',
+            args: this.queryNames.get(hash)?.args ?? [],
+            message,
+          })),
+        })
       })
       .catch((error) => {
         // superseded: nothing applied, so the replacement re-ships the same
@@ -1004,7 +1014,7 @@ class ZeroHttpSocket {
         const name = (op as { name?: string }).name ?? ''
         const args = ((op as { args?: readonly unknown[] }).args ??
           []) as readonly unknown[]
-        this.queryNames.set(op.hash, name || 'legacy')
+        this.queryNames.set(op.hash, { name: name || 'legacy', args })
         if (name && transform) {
           this.queryPatch.push({
             op: 'put',
@@ -1196,7 +1206,7 @@ class ZeroHttpSocket {
     return errors.map(({ hash, message }) => ({
       error: 'app',
       id: hash,
-      name: this.queryNames.get(hash) ?? 'legacy',
+      name: this.queryNames.get(hash)?.name ?? 'legacy',
       message,
     }))
   }
@@ -1620,7 +1630,13 @@ class ZeroHttpSocket {
     type: HttpPullLifecycleEvent['type'],
     detail: Pick<
       HttpPullLifecycleEvent,
-      'listener' | 'code' | 'reason' | 'httpStatus' | 'pushFrameCount' | 'mutationCount'
+      | 'listener'
+      | 'code'
+      | 'reason'
+      | 'httpStatus'
+      | 'pushFrameCount'
+      | 'mutationCount'
+      | 'queryErrors'
     > = {}
   ) {
     const event: HttpPullLifecycleEvent = {
