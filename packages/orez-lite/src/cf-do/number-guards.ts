@@ -77,7 +77,7 @@ export class NumberStorageGuards {
       }
     }
     const expected = new Set<string>()
-    const ddl: string[] = []
+    const ddl = new Map<string, string>()
     for (const [name, table] of Object.entries(this.schema.tables)) {
       const physical = table.serverName ?? table.name ?? name
       const current = this.shape(physical)
@@ -123,10 +123,12 @@ export class NumberStorageGuards {
           `SELECT CASE WHEN (OLD.${field} IS NOT NEW.${field} OR (${keyChanged})) AND NOT (${predicate}) THEN RAISE(ABORT, ${message}) END;`
         )
       }
-      ddl.push(
+      ddl.set(
+        insertName,
         `CREATE TRIGGER IF NOT EXISTS ${quote(insertName)} AFTER INSERT ON ${quote(physical)} BEGIN ${insert.join('')} END`
       )
-      ddl.push(
+      ddl.set(
+        updateName,
         `CREATE TRIGGER IF NOT EXISTS ${quote(updateName)} AFTER UPDATE ON ${quote(physical)} BEGIN ${update.join('')} END`
       )
     }
@@ -137,8 +139,9 @@ export class NumberStorageGuards {
       .toArray()) {
       const name = String(row.name)
       if (!expected.has(name)) this.sql.exec(`DROP TRIGGER ${quote(name)}`).toArray()
+      else ddl.delete(name)
     }
-    for (const statement of ddl) this.sql.exec(statement).toArray()
+    for (const statement of ddl.values()) this.sql.exec(statement).toArray()
   }
 
   suspend(): void {

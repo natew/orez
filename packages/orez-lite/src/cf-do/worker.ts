@@ -962,11 +962,16 @@ export class ZeroDO extends DurableObject {
     ctx.blockConcurrencyWhile(async () => {
       let recoveringTransactionId: string | null = null
       try {
+        let guardsSuspended = false
         const recovered = this.rollbackAtomicallyWithoutForeignKeys(() => {
           const transactionIDs = recoverTxJournal(
             this.sql,
             'application',
             (transactionID) => {
+              if (!guardsSuspended) {
+                this.numberGuards?.suspend()
+                guardsSuspended = true
+              }
               recoveringTransactionId = transactionID
               this.rollbackPendingTrackedChanges(transactionID)
             }
@@ -974,7 +979,7 @@ export class ZeroDO extends DurableObject {
           for (const transactionID of transactionIDs)
             this.deletePendingTrackedChanges(transactionID)
           return transactionIDs
-        })
+        }, false)
         if (recovered.length) this.invalidateSchemaCaches()
       } catch (error) {
         // transactionSync has restored the whole failed recovery attempt. retain
@@ -3178,11 +3183,14 @@ export class ZeroDO extends DurableObject {
    * The cursors must be consumed: workerd executes a statement only as its
    * cursor is read, so a discarded PRAGMA cursor silently never runs.
    */
-  private rollbackAtomicallyWithoutForeignKeys<T>(work: () => T): T {
+  private rollbackAtomicallyWithoutForeignKeys<T>(
+    work: () => T,
+    suspendGuards = true
+  ): T {
     this.sql.exec('PRAGMA foreign_keys = OFF').toArray()
     try {
       return this.atomicallySync(() => {
-        this.numberGuards?.suspend()
+        if (suspendGuards) this.numberGuards?.suspend()
         const result = work()
         this.numberGuards?.reconcile()
         return result
