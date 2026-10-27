@@ -15,6 +15,7 @@ import {
 } from './createUseQuery'
 import { useEmitterValue, type Emitter } from './helpers/emitter'
 import { IS_SERVER_RUNTIME } from './helpers/platform'
+import { QueryErrorRecovery } from './queryErrorRecovery'
 import { serializeQueryParams } from './queryJson'
 import { resolveQuery } from './resolveQuery'
 
@@ -134,6 +135,7 @@ class DirectViewWrapper implements DirectView {
   private snapshot: DirectSnapshot
   private readonly listeners = new Set<() => void>()
   private destroyTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly recovery = new QueryErrorRecovery()
 
   constructor(
     private readonly query: any,
@@ -148,6 +150,8 @@ class DirectViewWrapper implements DirectView {
 
   private onData = (data: unknown, resultType: string, error?: DirectQueryError) => {
     const cloned = data === undefined ? undefined : deepClone(data as ReadonlyJSONValue)
+    const retryAfterChange = this.recovery.changed(cloned, resultType)
+    const current = this.view
     this.snapshot = getSnapshot(
       this.singular,
       cloned,
@@ -157,6 +161,11 @@ class DirectViewWrapper implements DirectView {
     )
     for (const listener of this.listeners) {
       listener()
+    }
+    if (retryAfterChange) {
+      queueMicrotask(() => {
+        if (this.view === current && this.snapshot[1].type === 'error') this.retry()
+      })
     }
   }
 

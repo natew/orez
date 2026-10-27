@@ -1,9 +1,10 @@
 import { addContextToQuery, asQueryInternals } from '@rocicorp/zero/bindings'
 import { useQuery as zeroUseQuery } from '@rocicorp/zero/react'
-import { useContext, useMemo, useRef, type Context } from 'react'
+import { useContext, useEffect, useMemo, useRef, type Context } from 'react'
 
 import { IS_SERVER_RUNTIME } from './helpers/platform'
 import { useZeroDebug } from './helpers/useZeroDebug'
+import { QueryErrorRecovery } from './queryErrorRecovery'
 import { serializeQueryParams } from './queryJson'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery'
 
@@ -156,6 +157,12 @@ export function createUseQuery<Schema extends ZeroSchema>({
       [effectiveEnabled, optionTTL]
     )
     const rawOut = zeroUseQuery(queryRequest, effectiveOptions)
+    const recovery = useMemo(() => new QueryErrorRecovery(), [queryRequest])
+    useEffect(() => {
+      if (recovery.changed(rawOut[0], rawOut[1].type) && rawOut[1].type === 'error') {
+        rawOut[1].retry?.()
+      }
+    }, [rawOut, recovery])
 
     // normalize the rare null-data first snapshot for plural queries to []:
     // zero-react's viewStore briefly hands us [null, {type:'unknown'}] when a
