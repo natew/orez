@@ -629,16 +629,47 @@ if (packOnly && !patch && !minor && !major && !canary) {
 const versionMap = new Map(packages.map((p) => [p.pkg.name, p.next]))
 if (canary && !rePublish && !packOnly && !dryRun) {
   const response = await fetch('https://registry.npmjs.org/orez/canary')
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Could not verify the existing Orez canary: HTTP ${response.status}`)
+  }
   if (response.ok) {
-    const metadata = (await response.json()) as { releaseSourceCommit?: string }
+    const metadata = (await response.json()) as {
+      version?: string
+      releaseSourceCommit?: string
+    }
     const sourceCommit =
       process.env.GITHUB_SHA ||
       execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
-    if (metadata.releaseSourceCommit === sourceCommit) {
-      console.info(
-        `Canary already published from ${sourceCommit}; skipping duplicate release.`
+    if (metadata.releaseSourceCommit === sourceCommit && metadata.version) {
+      const version = metadata.version
+      const complete = await Promise.all(
+        packages.map(async ({ pkg }) => {
+          const result = await fetch(
+            `https://registry.npmjs.org/${encodeURIComponent(pkg.name)}/${encodeURIComponent(version)}`
+          )
+          if (result.status === 404) return false
+          if (!result.ok) {
+            throw new Error(
+              `Could not verify ${pkg.name}@${version}: HTTP ${result.status}`
+            )
+          }
+          const published = (await result.json()) as {
+            version?: string
+            releaseSourceCommit?: string
+          }
+          return (
+            published.version === version &&
+            published.releaseSourceCommit === sourceCommit
+          )
+        })
       )
-      process.exit(0)
+      if (complete.every(Boolean)) {
+        console.info(
+          `Canary ${version} already published from ${sourceCommit}; skipping duplicate release.`
+        )
+        process.exit(0)
+      }
+      console.info(`Canary ${version} is incomplete; publishing a fresh train.`)
     }
   }
 }
