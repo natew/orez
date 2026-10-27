@@ -55,7 +55,7 @@ type ClientUnion<Instances extends Record<string, ZeroInstanceManifestEntry>> =
 
 export function createZeroClients<
   const Instances extends Record<string, ZeroInstanceManifestEntry>,
->(instances: Instances) {
+>(instances: Instances, options: { inner: keyof Instances & string }) {
   const names = Object.keys(instances)
   if (names.length === 0) {
     throw new Error('[on-zero] createZeroClients requires at least one instance')
@@ -65,7 +65,12 @@ export function createZeroClients<
     names.unshift('default')
   }
 
-  const innerName = names[names.length - 1]!
+  const innerName = options.inner
+  if (!names.includes(innerName)) {
+    throw new Error(
+      `[on-zero] createZeroClients inner instance '${innerName}' is not in the manifest`
+    )
+  }
   const clients: Record<string, ReturnType<typeof createZeroClientInternal>> = {}
 
   // release the complete old partition atomically before any new instance
@@ -99,6 +104,9 @@ export function createZeroClients<
   return {
     clients: typedClients,
     providers,
-    combined: combineZeroClients(...orderedClients),
+    combined: combineZeroClients<[ClientUnion<Instances>, ...ClientUnion<Instances>[]]>(
+      ...orderedClients,
+      { inner: innerName }
+    ),
   }
 }

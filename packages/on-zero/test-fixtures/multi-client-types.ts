@@ -48,7 +48,12 @@ const dataConfig = defineConfig({
 const projectScope: 'projectId' | undefined = dataConfig.instances.project.scope
 void projectScope
 
-const { clients, combined } = createZeroClients({ default: account, project: message })
+const { clients, combined } = createZeroClients(
+  { default: account, project: message },
+  { inner: 'project' }
+)
+// @ts-expect-error the inner provider must name an instance from the manifest
+createZeroClients({ default: account, project: message }, { inner: 'missing' })
 const publicEvents: ZeroEventsEmitter = combined.zeroEvents
 
 void publicEvents

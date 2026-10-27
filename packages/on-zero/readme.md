@@ -611,7 +611,7 @@ duplicate namespaces, missing scope columns, and cross-instance reach.
 import { createZeroClients } from 'on-zero/multi'
 import { instances } from '~/data/generated/instances'
 
-const clients = createZeroClients(instances)
+const clients = createZeroClients(instances, { inner: 'project' })
 const control = clients.clients.control
 const project = clients.clients.project
 const ProvideControlZero = clients.providers.control
@@ -645,7 +645,8 @@ constraints:
   storage key / cache url) — never swap the backing namespace under a live
   instance.
 - single-instance apps can keep using plain `createZeroClient`.
-- give the INNER slot to the instance owning the bulk of the subscriptions —
+- name the innermost provider with `inner`, independent of manifest key order.
+  give the INNER slot to the instance owning the bulk of the subscriptions —
   inner queries use zero-react's native context path. outer instances use the
   direct adapter on their own mounted zero, so keep those instances on bounded,
   low-fanout queries (current user, settings, directories).
