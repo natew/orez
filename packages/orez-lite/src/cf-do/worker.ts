@@ -988,6 +988,9 @@ export class ZeroDO extends DurableObject {
         this.dropZeroHttpJournalResidue()
         this.dropBackupSnapshotTables()
         this.atomicallySync(() => this.numberGuards?.reconcile())
+        // an empty configured schema has no modeled cells to guard. reconcile
+        // once on wake to remove guards left by an earlier schema.
+        if (schema && Object.keys(schema.tables).length === 0) this.numberGuards = null
       }
       if (!this.writeBudgetDisabled) {
         const persisted = await ctx.storage.get<number | PersistedWriteBudgetTrip>(

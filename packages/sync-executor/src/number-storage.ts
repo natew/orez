@@ -1,6 +1,6 @@
+import jsonPredicate from './zero-json-predicate.json' with { type: 'json' }
 import predicate from './zero-number-predicate.json' with { type: 'json' }
 import wirePredicate from './zero-wire-predicate.json' with { type: 'json' }
-import jsonPredicate from './zero-json-predicate.json' with { type: 'json' }
 
 // shared with sync-core: the placeholder is an already-quoted SQL expression.
 export function numberStoragePredicate(value: string): string {

@@ -218,11 +218,12 @@ describe('ZeroDO schema table maintenance', () => {
       },
     })
 
-    expect(sql.exec('PRAGMA table_info("post")').toArray().map((row) => row.name)).toEqual([
-      'id',
-      'caption',
-      'syncMarker',
-    ])
+    expect(
+      sql
+        .exec('PRAGMA table_info("post")')
+        .toArray()
+        .map((row) => row.name)
+    ).toEqual(['id', 'caption', 'syncMarker'])
     expect(sql.alters).toEqual(['ALTER TABLE "post" ADD COLUMN "syncMarker" REAL'])
     expect(() =>
       sql.exec('INSERT INTO post (id, syncMarker) VALUES (?, ?)', 'bad', 'invalid')
