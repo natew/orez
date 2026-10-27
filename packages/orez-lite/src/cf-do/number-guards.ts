@@ -1,4 +1,8 @@
-import { numberStoragePredicate, wireStoragePredicate } from 'orez-sync-executor/sqlite'
+import {
+  jsonStoragePredicate,
+  numberStoragePredicate,
+  wireStoragePredicate,
+} from 'orez-sync-executor/sqlite'
 
 import type { DurableSqlStorage } from './watermark.js'
 import type { ZeroSchemaConfig } from 'orez-sync-executor'
@@ -6,6 +10,13 @@ import type { ZeroSchemaConfig } from 'orez-sync-executor'
 const prefix = '_orez_number_guard_'
 const quote = (value: string) => `"${value.replace(/"/g, '""')}"`
 const literal = (value: string) => `'${value.replace(/'/g, "''")}'`
+
+function validStorage(value: string, type: string): string {
+  const wire = wireStoragePredicate(value)
+  if (type === 'number') return `(${wire}) AND (${numberStoragePredicate(value)})`
+  if (type === 'json') return `(${wire}) AND (${jsonStoragePredicate(value)})`
+  return wire
+}
 
 /** Guards are durable SQLite triggers on the authoritative store, not its replicas. */
 export class NumberStorageGuards {
@@ -35,11 +46,8 @@ export class NumberStorageGuards {
       for (const [name, definition] of Object.entries(table.columns)) {
         const column = definition.serverName ?? name
         if (!current.has(column)) continue
-        const field = quote(column)
-        const valid =
-          definition.type === 'number'
-            ? `(${wireStoragePredicate(field)}) AND (${numberStoragePredicate(field)})`
-            : wireStoragePredicate(field)
+        const field = `_orez_guard_row.${quote(column)}`
+        const valid = validStorage(field, definition.type)
         const identity = [...keys, column]
           .flatMap((value) => {
             const field = quote(value)
@@ -48,7 +56,7 @@ export class NumberStorageGuards {
           .join(', ')
         const rows = this.sql
           .exec(
-            `SELECT json_array(${identity}) AS identity, count(*) AS count FROM ${quote(physical)} WHERE NOT (${valid}) GROUP BY identity`
+            `SELECT json_array(${identity}) AS identity, count(*) AS count FROM ${quote(physical)} AS _orez_guard_row WHERE NOT (${valid}) GROUP BY identity`
           )
           .toArray()
         for (const row of rows) {
@@ -98,19 +106,15 @@ export class NumberStorageGuards {
             .join('')
         )
         .join('_')
-      const insertName = `${prefix}${signature}_v3_insert`
-      const updateName = `${prefix}${signature}_v3_update`
+      const insertName = `${prefix}${signature}_v4_insert`
+      const updateName = `${prefix}${signature}_v4_update`
       expected.add(insertName)
       expected.add(updateName)
       const insert: string[] = []
       const update: string[] = []
       for (const column of columns) {
         const field = quote(column.name)
-        const valid = (value: string) =>
-          column.type === 'number'
-            ? `(${wireStoragePredicate(value)}) AND (${numberStoragePredicate(value)})`
-            : wireStoragePredicate(value)
-        const predicate = valid(`NEW.${field}`)
+        const predicate = validStorage(`NEW.${field}`, column.type)
         const message = literal(`invalid number storage in ${physical}.${column.name}`)
         insert.push(
           `SELECT CASE WHEN NOT (${predicate}) THEN RAISE(ABORT, ${message}) END;`

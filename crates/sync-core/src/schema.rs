@@ -845,7 +845,7 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 // idempotent, and the version feeds schema_revision so hosts re-run the
 // schema pass exactly once when new bodies ship.
 pub const TRIGGER_VERSION: u32 = 6;
-pub const NUMBER_GUARD_VERSION: u32 = 3;
+pub const NUMBER_GUARD_VERSION: u32 = 4;
 
 // the same sqlite predicate is used by the authoritative data worker. keeping
 // it in one file makes the accepted storage values independent of the host.
@@ -873,10 +873,22 @@ fn storage_predicate(value: &str, kind: ZeroColumnType) -> String {
             lines.join("\n")
         })
         .replace("__OREZ_NUMBER_VALUE__", value);
-    if kind == ZeroColumnType::Number {
-        format!("({wire}) AND ({})", number_storage_predicate(value))
-    } else {
-        wire
+    match kind {
+        ZeroColumnType::Number => format!("({wire}) AND ({})", number_storage_predicate(value)),
+        ZeroColumnType::Json => {
+            static JSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let predicate = JSON
+                .get_or_init(|| {
+                    let lines: Vec<String> = serde_json::from_str(include_str!(
+                        "../../../packages/sync-executor/src/zero-json-predicate.json"
+                    ))
+                    .expect("JSON storage predicate must be a JSON string array");
+                    lines.join("\n")
+                })
+                .replace("__OREZ_NUMBER_VALUE__", value);
+            format!("({wire}) AND ({predicate})")
+        }
+        _ => wire,
     }
 }
 
@@ -929,9 +941,9 @@ pub fn invalid_number_cells(
                     ]
                 })
                 .collect();
-            let field = quote_ident(physical_column);
+            let field = format!("_orez_guard_row.{}", quote_ident(physical_column));
             let query = format!(
-                "SELECT {} FROM {} WHERE NOT ({})",
+                "SELECT {} FROM {} AS _orez_guard_row WHERE NOT ({})",
                 fields.join(","),
                 quote_ident(physical_table),
                 storage_predicate(&field, *kind)

@@ -1,0 +1,6 @@
+[
+  "CASE WHEN typeof(__OREZ_NUMBER_VALUE__) IN ('text','blob') AND json_valid(CAST(__OREZ_NUMBER_VALUE__ AS TEXT))",
+  "THEN NOT EXISTS (SELECT 1 FROM json_tree(CAST(__OREZ_NUMBER_VALUE__ AS TEXT))",
+  "WHERE type IN ('integer','real') AND (value < -9007199254740991 OR value > 9007199254740991))",
+  "ELSE 1 END"
+]

@@ -3,6 +3,7 @@ import type { ApplicationDatabase, ApplicationTransaction } from './types.js'
 export { encodeSqlParams, encodeSqlValue } from './sql-wire.js'
 export {
   createTableIfAbsentTarget,
+  jsonStoragePredicate,
   numberStoragePredicate,
   wireStoragePredicate,
 } from './number-storage.js'

@@ -1567,6 +1567,27 @@ describe('ZeroDO write budget stickiness', () => {
 })
 
 describe('ZeroDO authoritative number storage', () => {
+  it('detects unsafe JSON in a column named value and permits repair', async () => {
+    const { sql } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT)')
+    sql.exec('INSERT INTO item VALUES (?, ?)', 'legacy', '{"n":9007199254740992}')
+    const guards = new NumberStorageGuards(sql, {
+      tables: {
+        item: {
+          primaryKey: ['id'],
+          columns: { id: { type: 'string' }, value: { type: 'json' } },
+        },
+      },
+    })
+    expect(guards.invalidCells().size).toBe(1)
+    guards.reconcile()
+    expect(() =>
+      sql.exec('INSERT INTO item VALUES (?, ?)', 'bad', '{"n":9007199254740993}')
+    ).toThrow('invalid number storage')
+    sql.exec('UPDATE item SET value = ? WHERE id = ?', '{"n":42}', 'legacy')
+    expect(guards.invalidCells().size).toBe(0)
+  })
+
   it('guards raw writes and schema-created cells while retaining legacy values for rollback', async () => {
     const { sql, zero } = await createWorkerCore()
     const schema = {

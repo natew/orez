@@ -117,6 +117,39 @@ fn authoritative_number_guard_rejects_unsafe_numeric_text() {
 }
 
 #[test]
+fn authoritative_guard_rejects_unsafe_integers_inside_json() {
+    let tables = Tables::from_zero_schema(&json!({"tables":{"item":{
+        "columns":{"id":{"type":"string"},"value":{"type":"json"}},
+        "primaryKey":["id"]
+    }}}))
+    .unwrap();
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT)", &[])
+        .unwrap();
+    db.exec(
+        "INSERT INTO item VALUES ('legacy', '{\"n\":9007199254740992}')",
+        &[],
+    )
+    .unwrap();
+    let before = sync_core::schema::invalid_number_cells(&mut db, &tables).unwrap();
+    assert_eq!(before.len(), 1);
+    sync_core::schema::init_number_storage_guards(&mut db, &tables).unwrap();
+    for sql in [
+        "INSERT INTO item VALUES ('bad', '{\"n\":9007199254740993}')",
+        "UPDATE item SET value = '[{\"n\":-9007199254740992}]' WHERE id = 'legacy'",
+    ] {
+        assert!(db.exec(sql, &[]).is_err(), "accepted {sql}");
+    }
+    db.exec(
+        "UPDATE item SET value = '{\"n\":9007199254740991}' WHERE id = 'legacy'",
+        &[],
+    )
+    .unwrap();
+    db.exec("INSERT INTO item VALUES ('raw', 'not json')", &[])
+        .unwrap();
+}
+
+#[test]
 fn initialization_cannot_add_poison_and_preserves_existing_invalid_cells() {
     let tables = Tables::from_zero_schema(&json!({"tables":{"item":{
         "columns":{"id":{"type":"string"},"amount":{"type":"number"}},
