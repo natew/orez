@@ -83,6 +83,96 @@ afterEach(async () => {
 })
 
 describe('Orez HTTP transport', () => {
+  test('delivers an isolated query error to stock Zero while another query completes', async () => {
+    let repaired = false
+    let failedHash: string | undefined
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      expect(request.body.queryErrorMode).toBe('per-query-v1')
+      const patch = request.body.queries?.patch ?? []
+      const bad = patch.filter(
+        (op: any) => op.op === 'put' && op.ast?.table === 'user_record'
+      )
+      const good = patch.filter(
+        (op: any) => op.op === 'put' && op.ast?.table !== 'user_record'
+      )
+      if (bad[0]) failedHash = bad[0].hash
+      if (repaired) {
+        return jsonResponse({
+          cookie: 2,
+          lastMutationIDChanges: {},
+          rowsPatch: [
+            {
+              op: 'put',
+              tableName: 'user_record',
+              value: { user_id: 'u1', display_name: 'repaired' },
+            },
+          ],
+          gotQueries: {
+            version: request.body.queries?.version ?? 1,
+            patch: [{ op: 'put', hash: failedHash }],
+          },
+          queryErrors: [],
+        })
+      }
+      return jsonResponse({
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch:
+          request.body.cookie === null
+            ? [
+                { op: 'clear' },
+                {
+                  op: 'put',
+                  tableName: 'project_record',
+                  value: { project_id: 'p1', owner_id: 'u1', project_name: 'healthy' },
+                },
+              ]
+            : [],
+        ...(request.body.queries
+          ? {
+              gotQueries: {
+                version: request.body.queries.version,
+                patch: good.map((op: any) => ({ op: 'put', hash: op.hash })),
+              },
+            }
+          : {}),
+        queryErrors: bad.map((op: any) => ({
+          hash: op.hash,
+          message: 'invalid stored value',
+        })),
+      })
+    })
+    const transport = install(fetch)
+    const zero = createZero()
+    const healthy = zero.query.project.materialize()
+    const affected = zero.query.user.materialize()
+    const error = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('timed out waiting for query error')),
+        5_000
+      )
+      affected.addListener((_data, type, details) => {
+        if (type !== 'error') return
+        clearTimeout(timer)
+        resolve(details)
+      })
+    })
+    const [rows, details] = await Promise.all([waitForComplete<any[]>(healthy), error])
+    expect(rows).toEqual([{ id: 'p1', ownerId: 'u1', name: 'healthy' }])
+    expect(details).toMatchObject({ message: 'invalid stored value' })
+    expect(zero.connection.state.current.name).toBe('connected')
+    repaired = true
+    await transport.pull()
+    const recovered = zero.query.user.materialize()
+    expect(await waitForComplete<any[]>(recovered)).toEqual([
+      { id: 'u1', name: 'repaired' },
+    ])
+    healthy.destroy()
+    affected.destroy()
+    recovered.destroy()
+  })
+
   test('connect + complete maps physical rows into a stock Zero materialized query', async () => {
     const requests: RequestRecord[] = []
     let cookie = 0

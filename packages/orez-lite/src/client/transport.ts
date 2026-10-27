@@ -592,6 +592,7 @@ class ZeroHttpSocket {
   // version that bumps on each change, and the version/length of the delta the
   // in-flight pull sent so the server's ack can clear that prefix.
   private queryPatch: QueryPatchOp[] = []
+  private readonly queryNames = new Map<string, string>()
   private queryVersion = 0
   private ackVersion = 0
   private sentVersion: number | undefined
@@ -789,6 +790,7 @@ class ZeroHttpSocket {
     )
       .then((response) => {
         if (abort.signal.aborted) return
+        const queryErrors = this.decodeQueryErrors(response)
         this.applyServerDeletedClients(response, deletedClientIDs)
         this.applyServerGotQueries(response)
         if (response.unchanged) {
@@ -796,6 +798,7 @@ class ZeroHttpSocket {
         } else {
           this.emitPokeIfEffective(response)
         }
+        if (queryErrors.length > 0) this.emitMessage(['transformError', queryErrors])
         this.emitLifecycle('pull')
       })
       .catch((error) => {
@@ -997,14 +1000,17 @@ class ZeroHttpSocket {
     const transform = this.state.queryTransform
     for (const op of desiredQueriesPatch as DesiredQueryPatchOp[]) {
       if (op.op === 'clear') {
+        this.queryNames.clear()
         this.queryPatch.push({ op: 'clear' })
       } else if (op.op === 'del') {
+        this.queryNames.delete(op.hash)
         this.queryPatch.push({ op: 'del', hash: op.hash })
       } else if (op.op === 'put') {
         const inline = (op as { ast?: unknown }).ast
         const name = (op as { name?: string }).name ?? ''
         const args = ((op as { args?: readonly unknown[] }).args ??
           []) as readonly unknown[]
+        this.queryNames.set(op.hash, name || 'legacy')
         if (name && transform) {
           this.queryPatch.push({
             op: 'put',
@@ -1183,6 +1189,28 @@ class ZeroHttpSocket {
     }
   }
 
+  private decodeQueryErrors(response: PullResponse) {
+    const errors = response.queryErrors
+    if (errors === undefined) return []
+    if (
+      !Array.isArray(errors) ||
+      errors.some(
+        (error) =>
+          !error ||
+          typeof error.hash !== 'string' ||
+          !error.hash ||
+          typeof error.message !== 'string'
+      )
+    )
+      throw new Error('Orez HTTP pull returned invalid queryErrors')
+    return errors.map(({ hash, message }) => ({
+      error: 'app',
+      id: hash,
+      name: this.queryNames.get(hash) ?? 'legacy',
+      message,
+    }))
+  }
+
   private applyServerDeletedClients(
     response: PullResponse,
     sentClientIDs: readonly string[]
@@ -1234,6 +1262,7 @@ class ZeroHttpSocket {
       clientID: this.clientID,
       clientGroupID,
       cookie: typeof cookie === 'number' ? cookie : toHttpCookie(cookie),
+      ...(includeQueries ? { queryErrorMode: 'per-query-v1' } : {}),
     }
     // ship the un-acked desired-query delta with the pull; remember what we
     // sent so the server ack can clear exactly that prefix. a recovery pull

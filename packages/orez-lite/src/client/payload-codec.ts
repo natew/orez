@@ -28,6 +28,11 @@ export type ServerGotQueries = {
   readonly patch: readonly GotQueryPatchOp[]
 }
 
+export type ServerQueryError = {
+  readonly hash: string
+  readonly message: string
+}
+
 export type PullResponse =
   | {
       readonly [key: string]: JSONValue | undefined
@@ -36,6 +41,7 @@ export type PullResponse =
       readonly rowsPatch: readonly JSONValue[]
       readonly unchanged?: false
       readonly gotQueries?: ServerGotQueries
+      readonly queryErrors?: readonly ServerQueryError[]
       readonly deletedClientIDs?: readonly string[]
     }
   | {
@@ -43,6 +49,7 @@ export type PullResponse =
       readonly cookie: number | null
       readonly unchanged: true
       readonly gotQueries?: ServerGotQueries
+      readonly queryErrors?: readonly ServerQueryError[]
       readonly deletedClientIDs?: readonly string[]
     }
 
