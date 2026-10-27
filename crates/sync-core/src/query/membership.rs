@@ -1310,10 +1310,12 @@ pub fn recompute_group(
         tables,
         group,
         changed,
-        &BTreeSet::new(),
-        false,
-        0,
-        false,
+        RecomputeOptions {
+            rehydrate: &BTreeSet::new(),
+            rehydrate_all: false,
+            version: 0,
+            isolate_errors: false,
+        },
     )?
     .0)
 }
@@ -1378,16 +1380,26 @@ fn live_zero_row(tables: &Tables, table: &str, row: &Row) -> Result<Value, Engin
     zero_row(tables, table, spec, row)
 }
 
+pub(crate) struct RecomputeOptions<'a> {
+    pub rehydrate: &'a BTreeSet<String>,
+    pub rehydrate_all: bool,
+    pub version: i64,
+    pub isolate_errors: bool,
+}
+
 pub(crate) fn recompute_group_with_rehydrate(
     db: &mut dyn SyncDb,
     tables: &Tables,
     group: &str,
     changed: &BTreeSet<(String, String)>,
-    rehydrate: &BTreeSet<String>,
-    rehydrate_all: bool,
-    version: i64,
-    isolate_errors: bool,
+    options: RecomputeOptions<'_>,
 ) -> Result<MembershipDiff, EngineError> {
+    let RecomputeOptions {
+        rehydrate,
+        rehydrate_all,
+        version,
+        isolate_errors,
+    } = options;
     let queries = active_queries(db, group)?;
     validate_queries(tables, &queries)?;
 

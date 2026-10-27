@@ -20,10 +20,10 @@ use crate::store;
 use crate::wire;
 
 use super::membership::{
-    advance_query_ack, canonical_pk_text, clear_desires, client_query_version, delete_clients,
-    desired_hashes, has_uncomputed_queries, prepare_transform_version, prune_tombstones,
-    recompute_group_with_rehydrate, register_query, remove_desire, set_desire, transitions_since,
-    validate_active_queries,
+    RecomputeOptions, advance_query_ack, canonical_pk_text, clear_desires, client_query_version,
+    delete_clients, desired_hashes, has_uncomputed_queries, prepare_transform_version,
+    prune_tombstones, recompute_group_with_rehydrate, register_query, remove_desire, set_desire,
+    transitions_since, validate_active_queries,
 };
 
 const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
@@ -301,10 +301,12 @@ pub fn handle_query_pull(
         tables,
         group,
         &changed,
-        &rehydrate,
-        full_response,
-        current,
-        isolate_errors,
+        RecomputeOptions {
+            rehydrate: &rehydrate,
+            rehydrate_all: full_response,
+            version: current,
+            isolate_errors,
+        },
     )?;
     if !full_response {
         // replay membership transitions another client of this group already
