@@ -1731,34 +1731,6 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
 })
 
 describe('ZeroDO change feed type fidelity', () => {
-  it('fails closed instead of rounding legacy JSON integers in snapshots and changes', async () => {
-    const { sql, zero } = await createWorkerCore()
-    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, meta TEXT)')
-    sql.exec('INSERT INTO item VALUES (?, ?)', 'legacy', '{"amount":9007199254740993}')
-    zero.ensureSchemaTables({
-      tables: {
-        item: {
-          primaryKey: ['id'],
-          columns: { id: { type: 'string' }, meta: { type: 'json' } },
-        },
-      },
-    })
-    const snapshot = await zero.handleSnapshot()
-    expect(snapshot.status).toBe(500)
-    expect(sql.exec('SELECT meta FROM item').one()?.meta).toBe(
-      '{"amount":9007199254740993}'
-    )
-    zero.cdc.syncTables([{ physicalTableName: 'item', tableName: 'item' }])
-    zero.executeSQL("UPDATE item SET meta = '{\"amount\":42}' WHERE id = 'legacy'", [], {
-      physicalTableName: 'item',
-      tableName: 'item',
-      operation: 'UPDATE',
-      rowColumns: ['id', 'meta'],
-    })
-    const changes = await zero.fetch(new Request('http://do/changes?watermark=0'))
-    expect(changes.status).toBe(500)
-  })
-
   it('decodes schema JSON columns from trigger-captured storage text', async () => {
     const { zero } = await createWorkerCore()
     zero.ensureSchemaTables({

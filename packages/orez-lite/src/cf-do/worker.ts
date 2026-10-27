@@ -1936,8 +1936,7 @@ export class ZeroDO extends DurableObject {
       const changes = this.readChangesSince(
         watermark,
         changeLimit,
-        4 * 1024 * 1024 - 1024,
-        true
+        4 * 1024 * 1024 - 1024
       )
       return Response.json({
         watermark: head,
@@ -2075,7 +2074,7 @@ export class ZeroDO extends DurableObject {
           }
           return Response.json({
             watermark: this.watermark(),
-            rows: rawRows.map((row) => this.normalizeRow(table, row, true)),
+            rows: rawRows.map((row) => this.normalizeRow(table, row)),
             nextCursor,
           })
         })
@@ -2094,7 +2093,7 @@ export class ZeroDO extends DurableObject {
           tables[name] = this.sql
             .exec(`SELECT * FROM ${quoteIdent(physicalName)}`)
             .toArray()
-            .map((row: any) => this.normalizeRow(name, row, true))
+            .map((row: any) => this.normalizeRow(name, row))
         }
         return Response.json({ watermark: this.watermark(), tables })
       })
@@ -3825,12 +3824,7 @@ export class ZeroDO extends DurableObject {
     return deletePendingChanges(this.sql, transactionID)
   }
 
-  private readChangesSince(
-    watermark: number,
-    limit?: number,
-    maxBytes?: number,
-    strictJson = false
-  ) {
+  private readChangesSince(watermark: number, limit?: number, maxBytes?: number) {
     this.watermarks.ensureTables()
     const statement =
       'SELECT watermark, table_name, op, row_data, old_data, created_at FROM _zero_changes WHERE watermark > ? ORDER BY watermark' +
@@ -3852,8 +3846,8 @@ export class ZeroDO extends DurableObject {
             : Number(row.created_at),
         tableName,
         op: String(row.op),
-        rowData: rowData ? this.normalizeRow(tableName, rowData, strictJson) : null,
-        oldData: oldData ? this.normalizeRow(tableName, oldData, strictJson) : null,
+        rowData: rowData ? this.normalizeRow(tableName, rowData) : null,
+        oldData: oldData ? this.normalizeRow(tableName, oldData) : null,
       }
       if (maxBytes !== undefined) {
         const changeBytes = encoder.encode(JSON.stringify(change)).byteLength + 1
@@ -4065,8 +4059,7 @@ export class ZeroDO extends DurableObject {
 
   private normalizeRow(
     tn: string,
-    row: Record<string, unknown>,
-    strictJson = false
+    row: Record<string, unknown>
   ): Record<string, unknown> {
     const schema = this.schemaForTable(tn)
     const normalized: Record<string, unknown> = {}
@@ -4101,27 +4094,10 @@ export class ZeroDO extends DurableObject {
             ? numeric
             : value
       } else if (type === 'json' && typeof value === 'string') {
-        let unsafeNumber = false
         try {
-          normalized[key] = JSON.parse(
-            value,
-            strictJson
-              ? (_key, entry: unknown) => {
-                  if (
-                    typeof entry === 'number' &&
-                    (!Number.isFinite(entry) || Math.abs(entry) > Number.MAX_SAFE_INTEGER)
-                  ) {
-                    unsafeNumber = true
-                  }
-                  return entry
-                }
-              : undefined
-          )
+          normalized[key] = JSON.parse(value)
         } catch {
           normalized[key] = value
-        }
-        if (strictJson && unsafeNumber) {
-          throw new Error(`stored JSON value cannot be represented: ${tn}.${key}`)
         }
       } else {
         normalized[key] = value
