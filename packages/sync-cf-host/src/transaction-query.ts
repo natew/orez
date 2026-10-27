@@ -262,7 +262,7 @@ const FINITE_NUMBER_TEXT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/
 const TIMESTAMP_TEXT =
   /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|([+-])(\d{2})(?::?(\d{2}))?)?$/
 
-function numberFromStorageText(value: string): number | undefined {
+export function numberFromStorageText(value: string): number | undefined {
   if (FINITE_NUMBER_TEXT.test(value)) {
     const numeric = Number(value)
     if (Number.isFinite(numeric)) return numeric === 0 ? 0 : numeric

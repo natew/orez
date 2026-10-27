@@ -1624,6 +1624,15 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
     const rows = await snapshotFor([{ id: 'm3', createdAt: 1_783_776_886_000 }])
     expect(rows).toEqual([{ id: 'm3', createdAt: 1_783_776_886_000 }])
   })
+
+  it('preserves unconvertible legacy number cells in snapshot output', async () => {
+    const values = [
+      { id: 'empty', createdAt: '' },
+      { id: 'hex', createdAt: '0x10' },
+      { id: 'space', createdAt: ' ' },
+    ]
+    expect(await snapshotFor(values)).toEqual(values)
+  })
 })
 
 describe('ZeroDO change feed type fidelity', () => {

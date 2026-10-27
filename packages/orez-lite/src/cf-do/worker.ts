@@ -2,6 +2,7 @@
 import { DurableObject, RpcTarget } from 'cloudflare:workers'
 import {
   executeTransactionQueryPlan,
+  numberFromStorageText,
   type CompiledTransactionQueryPlan,
   type TransactionQueryBudget,
 } from 'orez-sync-cf-host/transaction-query'
@@ -4022,8 +4023,13 @@ export class ZeroDO extends DurableObject {
         // feed. Forward a non-numeric value untouched so the engine's
         // timestamp_text_to_epoch_ms decodes it, matching the /changes feed
         // which forwards the raw text.
-        const numeric = Number(value)
-        normalized[key] = Number.isFinite(numeric) ? numeric : value
+        const numeric = typeof value === 'string' ? Number(value) : value
+        normalized[key] =
+          typeof numeric === 'number' &&
+          Number.isFinite(numeric) &&
+          (typeof value !== 'string' || numberFromStorageText(value) !== undefined)
+            ? numeric
+            : value
       } else if (type === 'json' && typeof value === 'string') {
         try {
           normalized[key] = JSON.parse(value)
