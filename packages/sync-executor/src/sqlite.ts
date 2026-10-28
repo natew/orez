@@ -2,6 +2,7 @@ import type { ApplicationDatabase, ApplicationTransaction } from './types.js'
 
 export { encodeSqlParams, encodeSqlValue } from './sql-wire.js'
 export {
+  cellPreservingDdl,
   createTableIfAbsentTarget,
   jsonStoragePredicate,
   numberStoragePredicate,

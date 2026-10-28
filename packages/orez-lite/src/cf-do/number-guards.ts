@@ -40,6 +40,10 @@ export class NumberStorageGuards {
       const physical = table.serverName ?? table.name ?? name
       const current = this.shape(physical)
       if (current.size === 0) continue
+      // an empty table holds no cell to be invalid, and a fresh object boots
+      // through every migration with all of them empty
+      if (this.sql.exec(`SELECT 1 FROM ${quote(physical)} LIMIT 1`).toArray().length === 0)
+        continue
       const keys = table.primaryKey
         .map((key) => table.columns[key]?.serverName ?? key)
         .filter((key) => current.has(key))

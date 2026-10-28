@@ -7,7 +7,7 @@ import {
   type TransactionQueryBudget,
 } from 'orez-sync-cf-host/transaction-query'
 import { trackBillableCursorRows } from 'orez-sync-executor/sql-billing'
-import { createTableIfAbsentTarget } from 'orez-sync-executor/sqlite'
+import { cellPreservingDdl, createTableIfAbsentTarget } from 'orez-sync-executor/sqlite'
 
 import {
   classifySql,
@@ -3377,15 +3377,18 @@ export class ZeroDO extends DurableObject {
     const backupDrop = this.backupMaintenance
       ? /^DROP TABLE IF EXISTS "((?:[^"]|"")+)"$/.exec(sql)?.[1]?.replaceAll('""', '"')
       : undefined
+    const preserving = schemaChange ? cellPreservingDdl(sql) : undefined
     const checkGuard =
       !!this.numberGuards &&
       schemaChange &&
       !backupDrop &&
+      preserving !== 'index' &&
       !(
         existing &&
         this.sql.exec(`PRAGMA table_xinfo(${quoteIdent(existing)})`).toArray().length
       )
-    const invalidCells = checkGuard ? this.numberGuards?.invalidCells() : undefined
+    const invalidCells =
+      checkGuard && !preserving ? this.numberGuards?.invalidCells() : undefined
     const suspendedCdc = this.cdc.beginSchemaChange(sql)
     let cursor: ReturnType<DurableSqlStorage['exec']>
     try {
