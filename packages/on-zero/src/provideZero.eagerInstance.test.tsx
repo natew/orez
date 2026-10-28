@@ -233,3 +233,30 @@ test('disable=true constructs nothing', () => {
 
   expect(fakeZero.instances.length).toBe(0)
 })
+
+test('unmounting one of two overlapping providers keeps the shared instance published', () => {
+  const client = makeClient()
+  const first = createRoot(document.createElement('div'))
+  root = createRoot(container)
+  const mount = (target: Root | null) =>
+    act(() => {
+      target?.render(
+        <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID="shared">
+          <span>ok</span>
+        </client.ProvideZero>
+      )
+    })
+
+  mount(first)
+  mount(root)
+  expect(fakeZero.instances.length).toBe(1)
+
+  act(() => first.unmount())
+  expect((client.zero as unknown as { clientID: string }).clientID).toBe(
+    fakeZero.instances[0].clientID
+  )
+
+  act(() => root?.unmount())
+  root = null
+  expect(() => client.zero.clientID).toThrow(/Zero instance not initialized/)
+})

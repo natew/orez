@@ -1262,6 +1262,12 @@ export function createZeroClientInternal<
 
   const ProvideZero = IS_SERVER_RUNTIME ? ProvideZeroServer : ProvideZeroClient
 
+  // committed SetZeroInstance mounts per client. a tree can hold two mounts of
+  // one client at once (a remounted subtree commits before its predecessor
+  // cleans up), and the first cleanup must not clear a facade the second
+  // still owns.
+  const publishedMounts = new Map<ZeroInstance, number>()
+
   const SetZeroInstance = () => {
     const zeroInstance = useZero<Schema, ZeroMutators>()
 
@@ -1274,7 +1280,14 @@ export function createZeroClientInternal<
       // provider actually unmounts, which is the lifecycle boundary that
       // invalidates this generation.
       publishZeroInstance(zeroInstance)
+      publishedMounts.set(zeroInstance, (publishedMounts.get(zeroInstance) ?? 0) + 1)
       return () => {
+        const remaining = publishedMounts.get(zeroInstance)! - 1
+        if (remaining > 0) {
+          publishedMounts.set(zeroInstance, remaining)
+          return
+        }
+        publishedMounts.delete(zeroInstance)
         if (!unpublishZeroInstance(zeroInstance)) return
         mutationLifecycle.fence()
       }
