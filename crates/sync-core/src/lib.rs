@@ -67,7 +67,8 @@ pub use upstream::{
     ApplyUpstreamResult, FeedOptionalColumns, SnapshotProgress, SnapshotState, UpstreamBatch,
     UpstreamChange, UpstreamSnapshot, apply_snapshot_changes, apply_snapshot_page, apply_upstream,
     apply_upstream_snapshot, begin_snapshot_generation, dropped_feed_columns_need_snapshot,
-    finalize_snapshot_generation, read_snapshot_progress, upstream_watermark,
+    finalize_snapshot_generation, finalize_table_bootstrap, read_snapshot_progress,
+    upstream_watermark,
 };
 pub use value::{
     ZeroColumnType, canonical_pk, canonical_pk_text, to_zero_value, to_zero_value_json,

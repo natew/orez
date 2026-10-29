@@ -31,6 +31,7 @@ import {
   engine_dropped_feed_columns_need_snapshot,
   engine_finalize,
   engine_finalize_snapshot_generation,
+  engine_finalize_table_bootstrap,
   engine_handle_query_pull,
   engine_init_query_schema,
   engine_init_schema,
@@ -842,6 +843,8 @@ export function createSyncDurableObject<
     #executorBeforeCommitFault: FaultKind | null = null
     #bootID = crypto.randomUUID()
     #initialized = false
+    #tableBootstrap: string[] | null = null
+    #snapshotRequired = false
     #initSkipped = false
     // whether this instance has asked the engine if a column it dropped while
     // running behind its feed is now modeled. the answer lives in the engine's
@@ -1061,7 +1064,44 @@ export function createSyncDurableObject<
           config.schema,
           config.initialize.toString(),
         ])
-        this.#initSkipped = this.#controlGet('initFingerprint') === initFingerprint
+        const previousFingerprint = this.#controlGet('initFingerprint')
+        this.#initSkipped = previousFingerprint === initFingerprint
+        const pendingBootstrap = this.#controlGet('tableBootstrap')
+        this.#snapshotRequired = pendingBootstrap !== null
+        const storedTables: string[] = JSON.parse(pendingBootstrap ?? '[]')
+        const pendingTables = storedTables.filter((table) =>
+          Object.hasOwn(config.schema.tables, table)
+        )
+        this.#tableBootstrap = pendingTables.length > 0 ? pendingTables : null
+        if (pendingTables.length !== storedTables.length) {
+          if (pendingTables.length > 0)
+            this.#controlSet('tableBootstrap', JSON.stringify(pendingTables))
+          else {
+            this.#controlDelete('tableBootstrap')
+            this.#snapshotRequired = false
+          }
+        }
+        if (config.upstream && previousFingerprint && !this.#initSkipped) {
+          const previous: [unknown, unknown, Schema, unknown] =
+            JSON.parse(previousFingerprint)
+          const added = Object.keys(config.schema.tables).filter(
+            (table) => !Object.hasOwn(previous[2].tables, table)
+          )
+          if (added.length > 0) {
+            // an existing full snapshot still needs its complete replacement.
+            // otherwise only the added tables need an initial source baseline.
+            if (
+              this.#tableBootstrap ||
+              (!this.#snapshotRequired && !this.#snapshotProgress())
+            ) {
+              this.#tableBootstrap = [
+                ...new Set([...(this.#tableBootstrap ?? []), ...added]),
+              ].sort()
+            }
+            this.#snapshotRequired = true
+            this.#controlSet('tableBootstrap', JSON.stringify(this.#tableBootstrap ?? []))
+          }
+        }
         if (!this.#initSkipped) {
           this.#directSql.exec(`CREATE TABLE IF NOT EXISTS orez_revocations (
             user_id TEXT NOT NULL,
@@ -1521,12 +1561,15 @@ export function createSyncDurableObject<
       return page as SnapshotPage
     }
 
-    async #beginSnapshotGeneration(path: string): Promise<{
-      progress: SnapshotProgress
+    async #beginSnapshotGeneration(
+      path: string,
+      selected?: readonly string[]
+    ): Promise<{
+      progress: SnapshotProgress | null
       page: SnapshotPage
       pageLimit: number
     }> {
-      const table = Object.keys(config.schema.tables).sort()[0]
+      const table = selected?.[0] ?? Object.keys(config.schema.tables).sort()[0]
       if (!table) throw requestError('paged snapshots require a modeled table', 500)
       let pageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS
       let page: SnapshotPage
@@ -1541,6 +1584,11 @@ export function createSyncDurableObject<
             cursor: null,
           })
         }
+      }
+      // an intentionally private upstream table remains empty until it is
+      // published. retain the bootstrap request and keep live ingest running.
+      if (selected && page.unpublishedTables?.includes(table)) {
+        return { progress: null, page, pageLimit }
       }
       this.#resetSnapshotBillingWindow()
       const progress = this.#withIngestBilling(
@@ -1560,7 +1608,11 @@ export function createSyncDurableObject<
             )
           )
       ) as SnapshotProgress
-      return { progress, page, pageLimit }
+      return {
+        progress,
+        page: progress.table === table ? page : { ...page, rows: [], nextCursor: null },
+        pageLimit,
+      }
     }
 
     // starts the first page of every other modeled table once the generation's
@@ -1590,6 +1642,38 @@ export function createSyncDurableObject<
       const page = prefetch.pages.get(table) ?? null
       prefetch.pages.delete(table)
       return page ? await page : null
+    }
+
+    #publishTableBootstrap(
+      tables: string[],
+      progress: SnapshotProgress
+    ): ApplyUpstreamResult {
+      this.#resetSnapshotBillingWindow()
+      const result = this.#withIngestBilling(
+        { phase: 'table_bootstrap_publish', generation: progress.generation },
+        () =>
+          this.ctx.storage.transactionSync(() => {
+            const published = this.#wasm(() =>
+              engine_finalize_table_bootstrap(
+                this.#engineDb,
+                config.schema,
+                tables,
+                progress.generation,
+                progress.catchupWatermark
+              )
+            ) as ApplyUpstreamResult
+            if (published.caughtUp)
+              this.#directSql.exec(
+                "DELETE FROM _zsync_host_control WHERE key = 'tableBootstrap'"
+              )
+            return published
+          })
+      ) as ApplyUpstreamResult
+      if (result.caughtUp) {
+        this.#tableBootstrap = null
+        this.#snapshotRequired = false
+      }
+      return result
     }
 
     #ingest(upstreamPath?: string | null, forceSnapshot = false): Promise<number> {
@@ -1624,6 +1708,8 @@ export function createSyncDurableObject<
           }
         }
         let progress = this.#snapshotProgress()
+        const bootstrap = forceSnapshot ? undefined : (this.#tableBootstrap ?? undefined)
+        if (this.#snapshotRequired && !progress) forceSnapshot = true
         this.#ingestBreaker.assertReady()
         const startingWatermark = this.#engineState().watermark
         let total = 0
@@ -1633,6 +1719,17 @@ export function createSyncDurableObject<
         let oldestLiveCommitTimeMs: number | undefined
         const changedTables = new Set<string>()
         for (;;) {
+          if (forceSnapshot) {
+            if (this.#snapshotRequired && !bootstrap) {
+              this.#tableBootstrap = null
+              this.#controlSet('tableBootstrap', '[]')
+            }
+            forceSnapshot = false
+            const begun = await this.#beginSnapshotGeneration(path, bootstrap)
+            progress = begun.progress
+            pendingPage = begun.page
+            snapshotPageLimit = begun.pageLimit
+          }
           if (progress?.state === 'paging') {
             const activeProgress = progress
             const table = activeProgress.table
@@ -1643,7 +1740,7 @@ export function createSyncDurableObject<
             }
             let page: SnapshotPage | null = pendingPage
             try {
-              if (snapshotPageLimit === DEFAULT_SNAPSHOT_PAGE_ROWS) {
+              if (!bootstrap && snapshotPageLimit === DEFAULT_SNAPSHOT_PAGE_ROWS) {
                 this.#prefetchSnapshotFirstPages(path, activeProgress.generation, table)
                 if (activeProgress.cursor === null) {
                   page ??= await this.#takePrefetchedSnapshotPage(
@@ -1652,12 +1749,24 @@ export function createSyncDurableObject<
                   )
                 }
               }
-              page ??= await this.#fetchSnapshotPage(
-                path,
-                table,
-                activeProgress.cursor,
-                snapshotPageLimit
-              )
+              page ??=
+                bootstrap && !bootstrap.includes(table)
+                  ? {
+                      watermark: Number(activeProgress.startWatermark),
+                      rows: [],
+                      nextCursor: null,
+                    }
+                  : await this.#fetchSnapshotPage(
+                      path,
+                      table,
+                      activeProgress.cursor,
+                      snapshotPageLimit
+                    )
+              if (bootstrap && page.unpublishedTables?.includes(table)) {
+                progress = null
+                pendingPage = null
+                continue
+              }
               const pageToApply = page
               this.#resetSnapshotBillingWindow()
               const nextProgress = this.#withIngestBilling(
@@ -1703,13 +1812,31 @@ export function createSyncDurableObject<
 
           if (progress?.state === 'catching_up') {
             const activeProgress = progress
-            const cursor = activeProgress.catchupWatermark
+            if (bootstrap && activeProgress.cursor !== null) {
+              const result = this.#publishTableBootstrap(bootstrap, activeProgress)
+              total += result.applied
+              this.#recordIngestLogicalRows(result.applied)
+              progress = this.#snapshotProgress()
+              continue
+            }
+            const liveCursor = bootstrap
+              ? this.#engineState().upstreamWatermark
+              : activeProgress.catchupWatermark
+            const cursor =
+              BigInt(activeProgress.catchupWatermark) < BigInt(liveCursor)
+                ? activeProgress.catchupWatermark
+                : liveCursor
             const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
             endpoint.searchParams.set('since', cursor)
             endpoint.searchParams.set('limit', String(upstreamLimit))
             const { response, body } = await this.#fetchUpstreamJson(endpoint)
             if (response.status === 410) {
-              const begun = await this.#beginSnapshotGeneration(path)
+              if (bootstrap)
+                throw requestError(
+                  'table bootstrap requires a retained live feed cursor',
+                  409
+                )
+              const begun = await this.#beginSnapshotGeneration(path, bootstrap)
               progress = begun.progress
               pendingPage = begun.page
               snapshotPageLimit = begun.pageLimit
@@ -1750,20 +1877,40 @@ export function createSyncDurableObject<
                 changeRows: batch.changes.length,
               },
               () =>
-                this.ctx.storage.transactionSync(() =>
-                  this.#wasm(() =>
+                this.ctx.storage.transactionSync(() => {
+                  const live = bootstrap
+                    ? (this.#wasm(() =>
+                        engine_apply_upstream(this.#engineDb, config.schema, batch)
+                      ) as ApplyUpstreamResult)
+                    : null
+                  const staged = this.#wasm(() =>
                     engine_apply_snapshot_changes(
                       this.#engineDb,
                       config.schema,
                       activeProgress.generation,
                       batch
                     )
-                  )
-                )
+                  ) as ApplyUpstreamResult
+                  return {
+                    ...staged,
+                    applied: staged.applied + (live?.applied ?? 0),
+                    caughtUp: staged.caughtUp && (live?.caughtUp ?? true),
+                  }
+                })
             ) as ApplyUpstreamResult
             total += result.applied
             this.#recordIngestLogicalRows(result.applied)
             if (result.caughtUp) {
+              if (bootstrap) {
+                const published = this.#publishTableBootstrap(bootstrap, {
+                  ...activeProgress,
+                  catchupWatermark: String(result.watermark),
+                })
+                total += published.applied
+                this.#recordIngestLogicalRows(published.applied)
+                progress = this.#snapshotProgress()
+                continue
+              }
               this.#resetSnapshotBillingWindow()
               this.#withIngestBilling(
                 {
@@ -1772,7 +1919,7 @@ export function createSyncDurableObject<
                   watermark: result.watermark,
                 },
                 () =>
-                  this.ctx.storage.transactionSync(() =>
+                  this.ctx.storage.transactionSync(() => {
                     this.#wasm(() =>
                       engine_finalize_snapshot_generation(
                         this.#engineDb,
@@ -1781,10 +1928,16 @@ export function createSyncDurableObject<
                         String(result.watermark)
                       )
                     )
-                  )
+                    if (this.#snapshotRequired)
+                      this.#directSql.exec(
+                        "DELETE FROM _zsync_host_control WHERE key = 'tableBootstrap'"
+                      )
+                  })
               )
+              this.#tableBootstrap = null
+              this.#snapshotRequired = false
               progress = null
-              snapshotCompleted = true
+              snapshotCompleted = !bootstrap
               break
             }
             if (String(result.watermark) === cursor) {
@@ -1805,19 +1958,16 @@ export function createSyncDurableObject<
           }
 
           const cursor = this.#engineState().upstreamWatermark
-          if (forceSnapshot) {
-            forceSnapshot = false
-            const begun = await this.#beginSnapshotGeneration(path)
-            progress = begun.progress
-            pendingPage = begun.page
-            snapshotPageLimit = begun.pageLimit
-            continue
-          }
           const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
           endpoint.searchParams.set('watermark', cursor)
           endpoint.searchParams.set('limit', String(upstreamLimit))
           const { response, body } = await this.#fetchUpstreamJson(endpoint)
           if (response.status === 410) {
+            if (bootstrap)
+              throw requestError(
+                'table bootstrap requires a retained live feed cursor',
+                409
+              )
             const begun = await this.#beginSnapshotGeneration(path)
             progress = begun.progress
             pendingPage = begun.page

@@ -704,26 +704,28 @@ fn abandon_active_generation(db: &mut dyn SyncDb) -> Result<(), EngineError> {
          WHERE generation = ? AND active = 1",
         &[store::counter(progress.generation)],
     )?;
+    queue_snapshot_cleanup(db, progress.generation)?;
+    finish_cleanup_generation(db, progress.generation)
+}
+
+fn queue_snapshot_cleanup(db: &mut dyn SyncDb, generation: i64) -> Result<(), EngineError> {
     let stages = db.query(
         "SELECT name FROM sqlite_schema
          WHERE type = 'table' AND name GLOB ?
          ORDER BY name",
-        &[SqlValue::Text(format!(
-            "_zsync_stage_{}_*",
-            progress.generation
-        ))],
+        &[SqlValue::Text(format!("_zsync_stage_{}_*", generation))],
     )?;
     for row in &stages {
         db.exec(
             "INSERT INTO _zsync_snapshot_cleanup (generation, stageName) VALUES (?, ?)
              ON CONFLICT (generation, stageName) DO NOTHING",
             &[
-                store::counter(progress.generation),
+                store::counter(generation),
                 SqlValue::Text(required_text(row, "name")?.to_string()),
             ],
         )?;
     }
-    finish_cleanup_generation(db, progress.generation)
+    Ok(())
 }
 
 pub(crate) fn reconcile_snapshot_schema(
@@ -1009,6 +1011,11 @@ pub fn apply_snapshot_changes(
             "snapshot generation {generation} has not finished paging"
         )));
     }
+    if progress.cursor.is_some() {
+        return Err(EngineError::conflict(
+            "bootstrap publication must complete before feed catch-up",
+        ));
+    }
     let mut cursor = progress.catchup_watermark;
     let initial_cursor = cursor;
     let mut applied = 0;
@@ -1164,6 +1171,183 @@ pub fn finalize_snapshot_generation(
     Ok(ApplyUpstreamResult {
         watermark,
         applied: 0,
+        caught_up: true,
+    })
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct BootstrapPublication {
+    table: usize,
+    inserting: bool,
+    cleaning: bool,
+    after: Vec<crate::wire::WireValue>,
+}
+
+const BOOTSTRAP_PUBLICATION_ROWS: usize = 1_000;
+
+/// publish one bounded batch of restored tables from a caught-up generation.
+/// live and staged feed catch-up must remain frozen at this watermark until
+/// publication completes. ordinary table triggers record
+/// the precise row changes, preserving other tables, client cookies and lmids.
+pub fn finalize_table_bootstrap(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    selected: &[String],
+    generation: i64,
+    watermark: i64,
+) -> Result<ApplyUpstreamResult, EngineError> {
+    let progress = generation_progress(db, generation)?;
+    if progress.state != SnapshotState::CatchingUp
+        || progress.catchup_watermark != watermark
+        || upstream_watermark(db)? != watermark
+    {
+        return Err(EngineError::conflict(
+            "table bootstrap requires both live and staged feed catch-up",
+        ));
+    }
+    if selected.is_empty() {
+        return Err(EngineError::bad_request("table bootstrap requires a table"));
+    }
+    let mut publication: BootstrapPublication = progress
+        .cursor
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| {
+            EngineError::internal(format!("invalid bootstrap publication cursor: {error}"))
+        })?
+        .unwrap_or_default();
+    let mut applied = 0;
+    if let Some(table) = selected.get(publication.table) {
+        let spec = tables
+            .get(table)
+            .ok_or_else(|| schema_refresh(format!("bootstrap table {table} is not modeled")))?;
+        let live = quote_ident(tables.physical_name(table).expect("modeled table"));
+        let stage = quote_ident(&stage_table_name(generation, table));
+        let columns = spec
+            .columns
+            .iter()
+            .map(|(column, _)| {
+                quote_ident(
+                    tables
+                        .physical_column(table, column)
+                        .expect("modeled column"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let same_row = columns
+            .iter()
+            .map(|column| format!("staged.{column} IS live.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let same_key = spec
+            .primary_key
+            .iter()
+            .map(|column| {
+                let column =
+                    quote_ident(tables.physical_column(table, column).expect("modeled key"));
+                format!("live.{column} IS staged.{column}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let keys = spec
+            .primary_key
+            .iter()
+            .map(|column| quote_ident(tables.physical_column(table, column).expect("modeled key")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let after = publication
+            .after
+            .into_iter()
+            .map(SqlValue::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        let placeholders = vec!["?"; spec.primary_key.len()].join(", ");
+        let lower = if after.is_empty() {
+            "1".to_string()
+        } else {
+            format!("({keys}) > ({placeholders})")
+        };
+        let source = if publication.inserting { &stage } else { &live };
+        let rows = db.query(&format!("SELECT {keys} FROM {source} WHERE {lower} ORDER BY {keys} LIMIT {BOOTSTRAP_PUBLICATION_ROWS}"), &after)?;
+        if let Some(last) = rows.last() {
+            let mut params = after;
+            params.extend(last.values.clone());
+            let range = format!("{lower} AND ({keys}) <= ({placeholders})");
+            // remove changed live keys before inserting, so unique-key swaps
+            // work across batch boundaries. newer feed writes stay upstream.
+            let sql = if publication.inserting {
+                let columns = columns.join(", ");
+                format!(
+                    "INSERT INTO {live} ({columns}) SELECT {columns} FROM {stage} AS staged WHERE {range} AND NOT EXISTS (SELECT 1 FROM {live} AS live WHERE {same_key})"
+                )
+            } else {
+                format!(
+                    "DELETE FROM {live} AS live WHERE {range} AND NOT EXISTS (SELECT 1 FROM {stage} AS staged WHERE {same_row})"
+                )
+            };
+            db.exec(&sql, &params)?;
+            let changed = db.query("SELECT changes() AS changed", &[])?;
+            if let SqlValue::Integer(count) = changed[0].values[0] {
+                applied = count as usize;
+            }
+            publication.after = last
+                .values
+                .iter()
+                .map(crate::wire::WireValue::from)
+                .collect();
+        } else {
+            publication.after = after.iter().map(crate::wire::WireValue::from).collect();
+        }
+        if rows.len() < BOOTSTRAP_PUBLICATION_ROWS {
+            publication.after.clear();
+            if publication.inserting {
+                publication.table += 1;
+                publication.inserting = false;
+            } else {
+                publication.inserting = true;
+            }
+        }
+    }
+    if publication.table < selected.len() || !publication.cleaning {
+        if publication.table >= selected.len() {
+            queue_snapshot_cleanup(db, generation)?;
+            publication.cleaning = true;
+        }
+        let cursor = serde_json::to_string(&publication)
+            .map_err(|error| EngineError::internal(error.to_string()))?;
+        db.exec(
+            "UPDATE _zsync_snapshot_progress SET cursor = ? WHERE generation = ? AND active = 1",
+            &[SqlValue::Text(cursor), store::counter(generation)],
+        )?;
+        return Ok(ApplyUpstreamResult {
+            watermark,
+            applied,
+            caught_up: false,
+        });
+    }
+    // finish bounded stage cleanup before retiring the durable request, so
+    // a successful bootstrap cannot retain a second copy indefinitely.
+    cleanup_one_snapshot_batch(db)?;
+    if !db
+        .query(
+            "SELECT 1 FROM _zsync_snapshot_cleanup WHERE generation = ? LIMIT 1",
+            &[store::counter(generation)],
+        )?
+        .is_empty()
+    {
+        return Ok(ApplyUpstreamResult {
+            watermark,
+            applied: 0,
+            caught_up: false,
+        });
+    }
+    db.exec(
+        "DELETE FROM _zsync_snapshot_progress WHERE generation = ? AND active = 1",
+        &[store::counter(generation)],
+    )?;
+    Ok(ApplyUpstreamResult {
+        watermark,
+        applied,
         caught_up: true,
     })
 }

@@ -8,7 +8,19 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import {
+  Zero,
+  createBuilder,
+  createSchema,
+  defineQueries,
+  defineQuery,
+  number,
+  string,
+  table,
+} from '@rocicorp/zero'
+
 import { findPort } from '../../src/port.ts'
+import { installHttpPullTransport } from '../orez-lite/src/client/transport.ts'
 
 const cwd = new URL('.', import.meta.url).pathname
 const namespace = 'proj-rolling'
@@ -57,8 +69,8 @@ async function deployed(persistTo, versions, work) {
 
 let clientGroup = 0
 
-async function write(base, sql, params = []) {
-  const response = await fetch(`${base}/write/${namespace}`, {
+async function write(base, sql, params = [], project = namespace) {
+  const response = await fetch(`${base}/write/${project}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ sql, params }),
@@ -181,6 +193,265 @@ try {
     assert.equal(converged.b2.note, null)
     assert.equal(converged.b3.note, 'written after')
     console.log('sync first: every request succeeded and the replica converged')
+  }
+
+  // restore a previously private table after the replica consumed its last
+  // mutation. its initial rows must appear without a later source mutation,
+  // while an existing item subscriber keeps its cookie and complete rows.
+  {
+    const state = persist()
+    let ordinaryCookie = null
+    const ordinaryPull = async (base) => {
+      const body = {
+        clientID: 'ordinary',
+        clientGroupID: 'ordinary',
+        cookie: ordinaryCookie,
+      }
+      if (ordinaryCookie === null)
+        body.queries = {
+          version: 1,
+          patch: [{ op: 'put', hash: 'ordinary', name: 'allItems', args: [] }],
+        }
+      const response = await fetch(base + '/' + namespace + '/pull', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const result = await response.json()
+      assert.equal(response.status, 200, JSON.stringify(result))
+      ordinaryCookie = result.cookie
+      return result
+    }
+    await deployed(state, { host: 'v1', data: 'v1' }, async (base) => {
+      await write(base, ...insertV1('existing'))
+      await write(base, 'INSERT INTO counter VALUES (?, ?, ?)', ['a', 42, 'reader'])
+      for (let value = 1; value <= 8; value++)
+        await write(base, 'UPDATE item SET label = ? WHERE id = ?', [
+          String(value),
+          'existing',
+        ])
+      const original = await ordinaryPull(base)
+      assert.equal(original.rowsPatch.filter((p) => p.op === 'put').length, 1)
+      assert.equal(original.rowsPatch.find((p) => p.op === 'put').value.label, '8')
+    })
+    await deployed(state, { host: 'v4', data: 'v1' }, async (base) => {
+      const existing = await ordinaryPull(base)
+      assert.equal((existing.rowsPatch ?? []).length, 0)
+      const response = await fetch(base + '/' + namespace + '/pull', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          clientID: 'ahead',
+          clientGroupID: 'ahead',
+          cookie: null,
+          queries: {
+            version: 1,
+            patch: [{ op: 'put', hash: 'ahead', name: 'ownCounters', args: [] }],
+          },
+        }),
+      })
+      const result = await response.json()
+      assert.equal(response.status, 200, JSON.stringify(result))
+      assert.equal(result.rowsPatch.filter((p) => p.op === 'put').length, 0)
+    })
+    const counter = table('counter')
+      .columns({ id: string(), value: number(), owner: string() })
+      .primaryKey('id')
+    const clientSchema = createSchema({ tables: [counter] })
+    const builder = createBuilder(clientSchema)
+    const clientQueries = defineQueries({
+      ownCounters: defineQuery(() => builder.counter.where('owner', 'reader')),
+    })
+    let lastRows = []
+    await deployed(state, { host: 'v4', data: 'v4' }, async (base) => {
+      const origin = base + '/' + namespace
+      const transport = installHttpPullTransport({ origin })
+      const clients = [0, 1].map(
+        (i) =>
+          new Zero({
+            server: origin,
+            userID: 'reader',
+            auth: 'reader',
+            schema: clientSchema,
+            kvStore: 'mem',
+            storageKey: 'table-bootstrap-' + i + '-' + crypto.randomUUID(),
+          })
+      )
+      const views = clients.map((client) =>
+        client.materialize(clientQueries.ownCounters())
+      )
+      const observed = views.map(() => [])
+      const ready = views.map(
+        (view, i) =>
+          new Promise((resolve, reject) => {
+            const timer = setTimeout(
+              () => reject(new Error('table bootstrap initial client timed out')),
+              10000
+            )
+            view.addListener((data, type) => {
+              observed[i] = data
+              if (type === 'complete') {
+                clearTimeout(timer)
+                resolve(data)
+              }
+            })
+          })
+      )
+      try {
+        const initial = await Promise.all(ready)
+        assert.deepEqual(
+          initial.map((rows) => rows.map((row) => [row.id, row.value])),
+          [[['a', 42]], [['a', 42]]]
+        )
+        const existing = await ordinaryPull(base)
+        assert.ok(!existing.rowsPatch?.some((p) => p.op === 'clear'))
+        assert.equal((existing.rowsPatch ?? []).length, 0)
+        const converge = async (expected) => {
+          const complete = views.map(
+            (view) =>
+              new Promise((resolve, reject) => {
+                const timer = setTimeout(
+                  () =>
+                    reject(
+                      new Error('clients did not converge to ' + JSON.stringify(expected))
+                    ),
+                  10000
+                )
+                const remove = view.addListener((data) => {
+                  if (
+                    JSON.stringify(data.map((row) => [row.id, row.value])) ===
+                    JSON.stringify(expected)
+                  ) {
+                    clearTimeout(timer)
+                    queueMicrotask(() => remove())
+                    resolve()
+                  }
+                })
+              })
+          )
+          await transport.pull()
+          await Promise.all(complete)
+          assert.deepEqual(observed[0], observed[1])
+        }
+        await write(base, 'UPDATE counter SET value = ? WHERE id = ?', [43, 'a'])
+        await converge([['a', 43]])
+        await write(base, 'UPDATE counter SET id = ? WHERE id = ?', ['renamed', 'a'])
+        await converge([['renamed', 43]])
+        await write(base, 'INSERT INTO counter VALUES (?, ?, ?)', [
+          'temporary',
+          1,
+          'reader',
+        ])
+        await write(base, 'DELETE FROM counter WHERE id = ?', ['temporary'])
+        await converge([['renamed', 43]])
+        await write(base, 'UPDATE counter SET owner = ? WHERE id = ?', [
+          'other',
+          'renamed',
+        ])
+        await converge([])
+        await write(base, 'UPDATE counter SET owner = ? WHERE id = ?', [
+          'reader',
+          'renamed',
+        ])
+        await converge([['renamed', 43]])
+        await write(base, 'DELETE FROM counter WHERE id = ?', ['renamed'])
+        await converge([])
+        lastRows = observed[0]
+      } finally {
+        for (const view of views) view.destroy()
+        await Promise.all(clients.map((client) => client.close()))
+        transport.uninstall()
+      }
+    })
+    await deployed(state, { host: 'v4', data: 'v4' }, async (base) => {
+      const reconnected = await ordinaryPull(base)
+      assert.ok(!reconnected.rowsPatch?.some((p) => p.op === 'clear'))
+      assert.equal((reconnected.rowsPatch ?? []).length, 0)
+      assert.deepEqual(lastRows, [])
+      const response = await fetch(base + '/' + namespace + '/pull', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          clientID: 'final',
+          clientGroupID: 'final',
+          cookie: null,
+          queries: {
+            version: 1,
+            patch: [{ op: 'put', hash: 'final', name: 'ownCounters', args: [] }],
+          },
+        }),
+      })
+      const result = await response.json()
+      assert.equal(response.status, 200, JSON.stringify(result))
+      assert.equal(result.rowsPatch.filter((p) => p.op === 'put').length, 0)
+    })
+    console.log(
+      'restored table: two Zero clients received initial rows, updates, rename, coalesced create/delete, final delete and owner revocation; ordinary subscriber survived deploy and reconnect'
+    )
+  }
+
+  {
+    const state = persist()
+    const racePull = async (base, group, cookie, query) => {
+      const body = { clientID: group, clientGroupID: group, cookie }
+      if (query)
+        body.queries = {
+          version: 1,
+          patch: [{ op: 'put', hash: group, name: query, args: [] }],
+        }
+      const response = await fetch(base + '/proj-racing/pull', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const wire = await response.text()
+      const result = JSON.parse(wire)
+      assert.equal(response.status, 200, JSON.stringify(result))
+      console.log(
+        'bootstrap HTTP response',
+        group,
+        'rows',
+        (result.rowsPatch ?? []).filter((p) => p.op === 'put').length,
+        'bytes',
+        Buffer.byteLength(wire)
+      )
+      return result
+    }
+    let cookie
+    await deployed(state, { host: 'v1', data: 'v1' }, async (base) => {
+      await write(
+        base,
+        'INSERT INTO item VALUES (?, ?)',
+        ['ordinary', 'preserved'],
+        'proj-racing'
+      )
+      await write(
+        base,
+        'INSERT INTO counter VALUES (?, ?, ?)',
+        ['a', 42, 'reader'],
+        'proj-racing'
+      )
+      cookie = (await racePull(base, 'ordinary-race', null, 'allItems')).cookie
+    })
+    await deployed(state, { host: 'v4', data: 'v4' }, async (base) => {
+      const initial = await Promise.all(
+        ['race-a', 'race-b'].map((group) => racePull(base, group, null, 'ownCounters'))
+      )
+      for (const result of initial) {
+        const puts = result.rowsPatch.filter((p) => p.op === 'put')
+        assert.deepEqual(
+          puts.map((p) => [p.value.id, p.value.value]),
+          [['raced', 43]]
+        )
+      }
+      const existing = await racePull(base, 'ordinary-race', cookie)
+      assert.equal((existing.rowsPatch ?? []).length, 0)
+      const resumed = await racePull(base, 'race-a', initial[0].cookie)
+      assert.equal((resumed.rowsPatch ?? []).length, 0)
+    })
+    console.log(
+      'restored table race: captured snapshot preceded concurrent update, rename, create/delete; both observers converged and existing subscriber received no rows'
+    )
   }
 } finally {
   for (const root of roots) rmSync(root, { recursive: true, force: true })

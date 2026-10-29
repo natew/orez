@@ -337,6 +337,39 @@ Pending trigger keys are not cleared by any of this. The engine drains them into
 the next transaction, which is the correct handling; deleting them would discard
 changes clients still need.
 
+## Newly mirrored tables on existing replicas
+
+The Cloudflare sync host compares its persisted schema fingerprint with the new
+schema. Added tables require their own initial source snapshot even when the
+namespace has already consumed the change feed past their last mutation. A later
+source write is not a substitute for that initial baseline.
+
+The host pages added tables into the existing snapshot staging mechanism and
+catches up both live storage and staging from the older cursor. It then freezes
+that caught-up image and publishes the selected tables in primary-key order,
+with at most 1,000 scanned rows per publication transaction. The existing snapshot
+cursor stores publication progress across eviction. Ordinary live triggers emit
+row changes; publication does not invalidate the namespace epoch, replace other
+tables, reset client cookies, or clear mutation acknowledgements. Unchanged live
+rows produce no ledger writes. Newer source writes remain in the feed and are
+ingested after publication. Staging uses the existing bounded cleanup path.
+
+An upstream table still excluded from publication remains empty, with its
+bootstrap request retained. Existing tables continue ingesting normally. Once
+the upstream publishes it, the next ingestion resumes the baseline without
+requiring a mutation in that table. Both deployment orders are supported.
+A bootstrap whose live feed cursor has expired fails with HTTP 409 rather than
+silently resetting unrelated data. Full resnapshot remains an explicit operator
+operation. An existing full snapshot or dropped-column recovery keeps its
+existing full-snapshot semantics.
+
+This detects additions relative to the previous persisted host schema. It does
+not infer which rows an older engine may already have missed after a historical
+schema change, nor does it republish tables that are absent from the source's
+publication. The rolling-schema HTTP harness and paged-snapshot core suite cover
+initial rows, concurrent writes, client continuity, owner filtering, restart and
+publication write bounds.
+
 ## Where this engine fits, and where it does not
 
 It fits an app that wants Zero's client experience without operating Postgres and

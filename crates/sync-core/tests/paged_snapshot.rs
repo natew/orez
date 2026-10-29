@@ -668,3 +668,355 @@ fn abandoned_generations_are_cleaned_in_bounded_batches() {
         .is_empty()
     );
 }
+
+fn finish_table_bootstrap(
+    db: &mut TestDb,
+    tables: &Tables,
+    selected: &[String],
+    generation: i64,
+    watermark: i64,
+) {
+    for _ in 0..16 {
+        init_schema(db, tables).unwrap();
+        if db
+            .transaction(|db| {
+                sync_core::finalize_table_bootstrap(db, tables, selected, generation, watermark)
+            })
+            .unwrap()
+            .caught_up
+        {
+            return;
+        }
+    }
+    panic!("small fixture bootstrap did not finish within its bounded batches");
+}
+
+#[test]
+fn restored_table_bootstrap_preserves_existing_clients_and_catches_concurrent_changes() {
+    use sync_core::{apply_upstream, finalize_table_bootstrap};
+    let (mut db, mut tables) = setup();
+    let baseline = UpstreamBatch {
+        watermark: 10,
+        changes: vec![UpstreamChange {
+            watermark: 10,
+            table_name: "item".into(),
+            op: "INSERT".into(),
+            row_data: Some(item("existing", "unchanged")),
+            old_data: None,
+        }],
+        optional_columns: Default::default(),
+    };
+    db.transaction(|db| apply_upstream(db, &tables, &baseline))
+        .unwrap();
+    let first = pull(&mut db, &tables, Value::Null);
+    db.exec(
+        "CREATE TABLE counter (id TEXT PRIMARY KEY, value REAL NOT NULL, owner TEXT NOT NULL)",
+        &[],
+    )
+    .unwrap();
+    tables.push(
+        "counter",
+        TableSpec {
+            columns: vec![
+                ("id".into(), ZeroColumnType::String),
+                ("value".into(), ZeroColumnType::Number),
+                ("owner".into(), ZeroColumnType::String),
+            ],
+            primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
+        },
+    );
+    init_schema(&mut db, &tables).unwrap();
+    let counter =
+        |id: &str, value: i64, owner: &str| row(json!({"id": id, "value": value, "owner": owner}));
+    let selected = vec!["counter".into()];
+    let begun = db
+        .transaction(|db| begin_snapshot_generation(db, &tables, 10))
+        .unwrap();
+    db.transaction(|db| {
+        apply_snapshot_page(
+            db,
+            &tables,
+            begun.generation,
+            "counter",
+            &[counter("a", 42, "u1")],
+            None,
+            &Default::default(),
+        )
+    })
+    .unwrap();
+    // an eviction runs the normal full-schema initializer before resuming.
+    init_schema(&mut db, &tables).unwrap();
+    assert!(read_snapshot_progress(&mut db).unwrap().is_some());
+    db.transaction(|db| {
+        apply_snapshot_page(
+            db,
+            &tables,
+            begun.generation,
+            "item",
+            &[],
+            None,
+            &Default::default(),
+        )
+    })
+    .unwrap();
+    let first_batch = db
+        .transaction(|db| finalize_table_bootstrap(db, &tables, &selected, begun.generation, 10))
+        .unwrap();
+    assert!(!first_batch.caught_up);
+    init_schema(&mut db, &tables).unwrap();
+    finish_table_bootstrap(&mut db, &tables, &selected, begun.generation, 10);
+    let reader = |db: &mut TestDb, cookie: Value| {
+        let mut body = json!({"clientID":"c2","clientGroupID":"g2","cookie":cookie});
+        if cookie.is_null() {
+            body["queries"] = json!({"version":1,"patch":[{"op":"put","hash":"counter-own","ast":{"table":"counter","where":{
+                "type":"simple","op":"=","left":{"type":"column","name":"owner"},"right":{"type":"literal","value":"u1"}
+            }}}]});
+        }
+        db.transaction(|db| sync_core::query::handle_query_pull(db, &tables, 4096, &body, "u1"))
+            .unwrap()
+    };
+    let initial = reader(&mut db, Value::Null);
+    assert!(
+        initial["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|patch| patch["value"]["value"] == 42)
+    );
+    let reconnected = reader(&mut db, initial["cookie"].clone());
+    assert_eq!(
+        reconnected,
+        json!({"cookie": initial["cookie"], "unchanged": true})
+    );
+    let existing_reader = |db: &mut TestDb, cookie: Value| {
+        let body = json!({"clientID":"c1","clientGroupID":"g1","cookie":cookie});
+        db.transaction(|db| sync_core::query::handle_query_pull(db, &tables, 4096, &body, "u1"))
+            .unwrap()
+    };
+    let existing = existing_reader(&mut db, first["cookie"].clone());
+    assert!(existing["rowsPatch"].as_array().unwrap().is_empty());
+    let next = db
+        .transaction(|db| begin_snapshot_generation(db, &tables, 10))
+        .unwrap();
+    db.transaction(|db| {
+        apply_snapshot_page(
+            db,
+            &tables,
+            next.generation,
+            "counter",
+            &[counter("a", 42, "u1")],
+            None,
+            &Default::default(),
+        )
+    })
+    .unwrap();
+    db.transaction(|db| {
+        apply_snapshot_page(
+            db,
+            &tables,
+            next.generation,
+            "item",
+            &[],
+            None,
+            &Default::default(),
+        )
+    })
+    .unwrap();
+    let change = |watermark, op: &str, new, old| UpstreamChange {
+        watermark,
+        table_name: "counter".into(),
+        op: op.into(),
+        row_data: new,
+        old_data: old,
+    };
+    let raced = UpstreamBatch {
+        watermark: 14,
+        changes: vec![
+            change(
+                11,
+                "UPDATE",
+                Some(counter("a", 43, "u1")),
+                Some(counter("a", 42, "u1")),
+            ),
+            change(
+                12,
+                "UPDATE",
+                Some(counter("renamed", 43, "u1")),
+                Some(counter("a", 43, "u1")),
+            ),
+            change(13, "INSERT", Some(counter("temporary", 1, "u1")), None),
+            change(14, "DELETE", None, Some(counter("temporary", 1, "u1"))),
+        ],
+        optional_columns: Default::default(),
+    };
+    db.transaction(|db| {
+        let live = apply_upstream(db, &tables, &raced)?;
+        let staged = apply_snapshot_changes(db, &tables, next.generation, &raced)?;
+        assert!(live.caught_up && staged.caught_up);
+        finalize_table_bootstrap(db, &tables, &selected, next.generation, 14)
+    })
+    .unwrap();
+    finish_table_bootstrap(&mut db, &tables, &selected, next.generation, 14);
+    assert_eq!(integer(&mut db, "SELECT COUNT(*) FROM item"), 1);
+    let changes = reader(&mut db, reconnected["cookie"].clone());
+    assert!(
+        !changes["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["op"] == "clear")
+    );
+    assert!(
+        changes["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["value"]["id"] == "renamed")
+    );
+    let existing_after = existing_reader(&mut db, existing["cookie"].clone());
+    assert!(
+        !existing_after["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["op"] == "clear")
+    );
+    assert!(existing_after["rowsPatch"].as_array().unwrap().is_empty());
+    let revoke = UpstreamBatch {
+        watermark: 15,
+        changes: vec![change(
+            15,
+            "UPDATE",
+            Some(counter("renamed", 43, "u2")),
+            Some(counter("renamed", 43, "u1")),
+        )],
+        optional_columns: Default::default(),
+    };
+    db.transaction(|db| apply_upstream(db, &tables, &revoke))
+        .unwrap();
+    let revoked = reader(&mut db, changes["cookie"].clone());
+    assert!(
+        revoked["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["op"] == "del")
+    );
+    let final_delete = UpstreamBatch {
+        watermark: 16,
+        changes: vec![change(
+            16,
+            "DELETE",
+            None,
+            Some(counter("renamed", 43, "u2")),
+        )],
+        optional_columns: Default::default(),
+    };
+    db.transaction(|db| apply_upstream(db, &tables, &final_delete))
+        .unwrap();
+    assert_eq!(integer(&mut db, "SELECT COUNT(*) FROM counter"), 0);
+}
+
+#[test]
+fn table_bootstrap_publication_bounds_writes_and_resumes_without_rewriting_equal_rows() {
+    use sync_core::{apply_upstream, finalize_table_bootstrap};
+    let (mut db, tables) = setup();
+    let selected = vec!["item".into()];
+    let source = (0..2_501)
+        .map(|i| item(&format!("id-{i:04}"), &format!("label-{i:04}")))
+        .collect::<Vec<_>>();
+    db.transaction(|db| {
+        apply_upstream(
+            db,
+            &tables,
+            &UpstreamBatch {
+                watermark: 10,
+                changes: vec![UpstreamChange {
+                    watermark: 10,
+                    table_name: "item".into(),
+                    op: "INSERT".into(),
+                    row_data: Some(source[0].clone()),
+                    old_data: None,
+                }],
+                optional_columns: Default::default(),
+            },
+        )
+    })
+    .unwrap();
+    let begun = db
+        .transaction(|db| begin_snapshot_generation(db, &tables, 10))
+        .unwrap();
+    for (index, page) in source.chunks(1_000).enumerate() {
+        db.transaction(|db| {
+            apply_snapshot_page(
+                db,
+                &tables,
+                begun.generation,
+                "item",
+                page,
+                if index < 2 { Some("next") } else { None },
+                &Default::default(),
+            )
+        })
+        .unwrap();
+    }
+    let before = db.conn.total_changes();
+    let first = db
+        .transaction(|db| finalize_table_bootstrap(db, &tables, &selected, begun.generation, 10))
+        .unwrap();
+    assert_eq!(first.applied, 0);
+    assert!(!first.caught_up);
+    assert_eq!(
+        db.conn.total_changes() - before,
+        1,
+        "an equal live row writes only the publication cursor"
+    );
+    let mut counts = Vec::new();
+    for _ in 0..3 {
+        // reconstruct the engine between every publication transaction.
+        init_schema(&mut db, &tables).unwrap();
+        let before = db.conn.total_changes();
+        let result = db
+            .transaction(|db| {
+                finalize_table_bootstrap(db, &tables, &selected, begun.generation, 10)
+            })
+            .unwrap();
+        let written = db.conn.total_changes() - before;
+        assert!(result.applied <= 1_000);
+        assert!(
+            written <= 3 * result.applied as u64 + 4,
+            "{written} physical changes for {} published rows",
+            result.applied
+        );
+        counts.push(result.applied);
+        assert!(!result.caught_up);
+    }
+    assert_eq!(counts, vec![999, 1_000, 501]);
+    for (written_rows, complete) in [(2_000, false), (503, true)] {
+        init_schema(&mut db, &tables).unwrap();
+        let before = db.conn.total_changes();
+        let result = db
+            .transaction(|db| {
+                finalize_table_bootstrap(db, &tables, &selected, begun.generation, 10)
+            })
+            .unwrap();
+        assert_eq!(result.applied, 0);
+        assert_eq!(result.caught_up, complete);
+        assert_eq!(db.conn.total_changes() - before, written_rows);
+    }
+    assert_eq!(
+        integer(
+            &mut db,
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name GLOB '_zsync_stage_*'"
+        ),
+        0
+    );
+    assert_eq!(
+        integer(&mut db, "SELECT COUNT(*) FROM _zsync_snapshot_cleanup"),
+        0
+    );
+    assert_eq!(integer(&mut db, "SELECT COUNT(*) FROM item"), 2_501);
+    assert!(read_snapshot_progress(&mut db).unwrap().is_none());
+}

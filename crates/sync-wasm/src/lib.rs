@@ -587,6 +587,30 @@ pub fn engine_finalize_snapshot_generation(
     to_js(&result)
 }
 
+/// publish selected staged tables without resetting unrelated client state.
+#[wasm_bindgen]
+pub fn engine_finalize_table_bootstrap(
+    db: &JsSyncDb,
+    schema: JsValue,
+    selected: JsValue,
+    generation: &str,
+    watermark: &str,
+) -> Result<JsValue, JsValue> {
+    let tables = tables_from_js(schema)?;
+    let selected: Vec<String> = from_js(selected)?;
+    let generation = parse_counter(generation, "snapshot generation")?;
+    let watermark = parse_counter(watermark, "bootstrap watermark")?;
+    let result = sync_core::finalize_table_bootstrap(
+        &mut WasmDb(db),
+        &tables,
+        &selected,
+        generation,
+        watermark,
+    )
+    .map_err(engine_error)?;
+    to_js(&result)
+}
+
 /// Initialize the additive query-aware durable tables. The host owns the
 /// transaction boundary, exactly as it does for the baseline schema.
 #[wasm_bindgen]
