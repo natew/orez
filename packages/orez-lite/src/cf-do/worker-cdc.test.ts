@@ -2027,8 +2027,8 @@ describe('ZeroDO paged snapshot feed', () => {
     expect(second.body.nextCursor).toBeNull()
   })
 
-  it('rejects malformed page requests and unknown tables', async () => {
-    const { zero } = await createWorkerCore()
+  it('rejects malformed pages and unmodeled physical tables but finishes absent tables', async () => {
+    const { sql, zero } = await createWorkerCore()
     zero.ensureSchemaTables({
       tables: {
         item: {
@@ -2037,6 +2037,9 @@ describe('ZeroDO paged snapshot feed', () => {
         },
       },
     })
+    sql.exec('CREATE TABLE unmodeled (id TEXT PRIMARY KEY)')
+    zero.watermarks.ensureTables()
+    zero.watermarks.mark(37)
 
     const cases = [
       new URL('http://do/snapshot?limit=2'),
@@ -2047,13 +2050,17 @@ describe('ZeroDO paged snapshot feed', () => {
       new URL(
         `http://do/snapshot?table=item&limit=2&cursor=${encodeURIComponent(JSON.stringify(['a', 'extra']))}`
       ),
-      new URL('http://do/snapshot?table=missing&limit=2'),
+      new URL('http://do/snapshot?table=unmodeled&limit=2'),
     ]
     for (const url of cases) {
       const response = await zero.fetch(new Request(url))
       expect(response.status, url.toString()).toBe(400)
       expect((await response.json()).error, url.toString()).toBeTypeOf('string')
     }
+    expect(await page(zero, 'missing', 2)).toEqual({
+      status: 200,
+      body: { watermark: 37, rows: [], nextCursor: null },
+    })
   })
 
   it('fails closed when the bounded SELECT errors', async () => {
