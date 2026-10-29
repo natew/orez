@@ -1993,12 +1993,27 @@ export class ZeroDO extends DurableObject {
           this.ensureSchemaMetadataTable()
           const schemaRow = this.sql
             .exec('SELECT schema_json FROM _zero_schema_tables WHERE name = ?', table)
-            .one()
-          if (!schemaRow?.schema_json)
-            return Response.json(
-              { error: `snapshot table ${JSON.stringify(table)} is not modeled` },
-              { status: 400 }
-            )
+            .toArray()[0]
+          if (!schemaRow?.schema_json) {
+            // a sync host models one schema for every namespace, so it pages tables
+            // this namespace class does not hold. with no metadata row and no
+            // physical table the table is absent here and contributes no rows;
+            // failing the request would stall the host at every page size. a
+            // physical table without metadata is a real schema error.
+            const held = this.sql
+              .exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table)
+              .toArray()[0]
+            if (held)
+              return Response.json(
+                { error: `snapshot table ${JSON.stringify(table)} is not modeled` },
+                { status: 400 }
+              )
+            return Response.json({
+              watermark: this.watermark(),
+              rows: [],
+              nextCursor: null,
+            })
+          }
           const schema = JSON.parse(String(schemaRow.schema_json)) as SchemaTable
           if (
             !Array.isArray(schema.primaryKey) ||
