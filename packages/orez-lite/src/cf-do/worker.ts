@@ -2001,7 +2001,10 @@ export class ZeroDO extends DurableObject {
             // failing the request would stall the host at every page size. a
             // physical table without metadata is a real schema error.
             const held = this.sql
-              .exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table)
+              .exec(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                table
+              )
               .toArray()[0]
             if (held)
               return Response.json(
