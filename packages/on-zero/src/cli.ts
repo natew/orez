@@ -24,6 +24,11 @@ const generateCommand = defineCommand({
       required: false,
       default: false,
     },
+    tsconfig: {
+      type: 'string',
+      description: 'TypeScript project used only for generation',
+      required: false,
+    },
     after: {
       type: 'string',
       description: 'Command to run after generation completes',
@@ -43,6 +48,7 @@ const generateCommand = defineCommand({
     const opts = {
       dir: config ? dirname(config) : target,
       config,
+      tsconfig: args.tsconfig,
       after: args.after,
       force: args.force,
     }

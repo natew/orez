@@ -20,6 +20,7 @@ import {
   generateDrizzleSchemaFile,
   generateDrizzleSchemaInputFile,
 } from './generate'
+import { createNativeTypeScriptProject } from './native-typescript'
 
 const testDir = join(tmpdir(), 'on-zero-test-' + Date.now())
 
@@ -38,6 +39,51 @@ afterEach(() => {
 })
 
 describe('generate', () => {
+  test('scopes generation to its project and keeps explicit ambient argument types', async () => {
+    const dataDir = join(testDir, 'data')
+    const sourcePath = join(dataDir, 'post/mutations.ts')
+    const tsconfig = join(testDir, 'tsconfig.generate.json')
+    const ambient = join(testDir, 'ambient.d.ts')
+    const unrelated = join(testDir, 'application.ts')
+    writeFileSync(
+      join(testDir, 'tsconfig.json'),
+      JSON.stringify({ include: ['**/*.ts'] })
+    )
+    writeFileSync(
+      tsconfig,
+      JSON.stringify({
+        extends: './tsconfig.json',
+        include: ['data/**/*.ts', 'ambient.d.ts'],
+      })
+    )
+    writeFileSync(ambient, 'type ScopedArgs = { count: number }')
+    writeFileSync(unrelated, 'export const application = 1')
+    writeFileSync(
+      sourcePath,
+      `
+export const schema = table('post').columns({ id: string() }).primaryKey('id')
+export const mutate = mutations(schema, permission, {
+  publish: async (ctx, args: ScopedArgs) => {},
+})
+`
+    )
+    const project = await createNativeTypeScriptProject(dataDir, [sourcePath], {
+      tsconfig,
+    })
+    const dependencies = await project.sourceFilePaths()
+    await project.close()
+    expect(dependencies).toContain(ambient)
+    expect(dependencies).not.toContain(unrelated)
+
+    await generate({ dir: dataDir, tsconfig, silent: true })
+    const outputPath = join(dataDir, 'generated/syncedMutations.ts')
+    expect(readFileSync(outputPath, 'utf8')).toContain('count: v.number()')
+
+    writeFileSync(ambient, 'type ScopedArgs = { count: string }')
+    await generate({ dir: dataDir, tsconfig, silent: true })
+    expect(readFileSync(outputPath, 'utf8')).toContain('count: v.string()')
+  })
+
   test('runs after command when files change', async () => {
     writeFileSync(
       join(testDir, 'post/mutations.ts'),

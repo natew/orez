@@ -56,10 +56,13 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
 
   let dataDir: string
   let databaseDir: string
+  let tsconfig: string | undefined
 
   const runGenerate = (silent: boolean) =>
     generate({
       dir: dataDir,
+      config: options.config,
+      tsconfig,
       after: options.after,
       silent,
       force: options.force,
@@ -73,6 +76,7 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
       configResolved(config) {
         dataDir = resolve(config.root, dir)
         databaseDir = resolve(dataDir, '../database')
+        tsconfig = options.tsconfig ? resolve(config.root, options.tsconfig) : undefined
       },
 
       async buildStart() {
@@ -81,8 +85,13 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
 
       configureServer(server) {
         if (options.disableGenerate) return
+        if (tsconfig) server.watcher.add(tsconfig)
 
         const handler = async (file: string) => {
+          if (file === tsconfig) {
+            await runGenerate(false)
+            return
+          }
           if (!/\.tsx?$/.test(file)) return
           if (
             (isWithinDirectory(file, dataDir) &&
@@ -105,6 +114,7 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
 
       configResolved(config) {
         dataDir = resolve(config.root, dir)
+        tsconfig = options.tsconfig ? resolve(config.root, options.tsconfig) : undefined
       },
 
       async buildStart() {

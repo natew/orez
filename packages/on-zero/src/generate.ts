@@ -40,7 +40,7 @@ import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate
 import type { DataLayout } from './generate-layout'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
-const GENERATOR_CACHE_VERSION = '9'
+const GENERATOR_CACHE_VERSION = '10'
 
 const isGeneratorSourceFile = (name: string) =>
   name.endsWith('.ts') &&
@@ -752,6 +752,8 @@ export interface GenerateOptions {
   dir: string
   /** explicit on-zero.config.ts path; auto-discovered in `dir` when omitted */
   config?: string
+  /** generation-only TypeScript project; defaults to each source file's project */
+  tsconfig?: string
   /** run after generation */
   after?: string
   /** suppress output */
@@ -812,21 +814,26 @@ function dataMembershipFromLayout(layout: DataLayout): DataMembership {
 
 async function loadGeneratorProject(
   baseDir: string,
-  deferSources = false
+  deferSources = false,
+  tsconfig?: string
 ): Promise<NativeTypeScriptProject> {
   const sourcePaths = collectTypeScriptSourcePaths([
     baseDir,
     resolve(dirname(baseDir), 'database'),
-  ])
-  return createNativeTypeScriptProject(baseDir, sourcePaths, { deferSources })
+  ]).filter((path) => !path.startsWith(`${resolve(baseDir, 'generated')}/`))
+  return createNativeTypeScriptProject(baseDir, sourcePaths, {
+    deferSources,
+    tsconfig: tsconfig ? resolve(tsconfig) : undefined,
+  })
 }
 
 export async function deriveDataMembership(options: {
   dir: string
   config?: string
+  tsconfig?: string
 }): Promise<DataMembership> {
   const baseDir = resolve(options.dir)
-  const project = await loadGeneratorProject(baseDir)
+  const project = await loadGeneratorProject(baseDir, false, options.tsconfig)
   try {
     const layout = discoverDataLayout(
       project,
@@ -843,9 +850,10 @@ export async function generateDrizzleSchemaInputFile(options: {
   dir: string
   schemaImportPath: string
   config?: string
+  tsconfig?: string
 }): Promise<string> {
   const baseDir = resolve(options.dir)
-  const project = await loadGeneratorProject(baseDir)
+  const project = await loadGeneratorProject(baseDir, false, options.tsconfig)
   try {
     return generateDrizzleSchemaInputFileWithProject(options, project)
   } finally {
@@ -939,7 +947,7 @@ async function generateDrizzleSchemaInputFileWithProject(
 }
 
 export async function generate(options: GenerateOptions): Promise<GenerateResult> {
-  const project = await loadGeneratorProject(resolve(options.dir), true)
+  const project = await loadGeneratorProject(resolve(options.dir), true, options.tsconfig)
   try {
     return await generateWithProject(options, project)
   } finally {
@@ -991,7 +999,7 @@ async function generateWithProject(
         .join('\0')
     )
     return hash(
-      `${hashInputTree(layout.sourceRoots, generatedDir, dependencyPaths)}\0${metadataHash}\0${externalZeroConfig}`
+      `${hashInputTree(layout.sourceRoots, generatedDir, dependencyPaths)}\0${metadataHash}\0${externalZeroConfig}\0${project.configurationKey}`
     )
   }
 
@@ -1431,7 +1439,7 @@ export async function watch(options: WatchOptions) {
   }
 
   const databaseDir = resolve(dirname(baseDir), 'database')
-  const project = await loadGeneratorProject(baseDir)
+  const project = await loadGeneratorProject(baseDir, false, options.tsconfig)
   let layout: DataLayout
   try {
     layout = discoverDataLayout(
@@ -1446,6 +1454,7 @@ export async function watch(options: WatchOptions) {
     [
       ...new Set([
         ...layout.sourceRoots,
+        ...(options.tsconfig ? [resolve(options.tsconfig)] : []),
         ...(existsSync(databaseDir) ? [databaseDir] : []),
       ]),
     ],

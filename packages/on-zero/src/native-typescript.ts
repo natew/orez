@@ -9,6 +9,7 @@ import type { SourceFile } from 'typescript/unstable/ast'
 process.env.GOMAXPROCS ??= '2'
 
 export type NativeTypeScriptProject = {
+  configurationKey: string
   projectForFile(path: string): Project
   sourceFilePaths(): Promise<string[]>
   loadSources(): Promise<void>
@@ -21,6 +22,7 @@ type CompilerSession = {
   api: API
   paths: Set<string>
   root: string
+  tsconfig?: string
 }
 
 let compiler: CompilerSession | null = null
@@ -32,7 +34,9 @@ async function closeCompiler(session: CompilerSession) {
   try {
     if (session.paths.size > 0) {
       const snapshot = await session.api.updateSnapshot({
-        closeFiles: [...session.paths],
+        ...(session.tsconfig
+          ? { closeProjects: [session.tsconfig] }
+          : { closeFiles: [...session.paths] }),
       })
       await snapshot.dispose()
     }
@@ -41,7 +45,7 @@ async function closeCompiler(session: CompilerSession) {
   }
 }
 
-async function acquireCompiler(root: string, sourcePaths: string[]) {
+async function acquireCompiler(root: string, sourcePaths: string[], tsconfig?: string) {
   const previousTurn = compilerTurn
   let releaseTurn = () => {}
   compilerTurn = new Promise<void>((resolveTurn) => {
@@ -53,26 +57,26 @@ async function acquireCompiler(root: string, sourcePaths: string[]) {
     compilerCloseTimer = null
   }
   if (compilerClose) await compilerClose
-  if (compiler && compiler.root !== root) {
+  if (compiler && (compiler.root !== root || compiler.tsconfig !== tsconfig)) {
     const previous = compiler
     compiler = null
     await closeCompiler(previous)
   }
-  compiler ??= { api: new API({ cwd: root }), paths: new Set(), root }
+  compiler ??= { api: new API({ cwd: root }), paths: new Set(), root, tsconfig }
   compiler.api.clearSourceFileCache()
   const previousPaths = compiler.paths
   const nextPaths = new Set(sourcePaths)
   compiler.paths = nextPaths
   if (previousPaths.size > 0) {
     const closedSnapshot = await compiler.api.updateSnapshot({
-      closeFiles: [...previousPaths],
+      ...(tsconfig ? { closeProjects: [tsconfig] } : { closeFiles: [...previousPaths] }),
       fileChanges: { invalidateAll: true },
     })
     await closedSnapshot.dispose()
     compiler.api.clearSourceFileCache()
   }
   const snapshot = await compiler.api.updateSnapshot({
-    openFiles: sourcePaths,
+    ...(tsconfig ? { openProjects: [tsconfig] } : { openFiles: sourcePaths }),
     fileChanges: { invalidateAll: true },
   })
   compiler.api.clearSourceFileCache()
@@ -118,13 +122,17 @@ export function collectTypeScriptSourcePaths(roots: string[]): string[] {
 export async function createNativeTypeScriptProject(
   root: string,
   sourcePaths: string[],
-  options: { deferSources?: boolean } = {}
+  options: { deferSources?: boolean; tsconfig?: string } = {}
 ): Promise<NativeTypeScriptProject> {
   if (sourcePaths.length === 0) {
     throw new Error(`[on-zero] no TypeScript source files found under ${root}`)
   }
 
-  const { session, snapshot, releaseTurn } = await acquireCompiler(root, sourcePaths)
+  const { session, snapshot, releaseTurn } = await acquireCompiler(
+    root,
+    sourcePaths,
+    options.tsconfig
+  )
   const sources = new Map<string, SourceFile>()
   const projectsByFile = new Map<string, Project>()
   const parseErrors = new Set<string>()
@@ -149,8 +157,22 @@ export async function createNativeTypeScriptProject(
   }
 
   try {
+    const scopedProject = options.tsconfig
+      ? snapshot.getProject(options.tsconfig)
+      : undefined
+    if (options.tsconfig) {
+      if (!scopedProject)
+        throw new Error(`[on-zero] TypeScript did not open ${options.tsconfig}`)
+      const included = new Set(await scopedProject.program.getSourceFileNames())
+      for (const path of sourcePaths) {
+        if (!included.has(path))
+          throw new Error(`[on-zero] generation project does not include ${path}`)
+      }
+    }
     for (const path of sourcePaths) {
-      const project = await snapshot.getDefaultProjectForFile(path)
+      const project = options.tsconfig
+        ? scopedProject
+        : await snapshot.getDefaultProjectForFile(path)
       if (!project) throw new Error(`[on-zero] TypeScript did not open ${path}`)
       projectsByFile.set(path, project)
     }
@@ -163,6 +185,11 @@ export async function createNativeTypeScriptProject(
 
   let closed = false
   return {
+    configurationKey: JSON.stringify(
+      [...new Map([...projectsByFile.values()].map((p) => [p.id, p])).values()]
+        .map((project) => [project.configFileName, project.compilerOptions])
+        .sort(([left], [right]) => String(left).localeCompare(String(right)))
+    ),
     loadSources,
     async sourceFilePaths() {
       const paths = new Set<string>()

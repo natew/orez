@@ -358,7 +358,10 @@ export default {
 ```ts
 onZeroPlugin({
   // path to data directory (default: 'src/data')
-  dataDir: 'src/data',
+  dir: 'src/data',
+
+  // optional generation-only project, relative to the vite root
+  tsconfig: 'tsconfig.on-zero.json',
 
   // additional paths to apply HMR fix to
   hmrInclude: ['/src/zero/'],
@@ -367,6 +370,15 @@ onZeroPlugin({
   disableGenerate: false,
 })
 ```
+
+Generation needs TypeScript's type checker to resolve imported and ambient argument
+types. In large applications, use a separate project extending the application's
+tsconfig with `include` limited to the data directory, database directory, and the
+ambient declaration files those sources need. Imported dependencies are still
+resolved normally. This changes only generation; the application keeps its usual
+typecheck project. The native compiler closes after generation, including in watch
+mode. The CLI accepts the same project with `on-zero generate --tsconfig
+tsconfig.on-zero.json`.
 
 ### cli (alternative)
 
