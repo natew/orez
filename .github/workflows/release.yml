@@ -21,10 +21,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: npm-release-${{ github.event_name == 'workflow_dispatch' && 'stable' || 'canary' }}
-  cancel-in-progress: false
-
 jobs:
   canary:
     if: >-
@@ -33,6 +29,9 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.conclusion == 'success')
+    concurrency:
+      group: npm-release-canary
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -98,6 +97,9 @@ jobs:
 
   stable:
     if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: npm-release-stable
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
