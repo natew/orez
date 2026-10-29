@@ -3376,7 +3376,8 @@ export class ZeroDO extends DurableObject {
         trackedTransactionID,
         physicalTableName,
         track.operation,
-        (table) => this.cdc.coversRowUndo(table)
+        (table) => this.cdc.coversRowUndo(table),
+        sql
       )) {
         snapshotted.add(table)
       }

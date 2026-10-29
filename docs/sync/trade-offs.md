@@ -230,6 +230,15 @@ row journal, a clean global setup completed at 125,402 rows under the existing
 150k circuit. Keep that circuit as a regression guard; increasing it would hide
 quadratic snapshot amplification rather than fix it.
 
+A direct parameter-bound `UPDATE` can prove that a column-scoped `UPDATE OF`
+trigger cannot fire. Only that initial graph edge is excluded; a later trigger
+can revisit the same table and must retain its full side-effect graph. Unknown
+assignments, explicit REPLACE conflict policies and schema-level REPLACE retain
+conservative snapshots. Trigger bodies still assume all target operations,
+including deletes, to preserve rollback under conflict resolution. The workerd
+write-attribution fixture pins an unrelated guarded update at the same physical
+write cost with zero or 1,000 retained cascade children.
+
 Table DDL requires an original-shape snapshot before any row-undo images exist
 for that table. Resolve a `main`-qualified table name to its physical name for
 both that snapshot and capture-trigger suspension. A quoted dot inside a table

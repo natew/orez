@@ -12,6 +12,7 @@ import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it } from 'vitest'
 
 import { TransactionalCdc } from './cdc.js'
+import { snapshotSideEffectWriteTables } from './tx-journal.js'
 
 import type { DurableSqlStorage } from './watermark.js'
 
@@ -543,5 +544,108 @@ describe('TransactionalCdc', () => {
     expect(cdc.drain()).toMatchObject([
       { tableName: 'public.pipe', op: 'INSERT', rowData: { id: 1, body: 'renamed' } },
     ])
+  })
+})
+
+describe('column-scoped trigger snapshots', () => {
+  it('skips an unrelated bound update without losing transitive trigger protection', () => {
+    const { nativeDb, sql } = createSqliteStorage()
+    try {
+      sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, key TEXT, value INTEGER)')
+      sql.exec(
+        'CREATE TABLE event (id INTEGER PRIMARY KEY, itemId TEXT REFERENCES item(id) ON DELETE CASCADE)'
+      )
+      sql.exec("INSERT INTO item VALUES ('item', 'key', 1)")
+      sql.exec(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000) INSERT INTO event SELECT x, 'item' FROM n"
+      )
+      sql.exec(
+        'CREATE TRIGGER derive AFTER UPDATE OF key ON item BEGIN UPDATE item SET key = NEW.key WHERE id = NEW.id; END'
+      )
+      const before = nativeDb.prepare('SELECT total_changes() AS n').get().n
+      expect([
+        ...snapshotSideEffectWriteTables(
+          sql,
+          'unrelated',
+          'item',
+          'UPDATE',
+          () => false,
+          'UPDATE "item" SET "value" = ? WHERE "id" = ?'
+        ),
+      ]).toEqual([])
+      expect(nativeDb.prepare('SELECT total_changes() AS n').get().n).toBe(before)
+      expect([
+        ...snapshotSideEffectWriteTables(
+          sql,
+          'watched',
+          'item',
+          'UPDATE',
+          () => false,
+          'UPDATE "item" SET "key" = ? WHERE "id" = ?'
+        ),
+      ]).toContain('event')
+      expect([
+        ...snapshotSideEffectWriteTables(
+          sql,
+          'replace',
+          'item',
+          'UPDATE',
+          () => false,
+          'UPDATE OR REPLACE item SET value = ? WHERE id = ?'
+        ),
+      ]).toContain('event')
+      // unknown assignments retain conservative snapshots.
+      expect([
+        ...snapshotSideEffectWriteTables(
+          sql,
+          'expression',
+          'item',
+          'UPDATE',
+          () => false,
+          'UPDATE item SET value = value + 1'
+        ),
+      ]).toContain('event')
+      sql.exec(
+        'CREATE TRIGGER indirect AFTER UPDATE OF value ON item BEGIN UPDATE item SET key = NEW.key WHERE id = NEW.id; END'
+      )
+      expect([
+        ...snapshotSideEffectWriteTables(
+          sql,
+          'transitive',
+          'item',
+          'UPDATE',
+          () => false,
+          'UPDATE item SET value = ? WHERE id = ?'
+        ),
+      ]).toContain('event')
+    } finally {
+      nativeDb.close()
+    }
+  })
+  it('retains snapshots when schema conflict resolution may replace another row', () => {
+    const { nativeDb, sql } = createSqliteStorage()
+    try {
+      sql.exec(
+        'CREATE TABLE item (id TEXT PRIMARY KEY, key TEXT, value INTEGER UNIQUE ON CONFLICT REPLACE)'
+      )
+      sql.exec(
+        'CREATE TABLE event (id INTEGER PRIMARY KEY, itemId TEXT REFERENCES item(id) ON DELETE CASCADE)'
+      )
+      sql.exec(
+        'CREATE TRIGGER derive AFTER UPDATE OF key ON item BEGIN UPDATE item SET key = NEW.key WHERE id = NEW.id; END'
+      )
+      expect([
+        ...snapshotSideEffectWriteTables(
+          sql,
+          'conflict',
+          'item',
+          'UPDATE',
+          () => false,
+          'UPDATE item SET value = ? WHERE id = ?'
+        ),
+      ]).toContain('event')
+    } finally {
+      nativeDb.close()
+    }
   })
 })

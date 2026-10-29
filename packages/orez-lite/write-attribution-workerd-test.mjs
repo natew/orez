@@ -23,6 +23,8 @@ const FIXTURES = [
   'multi-statement',
   'rollback',
   'duplicate-commit-retry',
+  'guard-empty',
+  'guard-loaded',
 ]
 
 writeFileSync(
@@ -101,6 +103,8 @@ const schema = {
     await client.exec(\`CREATE TRIGGER IF NOT EXISTS item_audit AFTER INSERT ON item BEGIN
       INSERT INTO audit (id, itemId) VALUES (NEW.id || '-a', NEW.id);
     END\`)
+    await client.exec('CREATE TABLE IF NOT EXISTS guard_event (id INTEGER PRIMARY KEY, itemId TEXT REFERENCES indexed_item(id) ON DELETE CASCADE)')
+    await client.exec('CREATE TRIGGER IF NOT EXISTS scoped_guard AFTER UPDATE OF name ON indexed_item WHEN NEW.name != lower(NEW.name) BEGIN UPDATE indexed_item SET name = lower(NEW.name) WHERE id = NEW.id; END')
     await client.registerTables([
       { table: 'item', publicTable: 'item' },
       { table: 'indexed_item', publicTable: 'indexed_item' },
@@ -173,6 +177,14 @@ const dataWorker = createOrezDataWorker({
         snapshot.lease[Symbol.dispose]()
       }
     }
+    if (request.method === 'POST' && parts[0] === 'guard-seed') {
+      const { count } = await request.json()
+      await sql.transaction(unusedCompiler, async (tx) => {
+        await tx.exec('DELETE FROM guard_event')
+        if (count) await tx.exec("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?) INSERT INTO guard_event SELECT x, 'idx1' FROM n", [count])
+      })
+      return Response.json({ ok: true })
+    }
     if (request.method === 'GET' && parts[0] === 'feed-ids') {
       const rows = await sql.query(
         'SELECT table_name AS tableName, op FROM _zero_changes ORDER BY watermark'
@@ -196,7 +208,11 @@ const dataWorker = createOrezDataWorker({
         })
         return Response.json({ ok: true, fixture: name })
       }
-      if (name === 'private-update') {
+      if (name === 'guard-empty' || name === 'guard-loaded') {
+        await sql.transaction(unusedCompiler, async (tx) => {
+          await tx.exec('UPDATE indexed_item SET createdAt = ? WHERE id = ?', [Date.now(), 'idx1'], meta('indexed_item', 'update'))
+        })
+      } else if (name === 'private-update') {
         await sql.transaction(unusedCompiler, async (tx) => {
           await tx.exec('UPDATE secret SET token = ? WHERE id = ?', ['t' + suffix, 's1'])
         })
@@ -491,6 +507,14 @@ new_sqlite_classes = ["ZeroDO"]
 
     const receipts = []
     for (const name of FIXTURES) {
+      if (name.startsWith('guard-')) {
+        const seeded = await fetch(`${base}/guard-seed?ns=${namespace}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ count: name === 'guard-loaded' ? 1000 : 0 }),
+        })
+        assert.equal(seeded.status, 200, await seeded.text())
+      }
       const before = await status()
       const eventsBefore = parseTransactionSamples(logText).length
       const response = await fetch(`${base}/fixture/${name}?ns=${namespace}`, {
@@ -525,6 +549,12 @@ new_sqlite_classes = ["ZeroDO"]
       })
     }
 
+    const guardEmpty = receipts.find((row) => row.name === 'guard-empty').billingDelta
+    const guardLoaded = receipts.find((row) => row.name === 'guard-loaded').billingDelta
+    assert.equal(guardLoaded, guardEmpty)
+    console.log(
+      JSON.stringify({ event: 'scoped_trigger_workerd', guardEmpty, guardLoaded })
+    )
     return {
       receipts,
       changefeed: await changes(),

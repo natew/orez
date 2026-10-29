@@ -1034,6 +1034,42 @@ function triggerEvent(sql: string | null): RowOperation | null {
 
 const NO_SNAPSHOTS: ReadonlySet<string> = new Set<string>()
 
+const SQL_IDENTIFIER = '"(?:[^"]|"")+"|`(?:[^`]|``)+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*'
+const BOUND_UPDATE = new RegExp(
+  `^\\s*UPDATE\\s+(?:${SQL_IDENTIFIER})(?:\\s*\\.\\s*(?:${SQL_IDENTIFIER}))?\\s+SET\\s+((?:(?:${SQL_IDENTIFIER})\\s*=\\s*\\?(?:\\d+)?\\s*,\\s*)*(?:${SQL_IDENTIFIER})\\s*=\\s*\\?(?:\\d+)?)(?:\\s+(?:WHERE|RETURNING)\\s|\\s*$)`,
+  'i'
+)
+const UPDATE_OF = new RegExp(
+  `^\\s*CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?TRIGGER\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:${SQL_IDENTIFIER})(?:\\s*\\.\\s*(?:${SQL_IDENTIFIER}))?\\s+(?:(?:BEFORE|AFTER|INSTEAD\\s+OF)\\s+)?UPDATE\\s+OF\\s+((?:(?:${SQL_IDENTIFIER})\\s*,\\s*)*(?:${SQL_IDENTIFIER}))\\s+ON\\s`,
+  'i'
+)
+
+function identifierNames(text: string): Set<string> {
+  const names = new Set<string>()
+  for (const match of text.matchAll(new RegExp(SQL_IDENTIFIER, 'g'))) {
+    const raw = match[0]
+    const name = raw.startsWith('"')
+      ? raw.slice(1, -1).replaceAll('""', '"')
+      : raw.startsWith('`')
+        ? raw.slice(1, -1).replaceAll('``', '`')
+        : raw.startsWith('[')
+          ? raw.slice(1, -1)
+          : raw
+    names.add(sqliteNoCase(name))
+  }
+  return names
+}
+
+// prove only parameter assignments. expressions, tuples, comments and batches
+// retain the existing conservative graph rather than guessing changed columns.
+function boundUpdateColumns(statement?: string): Set<string> | undefined {
+  if (!statement) return undefined
+  const single = statement.replace(/;\s*$/, '')
+  if (single.includes(';')) return undefined
+  const assignments = BOUND_UPDATE.exec(single)?.[1]
+  return assignments ? identifierNames(assignments) : undefined
+}
+
 /** true when this transaction already recorded row-undo images for `table`. */
 function hasRowUndoImages(sql: DurableSqlStorage, txID: string, table: string): boolean {
   if (!tableExists(sql, PENDING_CHANGES_TABLE)) return false
@@ -1086,15 +1122,21 @@ export function snapshotSideEffectWriteTables(
   txID: string,
   sourceTable: string,
   operation: TrackedOperation,
-  coversRowUndo: (physicalTable: string) => boolean
+  coversRowUndo: (physicalTable: string) => boolean,
+  sourceStatement?: string
 ): ReadonlySet<string> {
   const relations = sql
     .exec(
-      "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') " +
-        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '_orez_bk_*' ORDER BY name"
+      "SELECT name, type, CASE WHEN name = ? COLLATE NOCASE THEN sql END AS source_sql FROM sqlite_master WHERE type IN ('table', 'view') " +
+        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '_orez_bk_*' ORDER BY name",
+      sourceTable
     )
     .toArray()
-    .map((row) => ({ name: String(row.name ?? ''), type: String(row.type ?? '') }))
+    .map((row) => ({
+      name: String(row.name ?? ''),
+      type: String(row.type ?? ''),
+      sourceSql: String(row.source_sql ?? ''),
+    }))
     .filter((relation) => relation.name)
   const knownRelations = new Set(relations.map((relation) => sqliteNoCase(relation.name)))
   const snapshotTables = new Map(
@@ -1108,6 +1150,19 @@ export function snapshotSideEffectWriteTables(
       .map((relation) => [sqliteNoCase(relation.name), relation.name])
   )
   const node = (table: string, op: RowOperation) => `${sqliteNoCase(table)}\0${op}`
+  const sourceDefinition = relations.find(
+    (relation) => sqliteNoCase(relation.name) === sqliteNoCase(sourceTable)
+  )?.sourceSql
+  // a schema-level REPLACE policy can delete a conflicting row even when an
+  // UPDATE OF trigger cannot fire. retain its conservative graph.
+  const initialColumns =
+    operation === 'UPDATE' &&
+    sourceDefinition &&
+    !/\bON\s+CONFLICT\s+REPLACE\b/i.test(sourceDefinition)
+      ? boundUpdateColumns(sourceStatement)
+      : undefined
+  const sourceNode = node(sourceTable, 'UPDATE')
+  const initialNode = `${sourceNode}\0initial`
   const edges = new Map<string, Set<string>>()
   const unsafeNodes = new Set<string>()
   // Nodes reached by a referential action rather than by a trigger. Rollback
@@ -1122,13 +1177,19 @@ export function snapshotSideEffectWriteTables(
     fromOp: RowOperation,
     to: string,
     toOps: readonly RowOperation[],
-    referential = false
+    referential = false,
+    skipInitial = false
   ) => {
     const fromKey = node(from, fromOp)
     const targets = edges.get(fromKey) ?? new Set<string>()
     for (const toOp of toOps) {
       const toKey = node(to, toOp)
       targets.add(toKey)
+      if (initialColumns && fromKey === sourceNode && !skipInitial) {
+        const initialTargets = edges.get(initialNode) ?? new Set<string>()
+        initialTargets.add(toKey)
+        edges.set(initialNode, initialTargets)
+      }
       if (referential) referentialNodes.add(toKey)
     }
     edges.set(fromKey, targets)
@@ -1154,15 +1215,24 @@ export function snapshotSideEffectWriteTables(
     const targets = triggerWriteTargets(definition)
     const unknownTarget =
       !targets || targets.some((target) => !knownRelations.has(sqliteNoCase(target)))
+    const watched = definition ? UPDATE_OF.exec(definition)?.[1] : undefined
+    const watchedColumns = watched ? identifierNames(watched) : undefined
+    const skipInitial =
+      !!initialColumns &&
+      !!watchedColumns &&
+      ![...initialColumns].some((column) => watchedColumns.has(column))
     for (const firing of firedBy) {
       if (unknownTarget) {
         unsafeNodes.add(node(from, firing))
+        if (initialColumns && node(from, firing) === sourceNode && !skipInitial)
+          unsafeNodes.add(initialNode)
         continue
       }
       // reading which operation a trigger body performs would have to model
       // REPLACE conflict resolution deleting rows, so assume all three on the
       // target. only whether the trigger fires at all is decided precisely.
-      for (const target of targets!) addEdge(from, firing, target, ROW_OPERATIONS)
+      for (const target of targets!)
+        addEdge(from, firing, target, ROW_OPERATIONS, false, skipInitial)
     }
   }
 
@@ -1194,7 +1264,9 @@ export function snapshotSideEffectWriteTables(
   const reachable = new Set<string>()
   const reachableTables = new Set<string>()
   const referentialTables = new Set<string>()
-  const pending = seeded.map((op) => node(sourceTable, op))
+  const pending = seeded.map((op) =>
+    initialColumns && op === 'UPDATE' ? initialNode : node(sourceTable, op)
+  )
   let hasSideEffect = false
   let mustSnapshotAll = false
   while (pending.length > 0) {
