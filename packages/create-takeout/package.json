@@ -1,6 +1,6 @@
 {
   "name": "@o/create-takeout",
-  "version": "0.16.20",
+  "version": "0.16.21",
   "description": "Create a new Takeout app",
   "bin": {
     "create-takeout": "./run.js"

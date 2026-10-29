@@ -1,6 +1,6 @@
 {
   "name": "@o/better-auth-utils",
-  "version": "0.16.20",
+  "version": "0.16.21",
   "description": "Better auth utilities and client for React/React Native applications",
   "sideEffects": false,
   "type": "module",
