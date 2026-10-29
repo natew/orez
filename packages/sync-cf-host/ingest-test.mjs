@@ -171,13 +171,13 @@ try {
       restoreStatusBefore.requestsSinceBoot.sqlStatements,
     callbacks: restoreNotificationStatus.attempts,
   }
-  // guard maintenance adds 829 reads, 8 writes, and 29 statements during replacement.
+  // guard maintenance adds 825 reads, 8 writes, and 25 statements during replacement.
   assert.deepEqual(restoreCost, {
     totalChanges: 18,
-    rowsRead: 3_664,
+    rowsRead: 3_660,
     rowsWritten: 36,
     sessions: 9,
-    statements: 205,
+    statements: 201,
     callbacks: 0,
   })
   assert.deepEqual(
