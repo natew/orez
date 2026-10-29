@@ -666,6 +666,7 @@ export class ZeroDO extends DurableObject {
   private diagnosticSql = false
   private maintenanceSession: ApplicationSqlSessionTarget | null = null
   private maintenanceSql = false
+  private rollbackSql = false
   private writeBudgetReopening = false
   private backupMaintenance = false
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
@@ -788,7 +789,7 @@ export class ZeroDO extends DurableObject {
   }
 
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
-    if (this.maintenanceSql) {
+    if (this.maintenanceSql || (this.rollbackSql && this.writeBudget.status().tripped)) {
       this.writeBudget.recordMaintenanceBillable(rows)
       return
     }
@@ -824,7 +825,9 @@ export class ZeroDO extends DurableObject {
         )
         this.persistWriteBudgetTrip()
       }
-      throw error
+      // undo must finish even when its own writes cross the budget. the trip
+      // remains sticky and every later undo write is charged as maintenance.
+      if (!this.rollbackSql || !(error instanceof WriteBudgetExceededError)) throw error
     }
   }
 
@@ -929,6 +932,7 @@ export class ZeroDO extends DurableObject {
         !this.writeBudgetDisabled &&
         !this.backupMaintenance &&
         !this.maintenanceSql &&
+        !this.rollbackSql &&
         !this.restoringForeignKeys
       )
         this.writeBudget.assertOpen()
@@ -3095,6 +3099,11 @@ export class ZeroDO extends DurableObject {
     } catch (caught) {
       outcome = 'error'
       error = caught
+      try {
+        this.closeApplicationSqlSession(session)
+      } catch (rollbackError) {
+        error = rollbackError
+      }
     }
     this.releaseApplicationSqlTurn(session, { pump: false })
     try {
@@ -3147,6 +3156,12 @@ export class ZeroDO extends DurableObject {
           })
         )
         this.invalidateSchemaCaches()
+      } catch (error) {
+        this.recoveryFailure = {
+          transactionId: session.sessionID,
+          reason: error instanceof Error ? error.message : String(error),
+        }
+        throw error
       } finally {
         this.releaseApplicationSqlTurn(session)
       }
@@ -3205,8 +3220,10 @@ export class ZeroDO extends DurableObject {
     work: () => T,
     suspendGuards = true
   ): T {
-    this.sql.exec('PRAGMA foreign_keys = OFF').toArray()
+    const previousRollbackSql = this.rollbackSql
+    this.rollbackSql = true
     try {
+      this.sql.exec('PRAGMA foreign_keys = OFF').toArray()
       return this.atomicallySync(() => {
         if (suspendGuards) this.numberGuards?.suspend()
         const result = work()
@@ -3214,7 +3231,11 @@ export class ZeroDO extends DurableObject {
         return result
       })
     } finally {
-      this.restoreForeignKeyEnforcement()
+      try {
+        this.restoreForeignKeyEnforcement()
+      } finally {
+        this.rollbackSql = previousRollbackSql
+      }
     }
   }
 

@@ -222,6 +222,14 @@ CVR/CDB changes use the same journal with `publish: false` and are retained only
 long enough to support rollback and crash recovery. Full-table snapshots are a
 fallback for writes the compiler cannot classify, not the normal DML path.
 
+Journal undo may finish behind a tripped write circuit. Its physical writes
+remain billed and metered, including when undo itself first exceeds the budget;
+the trip remains sticky and ordinary application writes stay blocked. A failed
+commit undoes earlier session statements before releasing admission. If undo
+fails, the object retains the journal and refuses application SQL until recovery
+can restore it. This preserves transaction rollback, not a bound on recovery
+work or the size of an application transaction.
+
 This distinction matters to billing. A 2026-07-13 Chat cold-start profile
 recorded 1,191,374 billable rows, of which 1,077,552 came from 1,244 transaction
 snapshots of a growing internal `cdc_changeLog`. The Chat seed itself was not
