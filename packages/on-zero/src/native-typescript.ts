@@ -57,7 +57,12 @@ async function acquireCompiler(root: string, sourcePaths: string[], tsconfig?: s
     compilerCloseTimer = null
   }
   if (compilerClose) await compilerClose
-  if (compiler && (compiler.root !== root || compiler.tsconfig !== tsconfig)) {
+  // configured projects cache their root membership. reopen after generation
+  // adds files so a following run includes those outputs in its new program.
+  if (
+    compiler &&
+    (tsconfig || compiler.root !== root || compiler.tsconfig !== tsconfig)
+  ) {
     const previous = compiler
     compiler = null
     await closeCompiler(previous)

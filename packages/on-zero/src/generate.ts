@@ -820,7 +820,7 @@ async function loadGeneratorProject(
   const sourcePaths = collectTypeScriptSourcePaths([
     baseDir,
     resolve(dirname(baseDir), 'database'),
-  ]).filter((path) => !path.startsWith(`${resolve(baseDir, 'generated')}/`))
+  ])
   return createNativeTypeScriptProject(baseDir, sourcePaths, {
     deferSources,
     tsconfig: tsconfig ? resolve(tsconfig) : undefined,
