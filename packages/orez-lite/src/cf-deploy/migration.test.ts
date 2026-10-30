@@ -272,7 +272,7 @@ describe('buildMigrationModuleSource', () => {
     await expect(migrationModule.orezAppSchema.migrate()).resolves.toBeUndefined()
   })
 
-  it('commits migration files separately so later DDL can snapshot a table', async () => {
+  it('batches fresh schema-only files and commits after a row write so later DDL can snapshot a table', async () => {
     const schemaModuleUrl = javascriptModuleUrl(`
       export const schema = { tables: {}, relationships: {} }
     `)
@@ -282,6 +282,8 @@ describe('buildMigrationModuleSource', () => {
         schemaVersion: 'schema-backlog',
         schemaImportSpecifier: schemaModuleUrl,
         nativeSqlStatements: [
+          { id: '0000_a/migration.sql:0', sql: 'CREATE TABLE a (id text)' },
+          { id: '0000_b/migration.sql:0', sql: 'CREATE TABLE b (id text)' },
           {
             id: '0001_rows/migration.sql:0',
             sql: 'UPDATE project SET name = name',
@@ -313,6 +315,7 @@ describe('buildMigrationModuleSource', () => {
         ) {
           return
         }
+        if (sql.startsWith('CREATE TABLE a') || sql.startsWith('CREATE TABLE b')) return
         if (sql === 'UPDATE project SET name = name') {
           rowWriteTransaction = transaction
           statementTransactions.push(transaction)
@@ -356,7 +359,7 @@ describe('buildMigrationModuleSource', () => {
     expect(statementTransactions).toHaveLength(2)
     expect(statementTransactions[0]).not.toBe(statementTransactions[1])
     expect(transaction).toBe(2)
-    expect(ledger.size).toBe(2)
+    expect(ledger.size).toBe(4)
   })
 
   it('bounds ledger reads and application sessions to the pending migration files', async () => {

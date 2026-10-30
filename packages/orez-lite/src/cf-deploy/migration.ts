@@ -583,6 +583,20 @@ async function readAppliedMigrationStatements(tx) {
   return applied
 }
 
+const rowWriteSql = /^\\s*(?:--[^\\n]*\\n\\s*)*(?:insert|update|delete|replace)\\b/i
+const rowWritingFiles = new Set(
+  nativeSqlStatements.flatMap((statement) => {
+    if (typeof statement === 'string' || !hasExecutableMigrationSql(statement)) return []
+    return rowWriteSql.test(statement.sql) ? [String(statement.id).split(':')[0]] : []
+  }),
+)
+
+// the leading files of a pending list through the first one that writes rows.
+function schemaOnlyMigrationBatch(files) {
+  const end = files.findIndex((file) => rowWritingFiles.has(file))
+  return end === -1 ? files : files.slice(0, end + 1)
+}
+
 function pendingMigrationFilesFor(applied) {
   const pendingMigrationFiles = []
   for (const [index, statement] of nativeSqlStatements.entries()) {
@@ -985,10 +999,23 @@ async function applyNativeSchema(tx, instance, {
   if (prepare) await tx.registerTables(publicTables())
   const appliedStatementIds = new Set(applied)
   const pendingMigrationFiles = pendingMigrationFilesFor(appliedStatementIds)
-  const selectedMigrationFile =
-    migrationFile === null && prepare ? (pendingMigrationFiles[0] ?? null) : migrationFile
+  // a namespace with an empty ledger holds no rows, so its schema-only files can
+  // share this one transaction instead of paying a session, a ledger re-read and
+  // a commit each. the batch ends after the first file that writes rows, because
+  // a table with a row write cannot be snapshotted by later DDL in the same
+  // transaction. a namespace that already has applied statements keeps one file
+  // per transaction, which bounds the work of any single commit on live data.
+  const selectedMigrationFiles = new Set(
+    migrationFile !== null
+      ? [migrationFile]
+      : prepare
+        ? appliedStatementIds.size === 0
+          ? schemaOnlyMigrationBatch(pendingMigrationFiles)
+          : pendingMigrationFiles.slice(0, 1)
+        : [],
+  )
   const remainingMigrationFiles = pendingMigrationFiles.filter(
-    (file) => file !== selectedMigrationFile,
+    (file) => !selectedMigrationFiles.has(file),
   )
   // CREATE TABLE IF NOT EXISTS is a SILENT NO-OP against a table that already
   // exists in an older shape, so every column that only ever appears inside a
@@ -1126,7 +1153,7 @@ async function applyNativeSchema(tx, instance, {
       if (!hasExecutableMigrationSql(item)) continue
       const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
       if (supersededStatementIds.has(baseId)) continue
-      if (selectedMigrationFile === null || baseId.split(':')[0] !== selectedMigrationFile) {
+      if (!selectedMigrationFiles.has(baseId.split(':')[0])) {
         continue
       }
       const id = baseId + ':' + hashMigrationSql(item.sql)
