@@ -1,0 +1,1265 @@
+import { schema } from "./schema.js"
+
+export const SCHEMA_VERSION = "migration-cost-v1"
+
+const migrationTable = "__contrast_cf_migrations"
+
+function quoteIdentifier(value) {
+  return '"' + String(value).replaceAll('"', '""') + '"'
+}
+
+// one migration runner per boot set. every namespace shares the ledger table
+// and the runner code; only the statements, registrations, and expected shape
+// differ, so a narrower namespace never boots tables it does not own.
+function createNativeMigrations({
+  schema,
+  nativeSqlStatements,
+  configuredPublicTables,
+  expectedTables,
+  expectedIndexes,
+}) {
+const supersededStatementIds = new Set(nativeSqlStatements.flatMap((item) =>
+  item && typeof item === 'object' && typeof item.sql === 'string' && item.sql.trim() && Array.isArray(item.supersedes)
+    ? item.supersedes : [],
+))
+
+function schemaMetadataStatements() {
+  return Object.values(schema.tables || {})
+    .filter((table) => table && typeof table.name === 'string')
+    .map((table) => {
+      const publicName = table.name.startsWith('public.')
+        ? table.name
+        : 'public.' + table.name
+      const registration = resolvedPublicTables.find(
+        (candidate) => candidate.publicTable === publicName,
+      )
+      return {
+        sql: 'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
+        params: [
+          table.name.replace(/^public\./, ''),
+          JSON.stringify({
+            columns: table.columns,
+            primaryKey: table.primaryKey,
+            physicalName:
+              (registration && registration.table) ||
+              table.serverName ||
+              table.name.replace(/^public\./, ''),
+          }),
+        ],
+      }
+    })
+}
+
+function publicTables() {
+  if (configuredPublicTables.length) return configuredPublicTables
+  return Object.values(schema.tables || {})
+    .filter((table) => table && typeof table.name === 'string')
+    .map((table) => {
+      const publicTable = table.name.startsWith('public.') ? table.name : 'public.' + table.name
+      return { table: publicTable.replace(/^public\./, ''), publicTable }
+    })
+}
+
+const resolvedPublicTables = publicTables()
+
+async function shouldSkipStatement(tx, statement) {
+  if (statement.skipIfTableMissing) {
+    const tempRows = await tx.query(
+      'PRAGMA table_info(' + quoteIdentifier(statement.skipIfTableMissing) + ')',
+    )
+    if (tempRows.length === 0) return true
+  }
+  if (statement.migrateIfColumnType) {
+    const condition = statement.migrateIfColumnType
+    const rows = await tx.query(
+      'SELECT type FROM pragma_table_info(?) WHERE name = ? LIMIT 1',
+      [condition.table, condition.column],
+    )
+    if (rows.length === 0 || !columnTypeMatches(rows[0].type, condition)) return true
+  }
+  const condition = statement.skipIfColumnExists || statement.skipIfColumnMissing
+  if (!condition) return false
+  const rows = await tx.query('PRAGMA table_info(' + quoteIdentifier(condition.table) + ')')
+  const hasColumn = rows.some((row) => row && row.name === condition.column)
+  return shouldSkipForColumnCondition(statement, hasColumn)
+}
+
+function shouldSkipForColumnCondition(statement, hasColumn) {
+  if (statement.skipIfColumnExists) return hasColumn
+  if (statement.skipIfColumnMissing) return !hasColumn
+  return false
+}
+
+function normalizeSqlType(value) {
+  return String(value).trim().toLowerCase().replaceAll(/\s+/g, ' ')
+}
+
+function sqliteTypeAffinity(value) {
+  const type = normalizeSqlType(value)
+  if (type.includes('int')) return 'integer'
+  if (type.includes('char') || type.includes('clob') || type.includes('text')) {
+    return 'text'
+  }
+  if (!type || type.includes('blob')) return 'blob'
+  if (type.includes('real') || type.includes('floa') || type.includes('doub')) {
+    return 'real'
+  }
+  return 'numeric'
+}
+
+function columnTypeMatches(actualType, condition) {
+  if (typeof condition.declaredType === 'string') {
+    return normalizeSqlType(actualType) === normalizeSqlType(condition.declaredType)
+  }
+  if (
+    condition.affinity === 'blob' ||
+    condition.affinity === 'integer' ||
+    condition.affinity === 'numeric' ||
+    condition.affinity === 'real' ||
+    condition.affinity === 'text'
+  ) {
+    return sqliteTypeAffinity(actualType) === condition.affinity
+  }
+  throw new TypeError('migrateIfColumnType requires declaredType or a SQLite affinity')
+}
+
+function normalizePredicate(value) {
+  if (value === null) return null
+  // fold identifier quoting and whitespace, but never the contents of
+  // single-quoted string literals
+  return value
+    .split(/('(?:[^']|'')*')/)
+    .map((part, position) =>
+      position % 2 === 1
+        ? part
+        : part
+            .toLowerCase()
+            .replaceAll('"', '')
+            .replaceAll(String.fromCharCode(96), '')
+            .replaceAll('[', '')
+            .replaceAll(']', '')
+            .replaceAll(/\s+/g, ' '),
+    )
+    .join('')
+    .trim()
+}
+
+function indexPredicate(indexSql) {
+  if (!indexSql) return null
+  // partial-index predicates cannot contain subqueries, so the first WHERE
+  // after the column list closes is the predicate
+  const match = /^[^)]*\)\s*WHERE\s+([\s\S]+)$/i.exec(indexSql)
+  return match ? match[1].trim() : null
+}
+
+function normalizeIndexDdl(value) {
+  if (!value) return null
+  return normalizePredicate(value)
+    .replace(/^create (unique )?index if not exists /, 'create $1index ')
+    .replace(/;$/, '')
+}
+
+// every table's columns in ONE round trip. this used to be a PRAGMA
+// table_info per expected table in the shape assert plus another per ledgered
+// ADD COLUMN in the reconcile — order 125 sequential DO calls, all of them
+// holding the namespace's exclusive application-SQL session while concurrent
+// readers spin in the 25ms acquire retry. healing paths force this run on
+// EVERY request for an unseeded project, so its cost lands on exactly the
+// population it exists to repair (the 2026-07-21 outage shape).
+//
+// one behaviour difference from the PRAGMAs this replaced: lookups here are
+// case-EXACT, because the keys come from sqlite_master.name, while
+// PRAGMA table_info resolves a table name case-insensitively. No statement in
+// the current set mismatches, but a hand-written repair migration that spelled
+// a table name in a different case would read as a missing column, resurrect,
+// and then die on "duplicate column name". Match sqlite_master's spelling.
+async function readLiveColumns(tx) {
+  // exclude protected/internal tables from the scan. once a Durable Object has
+  // used its KV API, _cf_KV is listed in sqlite_master but the platform
+  // authorizer refuses pragma_table_info on it, and one denied row fails the
+  // WHOLE statement with SQLITE_AUTH (verified 2026-07-24 against a real DO:
+  // scan passes without _cf_KV, fails the moment storage.put creates it, and
+  // passes again with this filter). every prod namespace DO has _cf_KV, so the
+  // unfiltered scan broke every migration session. caret escape on purpose:
+  // this whole function body is emitted through a template literal, where a
+  // literal backslash would need quadruple escaping.
+  const rows = await tx.query(
+    'SELECT m.name AS tableName, p.name AS columnName, p.type AS columnType,' +
+      ' p."notnull" AS columnNotNull, p.pk AS columnPk' +
+      " FROM sqlite_master m JOIN pragma_table_info(m.name) p WHERE m.type = 'table'" +
+      " AND m.name NOT GLOB '_orez_bk_*'" +
+      " AND m.name NOT LIKE '^_cf^_%' ESCAPE '^'" +
+      " AND m.name NOT LIKE 'sqlite^_%' ESCAPE '^'",
+  )
+  const tables = new Map()
+  for (const row of rows) {
+    let columns = tables.get(row.tableName)
+    if (!columns) {
+      columns = []
+      tables.set(row.tableName, columns)
+    }
+    columns.push({
+      name: row.columnName,
+      notnull: row.columnNotNull,
+      pk: row.columnPk,
+      type: row.columnType,
+    })
+  }
+  return tables
+}
+
+async function readLiveIndexes(tx) {
+  const indexes = new Map()
+  if (expectedIndexes.length === 0) return indexes
+  // read only the expected names. sqlite_master supplies the predicate-bearing
+  // DDL while the table-valued pragmas supply uniqueness and ordered columns
+  // in the same application-SQL call. pack names below workerd's bind limit;
+  // soot's current 37 indexes fit in one query.
+  const indexesPerQuery = 64
+  for (let offset = 0; offset < expectedIndexes.length; offset += indexesPerQuery) {
+    const expected = expectedIndexes.slice(offset, offset + indexesPerQuery)
+    const rows = await tx.query(
+      'SELECT m.name AS indexName, m.tbl_name AS tableName, m.sql AS indexSql,' +
+        ' l."unique" AS indexUnique, i.seqno AS columnOrder, i.name AS columnName' +
+        ' FROM sqlite_master m JOIN pragma_index_list(m.tbl_name) l ON l.name = m.name' +
+        ' LEFT JOIN pragma_index_info(m.name) i' +
+        " WHERE m.type = 'index' AND m.name IN (" +
+        expected.map(() => '?').join(', ') + ')',
+      expected.map((index) => index.name),
+    )
+    for (const row of rows) {
+      let index = indexes.get(row.indexName)
+      if (!index) {
+        index = {
+          columns: [],
+          sql: row.indexSql,
+          table: row.tableName,
+          unique: Number(row.indexUnique) !== 0,
+        }
+        indexes.set(row.indexName, index)
+      }
+      if (typeof row.columnName === 'string') {
+        index.columns[Number(row.columnOrder)] = row.columnName
+      }
+    }
+  }
+  return indexes
+}
+
+async function assertExpectedSchema(tx, liveColumns = null) {
+  liveColumns ??= await readLiveColumns(tx)
+  // two passes on purpose. reporting only the FIRST missing table makes an
+  // operator fix them one deploy at a time, and a per-column mismatch later in
+  // the list would throw before the missing-table set was even known. collect
+  // every absent table first and report them together.
+  const present = []
+  const missingTables = []
+  for (const expectedTable of expectedTables) {
+    const actualColumns = liveColumns.get(expectedTable.name) || []
+    if (actualColumns.length === 0) missingTables.push(expectedTable.name)
+    else present.push({ actualColumns, expectedTable })
+  }
+  if (missingTables.length > 0) {
+    throw new Error(
+      'application SQLite schema mismatch: missing table' +
+        (missingTables.length > 1 ? 's' : '') +
+        ' ' +
+        missingTables.join(', '),
+    )
+  }
+
+  for (const { actualColumns, expectedTable } of present) {
+    const actualByName = new Map(actualColumns.map((column) => [column.name, column]))
+    const missing = expectedTable.columns
+      .filter((column) => !actualByName.has(column.name))
+      .map((column) => column.name)
+    if (missing.length > 0) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expectedTable.name +
+          ': missing [' + missing.join(', ') + ']',
+      )
+    }
+
+    const expectedPrimaryKey = expectedTable.columns
+      .filter((column) => column.primaryKeyOrder > 0)
+      .sort((left, right) => left.primaryKeyOrder - right.primaryKeyOrder)
+      .map((column) => column.name)
+    const actualPrimaryKey = actualColumns
+      .filter((column) => Number(column.pk) > 0)
+      .sort((left, right) => Number(left.pk) - Number(right.pk))
+      .map((column) => column.name)
+    let equivalentPrimaryKeyIndex = false
+    if (
+      expectedPrimaryKey.length > 0 &&
+      (actualPrimaryKey.length !== expectedPrimaryKey.length ||
+        actualPrimaryKey.some((column, index) => column !== expectedPrimaryKey[index]))
+    ) {
+      const indexes = await tx.query(
+        'PRAGMA index_list(' + quoteIdentifier(expectedTable.name) + ')',
+      )
+      for (const index of indexes) {
+        if (Number(index.unique) === 0 || Number(index.partial) !== 0) continue
+        const columns = (await tx.query(
+          'PRAGMA index_info(' + quoteIdentifier(index.name) + ')',
+        ))
+          .sort((left, right) => Number(left.seqno) - Number(right.seqno))
+          .map((column) => column.name)
+        if (
+          columns.length === expectedPrimaryKey.length &&
+          columns.every((column, index) => column === expectedPrimaryKey[index])
+        ) {
+          equivalentPrimaryKeyIndex = true
+          break
+        }
+      }
+    }
+
+    for (const expected of expectedTable.columns) {
+      const actual = actualByName.get(expected.name)
+      if (!actual) continue
+      const actualType = normalizeSqlType(actual.type)
+      const compatibleLegacyTimestamp =
+        expected.sqlType === 'timestamp' &&
+        (actualType === 'text' || actualType === 'real')
+      const compatibleLegacyNumber =
+        expected.sqlType === 'integer' &&
+        (actualType === 'real' || actualType === 'text')
+      if (
+        sqliteTypeAffinity(actualType) !== sqliteTypeAffinity(expected.sqlType) &&
+        !compatibleLegacyTimestamp &&
+        !compatibleLegacyNumber
+      ) {
+        throw new Error(
+          'application SQLite schema mismatch for ' + expectedTable.name + '.' + expected.name +
+            ': expected ' + expected.sqlType + ', found ' + (actualType || '(untyped)'),
+        )
+      }
+
+      const actualNotNull = Number(actual.notnull) !== 0 || Number(actual.pk) !== 0
+      if (actualNotNull !== expected.notNull) {
+        if (expected.notNull && !actualNotNull) {
+          const nullRows = await tx.query(
+            'SELECT 1 FROM ' + quoteIdentifier(expectedTable.name) +
+              ' WHERE ' + quoteIdentifier(expected.name) + ' IS NULL LIMIT 1',
+          )
+          if (nullRows.length === 0) continue
+        }
+        throw new Error(
+          'application SQLite schema mismatch for ' + expectedTable.name + '.' + expected.name +
+            ': expected ' + (expected.notNull ? 'NOT NULL' : 'nullable') +
+            ', found ' + (actualNotNull ? 'NOT NULL' : 'nullable'),
+        )
+      }
+      if (Number(actual.pk) !== expected.primaryKeyOrder && !equivalentPrimaryKeyIndex) {
+        throw new Error(
+          'application SQLite schema mismatch for ' + expectedTable.name + '.' + expected.name +
+            ': expected primary-key position ' + expected.primaryKeyOrder +
+            ', found ' + actual.pk,
+        )
+      }
+    }
+  }
+
+  const liveIndexes = await readLiveIndexes(tx)
+  for (const expected of expectedIndexes) {
+    const actual = liveIndexes.get(expected.name)
+    if (!actual) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table +
+          ': missing ' + (expected.unique ? 'unique ' : '') + 'index ' + expected.name,
+      )
+    }
+    if (actual.table !== expected.table) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected table ' + expected.table + ', found ' + actual.table,
+      )
+    }
+    if (actual.unique !== expected.unique) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected ' + (expected.unique ? 'unique' : 'non-unique') +
+          ', found ' + (actual.unique ? 'unique' : 'non-unique'),
+      )
+    }
+    if (
+      actual.columns.length !== expected.columns.length ||
+      actual.columns.some((column, position) => column !== expected.columns[position])
+    ) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected columns (' + expected.columns.join(', ') + '), found (' +
+          actual.columns.join(', ') + ')',
+      )
+    }
+    const actualPredicate = indexPredicate(actual.sql)
+    if (normalizePredicate(actualPredicate) !== expected.predicate) {
+      throw new Error(
+        'application SQLite schema mismatch for ' + expected.table + ': index ' + expected.name +
+          ' expected predicate ' + (expected.predicate ?? '(none)') +
+          ', found ' + (actualPredicate ?? '(none)'),
+      )
+    }
+  }
+}
+
+function hashMigrationSql(sql) {
+  let h = 2166136261
+  for (let i = 0; i < sql.length; i++) {
+    h ^= sql.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0).toString(36)
+}
+
+function migrationTableOperation(sql) {
+  let match
+  if ((match = /^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF NOT EXISTS\s+)?[`"]?(\w+)/i.exec(sql))) {
+    return { action: 'create', table: match[1] }
+  }
+  if ((match = /^DROP\s+TABLE\s+(?:IF EXISTS\s+)?[`"]?(\w+)/i.exec(sql))) {
+    return { action: 'drop', table: match[1] }
+  }
+  return null
+}
+
+function migrationStatementTargetTable(sql) {
+  const operation = migrationTableOperation(sql)
+  if (operation) return operation.table
+  const match =
+    /^INSERT(?:\s+OR\s+\w+)?\s+INTO\s+[`"]?(\w+)/i.exec(sql) ||
+    /^(?:UPDATE|DELETE\s+FROM|ALTER\s+TABLE)\s+[`"]?(\w+)/i.exec(sql)
+  return match ? match[1] : null
+}
+
+function appliedHasStatement(applied, baseId) {
+  return applied.has(baseId)
+}
+
+function hasExecutableMigrationSql(item) {
+  return item && typeof item.sql === 'string' && item.sql.split('\n').some((line) => {
+    const trimmed = line.trim()
+    return trimmed.length > 0 && !trimmed.startsWith('--')
+  })
+}
+
+function knownMigrationStatementIds() {
+  const ids = new Set()
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!hasExecutableMigrationSql(item)) continue
+    ids.add(typeof item.id === 'string' && item.id ? item.id : 'statement-' + index)
+  }
+  return [...ids]
+}
+
+const migrationStatementIds = knownMigrationStatementIds()
+
+// The ledger grows with deployment history, while this worker can only act on
+// the statement ids compiled into THIS bundle. Probe those ids through the
+// ledger primary key in bounded packs instead of scanning every historical row
+// once for prepare, once per migration file, and once again for finalize.
+async function readAppliedMigrationStatements(tx) {
+  const applied = new Set()
+  const statementIdsPerQuery = 32
+  for (let offset = 0; offset < migrationStatementIds.length; offset += statementIdsPerQuery) {
+    const ids = migrationStatementIds.slice(offset, offset + statementIdsPerQuery)
+    const params = []
+    for (const id of ids) params.push(id, id + ':', id + ';')
+    const rows = await tx.query(
+      'WITH expected(baseId, lowerId, upperId) AS (VALUES ' +
+        ids.map(() => '(?, ?, ?)').join(', ') +
+        ') SELECT expected.baseId FROM expected WHERE EXISTS (' +
+        'SELECT 1 FROM ' + quoteIdentifier(migrationTable) +
+        ' WHERE id = expected.baseId OR (id >= expected.lowerId AND id < expected.upperId)' +
+        ' LIMIT 1)',
+      params,
+    )
+    for (const row of rows) applied.add(row.baseId)
+  }
+  return applied
+}
+
+function pendingMigrationFilesFor(applied) {
+  const pendingMigrationFiles = []
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!hasExecutableMigrationSql(item)) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    if (supersededStatementIds.has(baseId) || applied.has(baseId)) continue
+    const file = baseId.split(':')[0]
+    if (!pendingMigrationFiles.includes(file)) pendingMigrationFiles.push(file)
+  }
+  return pendingMigrationFiles
+}
+
+async function deleteAppliedMigrationStatement(tx, baseId) {
+  await tx.exec(
+    'DELETE FROM ' + quoteIdentifier(migrationTable) +
+      ' WHERE id = ? OR (id >= ? AND id < ?)',
+    [baseId, baseId + ':', baseId + ';'],
+  )
+}
+
+// A migration can create scratch/candidate/guard tables, use them, and drop
+// them before the file completes. Their correct final effect is absence, so
+// that absence cannot prove the CREATE (or a dependent write) rolled back.
+// Track this by statement file and final lifecycle operation rather than by a
+// naming convention: a later CREATE in the same file makes the table durable
+// again and therefore removes it from this set.
+function intentionallyDroppedTablesByMigration() {
+  const lifecycle = new Map()
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!item || typeof item.sql !== 'string') continue
+    const operation = migrationTableOperation(item.sql.trim())
+    if (!operation) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    const file = baseId.split(':')[0]
+    const key = file + '::' + operation.table
+    const current = lifecycle.get(key)
+    if (operation.action === 'create') {
+      lifecycle.set(key, {
+        created: true,
+        file,
+        table: operation.table,
+        final: 'create',
+        finalStatementId: baseId,
+      })
+    } else if (current && current.created) {
+      lifecycle.set(key, {
+        ...current,
+        final: 'drop',
+        finalStatementId: baseId,
+      })
+    }
+  }
+  const byFile = new Map()
+  for (const entry of lifecycle.values()) {
+    if (entry.final !== 'drop') continue
+    let tableDrops = byFile.get(entry.file)
+    if (!tableDrops) {
+      tableDrops = new Map()
+      byFile.set(entry.file, tableDrops)
+    }
+    tableDrops.set(entry.table, entry.finalStatementId)
+  }
+  return byFile
+}
+
+const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigration()
+
+// a run killed mid-transaction (client abort, isolate eviction) rolls its DDL
+// back but keeps its ledger rows: the ledger is not a CDC-registered table, so
+// the DO's row undo never captures it. those phantom rows made every later run
+// skip statements whose effects no longer exist, permanently wedging the
+// namespace (2026-07-23 provisioning incident). before trusting the ledger,
+// delete entries whose effect is verifiably absent so their statements re-run
+// in order. a standalone DROP TABLE never re-runs: its effect IS absence.
+//
+// what this does NOT detect, stated plainly rather than as a reassurance:
+//   - DML. a backfill re-runs only when its target table is gone entirely (the
+//     same pass recreates it first). undone on a surviving table it is
+//     invisible in schema and stays skipped, unlogged. audit the assembled
+//     application's DML separately; schema reconciliation cannot prove its data.
+//   - an EXTRA column. assertExpectedSchema catches a missing table, a missing
+//     column, a type change and a NOT NULL change, but not a surplus one, so a
+//     ledgered ALTER TABLE ... DROP COLUMN whose effect rolled back is neither
+//     resurrected nor flagged.
+//   - a standalone DROP INDEX. its intended effect is absence, so an index
+//     still present after rollback is not evidence this pass can distinguish
+//     from a deliberately retained surplus index. required CREATE INDEX DDL is
+//     checked and repaired; removal of an index that is no longer expected is
+//     not.
+//   - an unguarded scratch column later renamed away. use a live-type or
+//     column condition so the final shape explicitly skips its retired effect.
+//   - a rebuild block that changes only nullability, defaults or foreign keys
+//     or declared types without changing the column SET. its rollback leaves a
+//     table this pass reads as landed. migrateIfColumnType controls whether the
+//     block runs initially, but it does not make that rollback observable here.
+//     it does not silently pass: assertExpectedSchema fails the run on the
+//     shape difference, so the namespace reports loudly instead of
+//     self-repairing.
+function skippedByLiveSchema(item, tables, liveColumns) {
+  if (item.skipIfTableMissing && !tables.has(item.skipIfTableMissing)) return true
+  if (item.migrateIfColumnType) {
+    const condition = item.migrateIfColumnType
+    const column = (liveColumns.get(condition.table) || []).find(
+      (candidate) => candidate.name === condition.column,
+    )
+    if (!column || !columnTypeMatches(column.type, condition)) return true
+  }
+  const condition = item.skipIfColumnExists || item.skipIfColumnMissing
+  return condition ? shouldSkipForColumnCondition(item,
+    (liveColumns.get(condition.table) || []).some((column) => column.name === condition.column),
+  ) : false
+}
+
+async function reconcilePhantomLedger(tx, applied, { inspectOnly = false, schemaRows = null, liveColumns = null } = {}) {
+  if (applied.size === 0) return false
+  // retired statements retain their identities, but no longer own an effect
+  // that reconciliation may resurrect, including their rebuild metadata.
+  const activeStatements = nativeSqlStatements.flatMap((statement, index) => {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement } : statement
+    if (!item || typeof item.sql !== 'string') return []
+    const id = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    return supersededStatementIds.has(id) ? [] : [{ ...item, id }]
+  })
+  schemaRows ??= await tx.query(
+    "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT GLOB '_orez_bk_*'",
+  )
+  const tables = new Set()
+  const indexes = new Map()
+  for (const row of schemaRows) {
+    if (row.type === 'table') tables.add(row.name)
+    else indexes.set(row.name, row.sql)
+  }
+  liveColumns ??= await readLiveColumns(tx)
+  // only the last applied, applicable index operation owns its current DDL.
+  // an unapplied successor is not evidence that an older effect was replaced.
+  // use the existing schema snapshot; this adds no per-statement database reads.
+  const latestIndexStatements = new Map()
+  for (const item of activeStatements) {
+    if (!appliedHasStatement(applied, item.id) || skippedByLiveSchema(item, tables, liveColumns)) continue
+    const match = /^(?:CREATE (?:UNIQUE )?INDEX|DROP INDEX)\s+(?:IF (?:NOT )?EXISTS\s+)?["\x60]?(\w+)/i.exec(item.sql.trim())
+    if (match) latestIndexStatements.set(match[1], item.id)
+  }
+  // a drizzle rebuild block (CREATE __new_<t> / INSERT..SELECT / DROP <t> /
+  // RENAME) is ONE unit. its statements are individually meaningless, so they
+  // resurrect together or not at all — including the DROP, which is the only
+  // way the RENAME can land on a re-run. the honest evidence that the block
+  // landed is <t> carrying the rebuilt COLUMN SET: a rolled-back block leaves
+  // the ORIGINAL <t> in place, so judging it by table name reads every wedged
+  // namespace as healthy and silently repairs nothing.
+  const blockKey = (item) => item.id.split(':')[0] + '::' + item.rebuildTarget
+  const blockLanded = new Map()
+  for (const statement of activeStatements) {
+    if (!statement || typeof statement !== 'object') continue
+    if (!statement.rebuildTarget || !statement.rebuildColumns) continue
+    const key = blockKey(statement)
+    if (blockLanded.has(key)) continue
+    const actualNames = new Set(
+      (liveColumns.get(statement.rebuildTarget) || []).map((column) => column.name),
+    )
+    // a superset test, not equality: a later migration legitimately adds
+    // columns to <t>, and treating that as "not landed" would drop a live
+    // table and rebuild it from a shape that no longer has them.
+    blockLanded.set(
+      key,
+      actualNames.size > 0 &&
+        statement.rebuildColumns.every((column) => actualNames.has(column)),
+    )
+  }
+  // the tables a resurrecting block will DROP and recreate this pass.
+  const rebuiltTables = new Set()
+  for (const statement of activeStatements) {
+    if (!statement || typeof statement !== 'object' || !statement.rebuildTarget) continue
+    if (blockLanded.get(blockKey(statement)) === false) {
+      rebuiltTables.add(statement.rebuildTarget)
+    }
+  }
+  const resurrect = new Set()
+  const replayWholeFiles = new Set()
+  for (const [index, statement] of activeStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    if (!appliedHasStatement(applied, baseId)) continue
+    // block members bypass the per-statement rules entirely: their effect is
+    // the block's effect, judged once above.
+    if (item.rebuildTarget) {
+      if (blockLanded.get(blockKey(item)) === false) resurrect.add(baseId)
+      continue
+    }
+    const sql = item.sql.trim()
+    const file = baseId.split(':')[0]
+    const targetTable = migrationStatementTargetTable(sql)
+    const finalDropId =
+      targetTable &&
+      intentionallyDroppedTableStatements.get(file)?.get(targetTable)
+    if (finalDropId && appliedHasStatement(applied, finalDropId)) {
+      continue
+    }
+    // A skipped conditional statement is intentionally ledgered even though
+    // its SQL effect is absent. Treating that absence as rollback evidence
+    // deletes and immediately rewrites the same ledger row on every run (for
+    // example, an index guarded by a column that the live schema does not
+    // have). Apply the exact execution predicate before effect inference.
+    if (skippedByLiveSchema(item, tables, liveColumns)) continue
+    let match
+    let missing = false
+    if ((match = /^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?[`"]?(\w+)/i.exec(sql))) {
+      missing = !tables.has(match[1])
+    } else if ((match = /^CREATE (?:UNIQUE )?INDEX\s+(?:IF NOT EXISTS\s+)?[`"]?(\w+)[`"]?\s+ON\s+[`"]?(\w+)/i.exec(sql))) {
+      // the index set was sampled BEFORE this pass drops and rebuilds <t>, so
+      // "the index exists" is stale evidence for any table a resurrecting
+      // block is about to DROP: the drop takes its indexes with it and the
+      // trailing CREATE INDEXes stay ledgered, leaving the rebuilt table
+      // bare. that silently removed the UNIQUE index invite redemption's
+      // ON CONFLICT target needs.
+      if (latestIndexStatements.get(match[1]) !== baseId) continue
+      const actualDdl = indexes.get(match[1])
+      const ddlMismatch =
+        actualDdl !== undefined &&
+        normalizeIndexDdl(actualDdl) !== normalizeIndexDdl(sql)
+      missing = actualDdl === undefined || rebuiltTables.has(match[2]) || ddlMismatch
+      if (ddlMismatch) replayWholeFiles.add(file)
+    } else if ((match = /^ALTER TABLE\s+[`"]?(\w+)[`"]?\s+RENAME TO\s+[`"]?(\w+)/i.exec(sql))) {
+      missing = !tables.has(match[2])
+    } else if ((match = /^ALTER TABLE\s+[`"]?(\w+)[`"]?\s+ADD\s+(?:COLUMN\s+)?[`"]?(\w+)/i.exec(sql))) {
+      const columns = liveColumns.get(match[1])
+      missing = !columns || !columns.some((column) => column.name === match[2])
+    } else if ((match = /^(?:INSERT INTO|UPDATE|DELETE FROM|ALTER TABLE)\s+[`"]?(\w+)/i.exec(sql))) {
+      missing = !tables.has(match[1])
+    }
+    if (missing) {
+      resurrect.add(baseId)
+      // A source-type guard commonly gates the first ADD scratch column of a
+      // repair file. Its later siblings then guard on that scratch column. A
+      // rolled-back transaction leaves the ADD detectably absent while those
+      // sibling predicates read false against this pass's initial schema
+      // snapshot. Replay the whole file so they re-evaluate after the ADD.
+      if (item.migrateIfColumnType) replayWholeFiles.add(file)
+    }
+  }
+  // Some repair effects are meaningful only as a whole migration file. An
+  // index repair needs its DROP before CREATE ... IF NOT EXISTS, and a guarded
+  // scratch-column repair needs its later statements to observe the ADD. Once
+  // one of those effects is verifiably absent, the file transaction rolled
+  // back, so clear every applied sibling and replay it in order.
+  if (replayWholeFiles.size > 0) {
+    for (const [index, statement] of activeStatements.entries()) {
+      const item = typeof statement === 'string'
+        ? { id: 'statement-' + index, sql: statement }
+        : statement
+      if (!item || typeof item.sql !== 'string') continue
+      const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+      if (
+        replayWholeFiles.has(baseId.split(':')[0]) &&
+        appliedHasStatement(applied, baseId)
+      ) {
+        resurrect.add(baseId)
+      }
+    }
+  }
+  if (resurrect.size === 0) return false
+  if (inspectOnly) return true
+  // a resurrected rebuild block must re-run with its sibling PRAGMA
+  // foreign_keys toggles, or the block re-executes under FK enforcement.
+  const resurrectedFiles = new Set(
+    [...resurrect].map((baseId) => baseId.split(':')[0]),
+  )
+  for (const [index, statement] of activeStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!item || typeof item.sql !== 'string') continue
+    if (!/^\s*PRAGMA\b/i.test(item.sql.trim())) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    if (resurrectedFiles.has(baseId.split(':')[0])) resurrect.add(baseId)
+  }
+  console.warn(
+    '[orez-migrations] resurrecting ' + resurrect.size +
+      ' phantom ledger entries: ' + [...resurrect].join(', '),
+  )
+  // clear a leftover __new_<t> before the block replays, but ONLY when <t> is
+  // also present. both present means the previous run died before its DROP, so
+  // __new_<t> is a stale partial copy and the resurrected INSERT..SELECT would
+  // fail on rows already in it ("UNIQUE constraint failed: __new_<t>.id").
+  // <t> ABSENT is the opposite case and must not be touched: there the DROP did
+  // land, __new_<t> holds the only copy of the rows, and the replay recreates an
+  // empty <t>, copies nothing out of it, drops it and renames __new_<t> over it.
+  for (const table of rebuiltTables) {
+    if (!tables.has(table) || !tables.has('__new_' + table)) continue
+    await tx.exec('DROP TABLE IF EXISTS ' + quoteIdentifier('__new_' + table))
+  }
+  for (const baseId of resurrect) {
+    await deleteAppliedMigrationStatement(tx, baseId)
+    applied.delete(baseId)
+  }
+}
+
+// current namespaces use a shared read session. repair keeps the existing
+// writer path and re-reads its ledger after acquiring the exclusive turn.
+async function nativeSchemaIsCurrent(tx) {
+  const schemaRows = await tx.query(
+    "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT GLOB '_orez_bk_*'",
+  )
+  const tables = new Set(schemaRows.filter((row) => row.type === 'table').map((row) => row.name))
+  if (!tables.has(migrationTable) || !tables.has('_zero_schema_tables')) return false
+  const applied = await readAppliedMigrationStatements(tx)
+  if (pendingMigrationFilesFor(applied).length > 0) return false
+  const liveColumns = await readLiveColumns(tx)
+  if (await reconcilePhantomLedger(tx, applied, { inspectOnly: true, schemaRows, liveColumns })) return false
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    if (!statement || typeof statement !== 'object' || !Array.isArray(statement.declaredColumns)) continue
+    const id = typeof statement.id === 'string' && statement.id ? statement.id : 'statement-' + index
+    if (supersededStatementIds.has(id)) continue
+    const created = /^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?[`"]?(\w+)/i.exec(statement.sql.trim())
+    if (!created) continue
+    const columns = new Set((liveColumns.get(created[1]) || []).map((column) => column.name))
+    // absent tables belong to phantom reconciliation, including scratch
+    // tables intentionally dropped by their migration. convergence only
+    // adds declared columns to tables that still exist.
+    if (columns.size === 0) continue
+    if (statement.declaredColumns.some((column) => column && typeof column.name === 'string' && !columns.has(column.name))) return false
+  }
+  // a shape mismatch may be repaired by declared-column convergence, so it
+  // takes the writer path where the existing assertion still reports errors.
+  try {
+    await assertExpectedSchema(tx, liveColumns)
+  } catch {
+    return false
+  }
+  const registrations = publicTables()
+  if (registrations.length) {
+    const cdcColumns = new Set((liveColumns.get('_orez_cdc_tables') || []).map((column) => column.name))
+    if (!['physical_table', 'table_name', 'columns_json', 'publish', 'schema_version'].every((name) => cdcColumns.has(name))) return false
+    // probe only this schema's registrations in bounded packs. table_xinfo
+    // includes generated capture columns.
+    for (let offset = 0; offset < registrations.length; offset += 24) {
+      const pack = registrations.slice(offset, offset + 24)
+      const rows = await tx.query(
+        'WITH expected(physical_table, table_name, publish) AS (VALUES ' + pack.map(() => '(?, ?, ?)').join(', ') +
+        ') SELECT e.physical_table FROM expected e LEFT JOIN _orez_cdc_tables c ON c.physical_table = e.physical_table' +
+        ' WHERE c.table_name = e.table_name AND c.publish = e.publish AND c.schema_version = 3' +
+        ' AND c.columns_json = (SELECT json_group_array(name) FROM (SELECT name FROM pragma_table_xinfo(e.physical_table) ORDER BY cid))' +
+        " AND (SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (" +
+        " '_orez_cdc_' || lower(hex(e.physical_table)) || '_insert'," +
+        " '_orez_cdc_' || lower(hex(e.physical_table)) || '_update'," +
+        " '_orez_cdc_' || lower(hex(e.physical_table)) || '_delete')) = 3",
+        pack.flatMap((table) => [table.table, table.publicTable, table.publish === false ? 0 : 1]),
+      )
+      if (rows.length !== pack.length) return false
+    }
+  }
+  const metadata = schemaMetadataStatements()
+  for (let offset = 0; offset < metadata.length; offset += 32) {
+    const pack = metadata.slice(offset, offset + 32)
+    const rows = await tx.query(
+      'WITH expected(name, schema_json) AS (VALUES ' + pack.map(() => '(?, ?)').join(', ') +
+      ') SELECT e.name FROM expected e JOIN _zero_schema_tables s ON s.name = e.name AND s.schema_json = e.schema_json',
+      pack.flatMap((statement) => statement.params),
+    )
+    if (rows.length !== pack.length) return false
+  }
+  return true
+}
+
+async function applyNativeSchema(tx, instance, {
+  prepare = true,
+  migrationFile = null,
+  finalize = true,
+} = {}) {
+  if (prepare) {
+    await tx.exec(
+      'CREATE TABLE IF NOT EXISTS ' + quoteIdentifier(migrationTable) +
+        ' (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)',
+    )
+  }
+  // re-read inside every file transaction. the applied set from the previous
+  // transaction is stale once a concurrent runMigrations commits between
+  // files, and inserting those ids again fails the caller.
+  const applied = await readAppliedMigrationStatements(tx)
+  if (prepare) await reconcilePhantomLedger(tx, applied)
+  // register BEFORE the statements, not only after them. a cdc trigger whose
+  // _orez_cdc_tables row is missing is invisible to beginSchemaChange, which
+  // skips unregistered tables, so it never suspends capture and the next
+  // DROP/RENAME COLUMN on that table dies on the surviving trigger. ensureTable
+  // reads that orphan as changed (its registration lookup returns nothing),
+  // drops the stale triggers and rewrites the row, so registering first is what
+  // lets the DDL below suspend capture at all. the pass after the statements
+  // still runs and still owns publication; this one only heals. on a fresh
+  // namespace every table is absent, ensureTable returns false for each, and
+  // this is a no-op beyond creating the cdc bookkeeping tables early.
+  if (prepare) await tx.registerTables(publicTables())
+  const appliedStatementIds = new Set(applied)
+  const pendingMigrationFiles = pendingMigrationFilesFor(appliedStatementIds)
+  // a namespace with an empty ledger holds no rows, so replaying its whole
+  // history in this one transaction costs the same statements as one file per
+  // transaction without paying a session, a ledger re-read and a commit for each
+  // file. a namespace that already has applied statements keeps one file per
+  // transaction, which bounds the work of any single commit on live data.
+  const selectedMigrationFiles = new Set(
+    migrationFile !== null
+      ? [migrationFile]
+      : prepare
+        ? appliedStatementIds.size === 0
+          ? pendingMigrationFiles
+          : pendingMigrationFiles.slice(0, 1)
+        : [],
+  )
+  const remainingMigrationFiles = pendingMigrationFiles.filter(
+    (file) => !selectedMigrationFiles.has(file),
+  )
+  // CREATE TABLE IF NOT EXISTS is a SILENT NO-OP against a table that already
+  // exists in an older shape, so every column that only ever appears inside a
+  // CREATE definition is unreachable on a namespace whose table predates it,
+  // and the first index over such a column fails the whole run forever (prod
+  // 2026-07-26: 217 namespaces, ~2k billed rows per retry, for two days).
+  //
+  // this belongs here and not in the phantom-ledger pass, which is where it was
+  // tried first and did nothing: that pass only considers LEDGERED statements,
+  // and the ledger entry for a failing run's CREATE is deleted again by the
+  // failure compensation below, so at the start of every retry the CREATE is
+  // unledgered and the pass skipped it. converging here is independent of
+  // ledger state, which is the only thing that made it reachable at all.
+  for (const [index, statement] of prepare ? nativeSqlStatements.entries() : []) {
+    const item = typeof statement === 'string' ? null : statement
+    if (!item || !Array.isArray(item.declaredColumns)) continue
+    if (typeof item.sql !== 'string') continue
+    const created = /^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?[`"]?(\w+)/i.exec(item.sql.trim())
+    if (!created) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    if (supersededStatementIds.has(baseId)) continue
+    // PRAGMA, not the bulk sqlite_master scan: it resolves the table the same
+    // way the statements do, and no rows means the table is genuinely absent,
+    // so the CREATE below builds it correctly and there is nothing to converge.
+    const liveRows = await tx.query(
+      'PRAGMA table_info(' + quoteIdentifier(created[1]) + ')',
+    )
+    if (liveRows.length === 0) continue
+    const live = new Set(liveRows.map((column) => String((column && column.name) ?? '')))
+    for (const column of item.declaredColumns) {
+      if (!column || typeof column.name !== 'string') continue
+      if (live.has(column.name)) continue
+      let definition = String(column.definition || '').trim()
+      if (!definition) continue
+      // sqlite refuses ADD COLUMN for these shapes; leave them to
+      // assertExpectedSchema, which reports the namespace loudly.
+      if (/\bPRIMARY KEY\b|\bUNIQUE\b/i.test(definition)) continue
+      if (/\bNOT NULL\b/i.test(definition) && /\bREFERENCES\b/i.test(definition)) continue
+      // a NOT NULL column with no default is skipped rather than given a
+      // synthesised one. sqlite would accept ADD COLUMN ... NOT NULL DEFAULT '',
+      // and every existing row would silently take that placeholder — inventing
+      // data the migration author never wrote, on a table that already holds
+      // real rows. the honest outcome is the loud one: assertExpectedSchema
+      // names the column and the namespace reports instead of self-repairing.
+      // no column that wedged production is of this shape.
+      if (/\bNOT NULL\b/i.test(definition) && !/\bDEFAULT\b/i.test(definition)) continue
+      console.warn(
+        '[orez-migrations] converging ' + created[1] + '.' + column.name +
+          ' declared by ' + baseId,
+      )
+      await tx.exec(
+        'ALTER TABLE ' + quoteIdentifier(created[1]) + ' ADD COLUMN ' + definition,
+      )
+    }
+  }
+  // the ledger table is treated as replication bookkeeping by the DO backend,
+  // so its writes are NOT covered by the transaction rollback: an aborted run
+  // used to leave every already-recorded statement marked applied while its
+  // data and DDL effects were undone, and later runs then skipped work that
+  // never happened. compensate explicitly: on failure, delete the rows this
+  // run inserted before rethrowing.
+  const insertedThisRun = []
+  // a fresh namespace replays hundreds of statements, and one durable object
+  // round trip each was the slowest part of provisioning. statements queue
+  // here with their ledger rows and flush as a single execMany call, breaking
+  // only where a skip condition has to read schema the queue would change.
+  const queued = []
+  const flushQueued = async () => {
+    if (queued.length === 0) return
+    const entries = queued.splice(0)
+    const owners = []
+    const statements = []
+    for (const entry of entries) {
+      for (const statement of entry.statements) {
+        owners.push(entry)
+        statements.push(statement)
+      }
+    }
+    try {
+      await tx.execMany(statements)
+    } catch (error) {
+      const failed =
+        (error && typeof error.statementIndex === 'number' && owners[error.statementIndex]) ||
+        entries[entries.length - 1]
+      const { item, baseId } = failed
+      // a bare sqlite message ("no such table: x") names neither the failing
+      // statement nor which of its siblings the ledger already recorded, and
+      // that ledger state is the only thing that explains a half-applied
+      // table-recreate block. the live column list of the target table is
+      // the other half of that story for DDL chains.
+      const file = baseId.split(':')[0]
+      const siblings = [...applied].filter((appliedId) => appliedId.startsWith(file))
+      let tableInfo = ''
+      // CREATE INDEX belongs here as much as the DML shapes: "no such
+      // column" on an index names a column the target table is missing,
+      // and the table's real column list is the whole diagnosis. it also
+      // has to come BEFORE the ledger list, which runs to hundreds of ids
+      // and truncated every trailing byte of this off the stored error.
+      const target =
+        /(?:UPDATE|ALTER TABLE|DELETE FROM|INSERT INTO)\s+[`"]?(\w+)/i.exec(item.sql) ||
+        /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF NOT EXISTS\s+)?[`"]?\w+[`"]?\s+ON\s+[`"]?(\w+)/i.exec(item.sql)
+      if (target) {
+        try {
+          const columns = await tx.query('PRAGMA table_info(' + quoteIdentifier(target[1]) + ')')
+          tableInfo = ' | table_info(' + target[1] + '): ' +
+            (columns.map((column) => column.name + ':' + column.type).join(', ') ||
+              '(no columns)')
+        } catch (infoError) {
+          tableInfo = ' | table_info(' + target[1] + ') failed: ' +
+            ((infoError && infoError.message) || String(infoError))
+        }
+      }
+      throw new Error(
+        'migration statement ' + baseId + ' failed on instance ' + instance + ': ' +
+          (error && error.message ? error.message : String(error)) +
+          ' | sql: ' + item.sql.replace(/\s+/g, ' ').slice(0, 160) +
+          tableInfo +
+          ' | ledger for ' + file + ': ' + (siblings.join(', ') || '(none)'),
+        { cause: error },
+      )
+    }
+    for (const { baseId, id } of entries) {
+      applied.add(baseId)
+      appliedStatementIds.add(baseId)
+      insertedThisRun.push({ baseId, id })
+    }
+  }
+  try {
+    for (const [index, statement] of nativeSqlStatements.entries()) {
+      const item = typeof statement === 'string'
+        ? { id: 'statement-' + index, sql: statement }
+        : statement
+      // a statement that is only sql comments (a supersession-anchor
+      // migration) has nothing to execute.
+      if (!hasExecutableMigrationSql(item)) continue
+      const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+      if (supersededStatementIds.has(baseId)) continue
+      if (!selectedMigrationFiles.has(baseId.split(':')[0])) {
+        continue
+      }
+      const id = baseId + ':' + hashMigrationSql(item.sql)
+      // migration statement ids are immutable execution identities. the SQL hash
+      // records which source version ran, but editing an old migration must never
+      // make destructive SQL run again under the same id.
+      if (appliedStatementIds.has(baseId)) continue
+      // a skip condition reads the live schema, which queued statements change.
+      if (
+        item.skipIfTableMissing ||
+        item.migrateIfColumnType ||
+        item.skipIfColumnExists ||
+        item.skipIfColumnMissing
+      ) {
+        await flushQueued()
+      }
+      const statements = []
+      if (!(await shouldSkipStatement(tx, item))) {
+        statements.push({ sql: item.sql, params: Array.isArray(item.params) ? item.params : [] })
+      }
+      statements.push({
+        sql: 'INSERT INTO ' + quoteIdentifier(migrationTable) + ' (id, applied_at) VALUES (?, ?)',
+        params: [id, Date.now()],
+      })
+      queued.push({ item, baseId, id, statements })
+    }
+    await flushQueued()
+    if (finalize && remainingMigrationFiles.length === 0) {
+      await assertExpectedSchema(tx)
+      await tx.exec(
+        'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)',
+      )
+      try {
+        // every row here is rewritten on every schema-version change across the
+        // whole fleet, so only write the rows whose json actually changed.
+        const publishedRows = await tx.query(
+          'SELECT name, schema_json FROM _zero_schema_tables',
+        )
+        const published = new Map(
+          publishedRows.map((row) => [String(row.name), String(row.schema_json)]),
+        )
+        await tx.execMany(
+          schemaMetadataStatements().filter(
+            (statement) => published.get(statement.params[0]) !== statement.params[1],
+          ),
+        )
+        await tx.registerTables(publicTables())
+      } catch (error) {
+        // publication runs against every registered table, so a table this schema
+        // no longer has still gets queried here. without the label the error is
+        // indistinguishable from a migration statement failing.
+        throw new Error(
+          'schema publication failed on instance ' + instance + ': ' +
+            (error && error.message ? error.message : String(error)),
+          { cause: error },
+        )
+      }
+    }
+  } catch (error) {
+    try {
+      await tx.execMany(
+        insertedThisRun.map((inserted) => ({
+          sql: 'DELETE FROM ' + quoteIdentifier(migrationTable) + ' WHERE id = ?',
+          params: [inserted.id],
+        })),
+      )
+    } catch {}
+    for (const inserted of insertedThisRun) {
+      applied.delete(inserted.baseId)
+      appliedStatementIds.delete(inserted.baseId)
+    }
+    throw error
+  }
+  return { applied, pendingMigrationFiles: remainingMigrationFiles }
+}
+
+// what the namespace actually looks like, for a failure message. the single
+// most expensive missing fact when a namespace is wedged is whether the table
+// the error names is genuinely absent or merely unreachable — a whole day went
+// into guessing that on 2026-07-23 because nothing ever said.
+//
+// runs on the error path only, in its own session, and must never throw: a
+// namespace too broken to answer is exactly the case it exists to describe.
+async function liveSchemaSummary(client) {
+  try {
+    let summary = ''
+    await client.transaction(() => {
+      throw new Error('native schema migration does not use queryAst')
+    }, async (tx) => {
+      const rows = await tx.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table'" +
+          " AND name NOT GLOB '_orez_bk_*'" +
+          " AND name NOT LIKE '^_cf^_%' ESCAPE '^'" +
+          " AND name NOT LIKE 'sqlite^_%' ESCAPE '^' ORDER BY name",
+      )
+      const present = new Set(rows.map((row) => row.name))
+      const missing = expectedTables
+        .map((table) => table.name)
+        .filter((name) => !present.has(name))
+      summary =
+        ' | live tables: ' + present.size +
+        (missing.length ? ', MISSING expected: ' + missing.join(', ') : ', none missing')
+    })
+    return summary
+  } catch (error) {
+    return ' | live schema unreadable: ' + (error && error.message ? error.message : String(error))
+  }
+}
+
+// `client` lets a caller that is ALREADY inside the durable object hand in an
+// in-process client (ZeroDO#applicationSqlLocalClient) instead of one that
+// round-trips per statement. it is a parameter rather than another global
+// because durable object instances share an isolate, so a global bound to one
+// instance would be read by another.
+async function migrate({
+  schemaOnly = false,
+  registrationOnly = false,
+  instance = 'singleton',
+  client: providedClient,
+} = {}) {
+  if (schemaOnly && registrationOnly) {
+    throw new Error('schemaOnly and registrationOnly are mutually exclusive')
+  }
+  let client = providedClient
+  if (!client) {
+    const createClient = globalThis.__contrast_cf_application_sql_client
+    if (typeof createClient !== 'function') {
+      throw new Error('Cloudflare application SQLite client is not initialized')
+    }
+    client = createClient(instance)
+  }
+  if (registrationOnly) {
+    await client.registerTables(resolvedPublicTables)
+    return { tables: resolvedPublicTables.map((table) => table.publicTable) }
+  }
+  // the migration-file loop labels its own failures; acquiring a session and
+  // committing sit OUTSIDE every try/catch in applyNativeSchema, so a Durable
+  // Object SQL error raised there arrives bare. the schema barrier hands that
+  // string straight back as a 503 body, which is the entire diagnosis budget a
+  // wedged namespace gets — prod has answered `no such table: main.user:
+  // SQLITE_ERROR` since 2026-07-23 and it names neither the phase that raised
+  // it nor whether that table is really gone. the phantom-ledger reconcile
+  // heals a dropped table correctly (verified against a real durable object),
+  // so what is left is only reachable through a message that says more.
+  let phase = 'session-acquire'
+  try {
+    phase = 'schema-check'
+    const current = await client.readTransaction(() => {
+      throw new Error('native schema migration does not use queryAst')
+    }, nativeSchemaIsCurrent)
+    if (current) return {
+      tables: resolvedPublicTables.map((table) => table.publicTable),
+      ...(schemaOnly ? { schemaOnly: true } : null),
+    }
+    phase = 'session-acquire'
+    let migrationState
+    await client.transaction(() => {
+      throw new Error('native schema migration does not use queryAst')
+    }, async (tx) => {
+      phase = 'prepare'
+      migrationState = await applyNativeSchema(tx, instance, {
+        prepare: true,
+        migrationFile: null,
+        finalize: true,
+      })
+      phase = migrationState.pendingMigrationFiles.length > 0
+        ? 'first-migration-commit'
+        : 'finalize-commit'
+    })
+    const remainingMigrationFiles = migrationState.pendingMigrationFiles
+    for (const [index, migrationFile] of remainingMigrationFiles.entries()) {
+      await client.transaction(() => {
+        throw new Error('native schema migration does not use queryAst')
+      }, async (tx) => {
+        phase = 'migration ' + migrationFile
+        migrationState = await applyNativeSchema(tx, instance, {
+          prepare: false,
+          migrationFile,
+          finalize: index === remainingMigrationFiles.length - 1,
+        })
+        phase = migrationState.pendingMigrationFiles.length === 0
+          ? 'finalize-commit'
+          : 'migration-commit ' + migrationFile
+      })
+    }
+  } catch (error) {
+    throw new Error(
+      'schema migration failed on instance ' + instance + ' during ' + phase + ': ' +
+        (error && error.message ? error.message : String(error)) +
+        (await liveSchemaSummary(client)),
+      { cause: error },
+    )
+  }
+  return {
+    tables: resolvedPublicTables.map((table) => table.publicTable),
+    ...(schemaOnly ? { schemaOnly: true } : null),
+  }
+}
+
+return { migrate, resolvedPublicTables }
+}
+
+const defaultMigrations = createNativeMigrations({
+  schema,
+  nativeSqlStatements: [{"id":"0000_history/migration.sql:0","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:1","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:2","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:3","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:4","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:5","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:6","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:7","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:8","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:9","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:10","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:11","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:12","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:13","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:14","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:15","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:16","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:17","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:18","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:19","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:20","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:21","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:22","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:23","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:24","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:25","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:26","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:27","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:28","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:29","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:30","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:31","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:32","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:33","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:34","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:35","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:36","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:37","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:38","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:39","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:40","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:41","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:42","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:43","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:44","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:45","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:46","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:47","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:48","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:49","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:50","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:51","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:52","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:53","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:54","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:55","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:56","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:57","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:58","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:59","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:60","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:61","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:62","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:63","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:64","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:65","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:66","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:67","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:68","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:69","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:70","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:71","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:72","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:73","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:74","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:75","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:76","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:77","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:78","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:79","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:80","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:81","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:82","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:83","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:84","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:85","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:86","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:87","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:88","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:89","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:90","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:91","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:92","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:93","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:94","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:95","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:96","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:97","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:98","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:99","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:100","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:101","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:102","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:103","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:104","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:105","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:106","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:107","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:108","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:109","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:110","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:111","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:112","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:113","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:114","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:115","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:116","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:117","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:118","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:119","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:120","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:121","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:122","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:123","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:124","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:125","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:126","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:127","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:128","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:129","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:130","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:131","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:132","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:133","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:134","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:135","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:136","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:137","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:138","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:139","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:140","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:141","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:142","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:143","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:144","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:145","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:146","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:147","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:148","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:149","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:150","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:151","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:152","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:153","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:154","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:155","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:156","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:157","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:158","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:159","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:160","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:161","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:162","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:163","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:164","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:165","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:166","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:167","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:168","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:169","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:170","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:171","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:172","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:173","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:174","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:175","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:176","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:177","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:178","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:179","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:180","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:181","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:182","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:183","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:184","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:185","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:186","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:187","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:188","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:189","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:190","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:191","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:192","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:193","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:194","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:195","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:196","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:197","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:198","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:199","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:200","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:201","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:202","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:203","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:204","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:205","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:206","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:207","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:208","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:209","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:210","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:211","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:212","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:213","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:214","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:215","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:216","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:217","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:218","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:219","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:220","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:221","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:222","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:223","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:224","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:225","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:226","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:227","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:228","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:229","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:230","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:231","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:232","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:233","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:234","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:235","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:236","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:237","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:238","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:239","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:240","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:241","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:242","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:243","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:244","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:245","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:246","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:247","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:248","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:249","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:250","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:251","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:252","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:253","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:254","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:255","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:256","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:257","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:258","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:259","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:260","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:261","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:262","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:263","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:264","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:265","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:266","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:267","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:268","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:269","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:270","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:271","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:272","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:273","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:274","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:275","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:276","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:277","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:278","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:279","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:280","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:281","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:282","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:283","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:284","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:285","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:286","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:287","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:288","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:289","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:290","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:291","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:292","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:293","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:294","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:295","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:296","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:297","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:298","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:299","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:300","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:301","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:302","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:303","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:304","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:305","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:306","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:307","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:308","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:309","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:310","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:311","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:312","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:313","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:314","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:315","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:316","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:317","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:318","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:319","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:320","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:321","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:322","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:323","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:324","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:325","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:326","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:327","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:328","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:329","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:330","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:331","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:332","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:333","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:334","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:335","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:336","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:337","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:338","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:339","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:340","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:341","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:342","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:343","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:344","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:345","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:346","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:347","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:348","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:349","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:350","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:351","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:352","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:353","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:354","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:355","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:356","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:357","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:358","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:359","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:360","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:361","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:362","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:363","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:364","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:365","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:366","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:367","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:368","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:369","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:370","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:371","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:372","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:373","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:374","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:375","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:376","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:377","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:378","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:379","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:380","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:381","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:382","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:383","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:384","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:385","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:386","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:387","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:388","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:389","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:390","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:391","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:392","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:393","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:394","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:395","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:396","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:397","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:398","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:399","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:400","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:401","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:402","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:403","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:404","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:405","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:406","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:407","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:408","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:409","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:410","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:411","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:412","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:413","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:414","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:415","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:416","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:417","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:418","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:419","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:420","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:421","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:422","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:423","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:424","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:425","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:426","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:427","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:428","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:429","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:430","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:431","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:432","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:433","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:434","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:435","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:436","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:437","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:438","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:439","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:440","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:441","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:442","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:443","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:444","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:445","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:446","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:447","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:448","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:449","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:450","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:451","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:452","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:453","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:454","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:455","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:456","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:457","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:458","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:459","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:460","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:461","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:462","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:463","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:464","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:465","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:466","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:467","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:468","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:469","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:470","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:471","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:472","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:473","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:474","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:475","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:476","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:477","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:478","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:479","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:480","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:481","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:482","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:483","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:484","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:485","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:486","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:487","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:488","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:489","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:490","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:491","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:492","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:493","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:494","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:495","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:496","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:497","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:498","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:499","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:500","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:501","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:502","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:503","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:504","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:505","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:506","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:507","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:508","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:509","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:510","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:511","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:512","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:513","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:514","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:515","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:516","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:517","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:518","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:519","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:520","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:521","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:522","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:523","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:524","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:525","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:526","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:527","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:528","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:529","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:530","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:531","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:532","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:533","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:534","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:535","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:536","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:537","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:538","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:539","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:540","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:541","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:542","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:543","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:544","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:545","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:546","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:547","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:548","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:549","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:550","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:551","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:552","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:553","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:554","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:555","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:556","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:557","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:558","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:559","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:560","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:561","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:562","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:563","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:564","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:565","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:566","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:567","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:568","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:569","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:570","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:571","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:572","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:573","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:574","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:575","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:576","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:577","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:578","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:579","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:580","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:581","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:582","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:583","sql":"-- historical statement retained for migration identity"},{"id":"0000_history/migration.sql:584","sql":"-- historical statement retained for migration identity"},{"id":"0001_retired/migration.sql:0","sql":"DROP TABLE IF EXISTS retired"},{"id":"0002_alpha/migration.sql:0","sql":"CREATE TABLE alpha (id TEXT PRIMARY KEY)"},{"id":"0003_beta/migration.sql:0","sql":"CREATE TABLE beta (id TEXT PRIMARY KEY)"}],
+  configuredPublicTables: [],
+  expectedTables: [{"name":"alpha","columns":[{"name":"id","notNull":true,"primaryKeyOrder":1,"sqlType":"text"}]},{"name":"beta","columns":[{"name":"id","notNull":true,"primaryKeyOrder":1,"sqlType":"text"}]}],
+  expectedIndexes: [],
+})
+
+function migrationsForInstance() {
+  return defaultMigrations
+}
+
+export async function runContrastCloudflareMigrations(options = {}) {
+  return migrationsForInstance(options.instance ?? 'singleton').migrate(options)
+}
+
+export { runContrastCloudflareMigrations as runCloudflareMigrations }
+export const orezAppSchema = {
+  version: SCHEMA_VERSION,
+  schema,
+  publicTables: defaultMigrations.resolvedPublicTables,
+  migrate: runContrastCloudflareMigrations,
+}
