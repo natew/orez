@@ -667,6 +667,48 @@ describe('ZeroDO transactional CDC integration', () => {
     expect(tripDeleted).toBe(true)
   })
 
+  it('lets miniflare record the object name while the write circuit is tripped', async () => {
+    const { sql, nativeDb } = await createWorkerCore()
+    const { ZeroDO } = await import('./worker.js')
+    let boot: Promise<void> | undefined
+    const transaction = <T>(work: () => T): T => {
+      nativeDb.exec('BEGIN')
+      try {
+        const value = work()
+        nativeDb.exec('COMMIT')
+        return value
+      } catch (error) {
+        nativeDb.exec('ROLLBACK')
+        throw error
+      }
+    }
+    const zero = new ZeroDO(
+      {
+        id: { name: 'ns:named', toString: () => 'named-object-id' },
+        storage: {
+          sql,
+          get: async () => ({ at: 1_000, windowRows: 900, budget: 300, windowMs: 300_000 }),
+          transaction: async <T>(work: () => T) => transaction(work),
+          transactionSync: transaction,
+        },
+        blockConcurrencyWhile(work: () => Promise<void>) {
+          boot = work()
+        },
+      } as any,
+      { OREZ_DO_WRITE_BUDGET_ROWS: '300' } as any
+    )
+    await expect(boot).resolves.toBeUndefined()
+
+    // miniflare's class wrapper runs these on every boot of a named object
+    sql.exec(
+      'CREATE TABLE IF NOT EXISTS __miniflare_do_name (id INTEGER PRIMARY KEY, name TEXT)'
+    )
+    sql.exec('INSERT OR REPLACE INTO __miniflare_do_name (id, name) VALUES (1, ?)', 'ns')
+
+    expect(zero.writeBudget.status().windowRows).toBe(0)
+    expect(() => sql.exec('CREATE TABLE app (id TEXT)')).toThrow(/write budget exceeded/)
+  })
+
   it('captures a published side effect even when the initiating table is private', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE channel (id TEXT PRIMARY KEY, touched INTEGER NOT NULL)')
