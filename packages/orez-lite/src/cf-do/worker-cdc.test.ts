@@ -712,6 +712,9 @@ describe('ZeroDO transactional CDC integration', () => {
 
     expect(zero.writeBudget.status().windowRows).toBe(0)
     expect(() => sql.exec('CREATE TABLE app (id TEXT)')).toThrow(/write budget exceeded/)
+    expect(() => sql.exec('CREATE TABLE app2 (id TEXT) -- __miniflare_do_name')).toThrow(
+      /write budget exceeded/
+    )
   })
 
   it('captures a published side effect even when the initiating table is private', async () => {

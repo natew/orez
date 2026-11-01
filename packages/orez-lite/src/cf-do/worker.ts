@@ -919,7 +919,12 @@ export class ZeroDO extends DurableObject {
     this.sql.exec = (statement: string, ...params: unknown[]) => {
       // miniflare's class wrapper records ctx.id.name here on every boot of a named
       // object, after the stored trip is restored. metering it bricks a tripped object.
-      if (statement.includes('__miniflare_do_name')) return rawExec(statement, ...params)
+      if (
+        /^\s*(CREATE TABLE IF NOT EXISTS|INSERT OR REPLACE INTO)\s+__miniflare_do_name\b/i.test(
+          statement
+        )
+      )
+        return rawExec(statement, ...params)
       this.requestsSinceBoot.sqlStatements++
       const mutation = isSqlMutation(statement)
       if (this.restoringForeignKeys && statement !== 'PRAGMA foreign_keys = ON')
