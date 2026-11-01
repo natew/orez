@@ -687,7 +687,12 @@ describe('ZeroDO transactional CDC integration', () => {
         id: { name: 'ns:named', toString: () => 'named-object-id' },
         storage: {
           sql,
-          get: async () => ({ at: 1_000, windowRows: 900, budget: 300, windowMs: 300_000 }),
+          get: async () => ({
+            at: 1_000,
+            windowRows: 900,
+            budget: 300,
+            windowMs: 300_000,
+          }),
           transaction: async <T>(work: () => T) => transaction(work),
           transactionSync: transaction,
         },
