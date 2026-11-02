@@ -11,6 +11,38 @@ const inspectorPort = await findPort(0)
 writeFileSync(
   join(fixture, 'worker.ts'),
   `import { createOrezDataWorker } from '../src/cf-do/lite-data-worker.js'
+import { ZeroDO as BudgetBase } from '../src/cf-do/worker.js'
+
+export class BudgetProbe extends BudgetBase {
+  constructor(ctx, env) {
+    super(ctx, { ...env, OREZ_DO_WRITE_BUDGET_ROWS: '56' })
+  }
+  async setup() {
+    await this.applicationSqlLocalClient('budget').exec(
+      'CREATE TABLE IF NOT EXISTS comment (id TEXT PRIMARY KEY, post INTEGER NOT NULL)'
+    )
+    return this.bootID
+  }
+  async write(at) {
+    try {
+      await this.applicationSqlLocalClient('budget').transaction(null, async (tx) => {
+        for (let i = 0; i < 5; i++) {
+          await tx.exec('INSERT INTO comment (id, post) VALUES (?, 1) ON CONFLICT (id) DO NOTHING RETURNING id AS id', [\`c-\${at}-\${i}\`])
+        }
+      })
+      return { ok: true, bootID: this.bootID }
+    } catch (error) {
+      return { error: String(error), bootID: this.bootID }
+    }
+  }
+  async state() {
+    return {
+      bootID: this.bootID,
+      comments: this.ctx.storage.sql.exec('SELECT count(*) AS n FROM comment').one().n,
+      tripped: this.writeBudget.status().tripped,
+    }
+  }
+}
 
 const schema = {
   version: 'application-push-v1',
@@ -71,7 +103,18 @@ const dataWorker = createOrezDataWorker({
 })
 
 export const ZeroDO = dataWorker.ZeroDO
-export default dataWorker
+export default {
+  fetch(request, env, ctx) {
+    const url = new URL(request.url)
+    if (url.pathname.startsWith('/budget/')) {
+      const object = env.BUDGET.get(env.BUDGET.idFromName('budget'))
+      if (url.pathname === '/budget/setup') return object.setup().then(Response.json)
+      if (url.pathname === '/budget/write') return object.write(url.searchParams.get('at')).then(Response.json)
+      return object.state().then(Response.json)
+    }
+    return dataWorker.fetch(request, env, ctx)
+  },
+}
 `
 )
 
@@ -89,9 +132,13 @@ OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN = "application-push-admin"
 name = "ZERO_SQL_DO"
 class_name = "ZeroDO"
 
+[[durable_objects.bindings]]
+name = "BUDGET"
+class_name = "BudgetProbe"
+
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["ZeroDO"]
+new_sqlite_classes = ["ZeroDO", "BudgetProbe"]
 `
 )
 
@@ -168,6 +215,21 @@ try {
       before.requestsSinceBoot.applicationSqlSessions,
     2
   )
+
+  const budget = (path) =>
+    fetch(`${base}/budget/${path}`).then((response) => response.json())
+  const bootID = await budget('setup')
+  assert.equal((await budget('write?at=1')).ok, true)
+  assert.equal((await budget('write?at=2')).ok, true)
+  const trip = await budget('write?at=3')
+  assert.match(trip.error, /WriteBudgetExceededError/)
+  assert.equal(trip.bootID, bootID)
+  const tripped = await budget('state')
+  assert.equal(tripped.tripped, true)
+  assert.equal(tripped.bootID, bootID)
+  const refused = await budget('write?at=4')
+  assert.match(refused.error, /WriteBudgetExceededError/)
+  assert.deepEqual(await budget('state'), tripped)
 } finally {
   server.kill()
   await server.exited
