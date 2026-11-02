@@ -51,10 +51,31 @@ writeFileSync(
   })
 )
 writeFileSync(
+  join(fixture, 'failure-migration.ts'),
+  buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+    mode: 'native',
+    schemaVersion: 'migration-failure-proof',
+    schemaImportSpecifier: './schema.js',
+    nativeSqlStatements: [
+      {
+        id: '9000_failure/migration.sql:0',
+        sql: 'CREATE TABLE failed_migration (id INTEGER PRIMARY KEY)',
+      },
+    ],
+    expectedTables: [
+      {
+        name: 'failed_migration',
+        columns: [{ name: 'id', notNull: true, primaryKeyOrder: 1, sqlType: 'integer' }],
+      },
+    ],
+  })
+)
+writeFileSync(
   join(fixture, 'worker.ts'),
   `import { createOrezDataWorker } from '../src/cf-do/lite-data-worker.js'
 import { createApplicationSqlClient } from '../src/cf-do/application-sql.js'
 import { orezAppSchema } from './migration.js'
+import { orezAppSchema as failureSchema } from './failure-migration.js'
 
 const notificationAttempts = new Map<string, number>()
 const dataWorker = createOrezDataWorker({
@@ -69,6 +90,23 @@ export class ZeroDO extends dataWorker.ZeroDO {
   resetForProof() { this.ctx.abort('snapshot restart proof') }
   storageTables() {
     return this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf_%' AND name NOT LIKE '__miniflare_%'").toArray().map((row) => row.name)
+  }
+  async checkFailedMigration(instance) {
+    let error
+    const client = this.applicationSqlLocalClient(instance)
+    const transaction = client.transaction.bind(client)
+    // fail outside the generated migration's compensation, before session commit.
+    client.transaction = (compile, work) => transaction(compile, async tx => {
+      await work(tx)
+      throw new Error('intentional migration commit failure')
+    })
+    try { await failureSchema.migrate({ instance, client }) }
+    catch (caught) { error = String(caught) }
+    return {
+      error,
+      ledger: this.ctx.storage.sql.exec('SELECT id FROM __contrast_cf_migrations WHERE id LIKE ? ORDER BY id', '9000_failure/%').toArray(),
+      tables: this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'failed_migration'").toArray(),
+    }
   }
   async checkCurrentSchema(instance) {
     return orezAppSchema.migrate({ instance, client: this.applicationSqlLocalClient(instance) })
@@ -165,7 +203,7 @@ export default {
           sql: 'INSERT INTO "__contrast_cf_migrations" (id, applied_at) VALUES (?, ?)',
           params: ['0001_retired/migration.sql:0:previous-hash', 1],
         },
-        ...Array.from({ length: 1000 }, (_, index) => ({
+        ...Array.from({ length: Number(url.searchParams.get('history') ?? 1000) }, (_, index) => ({
           sql: 'INSERT INTO "__contrast_cf_migrations" (id, applied_at) VALUES (?, ?)',
           params: ['historical-' + String(index).padStart(4, '0') + ':hash', 1],
         })),
@@ -198,6 +236,10 @@ export default {
     if (action === 'migrate') {
       const result = await dataWorker.ensureNamespaceSchema(env, namespace, { force: true })
       return Response.json(result)
+    }
+    if (action === 'failed-migration') {
+      const stub = env.ZERO_SQL_DO.get(env.ZERO_SQL_DO.idFromName(instance))
+      return Response.json(await stub.checkFailedMigration(instance))
     }
     if (action === 'current-check') {
       const stub = env.ZERO_SQL_DO.get(env.ZERO_SQL_DO.idFromName(instance))
@@ -268,6 +310,21 @@ const server = Bun.spawn(
 )
 const base = `http://127.0.0.1:${port}`
 
+const migrationCost = (before, after, callbacks) => ({
+  rowsRead: after.sqlBillingSinceBoot.rowsRead - before.sqlBillingSinceBoot.rowsRead,
+  rowsWritten:
+    after.sqlBillingSinceBoot.rowsWritten - before.sqlBillingSinceBoot.rowsWritten,
+  sessions:
+    after.requestsSinceBoot.applicationSqlSessions -
+    before.requestsSinceBoot.applicationSqlSessions,
+  readSessions:
+    after.requestsSinceBoot.applicationSqlReadSessions -
+    before.requestsSinceBoot.applicationSqlReadSessions,
+  statements:
+    after.requestsSinceBoot.sqlStatements - before.requestsSinceBoot.sqlStatements,
+  callbacks,
+})
+
 try {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -296,20 +353,7 @@ try {
   const observation = await fetch(`${base}/observe/${namespace}`).then((response) =>
     response.json()
   )
-  const cost = {
-    rowsRead: after.sqlBillingSinceBoot.rowsRead - before.sqlBillingSinceBoot.rowsRead,
-    rowsWritten:
-      after.sqlBillingSinceBoot.rowsWritten - before.sqlBillingSinceBoot.rowsWritten,
-    sessions:
-      after.requestsSinceBoot.applicationSqlSessions -
-      before.requestsSinceBoot.applicationSqlSessions,
-    readSessions:
-      after.requestsSinceBoot.applicationSqlReadSessions -
-      before.requestsSinceBoot.applicationSqlReadSessions,
-    statements:
-      after.requestsSinceBoot.sqlStatements - before.requestsSinceBoot.sqlStatements,
-    callbacks: observation.callbacks,
-  }
+  const cost = migrationCost(before, after, observation.callbacks)
   assert.deepEqual(observation, {
     tables: [{ name: 'alpha' }, { name: 'beta' }],
     ledger: 1_003,
@@ -326,14 +370,39 @@ try {
   // session before the two migration writers. its overhead writes no rows.
   // the first migration of a namespace also creates the three schema state
   // tables (one existence probe, three CREATE statements, six schema rows).
+  // compared with the old unprotected ledger: 10 first-use CDC metadata writes,
+  // plus 5 per ledger insert (capture1,drain1,pending2,cleanup1), total20.
+  // the history-size comparison below forbids a ledger scan or snapshot.
   assert.deepEqual(cost, {
-    rowsRead: 329,
-    rowsWritten: 50,
+    rowsRead: 508,
+    rowsWritten: 70,
     sessions: 3,
     readSessions: 1,
-    statements: 74,
+    statements: 110,
     callbacks: 0,
   })
+  // the retained ledger history must add no scan or snapshot cost.
+  const emptyNamespace = `proj-ledger-empty-${crypto.randomUUID()}`
+  assert.equal(
+    (await fetch(`${base}/seed/${emptyNamespace}?history=0`, { method: 'POST' })).status,
+    200
+  )
+  const emptyBefore = await fetch(`${base}/status/${emptyNamespace}`).then((r) =>
+    r.json()
+  )
+  assert.equal(
+    (await fetch(`${base}/migrate/${emptyNamespace}`, { method: 'POST' })).status,
+    200
+  )
+  const emptyAfter = await fetch(`${base}/status/${emptyNamespace}`).then((r) => r.json())
+  const emptyObservation = await fetch(`${base}/observe/${emptyNamespace}`).then((r) =>
+    r.json()
+  )
+  assert.equal(emptyObservation.ledger, 3)
+  assert.deepEqual(
+    migrationCost(emptyBefore, emptyAfter, emptyObservation.callbacks),
+    cost
+  )
   const currentBefore = await fetch(`${base}/status/${namespace}`).then((r) => r.json())
   const checks = await Promise.all(
     Array.from({ length: 33 }, () => fetch(`${base}/current-check/${namespace}`))
@@ -357,6 +426,13 @@ try {
       currentBefore.sqlBillingSinceBoot.rowsWritten,
     0
   )
+  // a failed generated migration must remove its ledger entry as well as DDL.
+  const failed = await fetch(`${base}/failed-migration/${namespace}`).then((r) =>
+    r.json()
+  )
+  assert.match(failed.error, /intentional migration commit failure/)
+  assert.deepEqual(failed.ledger, [])
+  assert.deepEqual(failed.tables, [])
   // raw application sql on a namespace nobody migrated converges the schema
   // before the statement runs, so the tables it asks for already exist
   const firstTouch = await fetch(

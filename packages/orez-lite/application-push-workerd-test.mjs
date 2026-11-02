@@ -21,6 +21,14 @@ export class BudgetProbe extends BudgetBase {
     await this.applicationSqlLocalClient('budget').exec(
       'CREATE TABLE IF NOT EXISTS comment (id TEXT PRIMARY KEY, post INTEGER NOT NULL)'
     )
+    const client = this.applicationSqlLocalClient('budget')
+    await client.registerTables([{ table: 'comment', publicTable: 'comment', publish: false }])
+    await client.exec("INSERT INTO comment VALUES ('kept', 1) RETURNING id")
+    this.sql.exec('CREATE TABLE budget_padding (id INTEGER PRIMARY KEY)')
+    // real metered writes put the next journal marker + RETURNING insert over 56.
+    const padding = 52 - this.writeBudget.status().windowRows
+    if (padding < 0) throw new Error('budget fixture setup exceeded its priming target')
+    if (padding) this.sql.exec('WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?) INSERT INTO budget_padding SELECT i FROM n', padding)
     return this.bootID
   }
   async write(at) {
@@ -36,10 +44,12 @@ export class BudgetProbe extends BudgetBase {
     }
   }
   async state() {
+    const budget = await this.fetch(new Request('https://fixture.invalid/_orez/write-budget')).then(r => r.json())
     return {
       bootID: this.bootID,
       comments: this.ctx.storage.sql.exec('SELECT count(*) AS n FROM comment').one().n,
-      tripped: this.writeBudget.status().tripped,
+      tripped: budget.tripped,
+      trippedStatement: budget.trippedStatement,
     }
   }
 }
@@ -219,15 +229,15 @@ try {
   const budget = (path) =>
     fetch(`${base}/budget/${path}`).then((response) => response.json())
   const bootID = await budget('setup')
-  assert.equal((await budget('write?at=1')).ok, true)
-  assert.equal((await budget('write?at=2')).ok, true)
-  const trip = await budget('write?at=3')
+  const trip = await budget('write?at=1')
   assert.match(trip.error, /WriteBudgetExceededError/)
   assert.equal(trip.bootID, bootID)
   const tripped = await budget('state')
   assert.equal(tripped.tripped, true)
   assert.equal(tripped.bootID, bootID)
-  const refused = await budget('write?at=4')
+  assert.equal(tripped.comments, 1)
+  assert.match(tripped.trippedStatement.sql, /INSERT INTO comment.*RETURNING/)
+  const refused = await budget('write?at=2')
   assert.match(refused.error, /WriteBudgetExceededError/)
   assert.deepEqual(await budget('state'), tripped)
 } finally {
