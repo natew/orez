@@ -237,6 +237,14 @@ foreign keys while replaying row images, so tracked and raw statements share tha
 policy instead of taking late snapshots of journaled cascade children. Private
 changes whose table snapshot already owns undo do not need pending rows.
 
+A restored migration ledger also needs private row capture. In the workerd
+migration fixture, first-use capture metadata costs ten physical writes and each
+of two new ledger rows costs five extra writes for capture, drain, pending state
+and cleanup. The pinned total is 70 writes, unchanged with zero or 1,000 retained
+historical rows; caught-up checks write nothing. A fresh registration table
+includes the inferred-capture column immediately, avoiding a redundant schema
+alteration. Existing registration tables still receive the compatible upgrade.
+
 Owner direction, 2026-11-02: "We have to be compatible", in the scope of Zero's
 primary-key-or-unique-index support. Like Zero, row capture accepts a primary key
 or a non-null unique index. When a hidden rowid remains accessible it can also

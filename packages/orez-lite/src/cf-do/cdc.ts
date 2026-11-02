@@ -745,7 +745,8 @@ export class TransactionalCdc {
         'table_name TEXT NOT NULL, ' +
         'columns_json TEXT NOT NULL, ' +
         'publish INTEGER NOT NULL DEFAULT 1, ' +
-        `schema_version INTEGER NOT NULL DEFAULT ${CDC_SCHEMA_VERSION})`
+        `schema_version INTEGER NOT NULL DEFAULT ${CDC_SCHEMA_VERSION}, ` +
+        'automatic INTEGER NOT NULL DEFAULT 0)'
     )
     const tableColumns = this.sql
       .exec(`PRAGMA table_info(${quoteIdent(CDC_TABLES)})`)
