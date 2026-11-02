@@ -975,6 +975,9 @@ export class ZeroDO extends DurableObject {
                 this.sqlBillingSinceBoot.rowsWritten += extraWritten
                 this.sqlBillingSinceBoot.rowsRead += cursor.rowsRead - read
                 measurement.rowsWritten += extraWritten
+                try {
+                  this.activeAttribution?.recordPhysical(statement, extraWritten)
+                } catch {}
                 this.writeBudget.recordMaintenanceBillable(extraWritten)
               }
               throw error
