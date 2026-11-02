@@ -87,8 +87,8 @@ export const ZSYNC_CHANGES_TABLE = '_zsync_changes'
  * the packed mutation ledger. the sync executor toggles its captureMode column
  * mid-transaction through plain sql with no statement metadata, so no tracked
  * write ever registers it for capture, and its identity is fixed and
- * orez-owned. the worker registers it rollback-only before any
- * statement that writes it: an application session abandoned mid-transaction (a
+ * orez-owned. application SQL target discovery registers it rollback-only
+ * before a statement that writes it: an application session abandoned mid-transaction (a
  * delegated push canceled by the sync host's per-attempt timeout) must restore
  * captureMode, or every later push fails preparePackedLedger with "packed
  * ledger has uncommitted capture state" and the namespace never recovers
@@ -1126,7 +1126,11 @@ export function snapshotSideEffectWriteTables(
   operation: TrackedOperation,
   coversRowUndo: (physicalTable: string) => boolean,
   sourceStatement?: string,
-  options: { rollbackDisablesForeignKeys?: boolean; captureSource?: boolean } = {}
+  options: {
+    rollbackDisablesForeignKeys?: boolean
+    captureSource?: boolean
+    preserveUnaddressableWrites?: boolean
+  } = {}
 ): ReadonlySet<string> {
   const relations = sql
     .exec(
@@ -1311,6 +1315,21 @@ export function snapshotSideEffectWriteTables(
       (options.rollbackDisablesForeignKeys || !referentialTables.has(sqliteNoCase(table)))
     )
       continue
+    if (options.preserveUnaddressableWrites && !tableIdentity(sql, table)) {
+      const columns = sql.exec(`PRAGMA table_xinfo(${quoteIdent(table)})`).toArray()
+      if (
+        columns.every(
+          (column) => Number(column.pk) === 0 && Number(column.hidden) === 0
+        ) &&
+        ['rowid', '_rowid_', 'oid'].every((alias) =>
+          columns.some((column) => sqliteNoCase(String(column.name)) === alias)
+        )
+      ) {
+        // owner-approved compatibility: this raw-only shape has no undo or
+        // exact snapshot representation. accept writes without claiming protection.
+        continue
+      }
+    }
     // `upgradeToTableSnapshot` refuses a table this transaction has already
     // written row-undoably, which is what stops a late first-touch copy.
     upgradeToTableSnapshot(sql, txID, table)

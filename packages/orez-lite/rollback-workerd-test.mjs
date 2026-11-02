@@ -78,6 +78,40 @@ export class Data extends ZeroDO {
     } catch (caught) { error = String(caught) }
     return { error, rows: this.ctx.storage.sql.exec('SELECT key, body FROM unique_only ORDER BY key COLLATE BINARY').toArray() }
   }
+  async indexChangeRollback() {
+    const client = this.applicationSqlLocalClient('index-change')
+    await client.exec('CREATE TABLE changing_key (rowid TEXT, _rowid_ TEXT, oid TEXT, first_key TEXT NOT NULL, next_key TEXT NOT NULL, body TEXT)')
+    await client.exec('CREATE UNIQUE INDEX first_key_index ON changing_key(first_key)')
+    await client.exec("INSERT INTO changing_key VALUES ('r', 'r', 'r', 'first', 'next', 'seed')")
+    await client.exec('DROP INDEX first_key_index')
+    await client.exec('CREATE UNIQUE INDEX next_key_index ON changing_key(next_key)')
+    let error
+    try {
+      await client.transaction(null, async tx => {
+        await tx.exec("UPDATE changing_key SET body = 'changed' WHERE next_key = 'next'")
+        await tx.exec("INSERT INTO changing_key VALUES ('r', 'r', 'r', 'second', 'second', 'new')")
+        throw new Error('changed index rollback')
+      })
+    } catch (caught) { error = String(caught) }
+    const rows = this.ctx.storage.sql.exec('SELECT first_key, next_key, body FROM changing_key').toArray()
+    await client.exec('DROP INDEX next_key_index')
+    const captured = this.cdc.ensureTable({ physicalTableName: 'changing_key', tableName: 'changing_key', publish: false }, true)
+    const triggers = this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'changing_key'").toArray()
+    const registrations = this.ctx.storage.sql.exec("SELECT physical_table FROM _orez_cdc_tables WHERE physical_table = 'changing_key'").toArray()
+    return { error, rows, captured, triggers, registrations }
+  }
+  async triggerDdlRollback() {
+    const client = this.applicationSqlLocalClient('trigger-ddl')
+    for (const table of ['parse_source', 'parse_b', 'parse_c']) await client.exec('CREATE TABLE ' + table + ' (id INTEGER PRIMARY KEY)')
+    let error
+    try {
+      await client.transaction(null, async tx => {
+        await tx.exec('CREATE TRIGGER parse_trigger AFTER INSERT ON parse_source BEGIN INSERT INTO parse_b VALUES (new.id); SELECT CASE WHEN new.id > 0 THEN 1 ELSE 0 END; INSERT INTO parse_c VALUES (new.id); END')
+        throw new Error('trigger ddl rollback')
+      })
+    } catch (caught) { error = String(caught) }
+    return { error, triggers: this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'parse_trigger'").toArray() }
+  }
   async fkRollback() {
     const client = this.applicationSqlLocalClient('fk')
     const sql = this.ctx.storage.sql
@@ -102,14 +136,16 @@ export class Data extends ZeroDO {
   async oddRollback() {
     const client = this.applicationSqlLocalClient('identityless')
     const before = this.ctx.storage.sql.exec('SELECT count(*) AS n FROM identityless').one().n
+    const protectedBefore = this.state().item
     let error
     try {
       await client.transaction(null, async tx => {
-        await tx.exec('/* odd */ INSERT /* target */ INTO"main"."identityless" VALUES (?, ?, ?, ?)', ['x', 'x', 'x', 'x'])
+        await tx.exec("INSERT INTO item VALUES (30, 'protected')")
+        for (let i = 0; i < 3; i++) await tx.exec('/* odd */ INSERT /* target */ INTO"main"."identityless" VALUES (?, ?, ?, ?)', ['x', 'x', 'x', 'x'])
         throw new Error('identityless rollback')
       })
     } catch (caught) { error = String(caught) }
-    return { before, after: this.ctx.storage.sql.exec('SELECT count(*) AS n FROM identityless').one().n, error }
+    return { before, after: this.ctx.storage.sql.exec('SELECT count(*) AS n FROM identityless').one().n, protectedBefore, protectedAfter: this.state().item, error }
   }
   async promote() {
     const client = this.applicationSqlLocalClient('promote')
@@ -151,6 +187,8 @@ export default {
         : await object.attempt(table, returning)
       return Response.json({ error, ...await object.state() })
     }
+    if (url.pathname === '/index-change') return Response.json(await object.indexChangeRollback())
+    if (url.pathname === '/trigger-ddl') return Response.json(await object.triggerDdlRollback())
     if (url.pathname === '/ledger') return Response.json(await object.ledgerRollback())
     if (url.pathname === '/unique') return Response.json(await object.uniqueRollback())
     if (url.pathname === '/fk') return Response.json(await object.fkRollback())
@@ -229,8 +267,9 @@ try {
           assert.equal(after.billed - before.billed, 66)
           assert.equal(warmRowsWritten, 52)
           const odd = await get('odd', { id })
-          assert.match(odd.error, /cannot snapshot inaccessible row identity/)
-          assert.equal(odd.after, odd.before)
+          assert.match(odd.error, /identityless rollback/)
+          assert.equal(odd.after, odd.before + 3)
+          assert.equal(odd.protectedAfter, odd.protectedBefore)
           const promoted = await get('promote', { id })
           assert.deepEqual(promoted.feed, [{ name: 'published_item' }])
         }
@@ -257,6 +296,17 @@ try {
       { key: 'A', body: 'upper' },
       { key: 'a', body: 'lower' },
     ])
+    const changedIndex = await get('index-change', { id })
+    assert.match(changedIndex.error, /changed index rollback/)
+    assert.deepEqual(changedIndex.rows, [
+      { first_key: 'first', next_key: 'next', body: 'seed' },
+    ])
+    assert.equal(changedIndex.captured, false)
+    assert.deepEqual(changedIndex.triggers, [])
+    assert.deepEqual(changedIndex.registrations, [])
+    const triggerDdl = await get('trigger-ddl', { id })
+    assert.match(triggerDdl.error, /trigger ddl rollback/)
+    assert.deepEqual(triggerDdl.triggers, [])
     const fk = await get('fk', { id })
     assert.deepEqual(fk, {
       rolledBack: { parent: 1, child: 0, privateChild: 1 },

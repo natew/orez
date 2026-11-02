@@ -1,4 +1,4 @@
-import { stripPublicPrefix } from '../do-sql-tracking.js'
+import { sqlStatementTokens, stripPublicPrefix } from '../do-sql-tracking.js'
 
 import type { TrackedOperation } from './tx-journal.js'
 import type { DurableSqlStorage } from './watermark.js'
@@ -548,46 +548,11 @@ const SCHEMA_CHANGE_PATTERNS = [
 export function rowMutationTargets(
   sql: string
 ): Array<{ table: string; operation: TrackedOperation }> {
-  const tokens = [
-    ...sql.matchAll(
-      /--[^\r\n]*|\/\*[\s\S]*?\*\/|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|'(?:[^']|'')*'|(?:[A-Za-z0-9_$]|[^\x00-\x7f])+|[^\s]/gu
-    ),
-  ]
-    .map((match) => match[0])
-    .filter((token) => !token.startsWith('--') && !token.startsWith('/*'))
   const targets: Array<{ table: string; operation: TrackedOperation }> = []
-  let depth = 0
-  let consumed = false
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index]!
-    if (token === '(') {
-      depth++
-      continue
-    }
-    if (token === ')') {
-      depth--
-      continue
-    }
-    if (depth !== 0) continue
-    if (token === ';') {
-      consumed = false
-      continue
-    }
-    if (consumed) continue
-    const command = token.toUpperCase()
-    if (
-      command === 'SELECT' ||
-      command === 'PRAGMA' ||
-      command === 'CREATE' ||
-      command === 'ALTER' ||
-      command === 'DROP'
-    ) {
-      consumed = true
-      continue
-    }
-    if (!['INSERT', 'REPLACE', 'UPDATE', 'DELETE'].includes(command)) continue
-    consumed = true
-    let cursor = index + 1
+  for (const tokens of sqlStatementTokens(sql)) {
+    const command = tokens[0]?.toUpperCase()
+    if (!command || !['INSERT', 'REPLACE', 'UPDATE', 'DELETE'].includes(command)) continue
+    let cursor = 1
     if (tokens[cursor]?.toUpperCase() === 'OR') cursor += 2
     if (command === 'INSERT' || command === 'REPLACE') {
       if (tokens[cursor]?.toUpperCase() !== 'INTO') continue
@@ -838,16 +803,17 @@ export class TransactionalCdc {
     )
   }
 
-  private triggersExist(table: string): boolean {
+  private triggersMatch(table: string, definitions: string[]): boolean {
     const names = triggerNames(table)
     const placeholders = names.map(() => '?').join(', ')
     return (
       this.sql
         .exec(
-          `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (${placeholders})`,
+          `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN (${placeholders})`,
           ...names
         )
-        .toArray().length === names.length
+        .toArray()
+        .filter((row) => definitions.includes(String(row.sql))).length === names.length
     )
   }
 
@@ -931,14 +897,14 @@ export class TransactionalCdc {
     this.#active = this.#registrations.size > 0
   }
 
-  private installTriggers(
+  private triggerDefinitions(
     registration: {
       physicalTableName: string
       tableName: string
       publish: boolean
     },
     identity: TableIdentity
-  ): void {
+  ): string[] {
     const physicalTable = quoteIdent(registration.physicalTableName)
     const logicalTable = quoteLiteral(registration.tableName)
     const [insertName, updateName, deleteName] = triggerNames(
@@ -958,19 +924,15 @@ export class TransactionalCdc {
       `INSERT INTO ${quoteIdent(CDC_BUFFER)} ` +
       '(table_name, op, row_json, old_json, new_rowid, old_rowid)'
 
-    this.sql.exec(
+    return [
       `CREATE TRIGGER ${insertName} AFTER INSERT ON ${physicalTable} BEGIN ` +
-        `${insertInto} VALUES (${logicalTable}, 'INSERT', ${newRow}, NULL, ${newRowid}, NULL); END`
-    )
-    this.sql.exec(
+        `${insertInto} VALUES (${logicalTable}, 'INSERT', ${newRow}, NULL, ${newRowid}, NULL); END`,
       `CREATE TRIGGER ${updateName} AFTER UPDATE ON ${physicalTable} ` +
         `WHEN ${changedWhen(columns)} BEGIN ` +
-        `${insertInto} VALUES (${logicalTable}, 'UPDATE', ${newRow}, ${oldRow}, ${newRowid}, ${oldRowid}); END`
-    )
-    this.sql.exec(
+        `${insertInto} VALUES (${logicalTable}, 'UPDATE', ${newRow}, ${oldRow}, ${newRowid}, ${oldRowid}); END`,
       `CREATE TRIGGER ${deleteName} AFTER DELETE ON ${physicalTable} BEGIN ` +
-        `${insertInto} VALUES (${logicalTable}, 'DELETE', NULL, ${oldRow}, NULL, ${oldRowid}); END`
-    )
+        `${insertInto} VALUES (${logicalTable}, 'DELETE', NULL, ${oldRow}, NULL, ${oldRowid}); END`,
+    ]
   }
 
   /**
@@ -1021,8 +983,24 @@ export class TransactionalCdc {
     // race an out-of-band migration with stale metadata; narrowing the trigger
     // to that stale list would silently omit the new column forever.
     const identity = tableIdentity(this.sql, physicalTableName)
-    if (!identity) return false
+    if (!identity) {
+      if (cached) {
+        this.dropTriggers(physicalTableName)
+        this.sql.exec(
+          `DELETE FROM ${quoteIdent(CDC_TABLES)} WHERE physical_table = ?`,
+          physicalTableName
+        )
+        this.#registrations.delete(physicalTableName)
+        this.#verified.delete(physicalTableName)
+        this.#active = this.#registrations.size > 0
+      }
+      return false
+    }
     const capturedColumns = identity.columns
+    const definitions = this.triggerDefinitions(
+      { physicalTableName, tableName, publish },
+      identity
+    )
     const previous = this.registered(physicalTableName)
     const unchanged =
       previous?.tableName === tableName &&
@@ -1030,10 +1008,10 @@ export class TransactionalCdc {
       previous.automatic === automatic &&
       previous.version === CDC_SCHEMA_VERSION &&
       JSON.stringify(previous.columns) === JSON.stringify(capturedColumns) &&
-      this.triggersExist(physicalTableName)
+      this.triggersMatch(physicalTableName, definitions)
     if (!unchanged) {
       this.dropTriggers(physicalTableName)
-      this.installTriggers({ physicalTableName, tableName, publish }, identity)
+      for (const definition of definitions) this.sql.exec(definition)
       this.sql.exec(
         `INSERT OR REPLACE INTO ${quoteIdent(CDC_TABLES)} ` +
           '(physical_table, table_name, columns_json, publish, schema_version, automatic) VALUES (?, ?, ?, ?, ?, ?)',
