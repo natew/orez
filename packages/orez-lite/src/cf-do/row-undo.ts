@@ -140,7 +140,7 @@ function identityWhere(
       throw new Error(`cdc undo: ${table} before-image is missing key column ${column}`)
     }
     const binding = journalValueSqlBinding(encoded)
-    clauses.push(`${quoteIdent(column)} IS ${binding.expr}`)
+    clauses.push(`${quoteIdent(column)} IS ${binding.expr} COLLATE BINARY`)
     params.push(...binding.params)
   }
   return { sql: clauses.join(' AND '), params }

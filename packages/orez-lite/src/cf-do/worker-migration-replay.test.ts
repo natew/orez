@@ -604,7 +604,9 @@ describe('stale namespace migration replay cost', () => {
         )
         .one()
     ).toEqual({ applied_at: 1 })
-    expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(11)
+    // four changed ledger rows now receive capture, drain, pending and cleanup
+    // writes, plus one registration. this protects ledger rollback as well.
+    expect(core.written.reduce((rows, write) => rows + write.rows, 0)).toBe(28)
 
     core.start()
     await migrationModule.orezAppSchema.migrate({

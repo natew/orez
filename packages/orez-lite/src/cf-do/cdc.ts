@@ -1,5 +1,6 @@
 import { stripPublicPrefix } from '../do-sql-tracking.js'
 
+import type { TrackedOperation } from './tx-journal.js'
 import type { DurableSqlStorage } from './watermark.js'
 
 /** Bump whenever the generated trigger bodies or buffer shape change. */
@@ -72,7 +73,7 @@ export interface TableIdentity {
   rowidColumn: string | null
   withoutRowid: boolean
   autoIncrement: boolean
-  /** Declared primary-key columns in key order. */
+  /** primary key or non-null unique-index columns in key order. */
   keyColumns: string[]
   /** Columns undo may write. Excludes generated columns. */
   writableColumns: string[]
@@ -287,7 +288,7 @@ export function parseJournalRecord(value: unknown): JournalRecord | null {
 
 /**
  * Read stable-identity metadata from the live schema. Returns null when the
- * table cannot be undone row-by-row (no rowid and no primary key), which keeps
+ * table cannot be undone row-by-row (no rowid and no primary or non-null unique key), which keeps
  * capture off it entirely so the caller falls back to table snapshots.
  */
 export function tableIdentity(
@@ -304,7 +305,7 @@ export function tableIdentity(
   if (columns.length === 0) return null
 
   const writableColumns = writableColumnsOf(info)
-  const keyColumns = info
+  let keyColumns = info
     .filter((row) => Number(row.pk ?? 0) > 0)
     .sort((a, b) => Number(a.pk ?? 0) - Number(b.pk ?? 0))
     .map((row) => String(row.name ?? ''))
@@ -337,7 +338,25 @@ export function tableIdentity(
       ? keyColumns[0]
       : null
 
-  if (!rowidAlias && keyColumns.length === 0) return null
+  if (!rowidAlias && keyColumns.length === 0) {
+    for (const index of sql.exec(`PRAGMA index_list(${quoteIdent(table)})`).toArray()) {
+      if (Number(index.unique) !== 1 || Number(index.partial) !== 0) continue
+      const keys = sql
+        .exec(`PRAGMA index_info(${quoteIdent(String(index.name))})`)
+        .toArray()
+      if (keys.length === 0 || keys.some((key) => Number(key.cid) < 0)) continue
+      const names = keys.map((key) => String(key.name))
+      if (
+        !names.every((name) =>
+          info.some((column) => column.name === name && Number(column.notnull) === 1)
+        )
+      )
+        continue
+      keyColumns = names
+      break
+    }
+    if (keyColumns.length === 0) return null
+  }
   let autoIncrement = false
   if (rowidColumn) {
     const definition = sql
@@ -525,27 +544,76 @@ const SCHEMA_CHANGE_PATTERNS = [
   ),
 ] as const
 
-/** find DML targets outside quoted SQL and comments, including CTEs and batches. */
-export function rowMutationTargets(sql: string): string[] {
-  const clean = sql.replace(SQL_QUOTED_OR_COMMENT_RE, (token) =>
-    token.startsWith('--') || token.startsWith('/*') ? ' '.repeat(token.length) : token
-  )
-  const masked = clean.replace(SQL_QUOTED_OR_COMMENT_RE, (token) =>
-    token === ';' ? token : ' '.repeat(token.length)
-  )
-  const command =
-    /(?<![\p{L}\p{N}_$:@])(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\b/giu
-  const target = new RegExp(`^\\s*${SQL_TABLE_NAME}`, 'i')
-  const tables = new Set<string>()
-  for (const match of masked.matchAll(command)) {
-    const name = target.exec(clean.slice(match.index + match[0].length))
-    if (!name || (!name[2] && /^SET$/i.test(name[1]))) continue
-    if (name[2] && unquoteSqlIdentifier(name[1]).toLowerCase() !== 'main') {
-      throw new Error('unsupported SQLite schema in table mutation: ' + name[1])
+/** read the top-level DML target of each statement, skipping CTE bodies. */
+export function rowMutationTargets(
+  sql: string
+): Array<{ table: string; operation: TrackedOperation }> {
+  const tokens = [
+    ...sql.matchAll(
+      /--[^\r\n]*|\/\*[\s\S]*?\*\/|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|'(?:[^']|'')*'|(?:[A-Za-z0-9_$]|[^\x00-\x7f])+|[^\s]/gu
+    ),
+  ]
+    .map((match) => match[0])
+    .filter((token) => !token.startsWith('--') && !token.startsWith('/*'))
+  const targets: Array<{ table: string; operation: TrackedOperation }> = []
+  let depth = 0
+  let consumed = false
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]!
+    if (token === '(') {
+      depth++
+      continue
     }
-    tables.add(unquoteSqlIdentifier(name[2] ?? name[1]))
+    if (token === ')') {
+      depth--
+      continue
+    }
+    if (depth !== 0) continue
+    if (token === ';') {
+      consumed = false
+      continue
+    }
+    if (consumed) continue
+    const command = token.toUpperCase()
+    if (
+      command === 'SELECT' ||
+      command === 'PRAGMA' ||
+      command === 'CREATE' ||
+      command === 'ALTER' ||
+      command === 'DROP'
+    ) {
+      consumed = true
+      continue
+    }
+    if (!['INSERT', 'REPLACE', 'UPDATE', 'DELETE'].includes(command)) continue
+    consumed = true
+    let cursor = index + 1
+    if (tokens[cursor]?.toUpperCase() === 'OR') cursor += 2
+    if (command === 'INSERT' || command === 'REPLACE') {
+      if (tokens[cursor]?.toUpperCase() !== 'INTO') continue
+      cursor++
+    } else if (command === 'DELETE') {
+      if (tokens[cursor]?.toUpperCase() !== 'FROM') continue
+      cursor++
+    }
+    let table = tokens[cursor]
+    if (!table) continue
+    if (tokens[cursor + 1] === '.') {
+      if (unquoteSqlIdentifier(table).toLowerCase() !== 'main') {
+        throw new Error('unsupported SQLite schema in table mutation: ' + table)
+      }
+      table = tokens[cursor + 2]
+      if (!table) continue
+    }
+    targets.push({
+      table: unquoteSqlIdentifier(table),
+      operation:
+        command === 'INSERT' || command === 'REPLACE'
+          ? 'UPSERT'
+          : (command as TrackedOperation),
+    })
   }
-  return [...tables]
+  return targets
 }
 
 /**
@@ -616,8 +684,6 @@ export class TransactionalCdc {
   #active = false
   #registrations = new Map<string, Registration>()
   #verified = new Set<string>()
-  #rollbackSchema: string | null = null
-  #uncoveredRollbackTables: string[] = []
 
   constructor(private readonly sql: DurableSqlStorage) {
     if (this.tableExists(CDC_TABLES)) this.ensureTables()
@@ -631,7 +697,6 @@ export class TransactionalCdc {
 
   /** Force the next per-table ensure to re-read SQLite's live schema. */
   invalidateSchema(): void {
-    this.#rollbackSchema = null
     this.#verified.clear()
   }
 
@@ -647,7 +712,6 @@ export class TransactionalCdc {
     // must fail the request without erasing a still-live capture decision.
     // Verification is different: an aborted transaction may have rolled its
     // triggers back, so no cached verification can survive even a failed load.
-    this.#rollbackSchema = null
     this.#verified.clear()
     const registrations = this.loadRegistrations()
     this.#registrations = registrations
@@ -920,8 +984,11 @@ export class TransactionalCdc {
     authoritative = refresh
   ): boolean {
     const physicalTableName = String(registration.physicalTableName || '')
-    const tableName = String(registration.tableName || '')
     const cached = this.registered(physicalTableName)
+    const tableName =
+      registration.automatic && cached
+        ? cached.tableName
+        : String(registration.tableName || '')
     // Only an authoritative caller (table registration, syncTables, the
     // schema-change restore) carries the schema's declared capture set, so only
     // it may change whether a table publishes: demoting one to rollback-only
@@ -988,35 +1055,6 @@ export class TransactionalCdc {
     this.#verified.add(physicalTableName)
     this.#active = true
     return true
-  }
-
-  /** capture raw SQL and its implicit writes without publishing private tables. */
-  ensureRollbackTables(isInternalTable: (name: string) => boolean): readonly string[] {
-    const tables = this.sql
-      .exec("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
-      .toArray()
-      .filter(
-        (row) => !isInternalTable(String(row.name)) && row.name !== '_orez_backup_meta'
-      )
-    const schema = JSON.stringify(tables)
-    if (this.#rollbackSchema === schema) return this.#uncoveredRollbackTables
-    const uncovered: string[] = []
-    for (const row of tables) {
-      const physicalTableName = String(row.name)
-      const cached = this.registered(physicalTableName)
-      if (
-        !this.ensureTable({
-          physicalTableName,
-          tableName: cached?.tableName ?? physicalTableName,
-          publish: false,
-          automatic: true,
-        })
-      )
-        uncovered.push(physicalTableName)
-    }
-    this.#uncoveredRollbackTables = uncovered
-    this.#rollbackSchema = schema
-    return uncovered
   }
 
   /** Replace the captured-table set with the caller's authoritative list. */

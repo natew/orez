@@ -1012,7 +1012,7 @@ function triggerWriteTargets(sql: string | null): string[] | null {
 }
 
 // sqlite's built-in identifier comparison folds ASCII case only.
-export function sqliteNoCase(identifier: string): string {
+function sqliteNoCase(identifier: string): string {
   return identifier.replace(/[A-Z]/g, (character) => character.toLowerCase())
 }
 
@@ -1035,8 +1035,6 @@ function triggerEvent(sql: string | null): RowOperation | null {
   const match = TRIGGER_EVENT.exec(begin < 0 ? sql : sql.slice(0, begin))
   return match ? (match[1]!.toUpperCase() as RowOperation) : null
 }
-
-const NO_SNAPSHOTS: ReadonlySet<string> = new Set<string>()
 
 const SQL_IDENTIFIER = '"(?:[^"]|"")+"|`(?:[^`]|``)+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*'
 const BOUND_UPDATE = new RegExp(
@@ -1128,7 +1126,7 @@ export function snapshotSideEffectWriteTables(
   operation: TrackedOperation,
   coversRowUndo: (physicalTable: string) => boolean,
   sourceStatement?: string,
-  rollbackDisablesForeignKeys = false
+  options: { rollbackDisablesForeignKeys?: boolean; captureSource?: boolean } = {}
 ): ReadonlySet<string> {
   const relations = sql
     .exec(
@@ -1265,15 +1263,19 @@ export function snapshotSideEffectWriteTables(
   // an upsert resolves to an insert or an update and only SQLite knows which,
   // so it seeds both. an insert fires no referential action.
   const seeded: readonly RowOperation[] =
-    operation === 'UPSERT' ? ['INSERT', 'UPDATE'] : [operation]
+    operation === 'UPSERT'
+      ? /\bREPLACE\b/i.test(sourceDefinition + ' ' + sourceStatement)
+        ? ROW_OPERATIONS
+        : ['INSERT', 'UPDATE']
+      : [operation]
   const reachable = new Set<string>()
   const reachableTables = new Set<string>()
   const referentialTables = new Set<string>()
   const pending = seeded.map((op) =>
     initialColumns && op === 'UPDATE' ? initialNode : node(sourceTable, op)
   )
-  let hasSideEffect = false
   let mustSnapshotAll = false
+  let hasSideEffect = false
   while (pending.length > 0) {
     const current = pending.pop()!
     if (reachable.has(current)) continue
@@ -1287,7 +1289,8 @@ export function snapshotSideEffectWriteTables(
       pending.push(target)
     }
   }
-  if (!hasSideEffect && !mustSnapshotAll) return NO_SNAPSHOTS
+
+  if (!options.captureSource && !hasSideEffect && !mustSnapshotAll) return new Set()
 
   const candidates = mustSnapshotAll
     ? [...snapshotTables.values()]
@@ -1305,7 +1308,7 @@ export function snapshotSideEffectWriteTables(
     // put them back after row undo had removed them.
     if (
       coversRowUndo(table) &&
-      (rollbackDisablesForeignKeys || !referentialTables.has(sqliteNoCase(table)))
+      (options.rollbackDisablesForeignKeys || !referentialTables.has(sqliteNoCase(table)))
     )
       continue
     // `upgradeToTableSnapshot` refuses a table this transaction has already

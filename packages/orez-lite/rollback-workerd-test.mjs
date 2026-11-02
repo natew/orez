@@ -23,6 +23,13 @@ export class Data extends ZeroDO {
     sql.exec('CREATE TABLE "set" (rowid TEXT, _rowid_ TEXT, oid TEXT)')
     sql.exec('CREATE TABLE identityless (rowid TEXT, _rowid_ TEXT, oid TEXT, body TEXT)')
     if (retained) sql.exec("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < ?) INSERT INTO identityless SELECT x, x, x, 'seed' FROM n", retained)
+    sql.exec('CREATE TABLE unique_only (rowid TEXT, _rowid_ TEXT, oid TEXT, key TEXT COLLATE NOCASE NOT NULL, body TEXT)')
+    sql.exec('CREATE UNIQUE INDEX unique_only_key ON unique_only(key COLLATE BINARY)')
+    sql.exec('CREATE TABLE __app_cf_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)')
+    sql.exec("INSERT INTO __app_cf_migrations VALUES ('old', 1)")
+    sql.exec('CREATE TABLE parent (id INTEGER PRIMARY KEY)')
+    sql.exec('CREATE TABLE private_child (id INTEGER PRIMARY KEY, parentId INTEGER REFERENCES parent(id) ON DELETE CASCADE)')
+    sql.exec('CREATE TABLE child (id INTEGER PRIMARY KEY, parentId INTEGER REFERENCES parent(id) ON DELETE CASCADE)')
     sql.exec('CREATE TABLE registered (id INTEGER PRIMARY KEY, body TEXT)')
     sql.exec('CREATE TABLE declared_private (id INTEGER PRIMARY KEY, body TEXT)')
     if (retained) sql.exec("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < ?) INSERT INTO item SELECT -x, 'seed' FROM n", retained)
@@ -41,8 +48,56 @@ export class Data extends ZeroDO {
       audit: sql.exec('SELECT count(*) AS n FROM audit').one().n,
       registered: sql.exec('SELECT count(*) AS n FROM registered').one().n,
       billed: this.writeBudget.status().billableRows,
+      registrations: sql.exec('SELECT physical_table FROM _orez_cdc_tables ORDER BY physical_table').toArray().map(row => row.physical_table),
       feed: sql.exec("SELECT table_name AS name FROM _zero_changes ORDER BY watermark").toArray(),
     }
+  }
+  async ledgerRollback() {
+    const client = this.applicationSqlLocalClient('ledger')
+    let error
+    try {
+      await client.transaction(null, async tx => {
+        await tx.exec("DELETE FROM __app_cf_migrations WHERE id = 'old'")
+        await tx.exec("INSERT INTO __app_cf_migrations VALUES ('new', 2)")
+        throw new Error('ledger rollback')
+      })
+    } catch (caught) { error = String(caught) }
+    return { error, rows: this.ctx.storage.sql.exec('SELECT * FROM __app_cf_migrations ORDER BY id').toArray() }
+  }
+  async uniqueRollback() {
+    const client = this.applicationSqlLocalClient('unique-only')
+    await client.exec("INSERT INTO unique_only VALUES ('r', 'r', 'r', 'a', 'lower'), ('r', 'r', 'r', 'A', 'upper')")
+    let error
+    try {
+      await client.transaction(null, async tx => {
+        await tx.exec("UPDATE unique_only SET body = 'changed' WHERE key = 'a' COLLATE BINARY")
+        await tx.exec("DELETE FROM unique_only WHERE key = 'A' COLLATE BINARY")
+        await tx.exec("INSERT INTO unique_only VALUES ('r', 'r', 'r', 'new', 'new')")
+        throw new Error('unique rollback')
+      })
+    } catch (caught) { error = String(caught) }
+    return { error, rows: this.ctx.storage.sql.exec('SELECT key, body FROM unique_only ORDER BY key COLLATE BINARY').toArray() }
+  }
+  async fkRollback() {
+    const client = this.applicationSqlLocalClient('fk')
+    const sql = this.ctx.storage.sql
+    await client.exec('INSERT INTO parent VALUES (1)')
+    sql.exec('INSERT INTO private_child VALUES (10, 1)')
+    let deadRows = 0
+    const mutate = async (tx, child) => {
+      await tx.exec('INSERT INTO child VALUES (?, 1)', [child], { table: 'child', publicTable: 'child', kind: 'insert' })
+      await tx.exec('DELETE FROM parent WHERE id = 1', [], { table: 'parent', publicTable: 'parent', kind: 'delete' })
+      deadRows += sql.exec('SELECT count(*) AS n FROM _zero_pending_changes WHERE publish = 0 AND undoable = 0').one().n
+    }
+    try {
+      await client.transaction(null, async tx => {
+        await mutate(tx, 1)
+        throw new Error('fk rollback')
+      })
+    } catch (error) { if (!String(error).includes('fk rollback')) throw error }
+    const rolledBack = { parent: sql.exec('SELECT count(*) AS n FROM parent').one().n, child: sql.exec('SELECT count(*) AS n FROM child').one().n, privateChild: sql.exec('SELECT count(*) AS n FROM private_child').one().n }
+    await client.transaction(null, tx => mutate(tx, 2))
+    return { rolledBack, deadRows, committed: { parent: sql.exec('SELECT count(*) AS n FROM parent').one().n, child: sql.exec('SELECT count(*) AS n FROM child').one().n, privateChild: sql.exec('SELECT count(*) AS n FROM private_child').one().n } }
   }
   async oddRollback() {
     const client = this.applicationSqlLocalClient('identityless')
@@ -96,6 +151,9 @@ export default {
         : await object.attempt(table, returning)
       return Response.json({ error, ...await object.state() })
     }
+    if (url.pathname === '/ledger') return Response.json(await object.ledgerRollback())
+    if (url.pathname === '/unique') return Response.json(await object.uniqueRollback())
+    if (url.pathname === '/fk') return Response.json(await object.fkRollback())
     if (url.pathname === '/odd') return Response.json(await object.oddRollback())
     if (url.pathname === '/promote') { await object.promote(); return Response.json(await object.state()) }
     return Response.json(await object.state())
@@ -158,11 +216,17 @@ try {
         assert.equal(registered.registered, 0)
         let warmRowsWritten
         if (!baseline) {
+          assert.deepEqual(after.registrations, [
+            'audit',
+            'declared_private',
+            'item',
+            'registered',
+          ])
           const warm = await get('attempt', { id, remote, returning })
           assert.equal(warm.item, retained)
           assert.equal(warm.audit, retained)
           warmRowsWritten = warm.billed - registered.billed
-          assert.equal(after.billed - before.billed, 71)
+          assert.equal(after.billed - before.billed, 66)
           assert.equal(warmRowsWritten, 52)
           const odd = await get('odd', { id })
           assert.match(odd.error, /cannot snapshot inaccessible row identity/)
@@ -180,6 +244,25 @@ try {
         })
       }
     }
+  }
+  if (!baseline) {
+    const id = 'review-regressions'
+    await get('setup', { id, retained: '0' })
+    const ledger = await get('ledger', { id })
+    assert.match(ledger.error, /ledger rollback/)
+    assert.deepEqual(ledger.rows, [{ id: 'old', applied_at: 1 }])
+    const unique = await get('unique', { id })
+    assert.match(unique.error, /unique rollback/)
+    assert.deepEqual(unique.rows, [
+      { key: 'A', body: 'upper' },
+      { key: 'a', body: 'lower' },
+    ])
+    const fk = await get('fk', { id })
+    assert.deepEqual(fk, {
+      rolledBack: { parent: 1, child: 0, privateChild: 1 },
+      deadRows: 0,
+      committed: { parent: 0, child: 0, privateChild: 0 },
+    })
   }
   for (let i = 0; i < costs.length; i += 2)
     assert.equal(costs[i].rowsWritten, costs[i + 1].rowsWritten)
