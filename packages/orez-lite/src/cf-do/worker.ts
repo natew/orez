@@ -961,8 +961,25 @@ export class ZeroDO extends DurableObject {
           try {
             this.activeAttribution?.recordPhysical(statement, rows)
           } catch {}
-          if (!this.writeBudgetDisabled && chargeWriteBudget)
-            this.recordWriteBudgetRows(rows, measurement)
+          if (!this.writeBudgetDisabled && chargeWriteBudget) {
+            try {
+              this.recordWriteBudgetRows(rows, measurement)
+            } catch (error) {
+              if (error instanceof WriteBudgetExceededError) {
+                // workerd cannot roll back while a RETURNING cursor is still active.
+                const written = cursor.rowsWritten
+                const read = cursor.rowsRead
+                for (const _ of cursor) {
+                }
+                const extraWritten = cursor.rowsWritten - written
+                this.sqlBillingSinceBoot.rowsWritten += extraWritten
+                this.sqlBillingSinceBoot.rowsRead += cursor.rowsRead - read
+                measurement.rowsWritten += extraWritten
+                this.writeBudget.recordMaintenanceBillable(extraWritten)
+              }
+              throw error
+            }
+          }
         },
         (rows) => {
           this.sqlBillingSinceBoot.rowsRead += rows
