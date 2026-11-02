@@ -28,6 +28,7 @@ import {
 import {
   TransactionalCdc,
   schemaChangeTargets,
+  rowMutationTargets,
   type CapturedRowChange,
   type CdcTableRegistration,
 } from './cdc.js'
@@ -47,10 +48,12 @@ import {
 import {
   beginTxJournal,
   commitTxJournal,
+  isInternalObject,
   recoverTxJournal,
   rollbackTxJournal,
   snapshotSideEffectWriteTables,
   snapshotTxSchema,
+  sqliteNoCase,
   upgradeToTableSnapshot,
   ZSYNC_CHANGES_TABLE,
   ZSYNC_LOG_SEGMENTS_TABLE,
@@ -2895,6 +2898,29 @@ export class ZeroDO extends DurableObject {
       })
     }
     beginTxJournal(this.sql, sessionID, 'application')
+    const uncovered = this.cdc.ensureRollbackTables(isInternalObject)
+    if (uncovered.length > 0) {
+      for (const target of rowMutationTargets(sql)) {
+        const table = uncovered.find(
+          (name) => sqliteNoCase(name) === sqliteNoCase(target)
+        )
+        if (table) upgradeToTableSnapshot(this.sql, sessionID, table, 'application')
+        // raw SQL may resolve conflicts through any row operation. only
+        // identity-uncoverable reachable targets need the conservative copy;
+        // application rollback disables foreign keys around row undo.
+        for (const operation of ['INSERT', 'UPDATE', 'DELETE'] as const) {
+          snapshotSideEffectWriteTables(
+            this.sql,
+            sessionID,
+            target,
+            operation,
+            (name) => this.cdc.coversRowUndo(name),
+            sql,
+            true
+          )
+        }
+      }
+    }
     return true
   }
 

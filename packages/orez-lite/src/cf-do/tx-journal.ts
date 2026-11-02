@@ -107,7 +107,7 @@ const INTERNAL_TABLES = new Set([
   '_zero_schema_tables',
 ])
 
-function isInternalObject(name: string): boolean {
+export function isInternalObject(name: string): boolean {
   return (
     INTERNAL_TABLES.has(name) ||
     name.startsWith('_cf_') ||
@@ -193,6 +193,7 @@ interface SchemaSnapshotObject {
 }
 
 interface CdcRegistrationSnapshot {
+  automatic?: number
   columns_json: string
   physical_table: string
   publish: number
@@ -605,12 +606,10 @@ function readCdcRegistrations(sql: DurableSqlStorage): CdcRegistrationSnapshot[]
     .toArray()
   if (registrationTableExists.length === 0) return []
   return sql
-    .exec(
-      `SELECT physical_table, table_name, columns_json, publish, schema_version ` +
-        `FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`
-    )
+    .exec(`SELECT * FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`)
     .toArray()
     .map((row) => ({
+      automatic: Number(row.automatic ?? 0),
       columns_json: String(row.columns_json ?? ''),
       physical_table: String(row.physical_table ?? ''),
       publish: Number(row.publish ?? 0),
@@ -747,15 +746,20 @@ function restoreSchemaSnapshot(
       .toArray().length > 0
   ) {
     sql.exec(`DELETE FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`)
+    const hasAutomatic = sql
+      .exec(`PRAGMA table_info(${quoteIdent(CDC_REGISTRATION_TABLE)})`)
+      .toArray()
+      .some((column) => column.name === 'automatic')
     for (const registration of snapshot.cdc) {
       sql.exec(
         `INSERT INTO ${quoteIdent(CDC_REGISTRATION_TABLE)} ` +
-          '(physical_table, table_name, columns_json, publish, schema_version) VALUES (?, ?, ?, ?, ?)',
+          `(physical_table, table_name, columns_json, publish, schema_version${hasAutomatic ? ', automatic' : ''}) VALUES (?, ?, ?, ?, ?${hasAutomatic ? ', ?' : ''})`,
         registration.physical_table,
         registration.table_name,
         registration.columns_json,
         registration.publish,
-        registration.schema_version
+        registration.schema_version,
+        ...(hasAutomatic ? [registration.automatic ?? 0] : [])
       )
     }
   }
@@ -1008,7 +1012,7 @@ function triggerWriteTargets(sql: string | null): string[] | null {
 }
 
 // sqlite's built-in identifier comparison folds ASCII case only.
-function sqliteNoCase(identifier: string): string {
+export function sqliteNoCase(identifier: string): string {
   return identifier.replace(/[A-Z]/g, (character) => character.toLowerCase())
 }
 
@@ -1123,7 +1127,8 @@ export function snapshotSideEffectWriteTables(
   sourceTable: string,
   operation: TrackedOperation,
   coversRowUndo: (physicalTable: string) => boolean,
-  sourceStatement?: string
+  sourceStatement?: string,
+  rollbackDisablesForeignKeys = false
 ): ReadonlySet<string> {
   const relations = sql
     .exec(
@@ -1298,7 +1303,11 @@ export function snapshotSideEffectWriteTables(
     // statement skipped and a later statement copies would be captured with
     // this statement's writes already committed into it, and the restore would
     // put them back after row undo had removed them.
-    if (coversRowUndo(table) && !referentialTables.has(sqliteNoCase(table))) continue
+    if (
+      coversRowUndo(table) &&
+      (rollbackDisablesForeignKeys || !referentialTables.has(sqliteNoCase(table)))
+    )
+      continue
     // `upgradeToTableSnapshot` refuses a table this transaction has already
     // written row-undoably, which is what stops a late first-touch copy.
     upgradeToTableSnapshot(sql, txID, table)

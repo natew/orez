@@ -28,6 +28,8 @@ export interface CdcTableRegistration {
   columns?: string[]
   /** False captures before/after images for transaction rollback only. */
   publish?: boolean
+  /** host-inferred rollback capture, superseded by an explicit registration. */
+  automatic?: boolean
 }
 
 /**
@@ -56,6 +58,7 @@ export interface CapturedRowChange {
 }
 
 export interface SuspendedCdcTable {
+  automatic?: boolean
   physicalTableName: string
   tableName: string
   publish?: boolean
@@ -496,6 +499,9 @@ function unquoteSqlIdentifier(identifier: string): string {
   if (identifier.startsWith('"') && identifier.endsWith('"')) {
     return identifier.slice(1, -1).replace(/""/g, '"')
   }
+  if (identifier.startsWith("'") && identifier.endsWith("'")) {
+    return identifier.slice(1, -1).replace(/''/g, "'")
+  }
   if (identifier.startsWith('`') && identifier.endsWith('`')) {
     return identifier.slice(1, -1).replace(/``/g, '`')
   }
@@ -509,7 +515,8 @@ const SCHEMA_CHANGE_GATE_RE = /\b(?:ALTER|CREATE|DROP)\b/i
 const SQL_QUOTED_OR_COMMENT_RE =
   /"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|'(?:[^']|'')*'|--[^\r\n]*|\/\*[\s\S]*?\*\/|;/g
 const SQL_IDENTIFIER = '(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[[^\\]]+\\]|[^\\s;(.]+)'
-const SQL_TABLE_NAME = `(${SQL_IDENTIFIER})(?:\\s*\\.\\s*(${SQL_IDENTIFIER}))?`
+const SQL_TABLE_IDENTIFIER = `(?:'(?:[^']|'')*'|${SQL_IDENTIFIER})`
+const SQL_TABLE_NAME = `(${SQL_TABLE_IDENTIFIER})(?:\\s*\\.\\s*(${SQL_TABLE_IDENTIFIER}))?`
 const SCHEMA_CHANGE_PATTERNS = [
   new RegExp(`^\\s*ALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${SQL_TABLE_NAME}`, 'i'),
   new RegExp(
@@ -517,6 +524,29 @@ const SCHEMA_CHANGE_PATTERNS = [
     'i'
   ),
 ] as const
+
+/** find DML targets outside quoted SQL and comments, including CTEs and batches. */
+export function rowMutationTargets(sql: string): string[] {
+  const clean = sql.replace(SQL_QUOTED_OR_COMMENT_RE, (token) =>
+    token.startsWith('--') || token.startsWith('/*') ? ' '.repeat(token.length) : token
+  )
+  const masked = clean.replace(SQL_QUOTED_OR_COMMENT_RE, (token) =>
+    token === ';' ? token : ' '.repeat(token.length)
+  )
+  const command =
+    /(?<![\p{L}\p{N}_$:@])(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\b/giu
+  const target = new RegExp(`^\\s*${SQL_TABLE_NAME}`, 'i')
+  const tables = new Set<string>()
+  for (const match of masked.matchAll(command)) {
+    const name = target.exec(clean.slice(match.index + match[0].length))
+    if (!name || (!name[2] && /^SET$/i.test(name[1]))) continue
+    if (name[2] && unquoteSqlIdentifier(name[1]).toLowerCase() !== 'main') {
+      throw new Error('unsupported SQLite schema in table mutation: ' + name[1])
+    }
+    tables.add(unquoteSqlIdentifier(name[2] ?? name[1]))
+  }
+  return [...tables]
+}
 
 /**
  * Return physical tables whose SQLite schema may be changed by this statement.
@@ -564,6 +594,7 @@ interface Registration {
   tableName: string
   columns: string[]
   publish: boolean
+  automatic: boolean
   version: number
 }
 
@@ -585,6 +616,8 @@ export class TransactionalCdc {
   #active = false
   #registrations = new Map<string, Registration>()
   #verified = new Set<string>()
+  #rollbackSchema: string | null = null
+  #uncoveredRollbackTables: string[] = []
 
   constructor(private readonly sql: DurableSqlStorage) {
     if (this.tableExists(CDC_TABLES)) this.ensureTables()
@@ -598,6 +631,7 @@ export class TransactionalCdc {
 
   /** Force the next per-table ensure to re-read SQLite's live schema. */
   invalidateSchema(): void {
+    this.#rollbackSchema = null
     this.#verified.clear()
   }
 
@@ -613,6 +647,7 @@ export class TransactionalCdc {
     // must fail the request without erasing a still-live capture decision.
     // Verification is different: an aborted transaction may have rolled its
     // triggers back, so no cached verification can survive even a failed load.
+    this.#rollbackSchema = null
     this.#verified.clear()
     const registrations = this.loadRegistrations()
     this.#registrations = registrations
@@ -623,11 +658,7 @@ export class TransactionalCdc {
     // reload runs before journal rollback; even no-op schema writes can prevent
     // workerd from disabling foreign keys around parent-table restoration.
     if (!this.tableExists(CDC_TABLES)) return new Map()
-    const rows = this.sql
-      .exec(
-        `SELECT physical_table, table_name, columns_json, publish, schema_version FROM ${quoteIdent(CDC_TABLES)}`
-      )
-      .toArray()
+    const rows = this.sql.exec(`SELECT * FROM ${quoteIdent(CDC_TABLES)}`).toArray()
     const registrations = new Map<string, Registration>()
     for (const row of rows) {
       const physicalTable = String(row.physical_table ?? '')
@@ -671,6 +702,7 @@ export class TransactionalCdc {
         tableName,
         columns,
         publish: publish === 1,
+        automatic: row.automatic === 1,
         version,
       })
     }
@@ -697,6 +729,11 @@ export class TransactionalCdc {
     if (!tableColumns.some((column) => String(column.name) === 'schema_version')) {
       this.sql.exec(
         `ALTER TABLE ${quoteIdent(CDC_TABLES)} ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0`
+      )
+    }
+    if (!tableColumns.some((column) => String(column.name) === 'automatic')) {
+      this.sql.exec(
+        `ALTER TABLE ${quoteIdent(CDC_TABLES)} ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0`
       )
     }
     // The buffer only ever holds rows for the statement being drained, so a
@@ -810,6 +847,7 @@ export class TransactionalCdc {
         physicalTableName,
         tableName: registration.tableName,
         ...(registration.publish ? null : { publish: false }),
+        ...(registration.automatic ? { automatic: true } : null),
       })
     }
     return suspended
@@ -888,15 +926,20 @@ export class TransactionalCdc {
     // schema-change restore) carries the schema's declared capture set, so only
     // it may change whether a table publishes: demoting one to rollback-only
     // capture or promoting it back. Every other ensure keeps the cached state
-    // in both directions: a rollback-only request must never demote an already
+    // in both directions, except inferred capture yields to explicit metadata:
+    // a rollback-only request must never demote an already
     // published table, and a flagless tracked write must never re-promote a
     // table the schema declared private.
     const publish =
-      authoritative || !cached ? registration.publish !== false : cached.publish
+      authoritative || !cached || (cached.automatic && !registration.automatic)
+        ? registration.publish !== false
+        : cached.publish
+    const automatic = registration.automatic === true && (!cached || cached.automatic)
     if (
       !refresh &&
       cached?.tableName === tableName &&
       cached.publish === publish &&
+      cached.automatic === automatic &&
       cached.version === CDC_SCHEMA_VERSION &&
       this.#verified.has(physicalTableName)
     ) {
@@ -917,6 +960,7 @@ export class TransactionalCdc {
     const unchanged =
       previous?.tableName === tableName &&
       previous.publish === publish &&
+      previous.automatic === automatic &&
       previous.version === CDC_SCHEMA_VERSION &&
       JSON.stringify(previous.columns) === JSON.stringify(capturedColumns) &&
       this.triggersExist(physicalTableName)
@@ -925,23 +969,54 @@ export class TransactionalCdc {
       this.installTriggers({ physicalTableName, tableName, publish }, identity)
       this.sql.exec(
         `INSERT OR REPLACE INTO ${quoteIdent(CDC_TABLES)} ` +
-          '(physical_table, table_name, columns_json, publish, schema_version) VALUES (?, ?, ?, ?, ?)',
+          '(physical_table, table_name, columns_json, publish, schema_version, automatic) VALUES (?, ?, ?, ?, ?, ?)',
         physicalTableName,
         tableName,
         JSON.stringify(capturedColumns),
         publish ? 1 : 0,
-        CDC_SCHEMA_VERSION
+        CDC_SCHEMA_VERSION,
+        automatic ? 1 : 0
       )
       this.#registrations.set(physicalTableName, {
         tableName,
         columns: capturedColumns,
         publish,
+        automatic,
         version: CDC_SCHEMA_VERSION,
       })
     }
     this.#verified.add(physicalTableName)
     this.#active = true
     return true
+  }
+
+  /** capture raw SQL and its implicit writes without publishing private tables. */
+  ensureRollbackTables(isInternalTable: (name: string) => boolean): readonly string[] {
+    const tables = this.sql
+      .exec("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
+      .toArray()
+      .filter(
+        (row) => !isInternalTable(String(row.name)) && row.name !== '_orez_backup_meta'
+      )
+    const schema = JSON.stringify(tables)
+    if (this.#rollbackSchema === schema) return this.#uncoveredRollbackTables
+    const uncovered: string[] = []
+    for (const row of tables) {
+      const physicalTableName = String(row.name)
+      const cached = this.registered(physicalTableName)
+      if (
+        !this.ensureTable({
+          physicalTableName,
+          tableName: cached?.tableName ?? physicalTableName,
+          publish: false,
+          automatic: true,
+        })
+      )
+        uncovered.push(physicalTableName)
+    }
+    this.#uncoveredRollbackTables = uncovered
+    this.#rollbackSchema = schema
+    return uncovered
   }
 
   /** Replace the captured-table set with the caller's authoritative list. */

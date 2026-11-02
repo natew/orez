@@ -132,6 +132,7 @@
     "build:dependencies": "bun run --cwd ../sync-cf-host build:dist",
     "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime",
     "test": "cd ../.. && vitest run --config vitest.config.ts packages/orez-lite/src",
+    "test:rollback-workerd": "node rollback-workerd-test.mjs",
     "test:application-push-workerd": "bun application-push-workerd-test.mjs",
     "test:migration-workerd": "bun migration-workerd-test.mjs",
     "test:write-attribution-workerd": "bun write-attribution-workerd-test.mjs",

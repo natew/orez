@@ -1,0 +1,190 @@
+import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+import { unstable_dev } from 'wrangler'
+
+const scratch = join(process.env.HOME, '.scratch/orez-tx-rollback')
+mkdirSync(scratch, { recursive: true })
+const fixture = mkdtempSync(join(scratch, 'workerd-'))
+const baseline = process.env.OREZ_ROLLBACK_BASELINE === '1'
+writeFileSync(
+  join(fixture, 'worker.ts'),
+  `
+import { ZeroDO, createApplicationSqlClient } from ${JSON.stringify(join(import.meta.dirname, 'src/cf-do/worker.ts'))}
+
+export class Data extends ZeroDO {
+  async setup(retained) {
+    const sql = this.ctx.storage.sql
+    this.watermarks.ensureTables()
+    sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+    sql.exec('CREATE TABLE audit (id INTEGER PRIMARY KEY, body TEXT)')
+    sql.exec('CREATE TRIGGER audit_item AFTER INSERT ON item BEGIN INSERT INTO audit VALUES (NEW.id, NEW.body); END')
+    sql.exec('CREATE TABLE "set" (rowid TEXT, _rowid_ TEXT, oid TEXT)')
+    sql.exec('CREATE TABLE identityless (rowid TEXT, _rowid_ TEXT, oid TEXT, body TEXT)')
+    if (retained) sql.exec("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < ?) INSERT INTO identityless SELECT x, x, x, 'seed' FROM n", retained)
+    sql.exec('CREATE TABLE registered (id INTEGER PRIMARY KEY, body TEXT)')
+    sql.exec('CREATE TABLE declared_private (id INTEGER PRIMARY KEY, body TEXT)')
+    if (retained) sql.exec("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < ?) INSERT INTO item SELECT -x, 'seed' FROM n", retained)
+    await this.applicationSqlLocalClient('setup').registerTables([
+      { table: 'registered', publicTable: 'registered' },
+      { table: 'declared_private', publicTable: 'declared_private', publish: false },
+    ])
+  }
+  async attempt(table, returning) {
+    return attempt(this.applicationSqlLocalClient('local'), table, returning)
+  }
+  state() {
+    const sql = this.ctx.storage.sql
+    return {
+      item: sql.exec('SELECT count(*) AS n FROM item').one().n,
+      audit: sql.exec('SELECT count(*) AS n FROM audit').one().n,
+      registered: sql.exec('SELECT count(*) AS n FROM registered').one().n,
+      billed: this.writeBudget.status().billableRows,
+      feed: sql.exec("SELECT table_name AS name FROM _zero_changes ORDER BY watermark").toArray(),
+    }
+  }
+  async oddRollback() {
+    const client = this.applicationSqlLocalClient('identityless')
+    const before = this.ctx.storage.sql.exec('SELECT count(*) AS n FROM identityless').one().n
+    let error
+    try {
+      await client.transaction(null, async tx => {
+        await tx.exec('/* odd */ INSERT /* target */ INTO"main"."identityless" VALUES (?, ?, ?, ?)', ['x', 'x', 'x', 'x'])
+        throw new Error('identityless rollback')
+      })
+    } catch (caught) { error = String(caught) }
+    return { before, after: this.ctx.storage.sql.exec('SELECT count(*) AS n FROM identityless').one().n, error }
+  }
+  async promote() {
+    const client = this.applicationSqlLocalClient('promote')
+    await client.exec('INSERT INTO item VALUES (20, ?)', ['private'])
+    try {
+      await client.transaction(null, async tx => {
+        await tx.exec('ALTER TABLE item ADD COLUMN discarded TEXT')
+        throw new Error('schema rollback')
+      })
+    } catch (error) { if (!String(error).includes('schema rollback')) throw error }
+    this.cdc.reload()
+    await client.exec('INSERT INTO item VALUES (21, ?)', ['public'], { table: 'item', publicTable: 'published_item', kind: 'insert' })
+    await client.exec('INSERT INTO declared_private VALUES (21, ?)', ['private'], { table: 'declared_private', publicTable: 'declared_private', kind: 'insert' })
+  }
+}
+async function attempt(client, table, returning) {
+  try {
+    await client.transaction(null, async tx => {
+      for (let i=1; i<=3; i++) {
+        if (returning) await tx.query('/* raw */ WITH value AS (SELECT ? AS id) INSERT INTO ' + table + ' SELECT id, ? FROM value WHERE true ON CONFLICT (id) DO UPDATE SET body = excluded.body RETURNING id', [i, 'attempt'])
+        else await tx.exec('INSERT INTO ' + table + ' VALUES (?, ?)', [i, 'attempt'])
+      }
+      throw new Error('intentional rollback')
+    })
+  } catch (error) { return String(error) }
+  throw new Error('transaction unexpectedly succeeded')
+}
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url)
+    const id = url.searchParams.get('id')
+    const object = env.DATA.get(env.DATA.idFromName(id))
+    if (url.pathname === '/setup') { await object.setup(Number(url.searchParams.get('retained'))); return Response.json(await object.state()) }
+    if (url.pathname === '/attempt') {
+      const table = url.searchParams.get('table') || 'item'
+      const returning = url.searchParams.get('returning') === '1'
+      const error = url.searchParams.get('remote') === '1'
+        ? await attempt(createApplicationSqlClient(env.DATA, id), table, returning)
+        : await object.attempt(table, returning)
+      return Response.json({ error, ...await object.state() })
+    }
+    if (url.pathname === '/odd') return Response.json(await object.oddRollback())
+    if (url.pathname === '/promote') { await object.promote(); return Response.json(await object.state()) }
+    return Response.json(await object.state())
+  }
+}
+`
+)
+writeFileSync(
+  join(fixture, 'wrangler.toml'),
+  `
+name = "orez-rollback-proof"
+main = "worker.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+[alias]
+"orez-sync-cf-host/transaction-query" = ${JSON.stringify(join(import.meta.dirname, '../sync-cf-host/src/transaction-query.ts'))}
+[vars]
+OREZ_DO_WRITE_BUDGET_ROWS = "1000000"
+[[durable_objects.bindings]]
+name = "DATA"
+class_name = "Data"
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Data"]
+`
+)
+const server = await unstable_dev(join(fixture, 'worker.ts'), {
+  config: join(fixture, 'wrangler.toml'),
+  local: true,
+  persist: false,
+  logLevel: 'error',
+  experimental: { disableExperimentalWarning: true, disableDevRegistry: true },
+})
+const get = async (path, params) => {
+  const response = await server.fetch(
+    'http://example.com/' + path + '?' + new URLSearchParams(params)
+  )
+  const body = await response.text()
+  assert.equal(response.status, 200, body)
+  return JSON.parse(body)
+}
+try {
+  const costs = []
+  for (const remote of ['0', '1']) {
+    for (const returning of ['0', '1']) {
+      for (const retained of [0, 1000]) {
+        const id = `proof-${remote}-${returning}-${retained}`
+        const before = await get('setup', { id, retained: String(retained) })
+        const after = await get('attempt', { id, remote, returning })
+        assert.match(after.error, /intentional rollback/)
+        assert.equal(after.registered, 0)
+        assert.equal(after.item, retained + (baseline ? 3 : 0))
+        assert.equal(after.audit, retained + (baseline ? 3 : 0))
+        const registered = await get('attempt', {
+          id,
+          remote,
+          returning,
+          table: 'registered',
+        })
+        assert.equal(registered.registered, 0)
+        let warmRowsWritten
+        if (!baseline) {
+          const warm = await get('attempt', { id, remote, returning })
+          assert.equal(warm.item, retained)
+          assert.equal(warm.audit, retained)
+          warmRowsWritten = warm.billed - registered.billed
+          assert.equal(after.billed - before.billed, 71)
+          assert.equal(warmRowsWritten, 52)
+          const odd = await get('odd', { id })
+          assert.match(odd.error, /cannot snapshot inaccessible row identity/)
+          assert.equal(odd.after, odd.before)
+          const promoted = await get('promote', { id })
+          assert.deepEqual(promoted.feed, [{ name: 'published_item' }])
+        }
+        costs.push({
+          remote,
+          returning,
+          retained,
+          rowsWritten: after.billed - before.billed,
+          remaining: after.item - retained,
+          warmRowsWritten,
+        })
+      }
+    }
+  }
+  for (let i = 0; i < costs.length; i += 2)
+    assert.equal(costs[i].rowsWritten, costs[i + 1].rowsWritten)
+  console.log(JSON.stringify({ baseline, costs }, null, 2))
+} finally {
+  await server.stop()
+  rmSync(fixture, { recursive: true, force: true })
+}

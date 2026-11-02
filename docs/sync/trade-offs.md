@@ -222,6 +222,19 @@ CVR/CDB changes use the same journal with `publish: false` and are retained only
 long enough to support rollback and crash recovery. Full-table snapshots are a
 fallback for writes the compiler cannot classify, not the normal DML path.
 
+Raw application SQL also installs rollback-only capture for application tables,
+including unregistered trigger and foreign-key targets. Discovery reads table
+definitions from schema metadata and reuses registrations while those definitions
+are unchanged. It never reads the contents of a growing application table.
+Inferred registrations remain private until explicit registration or statement
+metadata supplies a publication identity; explicitly private tables stay private.
+The existing registration row records whether capture was inferred, and schema
+rollback preserves that distinction. Only identity-uncoverable tables reachable
+from the raw statement retain the existing first-touch snapshot fallback. A table
+with every hidden rowid alias shadowed and no primary key cannot be restored
+exactly by either journal form; its mutation is refused before writing. Unrelated
+mutations remain available.
+
 Journal undo may finish behind a tripped write circuit. Its physical writes
 remain billed and metered, including when undo itself first exceeds the budget;
 the trip remains sticky and ordinary application writes stay blocked. A failed
