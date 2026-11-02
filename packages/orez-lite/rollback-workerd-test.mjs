@@ -21,7 +21,7 @@ export class Data extends ZeroDO {
     sql.exec('CREATE TABLE audit (id INTEGER PRIMARY KEY, body TEXT)')
     sql.exec('CREATE TRIGGER audit_item AFTER INSERT ON item BEGIN INSERT INTO audit VALUES (NEW.id, NEW.body); END')
     sql.exec('CREATE TABLE "set" (rowid TEXT, _rowid_ TEXT, oid TEXT)')
-    sql.exec('CREATE TABLE identityless (rowid TEXT, _rowid_ TEXT, oid TEXT, body TEXT)')
+    sql.exec("CREATE TABLE identityless (rowid TEXT, _rowid_ TEXT, oid TEXT, body TEXT, virtual_value TEXT GENERATED ALWAYS AS (body || 'virtual') VIRTUAL, stored_value TEXT GENERATED ALWAYS AS (body || 'stored') STORED)")
     if (retained) sql.exec("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < ?) INSERT INTO identityless SELECT x, x, x, 'seed' FROM n", retained)
     sql.exec('CREATE TABLE unique_only (rowid TEXT, _rowid_ TEXT, oid TEXT, key TEXT COLLATE NOCASE NOT NULL, body TEXT)')
     sql.exec('CREATE UNIQUE INDEX unique_only_key ON unique_only(key COLLATE BINARY)')
@@ -145,7 +145,7 @@ export class Data extends ZeroDO {
         throw new Error('identityless rollback')
       })
     } catch (caught) { error = String(caught) }
-    return { before, after: this.ctx.storage.sql.exec('SELECT count(*) AS n FROM identityless').one().n, protectedBefore, protectedAfter: this.state().item, error }
+    return { before, after: this.ctx.storage.sql.exec('SELECT count(*) AS n FROM identityless').one().n, protectedBefore, protectedAfter: this.state().item, generated: this.ctx.storage.sql.exec("SELECT virtual_value, stored_value FROM identityless WHERE body = 'x'").toArray(), error }
   }
   async promote() {
     const client = this.applicationSqlLocalClient('promote')
@@ -270,6 +270,13 @@ try {
           assert.match(odd.error, /identityless rollback/)
           assert.equal(odd.after, odd.before + 3)
           assert.equal(odd.protectedAfter, odd.protectedBefore)
+          assert.deepEqual(
+            odd.generated,
+            Array.from({ length: 3 }, () => ({
+              virtual_value: 'xvirtual',
+              stored_value: 'xstored',
+            }))
+          )
           const promoted = await get('promote', { id })
           assert.deepEqual(promoted.feed, [{ name: 'published_item' }])
         }

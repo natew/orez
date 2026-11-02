@@ -245,7 +245,9 @@ key cannot be restored exactly by either existing journal form. Owner direction,
 raw SQL acceptance and partial-rollback limitation. These writes remain accepted
 and are **not protected by transaction rollback**; their rows can survive a
 failed transaction. Protected tables in the same transaction still roll back.
-No full-table or schema-rewrite fallback is added for this shape.
+No full-table or schema-rewrite fallback is added for this shape. Ordinary
+tables with generated columns follow the same policy; virtual tables do not
+gain this compatibility exception.
 
 Capture verification compares generated trigger definitions with the installed
 ones, so replacing a unique index rebuilds rollback capture with the new key.

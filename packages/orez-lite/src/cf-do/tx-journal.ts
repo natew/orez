@@ -1317,16 +1317,22 @@ export function snapshotSideEffectWriteTables(
       continue
     if (options.preserveUnaddressableWrites && !tableIdentity(sql, table)) {
       const columns = sql.exec(`PRAGMA table_xinfo(${quoteIdent(table)})`).toArray()
+      const ordinaryTable = sql
+        .exec(`PRAGMA table_list(${quoteIdent(table)})`)
+        .toArray()
+        .some(
+          (row) => row.schema === 'main' && row.name === table && row.type === 'table'
+        )
       if (
-        columns.every(
-          (column) => Number(column.pk) === 0 && Number(column.hidden) === 0
-        ) &&
+        ordinaryTable &&
+        columns.every((column) => Number(column.pk) === 0) &&
         ['rowid', '_rowid_', 'oid'].every((alias) =>
           columns.some((column) => sqliteNoCase(String(column.name)) === alias)
         )
       ) {
-        // owner-approved compatibility: this raw-only shape has no undo or
-        // exact snapshot representation. accept writes without claiming protection.
+        // generated columns belong to ordinary tables too; virtual tables do
+        // not gain this owner-approved exception. this raw-only shape has no
+        // undo or exact snapshot representation. accept without claiming protection.
         continue
       }
     }
