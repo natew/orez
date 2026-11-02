@@ -69,9 +69,8 @@ try {
     patch: [{ op: 'put', hash: 'q-all-items', name: 'allItems', args: [] }],
   }
 
-  // The worker owns status authorization. A rejected cold probe returns before
-  // idFromName/get, while the authorized control proves the real DO meter sees
-  // constructor writes once object creation is allowed.
+  // the worker rejects unauthorized status before idFromName/get. an authorized
+  // empty object also writes nothing; fixture writes below prove the meter is live.
   const coldStatusNamespace = `proj-cold-status-${crypto.randomUUID()}`
   const rejectedColdStatus = await fetch(
     `${base}/data-worker/${coldStatusNamespace}/_orez/status`
@@ -86,9 +85,10 @@ try {
     { headers: { 'x-orez-admin-token': 'ingest-harness-do-admin' } }
   )
   assert.equal(authorizedColdStatus.status, 200)
-  assert.ok(
-    (await authorizedColdStatus.json()).sqlBillingSinceBoot.rowsWritten > 0,
-    'authorized cold status proves the physical write meter is live'
+  assert.equal(
+    (await authorizedColdStatus.json()).sqlBillingSinceBoot.rowsWritten,
+    0,
+    'authorized cold status does not create billable rows'
   )
 
   // Restore a dump over a live reverse-FK graph plus 41 current-only tables.
@@ -109,6 +109,10 @@ try {
     `${base}/data-worker/${restoreNamespace}/_orez/status`,
     { headers: { 'x-orez-admin-token': 'ingest-harness-do-admin' } }
   ).then((response) => response.json())
+  assert.ok(
+    restoreStatusBefore.sqlBillingSinceBoot.rowsWritten > 0,
+    'fixture writes prove the physical write meter is live'
+  )
   await fetch(`${base}/application-commit-status/ns:${restoreNamespace}`, {
     method: 'POST',
   })
