@@ -602,6 +602,8 @@ class ZeroHttpSocket {
   private readonly pendingDeletedClientIDs = new Set<string>()
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
+  // a screen waits on a newly desired query, so its re-run skips the spacing
+  private queryPullAfterCurrent = false
   // a change that drops a query the in-flight pull hydrates supersedes it
   private pullAbort: AbortController | undefined
   private inFlightPuts = new Set<string>()
@@ -721,6 +723,7 @@ class ZeroHttpSocket {
         this.queueDesiredQueries(message[1])
         this.queueDeletedClients(message[1]?.deleted)
         if (this.dropsInFlightQuery(message[1])) this.supersedePull()
+        else if (this.addsQuery(message[1])) this.pullForQuery()
         else this.requestPullAfterCurrent()
         return
       case 'updateAuth':
@@ -818,15 +821,37 @@ class ZeroHttpSocket {
         this.lastPullEndedAt = performance.now()
         const superseded = abort.signal.reason === PULL_SUPERSEDED
         const pullAgain = this.pullAfterCurrent
+        const queryWaiting = this.queryPullAfterCurrent
         this.pullAfterCurrent = false
+        this.queryPullAfterCurrent = false
         this.pullInFlight = undefined
         this.pullAbort = undefined
         this.inFlightPuts.clear()
         if (this.readyState === this.CLOSED) return
-        if (superseded) this.run(this.pull())
+        if (superseded || queryWaiting) this.run(this.pull())
         else if (pullAgain) this.requestPullAfterCurrent()
       })
     return this.pullInFlight
+  }
+
+  private addsQuery(body: unknown) {
+    const patch = (body as { desiredQueriesPatch?: unknown })?.desiredQueriesPatch
+    return (
+      Array.isArray(patch) &&
+      (patch as DesiredQueryPatchOp[]).some((op) => op.op === 'put')
+    )
+  }
+
+  // the spacing coalesces wake and ack pulls nobody is looking at. a new query
+  // is a screen opening, and its rows are a 2-30ms pull away, so it goes now,
+  // or straight after the pull in flight, even while pushes drain.
+  private pullForQuery() {
+    if (this.pullInFlight) {
+      this.pullAfterCurrent = true
+      this.queryPullAfterCurrent = true
+      return
+    }
+    this.run(this.pull())
   }
 
   private dropsInFlightQuery(body: unknown) {

@@ -2951,6 +2951,53 @@ describe('Orez HTTP desired-query sync', () => {
     await eventually(() => expect(requests.length).toBe(3))
   })
 
+  test('a new query pulls at once instead of waiting out the pull spacing', async () => {
+    const requests: RequestRecord[] = []
+    const releaseThird = defer<void>()
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(recordRequest(input, init))
+      const request = requests.at(-1)!
+      if (requests.length === 3) await releaseThird.promise
+      return jsonResponse({
+        cookie: requests.length,
+        lastMutationIDChanges: {},
+        rowsPatch: [],
+        gotQueries: { version: request.body.queries?.version ?? 0, patch: [] },
+      })
+    })
+    installWithQueries(fetch, (name) => ({ resolved: name }))
+    const { socket, messages } = openRawSocketWithMessages({
+      desiredQueriesPatch: [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }],
+    })
+    await eventually(() => expect(messages.some((m) => m[0] === 'pokeEnd')).toBe(true))
+    const put = (hash: string) =>
+      socket.send(
+        JSON.stringify([
+          'changeDesiredQueries',
+          { desiredQueriesPatch: [{ op: 'put', hash, name: 'byOwner', args: [] }] },
+        ])
+      )
+    // right after a pull ended: the spacing would hold this one for 250ms
+    const openedAt = Date.now()
+    put('h2')
+    await eventually(() => expect(requests.length).toBe(2))
+    expect(Date.now() - openedAt).toBeLessThan(100)
+    // a third screen opens while a pull is in flight: it leaves the moment
+    // that pull returns, not a spacing interval later
+    await sleep(20)
+    put('h3')
+    await eventually(() => expect(requests.length).toBe(3))
+    put('h4')
+    await sleep(20)
+    const releasedAt = Date.now()
+    releaseThird.resolve()
+    await eventually(() => expect(requests.length).toBe(4))
+    expect(Date.now() - releasedAt).toBeLessThan(100)
+    expect(requests[3].body.queries.patch).toEqual([
+      { op: 'put', hash: 'h4', ast: { resolved: 'byOwner' } },
+    ])
+  })
+
   test('an ad-hoc put with an inline ast ships that ast unchanged', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
