@@ -1152,7 +1152,7 @@ describe('namespace backup restore', () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         .all()
     ).toEqual([{ name: 'message' }])
-    expect(metrics.queries).toHaveLength(8)
+    expect(metrics.queries).toHaveLength(2)
     expect(
       metrics.queries.filter((sql) => sql.startsWith('PRAGMA foreign_key_list'))
     ).toHaveLength(0)
