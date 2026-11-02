@@ -19,6 +19,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -108,6 +109,7 @@ pub type InitFn = Arc<dyn Fn(&mut dyn SyncDb) -> Result<(), String> + Send + Syn
 
 pub struct Namespace {
     sender: std::sync::mpsc::Sender<Job>,
+    transaction_active: Arc<AtomicBool>,
 }
 
 impl Namespace {
@@ -233,7 +235,12 @@ fn force_autocommit(conn: &Connection) -> bool {
 // namespace and remembers SQLite's total-change count at BEGIN. it is set only
 // after BEGIN succeeds and cleared only after the connection is back in
 // autocommit, so it always mirrors the connection's real transaction state.
-fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease: Duration) {
+fn worker_loop(
+    conn: Connection,
+    receiver: std::sync::mpsc::Receiver<Job>,
+    lease: Duration,
+    transaction_active: Arc<AtomicBool>,
+) {
     let mut active_transaction: Option<ActiveTransaction> = None;
     // plain jobs that arrived while a transaction owned the namespace. drained in
     // arrival order once it frees. begins are never deferred (they are rejected
@@ -274,6 +281,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                     // resume pull/push on a dirty connection.
                     if force_autocommit(&conn) {
                         active_transaction = None;
+                        transaction_active.store(false, Ordering::Release);
                     } else {
                         lease_deadline = Instant::now() + lease;
                     }
@@ -289,6 +297,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                             // the admin client disconnected mid-transaction: roll
                             // back now instead of holding the namespace to the lease.
                             active_transaction = None;
+                            transaction_active.store(false, Ordering::Release);
                         } else {
                             lease_deadline = Instant::now() + lease;
                         }
@@ -305,6 +314,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                         // on a dirty connection.
                         if force_autocommit(&conn) {
                             active_transaction = None;
+                            transaction_active.store(false, Ordering::Release);
                         } else {
                             lease_deadline = Instant::now() + lease;
                         }
@@ -359,6 +369,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                         let total_changes = conn.total_changes();
                         match conn.execute_batch("BEGIN") {
                             Ok(()) => {
+                                transaction_active.store(true, Ordering::Release);
                                 if reply.send(Ok(())).is_ok() {
                                     // state changes only after BEGIN succeeded and the
                                     // client is still there to own the transaction.
@@ -372,6 +383,8 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                                         active_transaction =
                                             Some(ActiveTransaction { id, total_changes });
                                         lease_deadline = Instant::now() + lease;
+                                    } else {
+                                        transaction_active.store(false, Ordering::Release);
                                     }
                                 }
                             }
@@ -381,6 +394,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                                 // releasing plain work; keep ownership and retry on the
                                 // lease if SQLite cannot roll it back yet.
                                 if !force_autocommit(&conn) {
+                                    transaction_active.store(true, Ordering::Release);
                                     active_transaction =
                                         Some(ActiveTransaction { id, total_changes });
                                     lease_deadline = Instant::now() + lease;
@@ -419,6 +433,8 @@ fn spawn(
     tuning: crate::SqliteTuning,
 ) -> Result<(Namespace, JoinHandle<()>), String> {
     let (sender, receiver) = std::sync::mpsc::channel::<Job>();
+    let transaction_active = Arc::new(AtomicBool::new(false));
+    let worker_transaction_active = transaction_active.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let handle = std::thread::Builder::new()
         .name(format!("ns-{name}"))
@@ -450,13 +466,19 @@ fn spawn(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
-            worker_loop(conn, receiver, lease);
+            worker_loop(conn, receiver, lease, worker_transaction_active);
         })
         .map_err(|e| e.to_string())?;
     ready_rx
         .recv()
         .map_err(|e| format!("namespace worker failed to start: {e}"))??;
-    Ok((Namespace { sender }, handle))
+    Ok((
+        Namespace {
+            sender,
+            transaction_active,
+        },
+        handle,
+    ))
 }
 
 // a namespace name must be a safe filename component (no path traversal, no
@@ -593,7 +615,9 @@ impl Manager {
         let stale: Vec<String> = map
             .iter()
             .filter(|(_, e)| {
-                Arc::strong_count(&e.ns) == 1 && now.duration_since(e.last_access) >= idle_ttl
+                Arc::strong_count(&e.ns) == 1
+                    && !e.ns.transaction_active.load(Ordering::Acquire)
+                    && now.duration_since(e.last_access) >= idle_ttl
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -1059,6 +1083,33 @@ mod tests {
         assert_eq!(sqlite_count(dir.path()), 1);
         assert!(manager.live_keys().contains("proj-live"));
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn retain_spares_a_transaction_between_requests() {
+        let (_dir, manager) = test_manager();
+        let namespace = manager.get("proj-transaction").unwrap();
+        namespace.tx_begin("owner".into()).await.unwrap();
+        drop(namespace);
+
+        let outcome = manager.retain(
+            &aggressive_policy(),
+            SystemTime::now() + Duration::from_secs(10),
+        );
+        assert_eq!(outcome.evicted, 0);
+        assert_eq!(outcome.deleted, 0);
+        let namespace = manager.get("proj-transaction").unwrap();
+        namespace
+            .tx_end("owner".into(), TxEnd::Rollback)
+            .await
+            .unwrap();
+        drop(namespace);
+        assert_eq!(
+            manager
+                .retain(&aggressive_policy(), SystemTime::now())
+                .evicted,
+            1
+        );
     }
 
     #[test]
