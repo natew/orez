@@ -175,13 +175,14 @@ try {
       restoreStatusBefore.requestsSinceBoot.sqlStatements,
     callbacks: restoreNotificationStatus.attempts,
   }
-  // guard maintenance adds 825 reads, 8 writes, and 25 statements during replacement.
+  // reuse schema discovery to skip absent bookkeeping tables and non-FK tables.
+  // includes removal of two inferred capture registrations; no commit callbacks.
   assert.deepEqual(restoreCost, {
-    totalChanges: 18,
-    rowsRead: 3_660,
-    rowsWritten: 36,
-    sessions: 9,
-    statements: 201,
+    totalChanges: 17,
+    rowsRead: 3_364,
+    rowsWritten: 26,
+    sessions: 6,
+    statements: 132,
     callbacks: 0,
   })
   assert.deepEqual(

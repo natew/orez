@@ -1134,15 +1134,14 @@ export function snapshotSideEffectWriteTables(
 ): ReadonlySet<string> {
   const relations = sql
     .exec(
-      "SELECT name, type, CASE WHEN name = ? COLLATE NOCASE THEN sql END AS source_sql FROM sqlite_master WHERE type IN ('table', 'view') " +
-        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '_orez_bk_*' ORDER BY name",
-      sourceTable
+      "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') " +
+        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '_orez_bk_*' ORDER BY name"
     )
     .toArray()
     .map((row) => ({
       name: String(row.name ?? ''),
       type: String(row.type ?? ''),
-      sourceSql: String(row.source_sql ?? ''),
+      definition: String(row.sql ?? ''),
     }))
     .filter((relation) => relation.name)
   const knownRelations = new Set(relations.map((relation) => sqliteNoCase(relation.name)))
@@ -1159,7 +1158,7 @@ export function snapshotSideEffectWriteTables(
   const node = (table: string, op: RowOperation) => `${sqliteNoCase(table)}\0${op}`
   const sourceDefinition = relations.find(
     (relation) => sqliteNoCase(relation.name) === sqliteNoCase(sourceTable)
-  )?.sourceSql
+  )?.definition
   // a schema-level REPLACE policy can delete a conflicting row even when an
   // UPDATE OF trigger cannot fire. retain its conservative graph.
   const initialColumns =
@@ -1244,7 +1243,9 @@ export function snapshotSideEffectWriteTables(
   }
 
   for (const child of relations) {
-    if (child.type !== 'table') continue
+    // SQLite requires REFERENCES in every foreign-key declaration. skip
+    // metadata calls for unrelated tables using the schema rows already read.
+    if (child.type !== 'table' || !/\bREFERENCES\b/i.test(child.definition)) continue
     for (const row of sql
       .exec(`PRAGMA foreign_key_list(${quoteIdent(child.name)})`)
       .toArray()) {

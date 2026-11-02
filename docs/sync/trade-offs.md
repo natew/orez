@@ -225,7 +225,11 @@ fallback for writes the compiler cannot classify, not the normal DML path.
 Raw application SQL also installs rollback-only capture for its source tables
 and reachable trigger and foreign-key targets. Untouched tables receive no
 registrations or triggers. Discovery reads schema metadata, never application
-rows. Inferred registrations remain private until explicit registration or
+rows. The same schema scan supplies foreign-key declarations, so only definitions
+containing `REFERENCES` need `foreign_key_list` introspection. Backup replacement
+uses its existing table discovery to skip absent replication bookkeeping tables
+instead of opening write sessions that fail before deleting anything.
+Inferred registrations remain private until explicit registration or
 statement metadata supplies a publication identity; explicitly private tables
 stay private. The existing registration row records whether capture was inferred,
 and schema rollback preserves that distinction. Application rollback disables

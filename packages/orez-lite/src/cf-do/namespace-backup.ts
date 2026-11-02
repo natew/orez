@@ -866,7 +866,9 @@ export function createNamespaceBackupManager<Env>(
 
     await options.beforeImport?.(env, namespace)
 
+    const liveTables = tableIdentities(liveTableRows.map((row) => String(row.name)))
     for (const name of REPLICATION_BOOKKEEPING_TABLES) {
+      if (!liveTables.has(name)) continue
       try {
         await options.query(env, namespace, `DELETE FROM "${quoteIdentifier(name)}"`, [])
       } catch {
