@@ -28,6 +28,7 @@ import {
 import {
   TransactionalCdc,
   schemaChangeTargets,
+  rowMutationTargets,
   type CapturedRowChange,
   type CdcTableRegistration,
 } from './cdc.js'
@@ -47,13 +48,13 @@ import {
 import {
   beginTxJournal,
   commitTxJournal,
+  isInternalObject,
   recoverTxJournal,
   rollbackTxJournal,
   snapshotSideEffectWriteTables,
   snapshotTxSchema,
   upgradeToTableSnapshot,
   ZSYNC_CHANGES_TABLE,
-  ZSYNC_LOG_SEGMENTS_TABLE,
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 import {
@@ -2888,7 +2889,11 @@ export class ZeroDO extends DurableObject {
     return isSqlRowMutation(sql) ? changes > 0 : true
   }
 
-  private prepareApplicationSqlMutation(sessionID: string, sql: string): boolean {
+  private prepareApplicationSqlMutation(
+    sessionID: string,
+    sql: string,
+    track?: SqlTrack
+  ): boolean {
     if (!isSqlMutation(sql)) return false
     if (!isSqlRowMutation(sql)) {
       const targets = schemaChangeTargets(sql)
@@ -2903,18 +2908,36 @@ export class ZeroDO extends DurableObject {
       snapshotTxSchema(this.sql, sessionID, 'application', targets)
       return true
     }
-    // register the packed ledger for rollback-only row undo before the
-    // statement that writes it runs, in the same storage transaction. see
-    // ZSYNC_LOG_SEGMENTS_TABLE for why nothing else registers it and what an
-    // unrestored captureMode does to the namespace.
-    if (sql.includes(ZSYNC_LOG_SEGMENTS_TABLE)) {
+    if (track?.physicalTableName) {
       this.cdc.ensureTable({
-        physicalTableName: ZSYNC_LOG_SEGMENTS_TABLE,
-        tableName: ZSYNC_LOG_SEGMENTS_TABLE,
-        publish: false,
+        physicalTableName: track.physicalTableName,
+        tableName: track.tableName,
+        ...(track.publish === false ? { publish: false } : null),
       })
     }
     beginTxJournal(this.sql, sessionID, 'application')
+    for (const target of rowMutationTargets(sql)) {
+      snapshotSideEffectWriteTables(
+        this.sql,
+        sessionID,
+        target.table,
+        target.operation,
+        (table) =>
+          isInternalObject(table) ||
+          this.cdc.ensureTable({
+            physicalTableName: table,
+            tableName: table,
+            publish: false,
+            automatic: true,
+          }),
+        sql,
+        {
+          rollbackDisablesForeignKeys: true,
+          captureSource: true,
+          preserveUnaddressableWrites: true,
+        }
+      )
+    }
     return true
   }
 
@@ -2951,7 +2974,9 @@ export class ZeroDO extends DurableObject {
         [...params],
         undefined,
         session.sessionID,
-        session.telemetry
+        session.telemetry,
+        null,
+        true
       )
       if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
         session.changedData = true
@@ -2982,7 +3007,11 @@ export class ZeroDO extends DurableObject {
   ): Promise<ApplicationSqlExecResult> {
     this.assertApplicationSqlStatement(session, sql)
     return this.atomically(() => {
-      const mutation = this.prepareApplicationSqlMutation(session.sessionID, sql)
+      const mutation = this.prepareApplicationSqlMutation(
+        session.sessionID,
+        sql,
+        applicationSqlTrack(metadata)
+      )
       if (mutation) session.mutated = true
       session.statements++
       const result = this.executeSQL(
@@ -2990,7 +3019,9 @@ export class ZeroDO extends DurableObject {
         [...params],
         applicationSqlTrack(metadata),
         session.sessionID,
-        session.telemetry
+        session.telemetry,
+        null,
+        true
       )
       if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
         session.changedData = true
@@ -3015,7 +3046,11 @@ export class ZeroDO extends DurableObject {
         () =>
           statements.map(({ sql, params = [], metadata }, index) => {
             try {
-              const mutation = this.prepareApplicationSqlMutation(session.sessionID, sql)
+              const mutation = this.prepareApplicationSqlMutation(
+                session.sessionID,
+                sql,
+                applicationSqlTrack(metadata)
+              )
               if (mutation) session.mutated = true
               session.statements++
               const result = this.executeSQL(
@@ -3023,7 +3058,9 @@ export class ZeroDO extends DurableObject {
                 [...params],
                 applicationSqlTrack(metadata),
                 session.sessionID,
-                session.telemetry
+                session.telemetry,
+                null,
+                true
               )
               if (mutation && this.applicationSqlChangedData(sql, result.changes)) {
                 session.changedData = true
@@ -3371,7 +3408,8 @@ export class ZeroDO extends DurableObject {
     track?: SqlTrack,
     transactionID?: string,
     transactionTelemetry: SqlTelemetrySample | null = null,
-    queryTelemetry: SqlTelemetrySample | null = null
+    queryTelemetry: SqlTelemetrySample | null = null,
+    applicationSession = false
   ): {
     rows: Record<string, unknown>[]
     columns: string[]
@@ -3420,7 +3458,8 @@ export class ZeroDO extends DurableObject {
         snapshotted.add(physicalTableName)
       }
     }
-    if (track && trackedTransactionID) {
+    // application mutation preparation already owns capture and snapshots.
+    if (track && trackedTransactionID && !applicationSession) {
       const physicalTableName =
         track.physicalTableName || stripPublicPrefix(track.tableName)
       for (const table of snapshotSideEffectWriteTables(
@@ -3818,7 +3857,7 @@ export class ZeroDO extends DurableObject {
     undoable?: boolean
   }) {
     const publish = change.publish !== false
-    if (!publish && !change.transactionID) return
+    if (!publish && (!change.transactionID || change.undoable !== true)) return
     if (change.transactionID) {
       this.ensurePendingTrackedChangesTable()
       appendPendingChange(this.sql, {

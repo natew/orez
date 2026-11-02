@@ -258,16 +258,66 @@ export class RollingRowWriteBudget {
   }
 }
 
-const SQL_MUTATION_RE =
-  /(?:^|;)\s*(?:insert|update|delete|replace|create|alter|drop|truncate|vacuum|reindex)\b/i
-const SQL_ROW_MUTATION_RE = /(?:^|;)\s*(?:insert|update|delete|replace)\b/i
-const SQL_WITH_RE = /(?:^|;)\s*with\b/i
-const SQL_WITH_MUTATION_RE = /\b(?:insert|update|delete|replace)\b/i
-
-function sqlWithoutLeadingTrivia(sql: unknown): string {
-  const text = String(sql ?? '')
-  if (!text.includes('--') && !text.includes('/*')) return text
-  return text.replace(/(^|;)\s*(?:(?:--[^\n]*(?:\n|$))|(?:\/\*[\s\S]*?\*\/))\s*/g, '$1')
+/** tokenize complete statements, keeping trigger bodies together and skipping CTE headers. */
+export function sqlStatementTokens(sql: string): string[][] {
+  const tokens = [
+    ...sql.matchAll(
+      /--[^\r\n]*|\/\*[\s\S]*?\*\/|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|'(?:[^']|'')*'|(?:[A-Za-z0-9_$]|[^\x00-\x7f])+|[^\s]/gu
+    ),
+  ]
+    .map((match) => match[0])
+    .filter((token) => !token.startsWith('--') && !token.startsWith('/*'))
+  const statements: string[][] = []
+  let statement: string[] = []
+  let triggerBody = false
+  let caseDepth = 0
+  const finish = () => {
+    if (statement.length) statements.push(statement)
+    statement = []
+  }
+  for (const token of tokens) {
+    const command = token.toUpperCase()
+    const trigger =
+      statement[0]?.toUpperCase() === 'CREATE' &&
+      (statement[1]?.toUpperCase() === 'TRIGGER' ||
+        (['TEMP', 'TEMPORARY'].includes(statement[1]?.toUpperCase() ?? '') &&
+          statement[2]?.toUpperCase() === 'TRIGGER'))
+    if (trigger && command === 'BEGIN') triggerBody = true
+    else if (triggerBody && command === 'CASE') caseDepth++
+    else if (triggerBody && command === 'END') {
+      if (caseDepth > 0) caseDepth--
+      else triggerBody = false
+    }
+    if (token === ';' && !triggerBody) finish()
+    else statement.push(token)
+  }
+  finish()
+  return statements.map((tokens) => {
+    if (tokens[0]?.toUpperCase() !== 'WITH') return tokens
+    let cursor = tokens[1]?.toUpperCase() === 'RECURSIVE' ? 2 : 1
+    const skipGroup = () => {
+      if (tokens[cursor] !== '(') return
+      let depth = 0
+      do {
+        if (tokens[cursor] === '(') depth++
+        if (tokens[cursor] === ')') depth--
+        cursor++
+      } while (cursor < tokens.length && depth > 0)
+    }
+    do {
+      cursor++ // cte name, which can itself be an unquoted SQLite keyword
+      skipGroup() // optional column names
+      if (tokens[cursor]?.toUpperCase() !== 'AS') return []
+      cursor++
+      if (tokens[cursor]?.toUpperCase() === 'NOT') cursor++
+      if (tokens[cursor]?.toUpperCase() === 'MATERIALIZED') cursor++
+      if (tokens[cursor] !== '(') return []
+      skipGroup()
+      if (tokens[cursor] !== ',') break
+      cursor++
+    } while (cursor < tokens.length)
+    return tokens.slice(cursor)
+  })
 }
 
 export interface SqlClassification {
@@ -277,14 +327,27 @@ export interface SqlClassification {
 
 /** Classify a statement once for the write gate, CDC, and logical accounting. */
 export function classifySql(sql: unknown): SqlClassification {
-  // SqlStorage accepts comments before a statement. Remove only trivia at the
-  // beginning (and after statement separators) so a comment cannot bypass the
-  // pre-execution gate on a sticky circuit.
-  const text = sqlWithoutLeadingTrivia(sql)
-  const withMutation = SQL_WITH_RE.test(text) && SQL_WITH_MUTATION_RE.test(text)
+  const commands = sqlStatementTokens(String(sql ?? '')).map((tokens) =>
+    tokens[0]?.toUpperCase()
+  )
   return {
-    mutation: SQL_MUTATION_RE.test(text) || withMutation,
-    rowMutation: SQL_ROW_MUTATION_RE.test(text) || withMutation,
+    mutation: commands.some((command) =>
+      [
+        'INSERT',
+        'UPDATE',
+        'DELETE',
+        'REPLACE',
+        'CREATE',
+        'ALTER',
+        'DROP',
+        'TRUNCATE',
+        'VACUUM',
+        'REINDEX',
+      ].includes(command ?? '')
+    ),
+    rowMutation: commands.some((command) =>
+      ['INSERT', 'UPDATE', 'DELETE', 'REPLACE'].includes(command ?? '')
+    ),
   }
 }
 

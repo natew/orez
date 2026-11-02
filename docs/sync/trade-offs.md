@@ -222,6 +222,41 @@ CVR/CDB changes use the same journal with `publish: false` and are retained only
 long enough to support rollback and crash recovery. Full-table snapshots are a
 fallback for writes the compiler cannot classify, not the normal DML path.
 
+Raw application SQL also installs rollback-only capture for its source tables
+and reachable trigger and foreign-key targets. Untouched tables receive no
+registrations or triggers. Discovery reads schema metadata, never application
+rows. Inferred registrations remain private until explicit registration or
+statement metadata supplies a publication identity; explicitly private tables
+stay private. The existing registration row records whether capture was inferred,
+and schema rollback preserves that distinction. Application rollback disables
+foreign keys while replaying row images, so tracked and raw statements share that
+policy instead of taking late snapshots of journaled cascade children. Private
+changes whose table snapshot already owns undo do not need pending rows.
+
+Owner direction, 2026-11-02: "We have to be compatible", in the scope of Zero's
+primary-key-or-unique-index support. Like Zero, row capture accepts a primary key
+or a non-null unique index. When a hidden rowid remains accessible it can also
+journal ordinary raw-SQL tables without either key. A non-null unique index can
+identify rows even when application columns shadow every hidden rowid alias.
+Only reachable tables without a usable identity retain the existing first-touch
+snapshot fallback. A table with every hidden rowid alias shadowed and no usable
+key cannot be restored exactly by either existing journal form. Owner direction,
+2026-11-02: "Option one", scoped to preserving this non-Zero shape's existing
+raw SQL acceptance and partial-rollback limitation. These writes remain accepted
+and are **not protected by transaction rollback**; their rows can survive a
+failed transaction. Protected tables in the same transaction still roll back.
+No full-table or schema-rewrite fallback is added for this shape. Ordinary
+tables with generated columns follow the same policy; virtual tables do not
+gain this compatibility exception.
+
+Capture verification compares generated trigger definitions with the installed
+ones, so replacing a unique index rebuilds rollback capture with the new key.
+Losing the last usable key removes stale capture triggers and registration.
+The unique key supports row undo, but a destructive DDL snapshot still requires
+an accessible physical row identity: copying just the visible key would lose
+hidden rowids. Such DDL on a table shadowing every rowid alias remains unsupported
+by the existing exact snapshot format.
+
 Journal undo may finish behind a tripped write circuit. Its physical writes
 remain billed and metered, including when undo itself first exceeds the budget;
 the trip remains sticky and ordinary application writes stay blocked. A failed

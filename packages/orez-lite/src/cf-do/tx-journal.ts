@@ -87,8 +87,8 @@ export const ZSYNC_CHANGES_TABLE = '_zsync_changes'
  * the packed mutation ledger. the sync executor toggles its captureMode column
  * mid-transaction through plain sql with no statement metadata, so no tracked
  * write ever registers it for capture, and its identity is fixed and
- * orez-owned. the worker registers it rollback-only before any
- * statement that writes it: an application session abandoned mid-transaction (a
+ * orez-owned. application SQL target discovery registers it rollback-only
+ * before a statement that writes it: an application session abandoned mid-transaction (a
  * delegated push canceled by the sync host's per-attempt timeout) must restore
  * captureMode, or every later push fails preparePackedLedger with "packed
  * ledger has uncommitted capture state" and the namespace never recovers
@@ -107,7 +107,7 @@ const INTERNAL_TABLES = new Set([
   '_zero_schema_tables',
 ])
 
-function isInternalObject(name: string): boolean {
+export function isInternalObject(name: string): boolean {
   return (
     INTERNAL_TABLES.has(name) ||
     name.startsWith('_cf_') ||
@@ -193,6 +193,7 @@ interface SchemaSnapshotObject {
 }
 
 interface CdcRegistrationSnapshot {
+  automatic?: number
   columns_json: string
   physical_table: string
   publish: number
@@ -605,12 +606,10 @@ function readCdcRegistrations(sql: DurableSqlStorage): CdcRegistrationSnapshot[]
     .toArray()
   if (registrationTableExists.length === 0) return []
   return sql
-    .exec(
-      `SELECT physical_table, table_name, columns_json, publish, schema_version ` +
-        `FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`
-    )
+    .exec(`SELECT * FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`)
     .toArray()
     .map((row) => ({
+      automatic: Number(row.automatic ?? 0),
       columns_json: String(row.columns_json ?? ''),
       physical_table: String(row.physical_table ?? ''),
       publish: Number(row.publish ?? 0),
@@ -747,15 +746,20 @@ function restoreSchemaSnapshot(
       .toArray().length > 0
   ) {
     sql.exec(`DELETE FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`)
+    const hasAutomatic = sql
+      .exec(`PRAGMA table_info(${quoteIdent(CDC_REGISTRATION_TABLE)})`)
+      .toArray()
+      .some((column) => column.name === 'automatic')
     for (const registration of snapshot.cdc) {
       sql.exec(
         `INSERT INTO ${quoteIdent(CDC_REGISTRATION_TABLE)} ` +
-          '(physical_table, table_name, columns_json, publish, schema_version) VALUES (?, ?, ?, ?, ?)',
+          `(physical_table, table_name, columns_json, publish, schema_version${hasAutomatic ? ', automatic' : ''}) VALUES (?, ?, ?, ?, ?${hasAutomatic ? ', ?' : ''})`,
         registration.physical_table,
         registration.table_name,
         registration.columns_json,
         registration.publish,
-        registration.schema_version
+        registration.schema_version,
+        ...(hasAutomatic ? [registration.automatic ?? 0] : [])
       )
     }
   }
@@ -1032,8 +1036,6 @@ function triggerEvent(sql: string | null): RowOperation | null {
   return match ? (match[1]!.toUpperCase() as RowOperation) : null
 }
 
-const NO_SNAPSHOTS: ReadonlySet<string> = new Set<string>()
-
 const SQL_IDENTIFIER = '"(?:[^"]|"")+"|`(?:[^`]|``)+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*'
 const BOUND_UPDATE = new RegExp(
   `^\\s*UPDATE\\s+(?:${SQL_IDENTIFIER})(?:\\s*\\.\\s*(?:${SQL_IDENTIFIER}))?\\s+SET\\s+((?:(?:${SQL_IDENTIFIER})\\s*=\\s*\\?(?:\\d+)?\\s*,\\s*)*(?:${SQL_IDENTIFIER})\\s*=\\s*\\?(?:\\d+)?)(?:\\s+(?:WHERE|RETURNING)\\s|\\s*$)`,
@@ -1123,7 +1125,12 @@ export function snapshotSideEffectWriteTables(
   sourceTable: string,
   operation: TrackedOperation,
   coversRowUndo: (physicalTable: string) => boolean,
-  sourceStatement?: string
+  sourceStatement?: string,
+  options: {
+    rollbackDisablesForeignKeys?: boolean
+    captureSource?: boolean
+    preserveUnaddressableWrites?: boolean
+  } = {}
 ): ReadonlySet<string> {
   const relations = sql
     .exec(
@@ -1260,15 +1267,19 @@ export function snapshotSideEffectWriteTables(
   // an upsert resolves to an insert or an update and only SQLite knows which,
   // so it seeds both. an insert fires no referential action.
   const seeded: readonly RowOperation[] =
-    operation === 'UPSERT' ? ['INSERT', 'UPDATE'] : [operation]
+    operation === 'UPSERT'
+      ? /\bREPLACE\b/i.test(sourceDefinition + ' ' + sourceStatement)
+        ? ROW_OPERATIONS
+        : ['INSERT', 'UPDATE']
+      : [operation]
   const reachable = new Set<string>()
   const reachableTables = new Set<string>()
   const referentialTables = new Set<string>()
   const pending = seeded.map((op) =>
     initialColumns && op === 'UPDATE' ? initialNode : node(sourceTable, op)
   )
-  let hasSideEffect = false
   let mustSnapshotAll = false
+  let hasSideEffect = false
   while (pending.length > 0) {
     const current = pending.pop()!
     if (reachable.has(current)) continue
@@ -1282,7 +1293,8 @@ export function snapshotSideEffectWriteTables(
       pending.push(target)
     }
   }
-  if (!hasSideEffect && !mustSnapshotAll) return NO_SNAPSHOTS
+
+  if (!options.captureSource && !hasSideEffect && !mustSnapshotAll) return new Set()
 
   const candidates = mustSnapshotAll
     ? [...snapshotTables.values()]
@@ -1298,7 +1310,32 @@ export function snapshotSideEffectWriteTables(
     // statement skipped and a later statement copies would be captured with
     // this statement's writes already committed into it, and the restore would
     // put them back after row undo had removed them.
-    if (coversRowUndo(table) && !referentialTables.has(sqliteNoCase(table))) continue
+    if (
+      coversRowUndo(table) &&
+      (options.rollbackDisablesForeignKeys || !referentialTables.has(sqliteNoCase(table)))
+    )
+      continue
+    if (options.preserveUnaddressableWrites && !tableIdentity(sql, table)) {
+      const columns = sql.exec(`PRAGMA table_xinfo(${quoteIdent(table)})`).toArray()
+      const ordinaryTable = sql
+        .exec(`PRAGMA table_list(${quoteIdent(table)})`)
+        .toArray()
+        .some(
+          (row) => row.schema === 'main' && row.name === table && row.type === 'table'
+        )
+      if (
+        ordinaryTable &&
+        columns.every((column) => Number(column.pk) === 0) &&
+        ['rowid', '_rowid_', 'oid'].every((alias) =>
+          columns.some((column) => sqliteNoCase(String(column.name)) === alias)
+        )
+      ) {
+        // generated columns belong to ordinary tables too; virtual tables do
+        // not gain this owner-approved exception. this raw-only shape has no
+        // undo or exact snapshot representation. accept without claiming protection.
+        continue
+      }
+    }
     // `upgradeToTableSnapshot` refuses a table this transaction has already
     // written row-undoably, which is what stops a late first-touch copy.
     upgradeToTableSnapshot(sql, txID, table)

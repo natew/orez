@@ -1,5 +1,6 @@
-import { stripPublicPrefix } from '../do-sql-tracking.js'
+import { sqlStatementTokens, stripPublicPrefix } from '../do-sql-tracking.js'
 
+import type { TrackedOperation } from './tx-journal.js'
 import type { DurableSqlStorage } from './watermark.js'
 
 /** Bump whenever the generated trigger bodies or buffer shape change. */
@@ -28,6 +29,8 @@ export interface CdcTableRegistration {
   columns?: string[]
   /** False captures before/after images for transaction rollback only. */
   publish?: boolean
+  /** host-inferred rollback capture, superseded by an explicit registration. */
+  automatic?: boolean
 }
 
 /**
@@ -56,6 +59,7 @@ export interface CapturedRowChange {
 }
 
 export interface SuspendedCdcTable {
+  automatic?: boolean
   physicalTableName: string
   tableName: string
   publish?: boolean
@@ -69,7 +73,7 @@ export interface TableIdentity {
   rowidColumn: string | null
   withoutRowid: boolean
   autoIncrement: boolean
-  /** Declared primary-key columns in key order. */
+  /** primary key or non-null unique-index columns in key order. */
   keyColumns: string[]
   /** Columns undo may write. Excludes generated columns. */
   writableColumns: string[]
@@ -284,7 +288,7 @@ export function parseJournalRecord(value: unknown): JournalRecord | null {
 
 /**
  * Read stable-identity metadata from the live schema. Returns null when the
- * table cannot be undone row-by-row (no rowid and no primary key), which keeps
+ * table cannot be undone row-by-row (no rowid and no primary or non-null unique key), which keeps
  * capture off it entirely so the caller falls back to table snapshots.
  */
 export function tableIdentity(
@@ -301,7 +305,7 @@ export function tableIdentity(
   if (columns.length === 0) return null
 
   const writableColumns = writableColumnsOf(info)
-  const keyColumns = info
+  let keyColumns = info
     .filter((row) => Number(row.pk ?? 0) > 0)
     .sort((a, b) => Number(a.pk ?? 0) - Number(b.pk ?? 0))
     .map((row) => String(row.name ?? ''))
@@ -334,7 +338,25 @@ export function tableIdentity(
       ? keyColumns[0]
       : null
 
-  if (!rowidAlias && keyColumns.length === 0) return null
+  if (!rowidAlias && keyColumns.length === 0) {
+    for (const index of sql.exec(`PRAGMA index_list(${quoteIdent(table)})`).toArray()) {
+      if (Number(index.unique) !== 1 || Number(index.partial) !== 0) continue
+      const keys = sql
+        .exec(`PRAGMA index_info(${quoteIdent(String(index.name))})`)
+        .toArray()
+      if (keys.length === 0 || keys.some((key) => Number(key.cid) < 0)) continue
+      const names = keys.map((key) => String(key.name))
+      if (
+        !names.every((name) =>
+          info.some((column) => column.name === name && Number(column.notnull) === 1)
+        )
+      )
+        continue
+      keyColumns = names
+      break
+    }
+    if (keyColumns.length === 0) return null
+  }
   let autoIncrement = false
   if (rowidColumn) {
     const definition = sql
@@ -496,6 +518,9 @@ function unquoteSqlIdentifier(identifier: string): string {
   if (identifier.startsWith('"') && identifier.endsWith('"')) {
     return identifier.slice(1, -1).replace(/""/g, '"')
   }
+  if (identifier.startsWith("'") && identifier.endsWith("'")) {
+    return identifier.slice(1, -1).replace(/''/g, "'")
+  }
   if (identifier.startsWith('`') && identifier.endsWith('`')) {
     return identifier.slice(1, -1).replace(/``/g, '`')
   }
@@ -509,7 +534,8 @@ const SCHEMA_CHANGE_GATE_RE = /\b(?:ALTER|CREATE|DROP)\b/i
 const SQL_QUOTED_OR_COMMENT_RE =
   /"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|'(?:[^']|'')*'|--[^\r\n]*|\/\*[\s\S]*?\*\/|;/g
 const SQL_IDENTIFIER = '(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[[^\\]]+\\]|[^\\s;(.]+)'
-const SQL_TABLE_NAME = `(${SQL_IDENTIFIER})(?:\\s*\\.\\s*(${SQL_IDENTIFIER}))?`
+const SQL_TABLE_IDENTIFIER = `(?:'(?:[^']|'')*'|${SQL_IDENTIFIER})`
+const SQL_TABLE_NAME = `(${SQL_TABLE_IDENTIFIER})(?:\\s*\\.\\s*(${SQL_TABLE_IDENTIFIER}))?`
 const SCHEMA_CHANGE_PATTERNS = [
   new RegExp(`^\\s*ALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${SQL_TABLE_NAME}`, 'i'),
   new RegExp(
@@ -517,6 +543,43 @@ const SCHEMA_CHANGE_PATTERNS = [
     'i'
   ),
 ] as const
+
+/** read the top-level DML target of each statement, skipping CTE bodies. */
+export function rowMutationTargets(
+  sql: string
+): Array<{ table: string; operation: TrackedOperation }> {
+  const targets: Array<{ table: string; operation: TrackedOperation }> = []
+  for (const tokens of sqlStatementTokens(sql)) {
+    const command = tokens[0]?.toUpperCase()
+    if (!command || !['INSERT', 'REPLACE', 'UPDATE', 'DELETE'].includes(command)) continue
+    let cursor = 1
+    if (tokens[cursor]?.toUpperCase() === 'OR') cursor += 2
+    if (command === 'INSERT' || command === 'REPLACE') {
+      if (tokens[cursor]?.toUpperCase() !== 'INTO') continue
+      cursor++
+    } else if (command === 'DELETE') {
+      if (tokens[cursor]?.toUpperCase() !== 'FROM') continue
+      cursor++
+    }
+    let table = tokens[cursor]
+    if (!table) continue
+    if (tokens[cursor + 1] === '.') {
+      if (unquoteSqlIdentifier(table).toLowerCase() !== 'main') {
+        throw new Error('unsupported SQLite schema in table mutation: ' + table)
+      }
+      table = tokens[cursor + 2]
+      if (!table) continue
+    }
+    targets.push({
+      table: unquoteSqlIdentifier(table),
+      operation:
+        command === 'INSERT' || command === 'REPLACE'
+          ? 'UPSERT'
+          : (command as TrackedOperation),
+    })
+  }
+  return targets
+}
 
 /**
  * Return physical tables whose SQLite schema may be changed by this statement.
@@ -564,6 +627,7 @@ interface Registration {
   tableName: string
   columns: string[]
   publish: boolean
+  automatic: boolean
   version: number
 }
 
@@ -623,11 +687,7 @@ export class TransactionalCdc {
     // reload runs before journal rollback; even no-op schema writes can prevent
     // workerd from disabling foreign keys around parent-table restoration.
     if (!this.tableExists(CDC_TABLES)) return new Map()
-    const rows = this.sql
-      .exec(
-        `SELECT physical_table, table_name, columns_json, publish, schema_version FROM ${quoteIdent(CDC_TABLES)}`
-      )
-      .toArray()
+    const rows = this.sql.exec(`SELECT * FROM ${quoteIdent(CDC_TABLES)}`).toArray()
     const registrations = new Map<string, Registration>()
     for (const row of rows) {
       const physicalTable = String(row.physical_table ?? '')
@@ -671,6 +731,7 @@ export class TransactionalCdc {
         tableName,
         columns,
         publish: publish === 1,
+        automatic: row.automatic === 1,
         version,
       })
     }
@@ -697,6 +758,11 @@ export class TransactionalCdc {
     if (!tableColumns.some((column) => String(column.name) === 'schema_version')) {
       this.sql.exec(
         `ALTER TABLE ${quoteIdent(CDC_TABLES)} ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0`
+      )
+    }
+    if (!tableColumns.some((column) => String(column.name) === 'automatic')) {
+      this.sql.exec(
+        `ALTER TABLE ${quoteIdent(CDC_TABLES)} ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0`
       )
     }
     // The buffer only ever holds rows for the statement being drained, so a
@@ -737,16 +803,17 @@ export class TransactionalCdc {
     )
   }
 
-  private triggersExist(table: string): boolean {
+  private triggersMatch(table: string, definitions: string[]): boolean {
     const names = triggerNames(table)
     const placeholders = names.map(() => '?').join(', ')
     return (
       this.sql
         .exec(
-          `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (${placeholders})`,
+          `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN (${placeholders})`,
           ...names
         )
-        .toArray().length === names.length
+        .toArray()
+        .filter((row) => definitions.includes(String(row.sql))).length === names.length
     )
   }
 
@@ -810,6 +877,7 @@ export class TransactionalCdc {
         physicalTableName,
         tableName: registration.tableName,
         ...(registration.publish ? null : { publish: false }),
+        ...(registration.automatic ? { automatic: true } : null),
       })
     }
     return suspended
@@ -829,14 +897,14 @@ export class TransactionalCdc {
     this.#active = this.#registrations.size > 0
   }
 
-  private installTriggers(
+  private triggerDefinitions(
     registration: {
       physicalTableName: string
       tableName: string
       publish: boolean
     },
     identity: TableIdentity
-  ): void {
+  ): string[] {
     const physicalTable = quoteIdent(registration.physicalTableName)
     const logicalTable = quoteLiteral(registration.tableName)
     const [insertName, updateName, deleteName] = triggerNames(
@@ -856,19 +924,15 @@ export class TransactionalCdc {
       `INSERT INTO ${quoteIdent(CDC_BUFFER)} ` +
       '(table_name, op, row_json, old_json, new_rowid, old_rowid)'
 
-    this.sql.exec(
+    return [
       `CREATE TRIGGER ${insertName} AFTER INSERT ON ${physicalTable} BEGIN ` +
-        `${insertInto} VALUES (${logicalTable}, 'INSERT', ${newRow}, NULL, ${newRowid}, NULL); END`
-    )
-    this.sql.exec(
+        `${insertInto} VALUES (${logicalTable}, 'INSERT', ${newRow}, NULL, ${newRowid}, NULL); END`,
       `CREATE TRIGGER ${updateName} AFTER UPDATE ON ${physicalTable} ` +
         `WHEN ${changedWhen(columns)} BEGIN ` +
-        `${insertInto} VALUES (${logicalTable}, 'UPDATE', ${newRow}, ${oldRow}, ${newRowid}, ${oldRowid}); END`
-    )
-    this.sql.exec(
+        `${insertInto} VALUES (${logicalTable}, 'UPDATE', ${newRow}, ${oldRow}, ${newRowid}, ${oldRowid}); END`,
       `CREATE TRIGGER ${deleteName} AFTER DELETE ON ${physicalTable} BEGIN ` +
-        `${insertInto} VALUES (${logicalTable}, 'DELETE', NULL, ${oldRow}, NULL, ${oldRowid}); END`
-    )
+        `${insertInto} VALUES (${logicalTable}, 'DELETE', NULL, ${oldRow}, NULL, ${oldRowid}); END`,
+    ]
   }
 
   /**
@@ -882,21 +946,29 @@ export class TransactionalCdc {
     authoritative = refresh
   ): boolean {
     const physicalTableName = String(registration.physicalTableName || '')
-    const tableName = String(registration.tableName || '')
     const cached = this.registered(physicalTableName)
+    const tableName =
+      registration.automatic && cached
+        ? cached.tableName
+        : String(registration.tableName || '')
     // Only an authoritative caller (table registration, syncTables, the
     // schema-change restore) carries the schema's declared capture set, so only
     // it may change whether a table publishes: demoting one to rollback-only
     // capture or promoting it back. Every other ensure keeps the cached state
-    // in both directions: a rollback-only request must never demote an already
+    // in both directions, except inferred capture yields to explicit metadata:
+    // a rollback-only request must never demote an already
     // published table, and a flagless tracked write must never re-promote a
     // table the schema declared private.
     const publish =
-      authoritative || !cached ? registration.publish !== false : cached.publish
+      authoritative || !cached || (cached.automatic && !registration.automatic)
+        ? registration.publish !== false
+        : cached.publish
+    const automatic = registration.automatic === true && (!cached || cached.automatic)
     if (
       !refresh &&
       cached?.tableName === tableName &&
       cached.publish === publish &&
+      cached.automatic === automatic &&
       cached.version === CDC_SCHEMA_VERSION &&
       this.#verified.has(physicalTableName)
     ) {
@@ -911,31 +983,50 @@ export class TransactionalCdc {
     // race an out-of-band migration with stale metadata; narrowing the trigger
     // to that stale list would silently omit the new column forever.
     const identity = tableIdentity(this.sql, physicalTableName)
-    if (!identity) return false
+    if (!identity) {
+      if (cached) {
+        this.dropTriggers(physicalTableName)
+        this.sql.exec(
+          `DELETE FROM ${quoteIdent(CDC_TABLES)} WHERE physical_table = ?`,
+          physicalTableName
+        )
+        this.#registrations.delete(physicalTableName)
+        this.#verified.delete(physicalTableName)
+        this.#active = this.#registrations.size > 0
+      }
+      return false
+    }
     const capturedColumns = identity.columns
+    const definitions = this.triggerDefinitions(
+      { physicalTableName, tableName, publish },
+      identity
+    )
     const previous = this.registered(physicalTableName)
     const unchanged =
       previous?.tableName === tableName &&
       previous.publish === publish &&
+      previous.automatic === automatic &&
       previous.version === CDC_SCHEMA_VERSION &&
       JSON.stringify(previous.columns) === JSON.stringify(capturedColumns) &&
-      this.triggersExist(physicalTableName)
+      this.triggersMatch(physicalTableName, definitions)
     if (!unchanged) {
       this.dropTriggers(physicalTableName)
-      this.installTriggers({ physicalTableName, tableName, publish }, identity)
+      for (const definition of definitions) this.sql.exec(definition)
       this.sql.exec(
         `INSERT OR REPLACE INTO ${quoteIdent(CDC_TABLES)} ` +
-          '(physical_table, table_name, columns_json, publish, schema_version) VALUES (?, ?, ?, ?, ?)',
+          '(physical_table, table_name, columns_json, publish, schema_version, automatic) VALUES (?, ?, ?, ?, ?, ?)',
         physicalTableName,
         tableName,
         JSON.stringify(capturedColumns),
         publish ? 1 : 0,
-        CDC_SCHEMA_VERSION
+        CDC_SCHEMA_VERSION,
+        automatic ? 1 : 0
       )
       this.#registrations.set(physicalTableName, {
         tableName,
         columns: capturedColumns,
         publish,
+        automatic,
         version: CDC_SCHEMA_VERSION,
       })
     }
