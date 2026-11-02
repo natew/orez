@@ -53,7 +53,7 @@
     "test:ingest": "bun run build:dist && bun ingest-test.mjs",
     "test:package": "bun run build:dist && node package-runtime-test.mjs",
     "test:query-compiler": "bun run build:dist && bun test --preload orez-sync-cf-host/bun-wasm-loader query-compiler.test.mjs && node vite-ssr-query-compiler-test.mjs",
-    "test:restart": "bun run build:dist && bun restart-test.mjs",
+    "test:restart": "bun run build:dist && bun restart-test.mjs && bun init-guard-test.mjs",
     "test:rolling-schema": "bun run build:dist && bun rolling-schema-test.mjs",
     "test:platform": "bun run build:dist:platform && bun platform-test.mjs",
     "typecheck": "bun run build:dist:platform && tsc --noEmit",

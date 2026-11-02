@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import { createSyncExecutor, isMutationRetryError } from 'orez-sync-executor/core'
 import { createSocketHost } from 'orez-sync-executor/realtime'
-import { createTableIfAbsentTarget } from 'orez-sync-executor/sqlite'
+import { cellPreservingDdl, createTableIfAbsentTarget } from 'orez-sync-executor/sqlite'
 
 import { validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'
@@ -56,7 +56,7 @@ import {
   shouldRetryDelegatedPush,
 } from './write-safeguards.js'
 
-import type { SyncHostConfig, SyncHostEnv } from './types.js'
+import type { SyncHostConfig, SyncHostEnv, SyncSql } from './types.js'
 import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
@@ -1116,15 +1116,48 @@ export function createSyncDurableObject<
           this.#directSql.exec(
             'CREATE TRIGGER IF NOT EXISTS trg_revocations_insert INSTEAD OF INSERT ON revocations BEGIN INSERT INTO orez_revocations(user_id, revoked_at) VALUES (NEW.user_id, NEW.revoked_at); END;'
           )
-          const invalidBefore = config.upstream
-            ? null
-            : this.#wasm(() => engine_invalid_number_cells(this.#engineDb, config.schema))
           if (!config.upstream)
             this.#wasm(() =>
               engine_init_number_storage_guards(this.#engineDb, config.schema)
             )
-          config.initialize(this.#directSql)
-          if (!config.upstream)
+          let invalidBefore: ReturnType<typeof engine_invalid_number_cells> | undefined
+          const beforePossibleCellChange = (sql: string) => {
+            if (config.upstream || invalidBefore !== undefined) return
+            // Existing tables, indexes, and reads cannot change a stored cell.
+            // Delay the expensive baseline until the first other statement;
+            // the baseline then still precedes every possible cell change.
+            const preserving = cellPreservingDdl(sql)
+            if (
+              preserving === 'index' ||
+              (preserving === 'create-table' &&
+                !/^\s*CREATE\s+TEMP(?:ORARY)?\b/i.test(sql))
+            )
+              return
+            if (!sql.replace(/;\s*$/, '').includes(';')) {
+              if (/^\s*SELECT\b/i.test(sql)) return
+              if (
+                /^\s*PRAGMA\s+(?:table_info|table_xinfo)\s*\(\s*(?:"(?:[^"]|"")+"|'(?:[^']|'')+'|[a-z_][a-z0-9_]*)\s*\)\s*;?\s*$/i.test(
+                  sql
+                )
+              )
+                return
+            }
+            invalidBefore = this.#wasm(() =>
+              engine_invalid_number_cells(this.#engineDb, config.schema)
+            )
+          }
+          const initializeSql: SyncSql = {
+            exec: (sql, params, metadata) => {
+              beforePossibleCellChange(sql)
+              return this.#directSql.exec(sql, params, metadata)
+            },
+            query: (sql, params) => {
+              beforePossibleCellChange(sql)
+              return this.#directSql.query(sql, params)
+            },
+          }
+          config.initialize(initializeSql)
+          if (invalidBefore !== undefined)
             this.#wasm(() =>
               engine_validate_number_storage_changes(
                 this.#engineDb,
