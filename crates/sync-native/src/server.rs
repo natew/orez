@@ -1057,7 +1057,7 @@ async fn wake_ws(
     let user_id = identity.map(|identity| identity.user_id);
     let client_id = params.get("clientID").cloned().unwrap_or_default();
     // a client that cannot set headers on a WebSocket handshake offers its
-    // bearer as an `orez-auth.<b64>` subprotocol (limesync's transport does
+    // bearer as an `orez-auth.<b64>` subprotocol (orez-lite's transport does
     // whenever it holds an auth token). RFC 6455 has the client fail a 101 that
     // selects none of the protocols it offered, so without the echo bun closes
     // every wake socket with 1002 and browsers refuse it, leaving those clients
