@@ -14,7 +14,7 @@ import {
 } from '@rocicorp/zero'
 
 import { findPort } from '../../src/port.ts'
-import { installHttpPullTransport } from '../orez-lite/src/client/transport.ts'
+import { installHttpPullTransport } from '../limesync/src/client/transport.ts'
 
 const port = await findPort(0)
 const server = Bun.spawn(

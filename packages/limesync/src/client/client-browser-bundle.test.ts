@@ -1,9 +1,9 @@
 import { build } from 'esbuild'
 import { expect, test } from 'vitest'
 
-test('orez-lite/client stays a browser-only leaf package', async () => {
+test('limesync/client stays a browser-only leaf package', async () => {
   const bundle = await build({
-    entryPoints: ['packages/orez-lite/src/client/transport.ts'],
+    entryPoints: ['packages/limesync/src/client/transport.ts'],
     bundle: true,
     format: 'esm',
     platform: 'browser',
@@ -13,8 +13,8 @@ test('orez-lite/client stays a browser-only leaf package', async () => {
   const inputs = Object.keys(bundle.metafile.inputs).sort()
 
   expect(inputs).toEqual([
-    'packages/orez-lite/src/client/payload-codec.ts',
-    'packages/orez-lite/src/client/transport.ts',
+    'packages/limesync/src/client/payload-codec.ts',
+    'packages/limesync/src/client/transport.ts',
   ])
   // byte-bounded request/response streaming and the cross-socket query ack
   // cost ~1.5 KiB in the browser leaf, superseding a stale pull ~1.1 KiB, and

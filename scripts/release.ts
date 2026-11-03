@@ -203,7 +203,7 @@ function bumpVersion(current: string): string {
 //
 // Everything that packs goes through here. A tarball packed straight from the
 // repo tree carries `workspace:*` specifiers, which resolve to nothing once
-// installed: orez-lite's `./realtime` re-export of orez-sync-executor is one
+// installed: limesync's `./realtime` re-export of orez-sync-executor is one
 // import that then fails outright in the consumer.
 function stageForPack(
   dir: string,
@@ -266,7 +266,7 @@ function stageForPack(
 // want different versions, and the nested one wins for anything resolving from
 // inside that subtree. Refreshing only the hoisted copy leaves the consumer
 // running two versions of the family at once with nothing to say so: team-machine
-// resolved orez-lite's realtime re-export into a stale nested sync-executor
+// resolved limesync's realtime re-export into a stale nested sync-executor
 // that had no such export, and the import simply failed.
 function installedCopies(targetDir: string, name: string): string[] {
   const found: string[] = []
@@ -337,7 +337,7 @@ if (into) {
     })
   }
 
-  const orezLiteDir = resolve(root, 'packages', 'orez-lite')
+  const orezLiteDir = resolve(root, 'packages', 'limesync')
   const orezLitePkgPath = resolve(orezLiteDir, 'package.json')
   if (existsSync(orezLitePkgPath)) {
     const orezLitePkg = JSON.parse(readFileSync(orezLitePkgPath, 'utf-8'))
@@ -427,7 +427,7 @@ if (into) {
           run('bun x tsc && chmod +x dist/cli-entry.js')
         } else if (item.name === 'orez-sync-cf-host') {
           run('bun run build:wasm && bun run build:runtime', { cwd: item.dir })
-        } else if (item.name === 'orez-lite') {
+        } else if (item.name === 'limesync') {
           run(
             'bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime',
             { cwd: item.dir }
@@ -558,8 +558,8 @@ if (existsSync(syncExecutorPkgPath)) {
   })
 }
 
-// orez-lite — public SQLite and Rust sync engine.
-const orezLiteDir = resolve(root, 'packages', 'orez-lite')
+// limesync — public SQLite and Rust sync engine.
+const orezLiteDir = resolve(root, 'packages', 'limesync')
 const orezLitePkgPath = resolve(orezLiteDir, 'package.json')
 if (existsSync(orezLitePkgPath)) {
   const orezLitePkg = JSON.parse(readFileSync(orezLitePkgPath, 'utf-8'))

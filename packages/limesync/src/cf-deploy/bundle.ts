@@ -102,7 +102,7 @@ export function orezLiteAliasPlugin(
     ...SERVER_CONTEXT_STUBS,
   }
   return {
-    name: 'orez-lite-aliases',
+    name: 'limesync-aliases',
     setup(buildApi) {
       // consumer-declared .wasm modules (cfg.compiledWasmModules) → attach each as a
       // CompiledWasm worker module: resolve the specifier (honoring its package
@@ -133,13 +133,13 @@ export function orezLiteAliasPlugin(
           // code (e.g. an auth module's `import 'server-only'`) must hit the
           // no-op, not the throwing client-guard entry
           if (specifier in SERVER_CONTEXT_STUBS) {
-            return { path: specifier, namespace: 'orez-lite-virtual' }
+            return { path: specifier, namespace: 'limesync-virtual' }
           }
           if (args.importer && !isOrezLiteImporter(args.importer)) return undefined
-          return { path: specifier, namespace: 'orez-lite-virtual' }
+          return { path: specifier, namespace: 'limesync-virtual' }
         })
       }
-      buildApi.onLoad({ filter: /.*/, namespace: 'orez-lite-virtual' }, (args) => ({
+      buildApi.onLoad({ filter: /.*/, namespace: 'limesync-virtual' }, (args) => ({
         contents: virtualModules[args.path],
         loader: 'js',
         resolveDir,

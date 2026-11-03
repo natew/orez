@@ -6,9 +6,9 @@ import {
   createSQLiteApplicationDatabase,
   createSyncExecutor,
   type ApplicationTransaction,
-} from 'orez-lite'
-import { createQueryCompiler } from 'orez-lite/cloudflare/query-compiler'
-import { executeTransactionQueryPlan } from 'orez-lite/cloudflare/transaction-query'
+} from 'limesync'
+import { createQueryCompiler } from 'limesync/cloudflare/query-compiler'
+import { executeTransactionQueryPlan } from 'limesync/cloudflare/transaction-query'
 import { afterAll, describe, expect, test, vi } from 'vitest'
 
 import { createZeroServerBindings, setupAsyncLocalStorage } from './server'

@@ -250,14 +250,14 @@ The root TypeScript suite covers the Postgres-to-DO-SQLite path separately from
 the Rust engine. Run it from the repository root with `bun run test`. The most
 relevant files are:
 
-- `packages/orez-lite/src/cf-do/cdc.test.ts`: real-SQLite logical CDC, including full row images,
+- `packages/limesync/src/cf-do/cdc.test.ts`: real-SQLite logical CDC, including full row images,
   failed multi-row statements, SQLite transaction rollback, primary-key
   changes, schema changes, and indirect writes from business triggers. The
   failed-statement, rollback, and primary-key cases are adapted from Turso's CDC
   integration suite.
-- `packages/orez-lite/src/cf-do/worker-cdc.test.ts`: staging, transaction grouping, publish versus
+- `packages/limesync/src/cf-do/worker-cdc.test.ts`: staging, transaction grouping, publish versus
   rollback-only capture, and DDL integration at the `ZeroDO` boundary.
-- `packages/orez-lite/src/cf-do/worker-transaction.test.ts`: application-SQL transaction commit
+- `packages/limesync/src/cf-do/worker-transaction.test.ts`: application-SQL transaction commit
   and rollback behavior at the `ZeroDO` boundary.
 
 ## What is not covered
@@ -358,9 +358,9 @@ list-append --consistency-models serializable`, failing the job on `false`,
    coverage at all until 2026-08-18.** `harness/src/backup-restore.ts` covers
    the sync host's own backup and stops the writer first
    (`/admin/writer`, `backup-restore.ts:52`), so it structurally cannot observe
-   a write racing an export. The separate `orez-lite` namespace backup, which
+   a write racing an export. The separate `limesync` namespace backup, which
    dumps a whole namespace to R2 for disaster recovery
-   (`packages/orez-lite/src/cf-do/namespace-backup.ts`), is covered by
+   (`packages/limesync/src/cf-do/namespace-backup.ts`), is covered by
    `namespace-backup.test.ts` plus the production wiring test in
    `lite-data-worker.test.ts`. The suite tests paging, ordering, restore, and an
    invariant-preserving commit racing the scan. The race was added after a real

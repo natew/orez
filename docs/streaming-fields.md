@@ -35,7 +35,7 @@ gets out of the way once the database catches up.
 ## Declaring fields
 
 ```ts
-import { defineStreamingFields } from 'orez-lite/realtime'
+import { defineStreamingFields } from 'limesync/realtime'
 import { schema } from './schema'
 
 export const streaming = defineStreamingFields(schema, {

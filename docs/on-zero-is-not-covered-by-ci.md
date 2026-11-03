@@ -39,7 +39,7 @@ Full suite: 204 pass, 2 fail.
 **2. A fresh worktree cannot run vitest at all** without an install inside the
 worktree. `packages/on-zero` pins TypeScript 7.0.2 while the repo root resolves
 5.9.3, so `typescript/unstable/ast` is missing and the suite dies before the
-first test. Two further stops follow: `orez-lite/dist` is not built, and
+first test. Two further stops follow: `limesync/dist` is not built, and
 `drizzle-zero-sqlite` is not built. A CI job for on-zero needs those build steps
 ordered ahead of it, and the TS version skew resolved rather than worked around
 by installing twice.

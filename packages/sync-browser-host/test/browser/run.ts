@@ -14,7 +14,7 @@ await mkdir(join(outputDirectory, 'generated'), { recursive: true })
 
 await build({
   alias: {
-    'orez-lite/browser': join(repositoryRoot, 'packages/orez-lite/dist/browser/index.js'),
+    'limesync/browser': join(repositoryRoot, 'packages/limesync/dist/browser/index.js'),
   },
   entryPoints: {
     main: join(import.meta.dir, 'main.ts'),

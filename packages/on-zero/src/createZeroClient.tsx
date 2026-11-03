@@ -77,8 +77,8 @@ import type {
   ZeroOptions,
   Schema as ZeroSchema,
 } from '@rocicorp/zero'
-import type { AggregateSet } from 'orez-lite/aggregate'
-import type { HttpPullLifecycleEvent, HttpPullTransport } from 'orez-lite/client'
+import type { AggregateSet } from 'limesync/aggregate'
+import type { HttpPullLifecycleEvent, HttpPullTransport } from 'limesync/client'
 
 type PreloadOptions = { ttl?: 'always' | 'never' | number | undefined }
 

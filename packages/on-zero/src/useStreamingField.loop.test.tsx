@@ -14,7 +14,7 @@
 // carry their own per-hook stabilization, which this file locks in.
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { createLocalRealtime, defineStreamingFields } from 'orez-lite/realtime'
+import { createLocalRealtime, defineStreamingFields } from 'limesync/realtime'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'

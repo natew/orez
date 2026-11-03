@@ -9,7 +9,7 @@ import { releaseClientInstances } from './instanceRegistry'
 
 import type { GenericModels } from './types'
 import type { Schema as ZeroSchema } from '@rocicorp/zero'
-import type { AggregateSet } from 'orez-lite/aggregate'
+import type { AggregateSet } from 'limesync/aggregate'
 
 export * from './combineZeroClients'
 

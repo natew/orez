@@ -54,7 +54,7 @@ other 4xx returns immediately, and so does an attempt that used its whole
 
 An attempt that times out is therefore the host's total budget, not
 `maxAttempts * timeoutMs`. Size `timeoutMs` against the client that is waiting
-on the push. orez-lite's browser transport aborts any push or pull whose
+on the push. limesync's browser transport aborts any push or pull whose
 response headers miss its own 60s deadline, and treats any push failure as a
 transport failure, which closes its socket and reconnects. A host budget at or
 above that deadline turns one slow mutation into a full sync teardown that the
@@ -159,7 +159,7 @@ ordinary Cloudflare `[[services]]` bindings; the host reads them by name off
 
 ## Data-worker environment variables
 
-These configure the data worker (`packages/orez-lite/src/cf-do/worker.ts`), not
+These configure the data worker (`packages/limesync/src/cf-do/worker.ts`), not
 the sync host. The write-budget values are the source-side defense against a
 runaway writer.
 
@@ -228,7 +228,7 @@ Every route is under `/<namespace>/admin/` and gated by `authorizeAdmin` (or the
 
 ## Node host surface
 
-`orez-lite/native` exports `createNativeHost`, the supported Node and bun
+`limesync/native` exports `createNativeHost`, the supported Node and bun
 integration. It launches the prebuilt Rust host with the application's Zero
 schema, SQLite initialization statements, storage directory, browser-origin
 policy, and HTTP callbacks.
@@ -239,7 +239,7 @@ authoritative SQLite file, starts the native child, waits for readiness, and
 owns shutdown:
 
 ```ts
-import { defineLocalConfig } from 'orez-lite/local'
+import { defineLocalConfig } from 'limesync/local'
 
 export default defineLocalConfig({
   schema,
@@ -256,10 +256,10 @@ export default defineLocalConfig({
 })
 ```
 
-`orez-lite/vite` runs this configuration only during local serve and proxies
+`limesync/vite` runs this configuration only during local serve and proxies
 `/zero-http` to the configured namespace. Cloudflare builds continue to use
-`orez-lite/cloudflare/sync`. Non-Vite servers use the same implementation with
-`orez-lite dev -- <server command>`.
+`limesync/cloudflare/sync`. Non-Vite servers use the same implementation with
+`limesync dev -- <server command>`.
 
 Every pull is query-driven. The application must define its named queries once
 and use the same `defineQueries` registry for the client and server-side query
@@ -270,7 +270,7 @@ application rows.
 
 ```ts
 import { defineQueries, defineQuery } from '@rocicorp/zero'
-import { createNativeHost } from 'orez-lite/native'
+import { createNativeHost } from 'limesync/native'
 import { zql } from './zero.generated'
 
 export const appQueries = defineQueries({
@@ -336,7 +336,7 @@ Originless native and server-side sync clients remain supported.
 The standalone `sync-native serve` command requires
 `--admin-token-env <variable>`, plus a repeatable
 `--allow-origin <origin>`. The credential stays in the named environment
-variable and never appears in the process command line. `orez-lite/native`
+variable and never appears in the process command line. `limesync/native`
 provides this contract through `createNativeHost`.
 
 ### Settling application-owned native pushes

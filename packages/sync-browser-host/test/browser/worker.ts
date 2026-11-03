@@ -1,5 +1,5 @@
 import { createBuilder, defineQueries, defineQuery } from '@rocicorp/zero'
-import { createBrowserSyncHost } from 'orez-lite/browser'
+import { createBrowserSyncHost } from 'limesync/browser'
 import { MutationApplicationError } from 'orez-sync-executor/core'
 
 import {

@@ -19,7 +19,7 @@
         "@types/node": "^22.0.0",
         "@types/ws": "^8.18.1",
         "embedded-postgres": "17.10.0-beta.17",
-        "orez-lite": "workspace:*",
+        "limesync": "workspace:*",
         "orez-sync-executor": "workspace:*",
         "oxfmt": "latest",
         "oxlint": "latest",
@@ -216,6 +216,42 @@
         "react-native",
       ],
     },
+    "packages/limesync": {
+      "name": "limesync",
+      "version": "0.16.21",
+      "bin": {
+        "limesync": "dist/cli.js",
+      },
+      "dependencies": {
+        "@noble/ciphers": "1.3.0",
+        "@noble/curves": "1.9.7",
+        "@noble/hashes": "1.8.0",
+        "bedrock-sqlite": "workspace:*",
+        "es-module-lexer": "1.7.0",
+        "esbuild": "^0.25.0",
+        "orez-sync-cf-host": "workspace:*",
+        "orez-sync-executor": "workspace:*",
+        "ws": "^8.19.0",
+      },
+      "devDependencies": {
+        "@rocicorp/zero": "1.9.0",
+        "@types/node": "^22.0.0",
+        "@types/ws": "^8.18.1",
+        "typescript": "^5.7.0",
+        "vitest": "^3.2.7",
+        "wrangler": "^4.75.0",
+      },
+      "optionalDependencies": {
+        "orez-sync-native": "workspace:*",
+      },
+      "peerDependencies": {
+        "@rocicorp/zero": ">=1.7.0",
+        "vite": ">=5",
+      },
+      "optionalPeers": [
+        "vite",
+      ],
+    },
     "packages/native": {
       "name": "@o/native",
       "version": "0.16.21",
@@ -258,7 +294,7 @@
         "chokidar": "^4.0.3",
         "citty": "^0.1.6",
         "dequal": "^2.0.3",
-        "orez-lite": "workspace:*",
+        "limesync": "workspace:*",
         "typescript": "7.0.2",
         "valibot": "^1.1.0",
       },
@@ -285,42 +321,6 @@
         "drizzle-orm",
         "drizzle-zero-sqlite",
         "react-native",
-      ],
-    },
-    "packages/orez-lite": {
-      "name": "orez-lite",
-      "version": "0.16.21",
-      "bin": {
-        "orez-lite": "dist/cli.js",
-      },
-      "dependencies": {
-        "@noble/ciphers": "1.3.0",
-        "@noble/curves": "1.9.7",
-        "@noble/hashes": "1.8.0",
-        "bedrock-sqlite": "workspace:*",
-        "es-module-lexer": "1.7.0",
-        "esbuild": "^0.25.0",
-        "orez-sync-cf-host": "workspace:*",
-        "orez-sync-executor": "workspace:*",
-        "ws": "^8.19.0",
-      },
-      "devDependencies": {
-        "@rocicorp/zero": "1.9.0",
-        "@types/node": "^22.0.0",
-        "@types/ws": "^8.18.1",
-        "typescript": "^5.7.0",
-        "vitest": "^3.2.7",
-        "wrangler": "^4.75.0",
-      },
-      "optionalDependencies": {
-        "orez-sync-native": "workspace:*",
-      },
-      "peerDependencies": {
-        "@rocicorp/zero": ">=1.7.0",
-        "vite": ">=5",
-      },
-      "optionalPeers": [
-        "vite",
       ],
     },
     "packages/orez-sync-native": {
@@ -2224,6 +2224,8 @@
 
     "lightningcss-win32-x64-msvc": ["lightningcss-win32-x64-msvc@1.33.0", "", { "os": "win32", "cpu": "x64" }, "sha512-OlEICDx/Xl0FqSp4bry8zFnCvGpig3Gl4gCquvYwHuqJKEC1+n9NgDniFvqHGmMv1ZkqDJrDqKKSykTDX+ehuA=="],
 
+    "limesync": ["limesync@workspace:packages/limesync"],
+
     "lodash.camelcase": ["lodash.camelcase@4.3.0", "", {}, "sha512-TwuEnCnxbc3rAvhf/LbG7tJUDzhqXyFnv3dtzLOPgCG/hODL7WFnsbwktkD7yUV0RrreP/l1PALq/YSg6VvjlA=="],
 
     "lodash.debounce": ["lodash.debounce@4.0.8", "", {}, "sha512-FT1yDzDYEoYWhnSGnpE/4Kj1fLZkDFyqRb7fNt6FdYOSxlUWAtp42Eh6Wb0rGIv/m9Bgo7x4GhQbm5Ys4SG5ow=="],
@@ -2377,8 +2379,6 @@
     "open": ["open@7.4.2", "", { "dependencies": { "is-docker": "^2.0.0", "is-wsl": "^2.1.1" } }, "sha512-MVHddDVweXZF3awtlAS+6pgKLlm/JgxZ90+/NBurBoQctVOOB/zDdVjcyPzQ+0laDGbsWgrRkflI65sQeOgT9Q=="],
 
     "ora": ["ora@3.4.0", "", { "dependencies": { "chalk": "^2.4.2", "cli-cursor": "^2.1.0", "cli-spinners": "^2.0.0", "log-symbols": "^2.2.0", "strip-ansi": "^5.2.0", "wcwidth": "^1.0.1" } }, "sha512-eNwHudNbO1folBP3JsZ19v9azXWtQZjICdr3Q0TDPIaeBQ3mXLrh54wM+er0+hSp+dWKf+Z8KM58CYzEyIYxYg=="],
-
-    "orez-lite": ["orez-lite@workspace:packages/orez-lite"],
 
     "orez-sync-browser-host": ["orez-sync-browser-host@workspace:packages/sync-browser-host"],
 

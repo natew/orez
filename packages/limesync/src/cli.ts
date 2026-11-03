@@ -6,7 +6,7 @@ import { loadLocalConfig, startLocalSyncHost, type LocalSyncHostExit } from './l
 
 function usage(): never {
   console.error(
-    'usage: orez-lite dev [--config orez-lite.config.ts] -- <command> [args...]'
+    'usage: limesync dev [--config limesync.config.ts] -- <command> [args...]'
   )
   process.exit(1)
 }
@@ -18,7 +18,7 @@ const separator = args.indexOf('--')
 if (separator < 0 || separator === args.length - 1) usage()
 
 const options = args.slice(0, separator)
-let configPath = 'orez-lite.config.ts'
+let configPath = 'limesync.config.ts'
 for (let index = 0; index < options.length; index++) {
   if (options[index] !== '--config' || !options[index + 1]) usage()
   configPath = options[index + 1]
@@ -56,7 +56,7 @@ try {
   const exit = await Promise.race([appExited, hostExited])
   if (exit.source === 'host' && !exit.expected) {
     const reason = exit.signal ? `signal ${exit.signal}` : `code ${exit.code}`
-    console.error(`[orez-lite] native sync host exited (${reason})`)
+    console.error(`[limesync] native sync host exited (${reason})`)
     child.kill('SIGTERM')
     await appExited
     process.exitCode = 1

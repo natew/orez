@@ -20,7 +20,7 @@ import {
 } from '@rocicorp/zero'
 
 import { findPort } from '../../src/port.ts'
-import { installHttpPullTransport } from '../orez-lite/src/client/transport.ts'
+import { installHttpPullTransport } from '../limesync/src/client/transport.ts'
 
 const cwd = new URL('.', import.meta.url).pathname
 const namespace = 'proj-rolling'

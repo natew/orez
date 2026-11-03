@@ -1,5 +1,5 @@
 name = "orez-rust-sync-platform-test"
-main = "../orez-lite/test-workers/platform-probe-worker.ts"
+main = "../limesync/test-workers/platform-probe-worker.ts"
 compatibility_date = "2026-06-01"
 
 [[rules]]

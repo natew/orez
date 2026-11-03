@@ -20,7 +20,7 @@ whether the package was built from the current native implementation.
 
 ## Standalone contract
 
-Applications normally use `createNativeHost` from `orez-lite/native`. It accepts
+Applications normally use `createNativeHost` from `limesync/native`. It accepts
 the Zero schema, initialization SQL, callback URLs, storage directory, and
 server options as one object, then resolves the correct prebuilt binary
 internally. The lower-level launcher remains available for non-JavaScript
@@ -30,7 +30,7 @@ supervisors with file-backed schema and migration inputs:
 sync-native serve \
   --schema zero-schema.json \
   --init-sql init-sql.json \
-  --data-dir .orez-lite-native \
+  --data-dir .limesync-native \
   --host 127.0.0.1 \
   --port 5048 \
   --admin-token-env SYNC_NATIVE_ADMIN_TOKEN \
@@ -107,7 +107,7 @@ boundary must opt in visibly with `into_router_trusted()`.
 
 Namespace file retention is disabled by default. Supervisors may opt into
 closing idle workers, without deleting their files, with `--retention workers`,
-`--worker-idle-ms`, and `--worker-sweep-ms`. The `orez-lite/native` equivalent
+`--worker-idle-ms`, and `--worker-sweep-ms`. The `limesync/native` equivalent
 is `workerRetention`.
 
 ## Supported targets

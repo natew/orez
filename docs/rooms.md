@@ -6,7 +6,7 @@ keeps what must survive (the level, the scores); a room carries what is only
 true for the next few milliseconds.
 
 ```ts
-import { connectRoom, ROOM_PATH } from 'orez-lite/room'
+import { connectRoom, ROOM_PATH } from 'limesync/room'
 
 const room = connectRoom({
   // called for every connect, so each reconnect carries a fresh ticket.
@@ -23,7 +23,7 @@ const room = connectRoom({
 A room admits a socket only with a ticket for that room. The app's server
 decides who may join (a session, access to whatever the room is about) and
 signs one with `signRoomTicket(secret, room, userId)` from
-`orez-lite/room/ticket`; every host checks it with the same secret before the
+`limesync/room/ticket`; every host checks it with the same secret before the
 socket joins, so a room never looks up a session itself and nobody reaches a
 room the app did not admit them to. A ticket names its room and its user and
 lasts a minute by default; the client asks for a new one on every connect.
@@ -80,14 +80,14 @@ the other is drawn, the way racing games do.
 
 ## Hosts
 
-The room itself (`orez-lite/room/host`) has no I/O and no clock. Two hosts
+The room itself (`limesync/room/host`) has no I/O and no clock. Two hosts
 wrap it:
 
-- **Development**: with `roomSecret` in `orez-lite.config.ts`, the `orez()`
+- **Development**: with `roomSecret` in `limesync.config.ts`, the `orez()`
   Vite plugin serves rooms on the dev server's own port at
   `/__orez/room/<name>`, so web and native clients reach them at the app's
   origin.
-- **Cloudflare**: bind `OrezRoomDO` (from `orez-lite/room/cloudflare`, also
+- **Cloudflare**: bind `OrezRoomDO` (from `limesync/room/cloudflare`, also
   returned by `createOrezDataWorker`) as `OREZ_ROOM_DO` and the secret as
   `OREZ_ROOM_SECRET`, and the data worker routes `/__orez/room/<name>` to one
   object per room name. A host of its own calls `routeRoom(request, rooms,

@@ -85,7 +85,7 @@ export interface OrezDataWorkerEnv {
   ZERO_SQL_DO: OrezDataWorkerNamespace
   // bound to `OrezRoomDO` to serve game rooms at /__orez/room/<name>.
   OREZ_ROOM_DO?: RoomNamespace
-  // what the app signs room tickets with (orez-lite/room/ticket).
+  // what the app signs room tickets with (limesync/room/ticket).
   OREZ_ROOM_SECRET?: string
   OREZ_DO_WRITE_BUDGET_ROWS?: string
   OREZ_DO_WRITE_BUDGET_WINDOW_MS?: string

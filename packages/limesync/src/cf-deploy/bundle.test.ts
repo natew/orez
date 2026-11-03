@@ -100,7 +100,7 @@ describe('Cloudflare app bundling', () => {
   })
 
   it('bundles a caller-owned entrypoint with stable virtual imports', async () => {
-    const workerDir = mkdtempSync(join(tmpdir(), 'orez-lite-entry-'))
+    const workerDir = mkdtempSync(join(tmpdir(), 'limesync-entry-'))
     workerDirs.push(workerDir)
     mkdirSync(join(workerDir, 'node_modules'))
     writeFileSync(

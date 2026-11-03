@@ -13,7 +13,7 @@ reverts patches in place.
 ## Current TypeScript host matrix
 
 Run `local-host-verify` on 2026-09-09 started from a green
-`packages/orez-lite/src/cf-do` baseline. All three host patches compiled and
+`packages/limesync/src/cf-do` baseline. All three host patches compiled and
 were caught by `orez-lite-host`.
 
 | mutant                                     | host lane | failure that catches it                                                                   |

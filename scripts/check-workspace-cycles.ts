@@ -2,9 +2,9 @@
 //
 // orderReleasePackages already refuses a cycle, but only when a release runs,
 // and by then the damage is done: on 2026-07-27 sync-cf-host was given an
-// import of orez-lite/realtime while orez-lite already depended on
+// import of limesync/realtime while limesync already depended on
 // sync-cf-host, which broke CI and failed a canary release. Worse, it passed
-// locally, because a previously built orez-lite/dist was still on disk and
+// locally, because a previously built limesync/dist was still on disk and
 // resolved the import that a fresh checkout cannot. That import was never
 // declared in sync-cf-host's manifest, so a manifest-only pass finds no cycle
 // on the exact commit that broke: the edges here come from the source imports

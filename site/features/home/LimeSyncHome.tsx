@@ -27,7 +27,7 @@ export function LimeSyncHome() {
               </AppLink>
             </XStack>
             <Text color="$color9" fontSize={13}>
-              Current preview package: <code>orez-lite</code>
+              npm package: <code>limesync</code>
             </Text>
           </YStack>
         </section>

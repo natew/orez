@@ -1,5 +1,5 @@
 name = "orez-rolling-schema-harness"
-main = "../orez-lite/test-workers/rolling-schema-worker.ts"
+main = "../limesync/test-workers/rolling-schema-worker.ts"
 compatibility_date = "2026-06-01"
 compatibility_flags = ["nodejs_compat"]
 

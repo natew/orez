@@ -589,7 +589,7 @@ jobs:
       # exercises the in-object schema replay, which no vitest lane reaches.
       - name: orez-lite workerd lanes
         run: |
-          cd packages/orez-lite
+          cd packages/limesync
           bun run build
           bun run test:migration-workerd
           bun run test:application-push-workerd

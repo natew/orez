@@ -150,7 +150,7 @@ const LANES: Lane[] = [
       'run',
       '--config',
       'vitest.config.ts',
-      'packages/orez-lite/src/cf-do',
+      'packages/limesync/src/cf-do',
     ],
     cwd: REPO_ROOT,
     timeoutMs: 10 * 60_000,
@@ -300,7 +300,7 @@ function buildEngine(logFile: string): LaneOutcome {
 
 function buildHost(logFile: string): LaneOutcome {
   return sh(
-    ['bun', 'run', '--cwd', 'packages/orez-lite', 'typecheck'],
+    ['bun', 'run', '--cwd', 'packages/limesync', 'typecheck'],
     REPO_ROOT,
     10 * 60_000,
     logFile

@@ -4,7 +4,7 @@ import {
   type StreamingFieldHandle,
 } from 'on-zero/streaming'
 
-import type { RealtimeStore } from 'orez-lite/realtime'
+import type { RealtimeStore } from 'limesync/realtime'
 
 declare const store: RealtimeStore
 declare const handle: StreamingFieldHandle

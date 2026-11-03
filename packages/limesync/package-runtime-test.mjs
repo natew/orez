@@ -11,7 +11,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-const temporary = mkdtempSync(join(tmpdir(), 'orez-lite-pack-'))
+const temporary = mkdtempSync(join(tmpdir(), 'limesync-pack-'))
 const repositoryRoot = resolve(import.meta.dirname, '..', '..')
 
 function linkDependency(nodeModules, name, target) {
@@ -26,13 +26,13 @@ try {
     stdio: 'pipe',
   })
   const tarballName = readdirSync(temporary).find((name) => name.endsWith('.tgz'))
-  if (!tarballName) throw new Error('orez-lite pack produced no tarball')
+  if (!tarballName) throw new Error('limesync pack produced no tarball')
 
   const consumer = join(temporary, 'consumer')
   const nodeModules = join(consumer, 'node_modules')
   mkdirSync(nodeModules, { recursive: true })
   execFileSync('tar', ['-xzf', join(temporary, tarballName), '-C', nodeModules])
-  symlinkSync(join(nodeModules, 'package'), join(nodeModules, 'orez-lite'), 'dir')
+  symlinkSync(join(nodeModules, 'package'), join(nodeModules, 'limesync'), 'dir')
 
   linkDependency(
     nodeModules,
@@ -53,7 +53,7 @@ try {
 
   writeFileSync(
     join(consumer, 'entry.mjs'),
-    `import { createQueryCompiler } from 'orez-lite/cloudflare/query-compiler'
+    `import { createQueryCompiler } from 'limesync/cloudflare/query-compiler'
 const compile = createQueryCompiler({
   tables: {
     account: {
@@ -74,7 +74,7 @@ export const compiledSql = compile(
     join(consumer, 'build.mjs'),
     `import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { orezSyncCfHostWasm } from 'orez-lite/cloudflare/vite-wasm-loader'
+import { orezSyncCfHostWasm } from 'limesync/cloudflare/vite-wasm-loader'
 import { build } from 'vite'
 
 await build({
@@ -107,28 +107,28 @@ if (typeof built.compiledSql !== 'string' || built.compiledSql.length === 0) {
 
   execFileSync('node', ['build.mjs'], { cwd: consumer, stdio: 'pipe' })
   const native = await import(
-    new URL('./node_modules/orez-lite/dist/native.js', `file://${consumer}/`)
+    new URL('./node_modules/limesync/dist/native.js', `file://${consumer}/`)
   )
   assert.equal(typeof native.createNativeHost, 'function')
-  const local = await import('orez-lite/local')
+  const local = await import('limesync/local')
   assert.equal(typeof local.defineLocalConfig, 'function')
   assert.equal(typeof local.loadLocalConfig, 'function')
   assert.equal(typeof local.startLocalSyncHost, 'function')
-  const aggregate = await import('orez-lite/aggregate')
+  const aggregate = await import('limesync/aggregate')
   assert.equal(typeof aggregate.defineAggregates, 'function')
   assert.equal(typeof aggregate.aggregateMigrationStatements, 'function')
   assert.equal(typeof aggregate.withOptimisticAggregates, 'function')
-  const vite = await import('orez-lite/vite')
+  const vite = await import('limesync/vite')
   const plugin = vite.orez()
-  assert.equal(plugin.name, 'orez-lite')
+  assert.equal(plugin.name, 'limesync')
   assert.equal(plugin.apply, 'serve')
   execFileSync(
     'node',
     [
-      '--import=orez-lite/cloudflare/node-wasm-loader',
+      '--import=limesync/cloudflare/node-wasm-loader',
       '--input-type=module',
       '-e',
-      `const compiler = await import('orez-lite/cloudflare/query-compiler')
+      `const compiler = await import('limesync/cloudflare/query-compiler')
 const compile = compiler.createQueryCompiler({
   tables: {
     account: {

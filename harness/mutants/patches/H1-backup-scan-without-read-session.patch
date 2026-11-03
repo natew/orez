@@ -1,6 +1,6 @@
-diff --git a/packages/orez-lite/src/cf-do/namespace-backup.ts b/packages/orez-lite/src/cf-do/namespace-backup.ts
---- a/packages/orez-lite/src/cf-do/namespace-backup.ts
-+++ b/packages/orez-lite/src/cf-do/namespace-backup.ts
+diff --git a/packages/limesync/src/cf-do/namespace-backup.ts b/packages/limesync/src/cf-do/namespace-backup.ts
+--- a/packages/limesync/src/cf-do/namespace-backup.ts
++++ b/packages/limesync/src/cf-do/namespace-backup.ts
 @@ -613,7 +613,21 @@ export function createNamespaceBackupManager<Env>(
              tables,
              cursor,

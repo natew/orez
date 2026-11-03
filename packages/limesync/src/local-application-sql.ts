@@ -52,11 +52,11 @@ function createLocalSyncNotifier(namespace: string) {
       )
       if (!response.ok) {
         console.error(
-          `[orez-lite] local sync host refused notify for ${namespace}: ${response.status}`
+          `[limesync] local sync host refused notify for ${namespace}: ${response.status}`
         )
       }
     } catch (error) {
-      console.error(`[orez-lite] local sync host notify failed for ${namespace}`, error)
+      console.error(`[limesync] local sync host notify failed for ${namespace}`, error)
     } finally {
       inFlight = false
     }

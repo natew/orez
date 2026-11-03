@@ -76,7 +76,7 @@
       "id": "H1-backup-scan-without-read-session",
       "target": "typescript-host",
       "property": "backup-consistency",
-      "file": "packages/orez-lite/src/cf-do/namespace-backup.ts",
+      "file": "packages/limesync/src/cf-do/namespace-backup.ts",
       "description": "namespace backup pages bypass the snapshot lease, so a writer can commit between pages and produce a torn dump",
       "expectedLanes": ["orez-lite-host"]
     },
@@ -84,7 +84,7 @@
       "id": "H2-admit-writer-with-reader-open",
       "target": "typescript-host",
       "property": "transaction-isolation",
-      "file": "packages/orez-lite/src/cf-do/worker.ts",
+      "file": "packages/limesync/src/cf-do/worker.ts",
       "description": "the application SQL admission queue grants a writer while read sessions are still open",
       "expectedLanes": ["orez-lite-host"]
     },
@@ -92,7 +92,7 @@
       "id": "H3-skip-pending-change-promotion",
       "target": "typescript-host",
       "property": "commit-visibility",
-      "file": "packages/orez-lite/src/cf-do/worker.ts",
+      "file": "packages/limesync/src/cf-do/worker.ts",
       "description": "a committed application transaction deletes its pending change records without publishing them to the durable change log",
       "expectedLanes": ["orez-lite-host"]
     }

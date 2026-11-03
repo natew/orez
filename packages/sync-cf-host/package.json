@@ -1,7 +1,7 @@
 {
   "name": "orez-sync-cf-host",
   "version": "0.16.21",
-  "description": "Internal orez Cloudflare sync host. Do not import directly: consumers use orez-lite/cloudflare/sync.",
+  "description": "Internal orez Cloudflare sync host. Do not import directly: consumers use limesync/cloudflare/sync.",
   "type": "module",
   "exports": {
     ".": {

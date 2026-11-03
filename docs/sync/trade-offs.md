@@ -86,7 +86,7 @@ iteration (`packages/sync-cf-host/src/write-safeguards.ts`,
 ### Six billable rows per captured change
 
 Measured 2026-08-21 and pinned by `bills six rows per captured change` in
-`packages/orez-lite/src/cf-do/worker-write-amplification.test.ts`. The test
+`packages/limesync/src/cf-do/worker-write-amplification.test.ts`. The test
 measures the slope between a one-row and a ten-row synced `UPDATE`, so it
 reports the marginal cost of one more captured row rather than a total that
 fixed per-transaction overhead would muddy.
@@ -167,7 +167,7 @@ Because a runaway writer bills real money and can wedge an object, the system ha
 defense in depth (`plans/orez-write-safeguards.md`). All three are independent,
 so a failure in one does not disable the others.
 
-1. **Data-worker write budget** (`packages/orez-lite/src/cf-do/worker.ts`). The source `ZeroSqlDO`
+1. **Data-worker write budget** (`packages/limesync/src/cf-do/worker.ts`). The source `ZeroSqlDO`
    meters billable rows in a rolling window. Past `OREZ_DO_WRITE_BUDGET_ROWS`
    (default 150,000 per five minutes) it becomes sticky and mutating endpoints
    return HTTP 429 `writeBudgetExceeded`. Reads stay open, the trip is persisted

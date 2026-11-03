@@ -6,10 +6,7 @@ import { chromium } from 'playwright'
 const repositoryRoot = join(import.meta.dir, '../../../..')
 const result = await build({
   entryPoints: [
-    join(
-      repositoryRoot,
-      'packages/orez-lite/dist/client/encrypted-column-conformance.js'
-    ),
+    join(repositoryRoot, 'packages/limesync/dist/client/encrypted-column-conformance.js'),
   ],
   bundle: true,
   format: 'iife',

@@ -113,7 +113,7 @@
     "chokidar": "^4.0.3",
     "citty": "^0.1.6",
     "dequal": "^2.0.3",
-    "orez-lite": "workspace:*",
+    "limesync": "workspace:*",
     "typescript": "7.0.2",
     "valibot": "^1.1.0"
   },

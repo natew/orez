@@ -1,6 +1,6 @@
-diff --git a/packages/orez-lite/src/cf-do/worker.ts b/packages/orez-lite/src/cf-do/worker.ts
---- a/packages/orez-lite/src/cf-do/worker.ts
-+++ b/packages/orez-lite/src/cf-do/worker.ts
+diff --git a/packages/limesync/src/cf-do/worker.ts b/packages/limesync/src/cf-do/worker.ts
+--- a/packages/limesync/src/cf-do/worker.ts
++++ b/packages/limesync/src/cf-do/worker.ts
 @@ -1675,5 +1675,6 @@ export class ZeroDO extends DurableObject<Env> {
     */
    private canAdmitApplicationSqlSession(session: ApplicationSqlSessionTarget): boolean {

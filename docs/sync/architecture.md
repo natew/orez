@@ -112,15 +112,15 @@ mutators or push delegation, upstream ingest) is passed in as one
 `SyncHostConfig` object. That object is the entire public API; the configuration
 page documents every field.
 
-`orez-lite` exposes the shared application-database boundary. Both hosts call
+`limesync` exposes the shared application-database boundary. Both hosts call
 it for registered mutators, CRUD SQL, last-mutation-id ownership, replay, and
 deferred effects. Node and bun applications launch the Rust host through
-`orez-lite/native`. The CF host keeps the Rust pull and ingest engine compiled
+`limesync/native`. The CF host keeps the Rust pull and ingest engine compiled
 to WASM.
 
 ### packages/sync-browser-host
 
-The browser host is exported as `orez-lite/browser`. It loads sync-wasm
+The browser host is exported as `limesync/browser`. It loads sync-wasm
 and Bedrock SQLite in one worker and serves the same authenticated `/pull` and
 `/push` protocol through a `MessagePort`. The same port also exposes serialized
 direct `query` and `exec` calls for preview tooling. All attached clients receive
@@ -141,7 +141,7 @@ fallback.
 
 The host accepts the application's mutator registry and named-query resolver so
 generated validators, permissions, transaction helpers, and deferred effects
-keep working without a second mutation-bookkeeping path. The `orez-lite` package
+keep working without a second mutation-bookkeeping path. The `limesync` package
 includes both WASM binaries beside the subpath export, so ordinary worker
 bundles do not need consumer-specific asset copies.
 
@@ -253,7 +253,7 @@ performs one full resync because its old cookie belongs to the previous table
 generation. That reset is expected.
 
 The source still supports the legacy single-response `/snapshot` endpoint for
-small datasets and older harnesses, but Orez Lite uses the paged, resumable path
+small datasets and older harnesses, but Lime Sync uses the paged, resumable path
 by default. Replica DDL used by this flow must not contain foreign keys; the
 authoritative source owns referential integrity, and cross-page replica
 enforcement cannot be correct.
@@ -267,19 +267,19 @@ production on Cloudflare.
 
 On Cloudflare the deployment has two Durable Object roles:
 
-- The **data worker** (`packages/orez-lite/src/cf-do/worker.ts`, the `ZeroSqlDO` class) is the
+- The **data worker** (`packages/limesync/src/cf-do/worker.ts`, the `ZeroSqlDO` class) is the
   write side. Apps use the typed Application SQL Durable Object RPC, and it
   stores rows in DO SQLite. It exposes a
   watermark-cursored change feed the sync host consumes:
   `GET/POST /<db>/changes {watermark, limit}` returns `{watermark, changes}` and
   answers HTTP 410 `watermarkTooOld` when the cursor precedes the retained
   floor; `GET /<db>/snapshot` returns every tracked table; `POST /<db>/notify`
-  wakes ingest. Authoritative row capture is in `packages/orez-lite/src/cf-do/cdc.ts`: generated
+  wakes ingest. Authoritative row capture is in `packages/limesync/src/cf-do/cdc.ts`: generated
   SQLite triggers stage full before/after images in the same statement as the
   row write, including indirect writes from business triggers. Explicit
-  transactions are grouped and promoted only at commit; `packages/orez-lite/src/cf-do/row-undo.ts`
+  transactions are grouped and promoted only at commit; `packages/limesync/src/cf-do/row-undo.ts`
   uses the same images for rollback and crash recovery. This is logical CDC,
-  not WAL/page copying. `packages/orez-lite/src/do-sql-tracking.ts` meters billable writes, while
+  not WAL/page copying. `packages/limesync/src/do-sql-tracking.ts` meters billable writes, while
   `src/change-tracking.ts` is the separate Postgres-compatible replication
   entrypoint.
 - The **sync host** (`packages/sync-cf-host`) is the read side. It ingests the
@@ -287,8 +287,8 @@ On Cloudflare the deployment has two Durable Object roles:
   pushes. Application writes and sync ingestion share the same authoritative
   SQLite object without a Postgres compatibility layer.
 
-The canonical Orez transport integration lives at `orez-lite/client`, with
-source in `packages/orez-lite/src/client/`. It keeps `@rocicorp/zero` as the
-client and maps its sync connection onto the Orez Lite pull, push, and wake
+The canonical Orez transport integration lives at `limesync/client`, with
+source in `packages/limesync/src/client/`. It keeps `@rocicorp/zero` as the
+client and maps its sync connection onto the Lime Sync pull, push, and wake
 server endpoints. Downstream vendored copies are refreshed from this
 implementation.

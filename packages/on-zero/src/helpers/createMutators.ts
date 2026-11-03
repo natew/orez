@@ -1,4 +1,4 @@
-import { withOptimisticAggregates } from 'orez-lite/aggregate'
+import { withOptimisticAggregates } from 'limesync/aggregate'
 
 import { getAuthData } from '../state'
 import { mapObject } from './mapObject'
@@ -13,7 +13,7 @@ import type {
   MutatorContext,
   Transaction,
 } from '../types'
-import type { AggregateSet } from 'orez-lite/aggregate'
+import type { AggregateSet } from 'limesync/aggregate'
 
 export type ValidateMutationFn = (args: {
   authData: AuthData | null

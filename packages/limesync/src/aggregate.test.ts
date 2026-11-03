@@ -124,7 +124,7 @@ function changes(db: InstanceType<typeof BedrockSqlite.Database>, sql: string) {
   return after - before
 }
 
-describe('Orez Lite aggregates', () => {
+describe('Lime Sync aggregates', () => {
   it('backfills and maintains materialized and existing-row columns', () => {
     const db = createDatabase()
     db.exec(`

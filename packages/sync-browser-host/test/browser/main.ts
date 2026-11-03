@@ -2,7 +2,7 @@ import {
   BROWSER_SYNC_HOST_DATABASE_PREFIX,
   createBrowserSyncHostPortClient,
   deleteBrowserSyncHostSnapshot,
-} from 'orez-lite/browser'
+} from 'limesync/browser'
 
 import { IndexedDbSnapshotStore, SNAPSHOT_CHUNK_BYTES } from '../../src/idb-snapshot.js'
 

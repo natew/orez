@@ -15,27 +15,26 @@ oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bed
 
 ## Lime Sync
 
-Lime Sync is the separate SQLite-native Zero engine. The current preview ships
-as [`orez-lite`](https://www.npmjs.com/package/orez-lite) while its package
-boundary is being split from Orez. It runs on Cloudflare and other constrained
+Lime Sync is the separate SQLite-native Zero engine, published as
+[`limesync`](https://www.npmjs.com/package/limesync) (formerly `orez-lite`). It runs on Cloudflare and other constrained
 hosts, replaces Zero's server side, and speaks the Zero protocol to the real
-`@rocicorp/zero` client. `orez-lite/client` supplies the transport without
+`@rocicorp/zero` client. `limesync/client` supplies the transport without
 forking Zero's query or mutation API. Read the
 [Lime Sync documentation](https://lime-sync.natewienert.workers.dev).
 
-`orez-lite/aggregate` maintains queryable count and sum columns until Zero ships
+`limesync/aggregate` maintains queryable count and sum columns until Zero ships
 aggregate queries. One declaration generates the SQLite migration and triggers
 and projects the same change during optimistic on-zero mutations. See the
 [aggregate documentation](docs/aggregates.md).
 
 ## Cloudflare
 
-`orez-lite/cloudflare` is the workerd runtime. A complete data worker is one factory
+`limesync/cloudflare` is the workerd runtime. A complete data worker is one factory
 call; the generated descriptor carries the real Zero schema, migration, and
 publication metadata, so applications never list tables or columns again:
 
 ```ts
-import { createOrezDataWorker } from 'orez-lite/cloudflare'
+import { createOrezDataWorker } from 'limesync/cloudflare'
 import { orezAppSchema } from 'orez:cloudflare-migrations'
 
 const orez = createOrezDataWorker({
@@ -78,10 +77,10 @@ push; application code is still responsible for keeping mutation transactions
 free of network and other long-running work.
 
 Node-side migration, bundling, Wrangler configuration, pruning, and readiness
-helpers live at `orez-lite/cloudflare/build`.
+helpers live at `limesync/cloudflare/build`.
 
 Cloudflare query compilation is available at
-`orez-lite/cloudflare/query-compiler`. Lite applications depend on `orez-lite`,
+`limesync/cloudflare/query-compiler`. Lite applications depend on `limesync`,
 not `orez`; the workspace packages behind these exports are internal
 implementation units.
 
@@ -105,7 +104,7 @@ not suitable for production.
 - **Local filesystem** — no replication, no HA. Use `orez pg_dump` for backups.
 
 Orez does not embed zero-cache in Cloudflare Durable Objects. Cloudflare server
-work uses the SQLite-native Lime Sync runtime from `orez-lite/cloudflare`.
+work uses the SQLite-native Lime Sync runtime from `limesync/cloudflare`.
 
 ## Backends
 

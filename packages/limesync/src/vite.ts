@@ -24,14 +24,14 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
   let localConfig: LocalSyncHostConfig | undefined
 
   return {
-    name: 'orez-lite',
+    name: 'limesync',
     apply: 'serve',
 
     async config(config) {
       const { loadLocalConfig } = await import('./local.js')
       root = resolve(config.root ?? process.cwd())
       localConfig = await loadLocalConfig(
-        resolve(root, options.config ?? 'orez-lite.config.ts')
+        resolve(root, options.config ?? 'limesync.config.ts')
       )
       const namespace = localConfig.namespace
       return {
@@ -56,7 +56,7 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
 
     async configureServer(server) {
       if (!localConfig) {
-        throw new Error('orez-lite local configuration was not loaded')
+        throw new Error('limesync local configuration was not loaded')
       }
       const { port } = localConfig
       const previous = hostsByPort.get(port)
@@ -93,7 +93,7 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
       void host.exited.then((exit) => {
         if (exit.expected) return
         const reason = exit.signal ? `signal ${exit.signal}` : `code ${exit.code}`
-        server.config.logger.error(`[orez-lite] native sync host exited (${reason})`)
+        server.config.logger.error(`[limesync] native sync host exited (${reason})`)
         void server.close()
       })
     },

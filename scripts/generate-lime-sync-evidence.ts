@@ -403,7 +403,7 @@ async function generate(): Promise<void> {
     devDependencies: Record<string, string>
   }>(join(root, 'package.json'))
   const litePackage = readJson<{ version: string }>(
-    join(root, 'packages/orez-lite/package.json')
+    join(root, 'packages/limesync/package.json')
   )
   const packageTag = `v${litePackage.version}`
   const pushedTag = process.env.GITHUB_REF?.startsWith('refs/tags/')

@@ -6,5 +6,5 @@ type OrezSyncCfHostWasmOptions = {
 
 /** load Orez Lite and its sync engine into Vite's SSR bundle. */
 export function orezSyncCfHostWasm(options: OrezSyncCfHostWasmOptions = {}) {
-  return syncCfHostWasm({ noExternal: ['orez-lite'], runtime: options.runtime })
+  return syncCfHostWasm({ noExternal: ['limesync'], runtime: options.runtime })
 }

@@ -151,7 +151,7 @@ transports. Switching between custom minting, auth-token wake and disabled wake,
 or changing transport routing or timing, remains a configuration conflict.
 
 ```ts
-import { ensureHttpPullTransport } from 'orez-lite/client'
+import { ensureHttpPullTransport } from 'limesync/client'
 
 ensureHttpPullTransport({
   origin: syncOrigin,

@@ -1,12 +1,12 @@
-# Orez Lite aggregates
+# Lime Sync aggregates
 
-Orez Lite aggregates maintain queryable `count` and `sum` columns while Zero does
+Lime Sync aggregates maintain queryable `count` and `sum` columns while Zero does
 not yet support aggregate queries. One declaration owns the authoritative
 SQLite triggers, the backfill SQL installed with the schema migration, and the
 client-side projection used during optimistic Zero mutations.
 
 ```ts
-import { count, defineAggregates, sum } from 'orez-lite/aggregate'
+import { count, defineAggregates, sum } from 'limesync/aggregate'
 import { schema } from './data/generated/schema'
 
 export const aggregates = defineAggregates(schema, {
@@ -63,7 +63,7 @@ A project declares aggregates in `data/<namespace>/aggregates.ts`, exporting the
 definitions themselves rather than a compiled set:
 
 ```ts
-import { count, type AggregateDefinitions } from 'orez-lite/aggregate'
+import { count, type AggregateDefinitions } from 'limesync/aggregate'
 import { schema } from '../generated/schema'
 
 export const aggregates = {

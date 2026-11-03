@@ -1,4 +1,4 @@
-import { orezSyncCfHostWasm } from 'orez-lite/cloudflare/vite-wasm-loader'
+import { orezSyncCfHostWasm } from 'limesync/cloudflare/vite-wasm-loader'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({

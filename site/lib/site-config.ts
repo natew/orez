@@ -16,7 +16,7 @@ export const siteConfig = isLimeSyncSite
       description: "A compact Rust and SQLite sync server for Zero's real client.",
       docsRoot: 'data/lime-sync-docs',
       favicon: '/lime-sync.svg',
-      npmHref: 'https://www.npmjs.com/package/orez-lite',
+      npmHref: 'https://www.npmjs.com/package/limesync',
       relatedSite: {
         href: 'https://orez-docs.natewienert.workers.dev',
         label: 'Orez',

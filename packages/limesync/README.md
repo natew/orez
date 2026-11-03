@@ -1,18 +1,18 @@
-# orez-lite
+# limesync
 
-`orez-lite` is the SQLite and Rust sync engine for Zero applications.
+`limesync` is the SQLite and Rust sync engine for Zero applications.
 
-- `orez-lite` provides the host-neutral mutation executor.
-- `orez-lite/client` connects a stock Zero client to the HTTP sync protocol.
-- `orez-lite/browser` runs the engine with SQLite WASM in a browser worker.
-- `orez-lite/native` runs the prebuilt native engine from an application-owned
+- `limesync` provides the host-neutral mutation executor.
+- `limesync/client` connects a stock Zero client to the HTTP sync protocol.
+- `limesync/browser` runs the engine with SQLite WASM in a browser worker.
+- `limesync/native` runs the prebuilt native engine from an application-owned
   Zero schema, SQLite initializer, and HTTP policy callbacks.
-- `orez-lite/local` prepares SQLite and owns the local native process.
-- `orez-lite/vite` starts the local host only while Vite is serving.
-- `orez-lite/aggregate` generates count and sum migrations and projects their
+- `limesync/local` prepares SQLite and owns the local native process.
+- `limesync/vite` starts the local host only while Vite is serving.
+- `limesync/aggregate` generates count and sum migrations and projects their
   optimistic client updates.
-- `orez-lite/cloudflare` provides the Cloudflare runtime and data-worker factory.
-- `orez-lite/cloudflare/build` provides Node-side worker build and deployment tools.
+- `limesync/cloudflare` provides the Cloudflare runtime and data-worker factory.
+- `limesync/cloudflare/build` provides Node-side worker build and deployment tools.
 
 The package derives its database projection from the application’s Zero schema.
 Applications do not maintain separate table or column maps.
@@ -27,7 +27,7 @@ the bounded token refresh policy and access-denied surface.
 The native host is configured entirely by the application:
 
 ```ts
-import { createNativeHost } from 'orez-lite/native'
+import { createNativeHost } from 'limesync/native'
 
 const host = createNativeHost({
   schema,
@@ -61,10 +61,10 @@ Local dev checks the configured port before preparing SQLite. An occupied port
 fails immediately with its holder's PID and command (using `lsof` on Unix or
 `netstat` and `tasklist` on Windows); choose another port offset or stop the holder.
 
-Local application SQL uses the Node SQLite adapter from `orez-lite/local`:
+Local application SQL uses the Node SQLite adapter from `limesync/local`:
 
 ```ts
-import { createLocalApplicationSqlClientFactory } from 'orez-lite/local'
+import { createLocalApplicationSqlClientFactory } from 'limesync/local'
 
 const clients = createLocalApplicationSqlClientFactory({
   dataDir: '.orez/application-sql',
@@ -91,8 +91,8 @@ requires Node's `node:sqlite` and belongs in server setup, never a client bundle
 Application development normally uses the higher-level local configuration:
 
 ```ts
-// orez-lite.config.ts
-import { defineLocalConfig } from 'orez-lite/local'
+// limesync.config.ts
+import { defineLocalConfig } from 'limesync/local'
 
 export default defineLocalConfig({
   schema,
@@ -111,7 +111,7 @@ export default defineLocalConfig({
 
 ```ts
 // vite.config.ts
-import { orez } from 'orez-lite/vite'
+import { orez } from 'limesync/vite'
 
 export default {
   plugins: [orez()],
@@ -123,7 +123,7 @@ the Cloudflare host. Projects without Vite run the same supervisor through the
 CLI:
 
 ```sh
-orez-lite dev -- node server.js
+limesync dev -- node server.js
 ```
 
 ## Cloudflare data-object status

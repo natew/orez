@@ -9,10 +9,10 @@ export const WORKERS_DEV_URL_PATTERN =
 export function isOrezLiteImporter(importer: string): boolean {
   const normalized = importer.replaceAll('\\', '/')
   return (
-    normalized.includes('/node_modules/orez-lite/') ||
+    normalized.includes('/node_modules/limesync/') ||
     normalized.includes('/node_modules/orez-sync-cf-host/') ||
     normalized.includes('/node_modules/orez-sync-executor/') ||
-    normalized.includes('/packages/orez-lite/') ||
+    normalized.includes('/packages/limesync/') ||
     normalized.includes('/packages/sync-cf-host/') ||
     normalized.includes('/packages/sync-executor/')
   )

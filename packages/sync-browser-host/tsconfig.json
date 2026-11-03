@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
     "paths": {
-      "orez-lite/browser": ["packages/orez-lite/dist/browser/index.d.ts"]
+      "limesync/browser": ["packages/limesync/dist/browser/index.d.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/browser/main.ts", "test/browser/worker.ts"]

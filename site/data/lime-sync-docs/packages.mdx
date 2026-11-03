@@ -5,19 +5,18 @@ description: The public package boundary and internal source areas behind Lime S
 
 # Packages and source map
 
-Lime Sync is being separated from Orez in this repository. The website uses the
-new product name first; the current preview still ships through the `orez-lite`
-package while the package boundary is moved.
+Lime Sync ships from this repository as the `limesync` npm package. It was previously
+published as `orez-lite`; that name is deprecated.
 
 ## Public JavaScript exports
 
-| Package/export              | Purpose                                                        | Status  |
-| --------------------------- | -------------------------------------------------------------- | ------- |
-| `orez-lite/client`          | Browser transport plugin for the real Zero client              | Preview |
-| `orez-lite/browser`         | Durable browser worker host with Bedrock SQLite and IndexedDB  | Preview |
-| `orez-lite/native`          | Native SQLite host entrypoint                                  | Preview |
-| `orez-lite/cloudflare`      | Cloudflare deployment tools                                    | Preview |
-| `orez-lite/cloudflare/sync` | Rust/WASM sync host for Cloudflare Workers and Durable Objects | Preview |
+| Package/export             | Purpose                                                        | Status  |
+| -------------------------- | -------------------------------------------------------------- | ------- |
+| `limesync/client`          | Browser transport plugin for the real Zero client              | Preview |
+| `limesync/browser`         | Durable browser worker host with Bedrock SQLite and IndexedDB  | Preview |
+| `limesync/native`          | Native SQLite host entrypoint                                  | Preview |
+| `limesync/cloudflare`      | Cloudflare deployment tools                                    | Preview |
+| `limesync/cloudflare/sync` | Rust/WASM sync host for Cloudflare Workers and Durable Objects | Preview |
 
 ## Engine and host packages
 

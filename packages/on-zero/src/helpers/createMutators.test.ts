@@ -1,5 +1,5 @@
 import { createBuilder, createSchema, number, string, table } from '@rocicorp/zero'
-import { count, defineAggregates } from 'orez-lite/aggregate'
+import { count, defineAggregates } from 'limesync/aggregate'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { setSchema } from '../state'
