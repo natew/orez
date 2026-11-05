@@ -148,7 +148,8 @@ jobs:
         run: bun run native:bootstrap && bun run test:integration
 
   sync-browser-host:
-    runs-on: ubuntu-latest
+    # playwright's dependency installer must support the runner distribution.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
