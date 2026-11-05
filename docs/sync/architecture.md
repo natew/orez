@@ -170,6 +170,12 @@ Per-user scoping lives in the resolved query ASTs. A group never receives a del
 for a row it did not hold, and the engine never projects the full namespace to
 serve a pull.
 
+On connection the HTTP transport forwards Zero's `activeClients` list once,
+retrying it until a pull succeeds. The engine retires subscriptions belonging
+to absent clients in the same group before computing membership. It retains
+mutation counters and ownership so late mutations remain ordered and deduplicated.
+Ordinary caught-up pulls do not repeat this cleanup or write subscription state.
+
 The authoritative store rejects values that the sync wire cannot represent,
 including unsafe numbers in JSON, while retaining pre-existing invalid cells
 for explicit repair. The existing feed converts JSON text to JavaScript values;

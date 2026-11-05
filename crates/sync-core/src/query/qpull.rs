@@ -22,8 +22,8 @@ use crate::wire;
 use super::membership::{
     RecomputeOptions, advance_query_ack, canonical_pk_text, clear_desires, client_query_version,
     delete_clients, desired_hashes, has_uncomputed_queries, prepare_transform_version,
-    prune_tombstones, recompute_group_with_rehydrate, register_query, remove_desire, set_desire,
-    transitions_since, validate_active_queries,
+    prune_tombstones, recompute_group_with_rehydrate, register_query, remove_desire,
+    retain_active_clients, set_desire, transitions_since, validate_active_queries,
 };
 
 const MAX_DELETED_CLIENTS_PER_PULL: usize = 64;
@@ -191,6 +191,32 @@ pub fn handle_query_pull(
         }
     };
 
+    let active_clients = match body.get("activeClients") {
+        None => None,
+        Some(Value::Array(ids)) if ids.len() <= 4096 => {
+            let mut active = BTreeSet::new();
+            for id in ids {
+                let Some(id) = id.as_str().filter(|id| !id.is_empty()) else {
+                    return Err(EngineError::bad_request(
+                        "activeClients must contain non-empty strings",
+                    ));
+                };
+                active.insert(id.to_string());
+            }
+            if !active.contains(client_id) || !active.is_disjoint(&deleted_client_ids) {
+                return Err(EngineError::bad_request(
+                    "activeClients must include the requester and exclude deleted clients",
+                ));
+            }
+            Some(active)
+        }
+        Some(_) => {
+            return Err(EngineError::bad_request(
+                "activeClients must be an array of at most 4096 clients",
+            ));
+        }
+    };
+
     store::claim_client(db, group, client_id, user_id)?;
     // the pull's one watermark + floor read. the ledger is append-only inside
     // this transaction (nothing on the pull path writes it), so the watermark
@@ -202,6 +228,9 @@ pub fn handle_query_pull(
     // after the ownership check, so a rejected claim never marks a group live.
     store::touch_client_group(db, group, watermark, floor_before, retain_changes)?;
     delete_clients(db, group, &deleted_client_ids)?;
+    if let Some(active) = &active_clients {
+        retain_active_clients(db, group, active)?;
+    }
 
     let transform_client_reset = match body.get("_serverQueryTransformVersion") {
         None => false,
@@ -284,6 +313,7 @@ pub fn handle_query_pull(
         && cookie == Some(current)
         && applied_queries.is_none()
         && deleted_client_ids.is_empty()
+        && active_clients.is_none()
         && !has_uncomputed_queries(db, group)?
     {
         validate_active_queries(db, tables, group)?;

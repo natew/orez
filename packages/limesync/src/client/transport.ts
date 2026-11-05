@@ -630,6 +630,7 @@ class ZeroHttpSocket {
   private readonly attemptStartedAt: number | undefined
   private readonly attemptAgeAtConstructionMs: number | undefined
   private settled = false
+  private pendingActiveClients: readonly string[] | undefined
 
   constructor(
     private readonly state: TransportState,
@@ -1019,6 +1020,16 @@ class ZeroHttpSocket {
   }
 
   private queueDesiredQueries(body: unknown) {
+    const activeClients = (body as { activeClients?: unknown })?.activeClients
+    if (activeClients !== undefined) {
+      if (
+        !Array.isArray(activeClients) ||
+        !activeClients.every((id) => typeof id === 'string')
+      ) {
+        throw new Error('Zero initConnection returned invalid activeClients')
+      }
+      this.pendingActiveClients = activeClients
+    }
     const desiredQueriesPatch = (body as { desiredQueriesPatch?: unknown })
       ?.desiredQueriesPatch
     if (!Array.isArray(desiredQueriesPatch)) return
@@ -1309,7 +1320,10 @@ class ZeroHttpSocket {
     if (includeQueries && deletedClientIDs.length > 0) {
       body.deletedClientIDs = deletedClientIDs
     }
+    const activeClients = includeQueries ? this.pendingActiveClients : undefined
+    if (activeClients !== undefined) body.activeClients = activeClients
     const response = (await this.postJSON('/pull', body, signal)) as PullResponse
+    if (activeClients === this.pendingActiveClients) this.pendingActiveClients = undefined
     return this.state.payloadCodec.decodePull(response)
   }
 

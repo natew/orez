@@ -526,6 +526,30 @@ pub(crate) fn delete_clients(
     Ok(())
 }
 
+// Zero reports the live clients when connecting. retire only subscriptions;
+// mutation counters and ownership must survive an inactive client's late push.
+pub(crate) fn retain_active_clients(
+    db: &mut dyn SyncDb,
+    group: &str,
+    active_clients: &BTreeSet<String>,
+) -> Result<(), EngineError> {
+    let active = text(serde_json::to_string(active_clients).unwrap());
+    for table in [
+        "_zsync_desires",
+        "_zsync_query_ack",
+        "_zsync_query_transform_client",
+    ] {
+        db.exec(
+            &format!(
+                "DELETE FROM {table} WHERE clientGroupID = ?
+                 AND clientID NOT IN (SELECT value FROM json_each(?))"
+            ),
+            &[text(group), active.clone()],
+        )?;
+    }
+    Ok(())
+}
+
 // the hashes a client currently desires (for the gotQueries acknowledgement)
 pub(crate) fn desired_hashes(
     db: &mut dyn SyncDb,
