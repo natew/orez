@@ -465,19 +465,20 @@ export function parseCorpusEntry(
   // guard multiplication overflow for EVERY phase (a huge rounds*queriesPerRound
   // can overflow even when a single round's batch is safe), THEN bound the round,
   // THEN derive the phase-sensitive live-spec ceiling (views accumulate, so at
-  // round r up to (r+1)*queriesPerRound live specs; incremental runs after all
-  // rounds).
+  // round r up to (r+1)*queriesPerRound live specs; the final mixed transaction
+  // and incremental comparison run after all shapes have been generated).
   const totalSpecs = rounds * queriesPerRound
   if (!Number.isSafeInteger(totalSpecs))
     fail('rounds*queriesPerRound overflows the safe-integer range')
   if (o.phase === 'incremental') {
     if (round !== rounds)
       fail(`incremental round must equal rounds (${rounds}), got ${round}`)
-  } else if (round >= rounds) {
+  } else if (o.phase === 'hydrate' && round >= rounds) {
     fail(`${o.phase} round ${round} must be < rounds ${rounds}`)
+  } else if (round > rounds) {
+    fail(`${o.phase} round ${round} must be <= rounds ${rounds}`)
   }
-  const liveAtRound =
-    o.phase === 'incremental' ? totalSpecs : (round + 1) * queriesPerRound
+  const liveAtRound = Math.min(round + 1, rounds) * queriesPerRound
   if (specIndex >= liveAtRound)
     fail(
       `specIndex ${specIndex} out of range for ${o.phase} round ${round} (< ${liveAtRound})`
