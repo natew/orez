@@ -801,13 +801,13 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
 
   // the two NON-exact writer shapes the sweep live-integration emits (parser
   // classification is proven above; here the WRITER must produce them correctly).
-  {
+  for (const round of [3, 10]) {
     // post-writes cross-target: never exact, never minimized, full seeded replay.
     const pw = buildSweepDivergence({
       phase: 'post-writes',
       comparisonKind: 'cross-target',
-      round: 3,
-      specIndex: 5,
+      round,
+      specIndex: round === 10 ? 39 : 5,
       rounds: 10,
       queriesPerRound: 4,
       seed: 42,
@@ -825,8 +825,25 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
         !pw.minimizationComplete &&
         !pw.replay.includes('--replay-corpus') &&
         pw.replay.startsWith('bun src/sweep.ts --seed 42'),
-      'writer: post-writes cross-target is non-exact with a full seeded replay'
+      `writer: post-writes round ${round} is non-exact with a full seeded replay`
     )
+    if (round === 10) {
+      rejects(
+        () => pw,
+        (o) => (o.round = 11),
+        'post-writes beyond the final transaction'
+      )
+      rejects(
+        () => pw,
+        (o) => (o.specIndex = 40),
+        'final transaction has no extra specs'
+      )
+      rejects(
+        () => pw,
+        (o) => (o.phase = 'hydrate'),
+        'hydrate cannot use the final transaction round'
+      )
+    }
   }
   {
     // incremental single-target observed on stock-zero: round === rounds.

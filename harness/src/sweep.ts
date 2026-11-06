@@ -911,9 +911,9 @@ try {
 
     // mirrored random writes through each target's own client + upstream sql
     const writes = genWrites(round)
-    const acks: Promise<void>[] = []
     for (const write of writes) {
       if (write.kind === 'mutate') {
+        const acks: Promise<void>[] = []
         for (const [targetName, zero] of [
           [stock.name, stockZero],
           [other.name, otherZero],
@@ -928,12 +928,14 @@ try {
           )
           await withTimeout(req.client, 15_000, `client apply: ${write.label}`)
         }
+        // a later sql write may update the row this mutation creates. wait for
+        // both servers so it cannot run against an optimistic-only client row.
+        await withTimeout(Promise.all(acks), 30_000, `server acks: ${write.label}`)
       } else {
         await stock.sql(write.sql)
         await other.sql(write.sql)
       }
     }
-    await withTimeout(Promise.all(acks), 30_000, `round ${round} server acks`)
 
     // the marker must arrive through replication; a client mutation makes it
     // visible optimistically before the preceding server changes reach views.

@@ -110,8 +110,10 @@ the frozen grammar has one source of truth.
   false when nonexact; target-role invariants; `constructCount === constructCount(spec)`;
   `replay` EXACT-equal to the canonical builder. Provenance: `rounds*queriesPerRound`
   safe-integer (overflow guard for every phase), then phase-sensitive
-  `specIndex < (round+1)*queriesPerRound` (hydrate/post) / `< rounds*queriesPerRound`
-  (incremental). If `expectedFingerprint` is passed, `sourceFingerprint` must equal it.
+  `specIndex < min(round+1, rounds)*queriesPerRound`. Hydration requires `round < rounds`;
+  post-writes allows `round === rounds` for the final mixed transaction, which generates
+  no extra query shapes; incremental requires `round === rounds`.
+  If `expectedFingerprint` is passed, `sourceFingerprint` must equal it.
 - `loadCorpus(dir)` — a **missing directory is the deterministic empty infrastructure
   state (`[]`, no throw)**; otherwise reads `*.json` in SORTED filename order, parses
   each against the CURRENT fixture fingerprint, then rejects DUPLICATE ids (before the
