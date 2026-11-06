@@ -588,16 +588,38 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
 
   const operationFaults = new Map<string, NonNullable<typeof pendingFault>>()
 
+  // a background client request can fire the armed kill while an idempotent
+  // admin request is in flight. recover and retry it once after a confirmed
+  // kill; preserve failures unrelated to the injected outage.
+  const throughKill = async <T>(request: () => Promise<T>, label: string) => {
+    // the server holds exactly the last armed fault, which this step
+    // captured here: by the time a concurrent fire clears
+    // pendingFault, this handle still awaits its receipt.
+    const armed = pendingFault
+    try {
+      return await request()
+    } catch (error) {
+      if (await recoverObservedKill()) return request()
+      const armedKill = armed?.receipt.arm.kind === 'kill' ? armed : undefined
+      if (!armedKill) throw error
+      const resolution = await withTimeout(
+        armedKill.resolution,
+        `${label} kill receipt`,
+        5_000
+      ).catch(() => undefined)
+      if (resolution !== 'fired') throw error
+      await recoverKill(armedKill)
+      return request()
+    }
+  }
+
   const completeMutation = async (
     request: { client: Promise<unknown>; server: Promise<unknown> },
     label: string
   ) => {
-    const kill =
-      pendingFault?.receipt.arm.kind === 'kill' &&
-      pendingFault.receipt.arm.point.startsWith('push_')
-        ? pendingFault
-        : undefined
+    const kill = pendingFault?.receipt.arm.kind === 'kill' ? pendingFault : undefined
     await withTimeout(request.client, `client ${label}`)
+    await recoverObservedKill()
     const server = withTimeout(
       assertServerOutcome(request.server, 'success', label),
       `server ${label}`
@@ -689,7 +711,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           break
         }
         case 'responseLoss': {
-          await target.dropNextPushResponse()
+          await throughKill(() => target.dropNextPushResponse(), 'arm response loss')
           const request = client.mutate(
             mutators.task.create({
               id: operation.id,
@@ -700,8 +722,9 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
             })
           )
           await completeMutation(request, `lost-response ${operation.id}`)
-          const rows = await target.oracle(
-            `SELECT id FROM task WHERE id = '${operation.id}'`
+          const rows = await throughKill(
+            () => target.oracle(`SELECT id FROM task WHERE id = '${operation.id}'`),
+            'lost-response oracle'
           )
           if (rows.length !== 1)
             throw new Error(
@@ -713,32 +736,6 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           const pullFault = pendingFault?.receipt.arm.point.startsWith('pull_')
             ? pendingFault
             : undefined
-          const pullKill = pullFault?.receipt.arm.kind === 'kill' ? pullFault : undefined
-          // a background client push or pull can fire the armed kill (push or
-          // pull point) while a prune request is in flight, taking the server
-          // down under it. the setup writes are idempotent, so recover and
-          // retry once when a kill did the damage; anything else rethrows.
-          const throughKill = async <T>(request: () => Promise<T>, label: string) => {
-            // the server holds exactly the last armed fault, which this step
-            // captured here: by the time a concurrent fire clears
-            // pendingFault, this handle still awaits its receipt.
-            const armed = pendingFault
-            try {
-              return await request()
-            } catch (error) {
-              if (await recoverObservedKill()) return request()
-              const armedKill = armed?.receipt.arm.kind === 'kill' ? armed : pullKill
-              if (!armedKill) throw error
-              const resolution = await withTimeout(
-                armedKill.resolution,
-                `${label} kill receipt`,
-                5_000
-              ).catch(() => undefined)
-              if (resolution !== 'fired') throw error
-              await recoverKill(armedKill)
-              return request()
-            }
-          }
           for (let index = 0; index < 16; index++) {
             const id = `sm-prune-${seed}-${operation.epoch}-${index}`
             // A background push or pull can consume an armed kill while this
