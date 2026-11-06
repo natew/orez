@@ -58,6 +58,16 @@ describeIfBuilt('Database', () => {
       () => new Database('/nonexistent/path/db.sqlite', { fileMustExist: true })
     ).toThrow()
   })
+
+  it('accepts double-quoted strings only when doubleQuotedStrings is set', () => {
+    const query = 'SELECT "x" AS v'
+    const strict = new Database(':memory:')
+    expect(() => strict.prepare(query)).toThrow(/no such column/)
+    strict.close()
+    const lenient = new Database(':memory:', { doubleQuotedStrings: true })
+    expect(lenient.prepare(query).get()).toEqual({ v: 'x' })
+    lenient.close()
+  })
 })
 
 describeIfBuilt('exec', () => {

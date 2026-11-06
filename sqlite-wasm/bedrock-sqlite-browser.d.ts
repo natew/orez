@@ -15,6 +15,8 @@ declare module "bedrock-sqlite/browser" {
   interface DatabaseOptions {
     readonly?: boolean;
     fileMustExist?: boolean;
+    // accept double-quoted string literals that match no column (sqlite DQS 3); the build default rejects them
+    doubleQuotedStrings?: boolean;
   }
 
   interface FunctionOptions {

@@ -15,6 +15,8 @@ const SQLITE_UTF8 = 1
 const SQLITE_TRANSIENT = -1
 const SQLITE_DETERMINISTIC = 2048
 const SQLITE_DIRECTONLY = 524288
+const SQLITE_DBCONFIG_DQS_DML = 1013
+const SQLITE_DBCONFIG_DQS_DDL = 1014
 
 const INT32_MIN = -2147483648
 const INT32_MAX = 2147483647
@@ -100,6 +102,7 @@ Module.onRuntimeInitialized = () => {
     result_int64: [v, n2],
     result_error: [v, n3],
     get_autocommit: [n, n1],
+    db_config: [n, [n, n, n]],
     free: [v, n1],
     db_filename: [s, [n, s]],
     backup_init: [n, [n, s, n, s]],
@@ -308,6 +311,16 @@ Module.onRuntimeInitialized = () => {
         if (this._ptr !== NULL) sqlite3.close_v2(this._ptr)
         this._ptr = null
         throw new SqliteError(msg)
+      }
+
+      if (options.doubleQuotedStrings !== undefined) {
+        // sqlite3_db_config is variadic: wasm passes its (int onoff, int* result) as a stack buffer
+        const args = _malloc(8)
+        setValue(args, options.doubleQuotedStrings ? 1 : 0, 'i32')
+        setValue(args + 4, 0, 'i32')
+        sqlite3.db_config(this._ptr, SQLITE_DBCONFIG_DQS_DML, args)
+        sqlite3.db_config(this._ptr, SQLITE_DBCONFIG_DQS_DDL, args)
+        _free(args)
       }
 
       this._open = true
