@@ -12,7 +12,11 @@ import {
   type NamespaceBackupSnapshot,
   type NamespaceBackupSnapshotOptions,
 } from './namespace-backup.js'
-import { ZeroDO as OrezZeroDO } from './worker.js'
+import {
+  ZeroDO as OrezZeroDO,
+  type ChangeLogRetentionOptions,
+  type PruneChangesResult,
+} from './worker.js'
 
 import type { NamespaceRoutingOptions } from '../worker/cf-do-shim.js'
 import type {
@@ -73,6 +77,7 @@ export interface OrezDataWorkerStub extends ApplicationSqlRpc {
   orezStartApplicationSchema(version: string, instance: string): Promise<OrezSchemaStatus>
   orezImportBatch(statements: readonly NamespaceBackupStatement[]): Promise<void>
   orezBeginRestore(): Promise<void>
+  pruneChanges(options?: ChangeLogRetentionOptions): Promise<PruneChangesResult>
 }
 
 export interface OrezDataWorkerNamespace extends ApplicationSqlDurableObjectNamespace {
@@ -92,6 +97,8 @@ export interface OrezDataWorkerEnv {
   OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN?: string
   OREZ_DO_WRITE_BUDGET_DISABLED?: string
   OREZ_SQL_TELEMETRY_SAMPLE_RATE?: string
+  OREZ_CHANGE_LOG_KEEP_ROWS?: string
+  OREZ_CHANGE_LOG_OLDER_THAN_MS?: string
   [binding: string]: unknown
 }
 
@@ -201,6 +208,8 @@ export interface OrezDataWorkerOptions<
     rows?: number
     windowMs?: number
   }
+  /** Optional prefix retention policy for `_zero_changes` (off by default). */
+  changeLogRetention?: ChangeLogRetentionOptions
   /**
    * Notify an application-owned consumer after a transaction durably commits
    * published CDC rows. Invocation and failure handling run through the
@@ -288,6 +297,7 @@ const STANDARD_DATA_PATHS = [
   '/_orez/write-budget/trip',
   '/_orez/write-budget/reopen',
   '/_orez/write-budget',
+  '/_orez/changes/prune',
   '/_orez/schema-status',
   '/_orez/schema/migrate',
   '/snapshot',
@@ -646,6 +656,27 @@ export function createOrezDataWorker<
       throw new TypeError(`writeBudget.${name} must be a positive safe integer`)
     }
   }
+  if (options.changeLogRetention) {
+    const { keepRows, olderThanMs, batchSize } = options.changeLogRetention
+    if (keepRows !== undefined && (!Number.isSafeInteger(keepRows) || keepRows < 0)) {
+      throw new TypeError(
+        'changeLogRetention.keepRows must be a nonnegative safe integer'
+      )
+    }
+    if (
+      olderThanMs !== undefined &&
+      (typeof olderThanMs !== 'number' ||
+        !Number.isFinite(olderThanMs) ||
+        olderThanMs < 0)
+    ) {
+      throw new TypeError(
+        'changeLogRetention.olderThanMs must be a nonnegative finite number'
+      )
+    }
+    if (batchSize !== undefined && (!Number.isSafeInteger(batchSize) || batchSize < 1)) {
+      throw new TypeError('changeLogRetention.batchSize must be a positive safe integer')
+    }
+  }
 
   const requestSignals = new AsyncLocalStorage<AbortSignal>()
   const schemaVersion = options.schema.version
@@ -707,6 +738,12 @@ export function createOrezDataWorker<
         guardSchema
       )
       this.orezStorage = ctx.storage
+      if (options.changeLogRetention) {
+        this.changeLogRetention = {
+          ...this.changeLogRetention,
+          ...options.changeLogRetention,
+        }
+      }
       this.orezWorkerVersion = env.CF_VERSION?.id ?? ''
       this.orezEnv = env
       this.orezExecutionContext = ctx

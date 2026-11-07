@@ -49,6 +49,7 @@ export const engine_finalize_snapshot_generation = withWasm(
 export const engine_finalize_table_bootstrap = withWasm(
   generated.engine_finalize_table_bootstrap
 )
+export const engine_forget_user = withWasm(generated.engine_forget_user)
 export const engine_handle_query_pull = withWasm(generated.engine_handle_query_pull)
 export const engine_init_query_schema = withWasm(generated.engine_init_query_schema)
 export const engine_init_schema = withWasm(generated.engine_init_schema)

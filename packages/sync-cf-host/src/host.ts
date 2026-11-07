@@ -32,6 +32,7 @@ import {
   engine_finalize,
   engine_finalize_snapshot_generation,
   engine_finalize_table_bootstrap,
+  engine_forget_user,
   engine_handle_query_pull,
   engine_init_query_schema,
   engine_init_schema,
@@ -1631,16 +1632,22 @@ export function createSyncDurableObject<
           startWatermark: page.watermark,
         },
         () =>
-          this.ctx.storage.transactionSync(() =>
-            this.#wasm(() =>
+          this.ctx.storage.transactionSync(() => {
+            if (!selected && this.#snapshotRequired) {
+              this.#controlSet('tableBootstrap', '[]')
+            }
+            return this.#wasm(() =>
               engine_begin_snapshot_generation(
                 this.#engineDb,
                 config.schema,
                 String(page.watermark)
               )
             )
-          )
+          })
       ) as SnapshotProgress
+      if (!selected) {
+        this.#tableBootstrap = null
+      }
       return {
         progress,
         page: progress.table === table ? page : { ...page, rows: [], nextCursor: null },
@@ -1741,7 +1748,7 @@ export function createSyncDurableObject<
           }
         }
         let progress = this.#snapshotProgress()
-        const bootstrap = forceSnapshot ? undefined : (this.#tableBootstrap ?? undefined)
+        let bootstrap = forceSnapshot ? undefined : (this.#tableBootstrap ?? undefined)
         if (this.#snapshotRequired && !progress) forceSnapshot = true
         this.#ingestBreaker.assertReady()
         const startingWatermark = this.#engineState().watermark
@@ -1847,6 +1854,7 @@ export function createSyncDurableObject<
             const activeProgress = progress
             if (bootstrap && activeProgress.cursor !== null) {
               const result = this.#publishTableBootstrap(bootstrap, activeProgress)
+              if (result.caughtUp) bootstrap = undefined
               total += result.applied
               this.#recordIngestLogicalRows(result.applied)
               progress = this.#snapshotProgress()
@@ -1864,11 +1872,10 @@ export function createSyncDurableObject<
             endpoint.searchParams.set('limit', String(upstreamLimit))
             const { response, body } = await this.#fetchUpstreamJson(endpoint)
             if (response.status === 410) {
-              if (bootstrap)
-                throw requestError(
-                  'table bootstrap requires a retained live feed cursor',
-                  409
-                )
+              if (bootstrap) {
+                bootstrap = undefined
+                this.#snapshotRequired = true
+              }
               const begun = await this.#beginSnapshotGeneration(path, bootstrap)
               progress = begun.progress
               pendingPage = begun.page
@@ -1939,6 +1946,7 @@ export function createSyncDurableObject<
                   ...activeProgress,
                   catchupWatermark: String(result.watermark),
                 })
+                if (published.caughtUp) bootstrap = undefined
                 total += published.applied
                 this.#recordIngestLogicalRows(published.applied)
                 progress = this.#snapshotProgress()
@@ -1996,11 +2004,10 @@ export function createSyncDurableObject<
           endpoint.searchParams.set('limit', String(upstreamLimit))
           const { response, body } = await this.#fetchUpstreamJson(endpoint)
           if (response.status === 410) {
-            if (bootstrap)
-              throw requestError(
-                'table bootstrap requires a retained live feed cursor',
-                409
-              )
+            if (bootstrap) {
+              bootstrap = undefined
+              this.#snapshotRequired = true
+            }
             const begun = await this.#beginSnapshotGeneration(path)
             progress = begun.progress
             pendingPage = begun.page
@@ -2937,6 +2944,56 @@ export function createSyncDurableObject<
               }
             }
             return json({ ok: true, userID: targetUserID, revokedAt, closedSockets })
+          })
+      }
+      if (route === '/admin/forget-user') {
+        if (request.method !== 'POST') {
+          return json({ error: 'method not allowed' }, 405)
+        }
+        return request
+          .json()
+          .catch(() => ({}))
+          .then((body) => {
+            const parsed = typeof body === 'object' && body !== null ? body : {}
+            const targetUserID =
+              'userID' in parsed && typeof parsed.userID === 'string'
+                ? parsed.userID
+                : 'userId' in parsed && typeof parsed.userId === 'string'
+                  ? parsed.userId
+                  : null
+            if (!targetUserID) {
+              return json({ error: 'userID is required' }, 400)
+            }
+            const deletedGroups = this.ctx.storage.transactionSync(() => {
+              const deleted = this.#wasm(() =>
+                engine_forget_user(this.#engineDb, targetUserID)
+              ) as number
+              if (
+                this.#directSql.query(
+                  "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'orez_revocations'"
+                ).length > 0
+              ) {
+                this.#directSql.exec('DELETE FROM orez_revocations WHERE user_id = ?', [
+                  targetUserID,
+                ])
+              }
+              return deleted
+            })
+            let closedSockets = 0
+            for (const socket of this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG)) {
+              const attachment = socketAttachment(socket)
+              if (attachment?.identity?.userID === targetUserID) {
+                this.#realtimeDrop(socket)
+                socketCloseQuietly(socket, 1008, 'user forgotten')
+                closedSockets++
+              }
+            }
+            return json({
+              ok: true,
+              userID: targetUserID,
+              deletedGroups,
+              closedSockets,
+            })
           })
       }
       if (route === '/admin/sql-billing') return json({ ...this.#sqlBilling })

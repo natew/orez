@@ -446,6 +446,29 @@ export function createSyncExecutor<S extends Schema>(
         return value
       })
     },
+
+    async forgetUser(userID: string): Promise<number> {
+      if (!userID || typeof userID !== 'string') {
+        throw new Error('userID must be a non-empty string')
+      }
+      return database.transaction(async (applicationTx) => {
+        const tables = await applicationTx.query<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_zsync_clients'"
+        )
+        if (tables.length === 0) return 0
+        const groups = await applicationTx.query<{ clientGroupID: string }>(
+          'SELECT DISTINCT clientGroupID FROM _zsync_clients WHERE userID = ? ORDER BY clientGroupID',
+          [userID]
+        )
+        if (groups.length === 0) return 0
+        for (const { clientGroupID } of groups) {
+          await applicationTx.exec('DELETE FROM _zsync_clients WHERE clientGroupID = ?', [
+            clientGroupID,
+          ])
+        }
+        return groups.length
+      })
+    },
   }
 }
 

@@ -1167,4 +1167,59 @@ describe('sync executor', () => {
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
     expect(storedLMID(sqlite)).toBe(1)
   })
+
+  test('forgetUser removes all _zsync_clients rows for that user without touching other users', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    const executor = createSyncExecutor({
+      database,
+      effects,
+      mutators: {
+        noop: async () => {},
+      },
+      schema,
+    })
+
+    // Cold database before _zsync_clients exists writes nothing and returns 0
+    await expect((executor as any).forgetUser('user-deleted')).resolves.toBe(0)
+
+    await executor.push(
+      {
+        pushVersion: 1,
+        clientGroupID: 'group-del-1',
+        mutations: [
+          { type: 'custom', clientID: 'c-del-1', id: 1, name: 'noop', args: [{}] },
+        ],
+      },
+      { userID: 'user-deleted' }
+    )
+    await executor.push(
+      {
+        pushVersion: 1,
+        clientGroupID: 'group-del-2',
+        mutations: [
+          { type: 'custom', clientID: 'c-del-2', id: 1, name: 'noop', args: [{}] },
+        ],
+      },
+      { userID: 'user-deleted' }
+    )
+    await executor.push(
+      {
+        pushVersion: 1,
+        clientGroupID: 'group-stay',
+        mutations: [
+          { type: 'custom', clientID: 'c-stay', id: 1, name: 'noop', args: [{}] },
+        ],
+      },
+      { userID: 'user-stay' }
+    )
+
+    await expect((executor as any).forgetUser('user-deleted')).resolves.toBe(2)
+    expect(
+      sqlite
+        .prepare(
+          'SELECT clientGroupID, userID FROM _zsync_clients ORDER BY clientGroupID'
+        )
+        .all()
+    ).toEqual([{ clientGroupID: 'group-stay', userID: 'user-stay' }])
+  })
 })

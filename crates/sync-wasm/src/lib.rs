@@ -934,6 +934,13 @@ pub fn engine_invalidate(db: &JsSyncDb) -> Result<(), JsValue> {
     sync_core::invalidate(&mut db).map_err(engine_error)
 }
 
+#[wasm_bindgen]
+pub fn engine_forget_user(db: &JsSyncDb, user_id: &str) -> Result<u32, JsValue> {
+    let mut db = WasmDb(db);
+    let groups = sync_core::forget_user(&mut db, user_id).map_err(engine_error)?;
+    Ok(groups as u32)
+}
+
 #[derive(Deserialize)]
 struct MutationResultWire {
     #[serde(rename = "clientID")]

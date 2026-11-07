@@ -10,6 +10,7 @@ export {
   isApplicationSqlBusyError,
   ZeroDO,
 } from './cf-do/worker.js'
+export type { ChangeLogRetentionOptions, PruneChangesResult } from './cf-do/worker.js'
 export type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,

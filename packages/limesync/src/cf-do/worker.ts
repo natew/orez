@@ -628,6 +628,56 @@ class ApplicationSqlSessionTarget extends RpcTarget {
   }
 }
 
+export interface ChangeLogRetentionOptions {
+  /** Retain at most this many most-recent `_zero_changes` rows. */
+  keepRows?: number
+  /** Prune `_zero_changes` rows whose commit time is older than `now - olderThanMs`. */
+  olderThanMs?: number
+  /** Prune `_zero_changes` rows with `watermark <= throughWatermark`. */
+  throughWatermark?: number
+  /** Maximum rows deleted per storage transaction batch (default 1,000). */
+  batchSize?: number
+  /** Override current epoch milliseconds for deterministic age pruning. */
+  now?: number
+}
+
+export interface PruneChangesResult {
+  deleted: number
+  batches: number
+  watermark: number
+  oldestWatermark: number | null
+}
+
+const DEFAULT_PRUNE_CHANGES_BATCH_SIZE = 1_000
+
+function envChangeLogRetention(
+  env: Record<string, unknown>
+): ChangeLogRetentionOptions | undefined {
+  const rawKeepRows = env.OREZ_CHANGE_LOG_KEEP_ROWS
+  const rawOlderThanMs = env.OREZ_CHANGE_LOG_OLDER_THAN_MS
+  const keepRows =
+    typeof rawKeepRows === 'string' && rawKeepRows.trim().length > 0
+      ? Number(rawKeepRows)
+      : undefined
+  const olderThanMs =
+    typeof rawOlderThanMs === 'string' && rawOlderThanMs.trim().length > 0
+      ? Number(rawOlderThanMs)
+      : undefined
+  const validKeepRows =
+    keepRows !== undefined && Number.isSafeInteger(keepRows) && keepRows >= 0
+      ? keepRows
+      : undefined
+  const validOlderThanMs =
+    olderThanMs !== undefined && Number.isFinite(olderThanMs) && olderThanMs >= 0
+      ? olderThanMs
+      : undefined
+  if (validKeepRows === undefined && validOlderThanMs === undefined) return undefined
+  return {
+    ...(validKeepRows === undefined ? {} : { keepRows: validKeepRows }),
+    ...(validOlderThanMs === undefined ? {} : { olderThanMs: validOlderThanMs }),
+  }
+}
+
 export class ZeroDO extends DurableObject {
   private readonly bootID = crypto.randomUUID()
   private readonly bootedAt = Date.now()
@@ -670,6 +720,8 @@ export class ZeroDO extends DurableObject {
   private rollbackSql = false
   private writeBudgetReopening = false
   private backupMaintenance = false
+  private inStorageTransaction = false
+  protected changeLogRetention: ChangeLogRetentionOptions | undefined
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
   private applicationSqlTurns: ApplicationSqlTurn[] = []
   private applicationSqlGrantStalls: ApplicationSqlGrantStall[] = []
@@ -885,6 +937,9 @@ export class ZeroDO extends DurableObject {
     this.sql = ctx.storage.sql
     this.configuredNumberGuards = !!schema
     this.numberGuards = schema ? new NumberStorageGuards(this.sql, schema) : null
+    this.changeLogRetention = envChangeLogRetention(
+      (env ?? {}) as Record<string, unknown>
+    )
     this.writeBudgetDisabled = /^(?:1|true)$/i.test(
       env.OREZ_DO_WRITE_BUDGET_DISABLED ?? ''
     )
@@ -1314,6 +1369,8 @@ export class ZeroDO extends DurableObject {
       return this.handleWriteBudgetTrip(request)
     if (url.pathname === '/_orez/write-budget/reopen' && request.method === 'POST')
       return this.handleWriteBudgetReopen(request)
+    if (url.pathname === '/_orez/changes/prune' && request.method === 'POST')
+      return this.handlePruneChanges(request)
     if (
       (url.pathname === '/zero/push' || url.pathname === '/api/zero/push') &&
       request.method === 'POST'
@@ -1441,6 +1498,35 @@ export class ZeroDO extends DurableObject {
       request.headers.get('x-orez-admin-token') ??
       request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
     return Boolean(this.writeBudgetAdminToken && supplied === this.writeBudgetAdminToken)
+  }
+
+  private async handlePruneChanges(request: Request): Promise<Response> {
+    if (!this.hasAdminToken(request)) {
+      return Response.json({ error: 'forbidden' }, { status: 403 })
+    }
+    let body: ChangeLogRetentionOptions | undefined
+    const text = await request.text().catch(() => '')
+    if (text.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(text)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return Response.json({ error: 'invalid prune options' }, { status: 400 })
+        }
+        body = parsed as ChangeLogRetentionOptions
+      } catch {
+        return Response.json({ error: 'invalid prune options' }, { status: 400 })
+      }
+    }
+    return this.withApplicationSqlTurn(() => {
+      try {
+        return Response.json(this.pruneChanges(body))
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: error instanceof TypeError ? 400 : 500 }
+        )
+      }
+    }, request.signal)
   }
 
   // ── Zero sync protocol ──────────────────────────────────────────────────
@@ -1971,11 +2057,41 @@ export class ZeroDO extends DurableObject {
       // reserve space for the feed metadata below the sync host's 8 mib cap.
       // full row images include every streaming update, so a row limit alone
       // can produce a page much larger than the current application data.
-      const changes = this.readChangesSince(
+      const { changes, truncated } = this.readChangesPageSince(
         watermark,
         changeLimit,
         4 * 1024 * 1024 - 1024
       )
+      if (watermark < head) {
+        let expected = watermark + 1
+        for (const change of changes) {
+          if (change.watermark !== expected) {
+            return Response.json(
+              {
+                error: 'changeLogGap',
+                message: `_zero_changes is missing watermark ${expected} (found ${change.watermark})`,
+                expectedWatermark: expected,
+                actualWatermark: change.watermark,
+                watermark: head,
+              },
+              { status: 500 }
+            )
+          }
+          expected = change.watermark + 1
+        }
+        if (!truncated && expected - 1 < head) {
+          return Response.json(
+            {
+              error: 'changeLogGap',
+              message: `_zero_changes ended at watermark ${expected - 1} before head ${head}`,
+              expectedWatermark: expected,
+              actualWatermark: null,
+              watermark: head,
+            },
+            { status: 500 }
+          )
+        }
+      }
       return Response.json({
         watermark: head,
         changes,
@@ -2192,6 +2308,10 @@ export class ZeroDO extends DurableObject {
     work: () => T,
     session?: ApplicationSqlSessionTarget
   ): Promise<T> {
+    if (this.inStorageTransaction) {
+      return this.withMaintenanceSql(session, work)
+    }
+    this.inStorageTransaction = true
     try {
       return await this.ctx.storage.transaction(() =>
         this.withMaintenanceSql(session, work)
@@ -2199,6 +2319,8 @@ export class ZeroDO extends DurableObject {
     } catch (error) {
       this.invalidateSchemaCaches()
       throw error
+    } finally {
+      this.inStorageTransaction = false
     }
   }
 
@@ -3256,11 +3378,17 @@ export class ZeroDO extends DurableObject {
   }
 
   private atomicallySync<T>(work: () => T): T {
+    if (this.inStorageTransaction) {
+      return work()
+    }
+    this.inStorageTransaction = true
     try {
       return this.ctx.storage.transactionSync(work)
     } catch (error) {
       this.invalidateSchemaCaches()
       throw error
+    } finally {
+      this.inStorageTransaction = false
     }
   }
 
@@ -3901,6 +4029,9 @@ export class ZeroDO extends DurableObject {
       oldData ? JSON.stringify(oldData) : null
     )
     this.watermarks.mark(watermark)
+    if (this.changeLogRetention) {
+      this.pruneChanges(this.changeLogRetention)
+    }
   }
 
   private ensurePendingTrackedChangesTable() {
@@ -3934,6 +4065,9 @@ export class ZeroDO extends DurableObject {
       this.watermarks.mark(watermark)
     }
     this.deletePendingTrackedChanges(transactionID)
+    if (rows.length > 0 && this.changeLogRetention) {
+      this.pruneChanges(this.changeLogRetention)
+    }
     return rows.length
   }
 
@@ -3942,7 +4076,253 @@ export class ZeroDO extends DurableObject {
     return deletePendingChanges(this.sql, transactionID)
   }
 
+  pruneChanges(options?: ChangeLogRetentionOptions): PruneChangesResult {
+    const effective = options ?? this.changeLogRetention
+    if (effective?.keepRows !== undefined) {
+      if (!Number.isSafeInteger(effective.keepRows) || effective.keepRows < 0) {
+        throw new TypeError('keepRows must be a nonnegative safe integer')
+      }
+    }
+    if (effective?.olderThanMs !== undefined) {
+      if (
+        typeof effective.olderThanMs !== 'number' ||
+        !Number.isFinite(effective.olderThanMs) ||
+        effective.olderThanMs < 0
+      ) {
+        throw new TypeError('olderThanMs must be a nonnegative finite number')
+      }
+    }
+    if (effective?.throughWatermark !== undefined) {
+      if (
+        !Number.isSafeInteger(effective.throughWatermark) ||
+        effective.throughWatermark < 0
+      ) {
+        throw new TypeError('throughWatermark must be a nonnegative safe integer')
+      }
+    }
+    const batchSize =
+      effective?.batchSize === undefined
+        ? DEFAULT_PRUNE_CHANGES_BATCH_SIZE
+        : effective.batchSize
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1) {
+      throw new TypeError('batchSize must be a positive safe integer')
+    }
+    const nowMs = effective?.now === undefined ? Date.now() : effective.now
+    if (typeof nowMs !== 'number' || !Number.isFinite(nowMs)) {
+      throw new TypeError('now must be a finite number')
+    }
+
+    const previousBackupMaintenance = this.backupMaintenance
+    this.backupMaintenance = true
+    try {
+      const hasChangesTable =
+        this.sql
+          .exec(
+            "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_zero_changes' LIMIT 1"
+          )
+          .toArray().length > 0
+      const hasStateTable =
+        this.sql
+          .exec(
+            "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_zero_change_state' LIMIT 1"
+          )
+          .toArray().length > 0
+      const stateWatermark = hasStateTable
+        ? Number(
+            (
+              this.sql
+                .exec('SELECT last_value FROM _zero_change_state WHERE id = 1')
+                .one() as { last_value?: number } | null
+            )?.last_value ?? 0
+          )
+        : 0
+      if (!hasChangesTable) {
+        return {
+          deleted: 0,
+          batches: 0,
+          watermark: stateWatermark,
+          oldestWatermark: null,
+        }
+      }
+
+      const bounds = this.sql
+        .exec(
+          'SELECT MIN(watermark) AS minWatermark, MAX(watermark) AS maxWatermark FROM _zero_changes'
+        )
+        .one() as { minWatermark?: number | null; maxWatermark?: number | null } | null
+      const minWatermark =
+        bounds?.minWatermark == null ? null : Number(bounds.minWatermark)
+      const maxWatermark =
+        bounds?.maxWatermark == null ? null : Number(bounds.maxWatermark)
+      const head = Math.max(stateWatermark, maxWatermark ?? 0)
+      if (minWatermark === null || maxWatermark === null) {
+        return {
+          deleted: 0,
+          batches: 0,
+          watermark: head,
+          oldestWatermark: null,
+        }
+      }
+
+      if (
+        !effective ||
+        (effective.keepRows === undefined &&
+          effective.olderThanMs === undefined &&
+          effective.throughWatermark === undefined)
+      ) {
+        return {
+          deleted: 0,
+          batches: 0,
+          watermark: head,
+          oldestWatermark: minWatermark,
+        }
+      }
+
+      // Preserve the high-water mark before any prune if _zero_change_state is
+      // behind _zero_changes; normal commits already advance _zero_change_state.
+      if (maxWatermark > stateWatermark) {
+        this.watermarks.ensureTables()
+        this.watermarks.mark(maxWatermark)
+      }
+
+      let fixedCutoff: number | null =
+        effective.throughWatermark === undefined
+          ? null
+          : Math.min(effective.throughWatermark, maxWatermark)
+      if (effective.keepRows !== undefined) {
+        let keepCutoff: number | null = null
+        if (effective.keepRows === 0) {
+          keepCutoff = maxWatermark
+        } else if (maxWatermark - minWatermark >= effective.keepRows) {
+          const cutoffRow = this.sql
+            .exec(
+              'SELECT watermark FROM _zero_changes ORDER BY watermark DESC LIMIT 1 OFFSET ?',
+              effective.keepRows
+            )
+            .one() as { watermark?: number | null } | null
+          if (cutoffRow?.watermark != null) {
+            keepCutoff = Number(cutoffRow.watermark)
+          }
+        }
+        if (keepCutoff !== null) {
+          fixedCutoff =
+            fixedCutoff === null ? keepCutoff : Math.max(fixedCutoff, keepCutoff)
+        }
+      }
+
+      const ageCutoffMs =
+        effective.olderThanMs === undefined ? null : nowMs - effective.olderThanMs
+      if ((fixedCutoff === null || fixedCutoff < minWatermark) && ageCutoffMs === null) {
+        return {
+          deleted: 0,
+          batches: 0,
+          watermark: head,
+          oldestWatermark: minWatermark,
+        }
+      }
+
+      let deleted = 0
+      let batches = 0
+      for (;;) {
+        if (ageCutoffMs === null && fixedCutoff !== null) {
+          const batchResult = this.atomicallySync(() => {
+            const rows = this.sql
+              .exec(
+                `DELETE FROM _zero_changes
+                 WHERE watermark IN (
+                   SELECT watermark FROM _zero_changes
+                   WHERE watermark <= ?
+                   ORDER BY watermark ASC
+                   LIMIT ?
+                 )
+                 RETURNING watermark`,
+                fixedCutoff,
+                batchSize
+              )
+              .toArray()
+            const lastWatermark =
+              rows.length > 0 ? Number(rows[rows.length - 1].watermark) : null
+            return { count: rows.length, lastWatermark }
+          })
+          if (batchResult.count === 0) break
+          deleted += batchResult.count
+          batches += 1
+          if (
+            batchResult.count < batchSize ||
+            (batchResult.lastWatermark !== null &&
+              batchResult.lastWatermark >= fixedCutoff)
+          ) {
+            break
+          }
+          continue
+        }
+
+        const batchResult = this.atomicallySync(() => {
+          const candidates = this.sql
+            .exec(
+              'SELECT watermark, created_at FROM _zero_changes ORDER BY watermark ASC LIMIT ?',
+              batchSize
+            )
+            .toArray()
+          let batchCutoff: number | null = null
+          let batchCount = 0
+          for (const row of candidates) {
+            const wm = Number(row.watermark)
+            const createdAt = Number(row.created_at)
+            const commitTimeMs =
+              createdAt < 10_000_000_000 ? createdAt * 1_000 : createdAt
+            const expiredByAge = ageCutoffMs !== null && commitTimeMs <= ageCutoffMs
+            const expiredByCutoff = fixedCutoff !== null && wm <= fixedCutoff
+            if (!expiredByAge && !expiredByCutoff) break
+            batchCutoff = wm
+            batchCount += 1
+          }
+          if (batchCount === 0 || batchCutoff === null) {
+            return { count: 0, candidateCount: candidates.length }
+          }
+          this.sql.exec('DELETE FROM _zero_changes WHERE watermark <= ?', batchCutoff)
+          return { count: batchCount, candidateCount: candidates.length }
+        })
+        if (batchResult.count === 0) break
+        deleted += batchResult.count
+        batches += 1
+        if (
+          batchResult.count < batchResult.candidateCount ||
+          batchResult.candidateCount < batchSize
+        ) {
+          break
+        }
+      }
+
+      if (deleted === 0) {
+        return {
+          deleted: 0,
+          batches: 0,
+          watermark: head,
+          oldestWatermark: minWatermark,
+        }
+      }
+      const remainingFirst = this.sql
+        .exec('SELECT MIN(watermark) AS watermark FROM _zero_changes')
+        .one() as { watermark?: number | null } | null
+      const oldestWatermark =
+        remainingFirst?.watermark == null ? null : Number(remainingFirst.watermark)
+      return {
+        deleted,
+        batches,
+        watermark: head,
+        oldestWatermark,
+      }
+    } finally {
+      this.backupMaintenance = previousBackupMaintenance
+    }
+  }
+
   private readChangesSince(watermark: number, limit?: number, maxBytes?: number) {
+    return this.readChangesPageSince(watermark, limit, maxBytes).changes
+  }
+
+  private readChangesPageSince(watermark: number, limit?: number, maxBytes?: number) {
     this.watermarks.ensureTables()
     const statement =
       'SELECT watermark, table_name, op, row_data, old_data, created_at FROM _zero_changes WHERE watermark > ? ORDER BY watermark' +
@@ -3951,7 +4331,10 @@ export class ZeroDO extends DurableObject {
     const changes = []
     const encoder = new TextEncoder()
     let bytes = 0
+    let rowsRead = 0
+    let truncatedByBytes = false
     for (const row of this.sql.exec(statement, ...params)) {
+      rowsRead += 1
       const tableName = String(row.table_name)
       const rowData = row.row_data ? JSON.parse(String(row.row_data)) : null
       const oldData = row.old_data ? JSON.parse(String(row.old_data)) : null
@@ -3970,12 +4353,16 @@ export class ZeroDO extends DurableObject {
       if (maxBytes !== undefined) {
         const changeBytes = encoder.encode(JSON.stringify(change)).byteLength + 1
         // one indivisible row must advance even when it exceeds the page target.
-        if (changes.length > 0 && bytes + changeBytes > maxBytes) break
+        if (changes.length > 0 && bytes + changeBytes > maxBytes) {
+          truncatedByBytes = true
+          break
+        }
         bytes += changeBytes
       }
       changes.push(change)
     }
-    return changes
+    const truncated = truncatedByBytes || (limit !== undefined && rowsRead >= limit)
+    return { changes, truncated }
   }
 
   private watermark(): number {

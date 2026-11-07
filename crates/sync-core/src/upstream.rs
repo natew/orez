@@ -1017,6 +1017,12 @@ pub fn apply_snapshot_changes(
         ));
     }
     let mut cursor = progress.catchup_watermark;
+    if batch.changes.is_empty() && cursor < batch.watermark {
+        return Err(EngineError::internal(format!(
+            "upstream snapshot catch-up returned an empty page at cursor {cursor} behind head {}",
+            batch.watermark
+        )));
+    }
     let initial_cursor = cursor;
     let mut applied = 0;
     let mut feed = FeedRows::new(&batch.optional_columns);
@@ -1359,6 +1365,12 @@ pub fn apply_upstream(
     batch: &UpstreamBatch,
 ) -> Result<ApplyUpstreamResult, EngineError> {
     let mut cursor = upstream_watermark(db)?;
+    if batch.changes.is_empty() && cursor < batch.watermark {
+        return Err(EngineError::internal(format!(
+            "upstream change feed returned an empty page at cursor {cursor} behind head {}",
+            batch.watermark
+        )));
+    }
     let initial_cursor = cursor;
     let mut applied = 0;
     let mut feed = FeedRows::new(&batch.optional_columns);

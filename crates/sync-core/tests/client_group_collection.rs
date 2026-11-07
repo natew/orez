@@ -366,3 +366,99 @@ fn a_collected_group_that_comes_back_without_re_registering_is_served_again() {
         "its query is acknowledged as got again"
     );
 }
+
+#[test]
+fn forget_user_erases_all_client_groups_and_query_state_for_user() {
+    let mut host = Host::new();
+
+    for (group, user) in [
+        ("g-del-1", "u-deleted"),
+        ("g-del-2", "u-deleted"),
+        ("g-stays", "u-stays"),
+    ] {
+        let body = json!({
+            "clientID": format!("{group}-c"),
+            "clientGroupID": group,
+            "cookie": Value::Null,
+            "queries": { "version": 1, "patch": [
+                { "op": "put", "hash": "h-open", "ast": open_query() }
+            ]},
+        });
+        let tables = host.tables.clone();
+        host.db
+            .transaction(|db| handle_query_pull(db, &tables, RETAIN, &body, user))
+            .unwrap();
+    }
+
+    // Wake targeting populates _zsync_wake_keys for active groups
+    host.write("i-wake", 0);
+    let tables = host.tables.clone();
+    host.db
+        .transaction(|db| sync_core::query::wake_targets(db, &tables, 0))
+        .unwrap();
+
+    for group in ["g-del-1", "g-del-2", "g-stays"] {
+        assert!(host.count("_zsync_clients", group) > 0);
+        assert!(host.count("_zsync_client_group_seen", group) > 0);
+        assert!(host.count("_zsync_queries", group) > 0);
+        assert!(host.count("_zsync_desires", group) > 0);
+        assert!(host.count("_zsync_query_ack", group) > 0);
+        assert!(host.count("_zsync_query_rows", group) > 0);
+        assert!(host.count("_zsync_row_refs", group) > 0);
+        assert!(host.count("_zsync_query_state", group) > 0);
+        assert!(host.count("_zsync_wake_keys", group) > 0);
+    }
+
+    let forgotten = host
+        .db
+        .transaction(|db| sync_core::forget_user(db, "u-deleted"))
+        .unwrap();
+    assert_eq!(forgotten, 2);
+
+    for group in ["g-del-1", "g-del-2"] {
+        for table in [
+            "_zsync_clients",
+            "_zsync_client_group_seen",
+            "_zsync_queries",
+            "_zsync_desires",
+            "_zsync_query_ack",
+            "_zsync_query_transform_group",
+            "_zsync_query_transform_client",
+            "_zsync_query_rows",
+            "_zsync_row_refs",
+            "_zsync_query_state",
+            "_zsync_wake_keys",
+        ] {
+            assert_eq!(
+                host.count(table, group),
+                0,
+                "{table} still has rows for forgotten group {group}"
+            );
+        }
+    }
+
+    // Repeat call is idempotent and writes nothing
+    let forgotten_again = host
+        .db
+        .transaction(|db| sync_core::forget_user(db, "u-deleted"))
+        .unwrap();
+    assert_eq!(forgotten_again, 0);
+
+    // Other user's group is completely untouched
+    for table in [
+        "_zsync_clients",
+        "_zsync_client_group_seen",
+        "_zsync_queries",
+        "_zsync_desires",
+        "_zsync_query_ack",
+        "_zsync_query_rows",
+        "_zsync_row_refs",
+        "_zsync_query_state",
+        "_zsync_wake_keys",
+    ] {
+        assert!(
+            host.count(table, "g-stays") > 0,
+            "{table} lost rows for surviving group g-stays"
+        );
+    }
+}
