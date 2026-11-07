@@ -173,6 +173,16 @@ export type ApplicationSqlSessionOptions = {
   priority?: ApplicationSqlSessionPriority
 }
 
+/** what a committed application SQL session reports back to its caller */
+export type ApplicationSqlCommitResult = {
+  /** true when the commit published changes to tracked (Zero schema) tables */
+  published: boolean
+}
+
+export type ApplicationSqlTransactionOptions = {
+  onCommit?(result: ApplicationSqlCommitResult): void
+}
+
 export type ApplicationSqlPreemptibleResult<Value> =
   | { outcome: 'completed'; value: Value }
   | { outcome: 'preempted' }
@@ -229,8 +239,10 @@ export type ApplicationSqlSessionRpc = Disposable & {
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<ApplicationSqlPreemptibleResult<Result>>
   registerTables(tables: readonly ApplicationSqlTable[]): Promise<void>
-  commit(): Promise<void>
-  commitPreemptible(): Promise<ApplicationSqlPreemptibleResult<void>>
+  commit(): Promise<ApplicationSqlCommitResult>
+  commitPreemptible(): Promise<
+    ApplicationSqlPreemptibleResult<ApplicationSqlCommitResult>
+  >
   rollback(): Promise<void>
 }
 
@@ -271,7 +283,8 @@ export type ApplicationSqlClient = {
   transaction<Value>(
     compileQuery: ApplicationSqlQueryCompiler,
     work: ApplicationSqlTransactionWork<Value>,
-    queryBudget?: Partial<TransactionQueryBudget>
+    queryBudget?: Partial<TransactionQueryBudget>,
+    options?: ApplicationSqlTransactionOptions
   ): Promise<Value>
   /**
    * Same statements, read-only admission. Concurrent read transactions run
@@ -341,7 +354,8 @@ async function withApplicationSqlSession<Value>(
   namespace: string,
   signal: AbortSignal | undefined,
   sessionOptions: ApplicationSqlSessionOptions,
-  work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>
+  work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>,
+  onCommit?: (result: ApplicationSqlCommitResult) => void
 ): Promise<Value> {
   const sessionID = crypto.randomUUID()
   const caller = new Error()
@@ -381,11 +395,11 @@ async function withApplicationSqlSession<Value>(
         phases.work = workedAt - phaseStartedAt
         phase = 'commit'
         phaseStartedAt = workedAt
-        if (sessionOptions.priority === 'background') {
-          applicationSqlPreemptibleValue(await session.commitPreemptible())
-        } else {
-          await session.commit()
-        }
+        const committed =
+          sessionOptions.priority === 'background'
+            ? applicationSqlPreemptibleValue(await session.commitPreemptible())
+            : await session.commit()
+        onCommit?.(committed)
         const committedAt = performance.now()
         phases.commit = committedAt - phaseStartedAt
         phase = 'dispose'
@@ -444,7 +458,8 @@ export function createApplicationSqlClient(
   const target = durableObjects.get(durableObjects.idFromName(namespace))
   const session = <Value>(
     sessionOptions: ApplicationSqlSessionOptions,
-    work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>
+    work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>,
+    onCommit?: (result: ApplicationSqlCommitResult) => void
   ) =>
     withApplicationSqlSession(
       target,
@@ -453,23 +468,28 @@ export function createApplicationSqlClient(
       options.priority
         ? { ...sessionOptions, priority: options.priority }
         : sessionOptions,
-      work
+      work,
+      onCommit
     )
   const transaction = <Value>(
     sessionOptions: ApplicationSqlSessionOptions,
     compileQuery: ApplicationSqlQueryCompiler,
     work: ApplicationSqlTransactionWork<Value>,
-    queryBudget?: Partial<TransactionQueryBudget>
+    queryBudget?: Partial<TransactionQueryBudget>,
+    transactionOptions?: ApplicationSqlTransactionOptions
   ) =>
-    session(sessionOptions, (active) =>
-      work(
-        applicationSqlSessionTransaction(
-          active,
-          sessionOptions.priority === 'background' || options.priority === 'background',
-          compileQuery,
-          queryBudget
-        )
-      )
+    session(
+      sessionOptions,
+      (active) =>
+        work(
+          applicationSqlSessionTransaction(
+            active,
+            sessionOptions.priority === 'background' || options.priority === 'background',
+            compileQuery,
+            queryBudget
+          )
+        ),
+      transactionOptions?.onCommit
     )
   return {
     namespace,
@@ -491,8 +511,8 @@ export function createApplicationSqlClient(
     exec: (sql, params = [], metadata) =>
       session({}, (active) => active.exec(sql, params, metadata)),
     registerTables: (tables) => session({}, (active) => active.registerTables(tables)),
-    transaction: (compileQuery, work, queryBudget) =>
-      transaction({}, compileQuery, work, queryBudget),
+    transaction: (compileQuery, work, queryBudget, transactionOptions) =>
+      transaction({}, compileQuery, work, queryBudget, transactionOptions),
     readTransaction: (compileQuery, work, queryBudget) =>
       transaction({ readOnly: true }, compileQuery, work, queryBudget),
   }

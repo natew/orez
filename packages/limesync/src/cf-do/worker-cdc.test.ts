@@ -298,6 +298,45 @@ describe('ZeroDO transactional CDC integration', () => {
     expect(committed).toHaveBeenCalledWith(true, true)
   })
 
+  it('returns whether a commit published from commit and commitPreemptible', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+    sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')
+    const registration = await zero.applicationSqlSession('result-registration')
+    await registration.begin()
+    await registration.registerTables([
+      { table: 'item', publicTable: 'public.item' },
+      { table: 'private_note', publicTable: 'private.private_note', publish: false },
+    ])
+    await registration.commit()
+
+    const tracked = await zero.applicationSqlSession('result-tracked')
+    await tracked.begin()
+    await tracked.exec("INSERT INTO item VALUES ('one', 'x')", [], {
+      table: 'item',
+      publicTable: 'public.item',
+      kind: 'insert',
+    })
+    expect(await tracked.commit()).toEqual({ published: true })
+
+    const untracked = await zero.applicationSqlSession('result-untracked')
+    await untracked.begin()
+    await untracked.exec("INSERT INTO private_note VALUES ('one', 'x')")
+    expect(await untracked.commit()).toEqual({ published: false })
+
+    const preemptible = await zero.applicationSqlSession('result-preemptible')
+    await preemptible.begin()
+    await preemptible.exec("INSERT INTO item VALUES ('two', 'x')", [], {
+      table: 'item',
+      publicTable: 'public.item',
+      kind: 'insert',
+    })
+    expect(await preemptible.commitPreemptible()).toEqual({
+      outcome: 'completed',
+      value: { published: true },
+    })
+  })
+
   it('does not report private or no-op commits as published changes', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
@@ -510,7 +549,7 @@ describe('ZeroDO transactional CDC integration', () => {
     const session = await zero.applicationSqlSession('application-read-only')
     await session.begin()
     await expect(session.query('SELECT id FROM item')).resolves.toEqual([])
-    await expect(session.commit()).resolves.toBeUndefined()
+    await expect(session.commit()).resolves.toEqual({ published: false })
   })
 
   it('recovers an interrupted write whose foreign-key parent table is missing', async () => {
