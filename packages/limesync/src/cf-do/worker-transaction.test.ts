@@ -256,7 +256,7 @@ describe('ZeroDO trusted application transaction', () => {
       await expect(session.queryPlan(flatPlan(), 'item.byId')).resolves.toEqual([
         { id: 'row-1', enabled: true },
       ])
-      await expect(session.commit()).resolves.toBeUndefined()
+      await expect(session.commit()).resolves.toEqual({ published: false })
     } finally {
       log.mockRestore()
     }
@@ -809,7 +809,7 @@ describe('ZeroDO trusted application transaction', () => {
 
       gate = null
       open()
-      await expect(commit).resolves.toBeUndefined()
+      await expect(commit).resolves.toEqual({ published: false })
       await admission
       expect(admitted).toBe(true)
       await waiter.commit()

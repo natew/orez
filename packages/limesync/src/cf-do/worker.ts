@@ -66,6 +66,7 @@ import {
 import type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,
+  ApplicationSqlCommitResult,
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
   ApplicationSqlQueryOptions,
@@ -90,6 +91,7 @@ export {
 export type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,
+  ApplicationSqlCommitResult,
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlExecResult,
   ApplicationSqlPreemptibleResult,
@@ -605,13 +607,15 @@ class ApplicationSqlSessionTarget extends RpcTarget {
     )
   }
 
-  commit(): Promise<void> {
+  commit(): Promise<ApplicationSqlCommitResult> {
     return this.owner[APPLICATION_SQL_CALL](this, () =>
       this.owner[APPLICATION_SQL_COMMIT](this)
     )
   }
 
-  commitPreemptible(): Promise<ApplicationSqlPreemptibleResult<void>> {
+  commitPreemptible(): Promise<
+    ApplicationSqlPreemptibleResult<ApplicationSqlCommitResult>
+  > {
     return this.owner[APPLICATION_SQL_CALL](this, () =>
       this.owner[APPLICATION_SQL_COMMIT_PREEMPTIBLE](this)
     )
@@ -3148,7 +3152,9 @@ export class ZeroDO extends DurableObject {
     await this.atomically(() => this.registerApplicationSqlTables(tables), session)
   }
 
-  async [APPLICATION_SQL_COMMIT](session: ApplicationSqlSessionTarget): Promise<void> {
+  async [APPLICATION_SQL_COMMIT](
+    session: ApplicationSqlSessionTarget
+  ): Promise<ApplicationSqlCommitResult> {
     this.assertApplicationSqlSession(session)
     let published = false
     let outcome: 'committed' | 'error' = 'committed'
@@ -3189,18 +3195,18 @@ export class ZeroDO extends DurableObject {
       this.pumpApplicationSqlQueue()
     }
     if (outcome === 'error') throw error
+    return { published }
   }
 
   async [APPLICATION_SQL_COMMIT_PREEMPTIBLE](
     session: ApplicationSqlSessionTarget
-  ): Promise<ApplicationSqlPreemptibleResult<void>> {
+  ): Promise<ApplicationSqlPreemptibleResult<ApplicationSqlCommitResult>> {
     if (session.state === 'preempted') {
       this.releaseApplicationSqlTurn(session)
       this.finishApplicationSqlTelemetry(session, 'rolled_back')
       return { outcome: 'preempted' }
     }
-    await this[APPLICATION_SQL_COMMIT](session)
-    return { outcome: 'completed', value: undefined }
+    return { outcome: 'completed', value: await this[APPLICATION_SQL_COMMIT](session) }
   }
 
   /**
