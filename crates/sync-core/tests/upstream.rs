@@ -337,3 +337,33 @@ fn changes_skip_tables_absent_from_host_schema() {
     );
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 2);
 }
+
+#[test]
+fn rejects_empty_upstream_page_behind_head() {
+    let (mut db, tables) = setup();
+    apply_upstream(
+        &mut db,
+        &tables,
+        &UpstreamBatch {
+            watermark: 1,
+            optional_columns: Default::default(),
+            changes: vec![change(1, "INSERT", Some(item("a", "one")), None)],
+        },
+    )
+    .unwrap();
+
+    // If upstream reports head = 5 while the replica is at cursor = 1, an empty
+    // changes page means rows 2..=5 are missing and must fail loudly.
+    let err = apply_upstream(
+        &mut db,
+        &tables,
+        &UpstreamBatch {
+            watermark: 5,
+            optional_columns: Default::default(),
+            changes: vec![],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.status, 500);
+    assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 1);
+}

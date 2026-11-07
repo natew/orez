@@ -44,6 +44,7 @@ pub use push::{
     assemble_push_response, finalize, handle_push, preflight, push_validate, record_app_error,
     settle_delegated_push,
 };
+pub use query::forget_user;
 pub use schema::{TableSpec, Tables, init_schema, trigger_ddl};
 
 /// identity of every durable DDL surface this engine installs. a host stores

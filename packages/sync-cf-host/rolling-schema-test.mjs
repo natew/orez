@@ -453,6 +453,93 @@ try {
       'restored table race: captured snapshot preceded concurrent update, rename, create/delete; both observers converged and existing subscriber received no rows'
     )
   }
+
+  // table bootstrap when upstream _zero_changes was pruned past the replica's
+  // live cursor (410) must fall back to a full snapshot instead of failing with 409,
+  // and /admin/forget-user must erase the user's durable client groups.
+  {
+    const state = persist()
+    const ns = 'proj-pruned-bootstrap'
+    const nsPull = async (base, group, cookie, query, userID = 'reader') => {
+      const body = { clientID: group, clientGroupID: group, cookie }
+      if (query)
+        body.queries = {
+          version: 1,
+          patch: [{ op: 'put', hash: group, name: query, args: [] }],
+        }
+      const response = await fetch(`${base}/${ns}/pull`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${userID}`,
+        },
+        body: JSON.stringify(body),
+      })
+      const result = await response.json()
+      assert.equal(
+        response.status,
+        200,
+        `pull failed (${response.status}): ${JSON.stringify(result)}`
+      )
+      return result
+    }
+    let existingItemCookie
+    await deployed(state, { host: 'v1', data: 'v1' }, async (base) => {
+      await write(base, 'INSERT INTO item VALUES (?, ?)', ['i1', 'before-prune'], ns)
+      await write(base, 'INSERT INTO counter VALUES (?, ?, ?)', ['c1', 10, 'reader'], ns)
+      existingItemCookie = (await nsPull(base, 'item-sub', null, 'allItems')).cookie
+    })
+    await deployed(state, { host: 'v4', data: 'v4' }, async (base) => {
+      await write(
+        base,
+        'UPDATE item SET label = ? WHERE id = ?',
+        ['after-prune', 'i1'],
+        ns
+      )
+      await write(base, 'INSERT INTO item VALUES (?, ?)', ['i2', 'second'], ns)
+      const pruneRes = await fetch(`${base}/prune/${ns}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ keepRows: 1 }),
+      })
+      const pruned = await pruneRes.json()
+      assert.equal(pruneRes.status, 200, JSON.stringify(pruned))
+      assert.ok(
+        pruned.deleted >= 2,
+        `expected pruned rows, got ${JSON.stringify(pruned)}`
+      )
+
+      const counters = await nsPull(base, 'counter-sub', null, 'ownCounters')
+      const counterPuts = counters.rowsPatch.filter(
+        (p) => p.op === 'put' && p.tableName === 'counter'
+      )
+      assert.deepEqual(
+        counterPuts.map((p) => [p.value.id, p.value.value]),
+        [['c1', 10]]
+      )
+
+      const items = await nsPull(base, 'item-sub', existingItemCookie)
+      const itemPuts = Object.fromEntries(
+        items.rowsPatch
+          .filter((p) => p.op === 'put' && p.tableName === 'item')
+          .map((p) => [p.value.id, p.value.label])
+      )
+      assert.deepEqual(itemPuts, { i1: 'after-prune', i2: 'second' })
+
+      const forgetRes = await fetch(`${base}/${ns}/admin/forget-user`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userID: 'reader' }),
+      })
+      const forgetBody = await forgetRes.json()
+      assert.equal(forgetRes.status, 200, JSON.stringify(forgetBody))
+      assert.equal(forgetBody.ok, true)
+      assert.equal(forgetBody.deletedGroups, 2)
+    })
+    console.log(
+      'pruned table bootstrap + forget-user: 410 during table bootstrap fell back to full snapshot and /admin/forget-user erased client groups'
+    )
+  }
 } finally {
   for (const root of roots) rmSync(root, { recursive: true, force: true })
 }

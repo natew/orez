@@ -698,6 +698,59 @@ pub(crate) fn reset_group(db: &mut dyn SyncDb, group: &str) -> Result<(), Engine
     Ok(())
 }
 
+/// Remove every durable client group and query-membership record owned by
+/// `user_id`. The caller must wrap this in a transaction.
+pub fn forget_user(db: &mut dyn SyncDb, user_id: &str) -> Result<usize, EngineError> {
+    if !table_exists(db, "_zsync_clients")? {
+        return Ok(0);
+    }
+    let groups: Vec<String> = db
+        .query(
+            "SELECT DISTINCT clientGroupID FROM _zsync_clients WHERE userID = ? ORDER BY clientGroupID",
+            &[text(user_id)],
+        )?
+        .into_iter()
+        .filter_map(|row| match row.get("clientGroupID") {
+            Some(SqlValue::Text(group)) => Some(group.clone()),
+            _ => None,
+        })
+        .collect();
+    if groups.is_empty() {
+        return Ok(0);
+    }
+    let has_seen = table_exists(db, "_zsync_client_group_seen")?;
+    let has_query_meta = table_exists(db, "_zsync_query_meta")?;
+    let has_wake_keys = has_query_meta && table_exists(db, "_zsync_wake_keys")?;
+    for group in &groups {
+        let g = [text(group)];
+        if has_seen {
+            db.exec(
+                "DELETE FROM _zsync_client_group_seen WHERE clientGroupID = ?",
+                &g,
+            )?;
+        }
+        if has_query_meta {
+            for table in [
+                "_zsync_query_rows",
+                "_zsync_row_refs",
+                "_zsync_query_state",
+                "_zsync_queries",
+                "_zsync_desires",
+                "_zsync_query_ack",
+                "_zsync_query_transform_group",
+                "_zsync_query_transform_client",
+            ] {
+                db.exec(&format!("DELETE FROM {table} WHERE clientGroupID = ?"), &g)?;
+            }
+        }
+        if has_wake_keys {
+            db.exec("DELETE FROM _zsync_wake_keys WHERE clientGroupID = ?", &g)?;
+        }
+        db.exec("DELETE FROM _zsync_clients WHERE clientGroupID = ?", &g)?;
+    }
+    Ok(groups.len())
+}
+
 // invalidate durable group state only when the server-owned group version
 // changes. the return value is narrower: this replica's local query state needs
 // a clear, including when a new client joins a group already on this version.

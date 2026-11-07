@@ -2296,3 +2296,187 @@ describe('table snapshots never capture earlier writes from the same transaction
     expect(noteIds(sql)).toEqual(['pre'])
   })
 })
+
+describe('ZeroDO _zero_changes prefix retention and gap detection', () => {
+  it('prunes a contiguous prefix in batches without touching _zero_change_state or tripping the write budget', async () => {
+    const cold = await createWorkerCore()
+    expect((cold.zero as any).pruneChanges({ keepRows: 10 })).toEqual({
+      deleted: 0,
+      batches: 0,
+      watermark: 0,
+      oldestWatermark: null,
+    })
+    expect(
+      cold.sql
+        .exec("SELECT name FROM sqlite_master WHERE name = '_zero_changes'")
+        .toArray()
+    ).toEqual([])
+
+    const { sql, zero } = await createWorkerCore({
+      OREZ_DO_WRITE_BUDGET_ROWS: '50',
+    })
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+
+    for (let i = 1; i <= 6; i++) {
+      const res = await zero.handleBatch(
+        batchRequest([
+          {
+            sql: 'INSERT INTO item VALUES (?, ?)',
+            params: [`id-${i}`, `body-${i}`],
+            track: ITEM_TRACK,
+          },
+        ])
+      )
+      expect(res.status).toBe(200)
+    }
+
+    expect(zero.watermarks.current()).toBe(6)
+
+    const pruned = (zero as any).pruneChanges({ keepRows: 2, batchSize: 2 })
+    expect(pruned).toEqual({
+      deleted: 4,
+      batches: 2,
+      watermark: 6,
+      oldestWatermark: 5,
+    })
+    expect(
+      sql.exec('SELECT watermark FROM _zero_changes ORDER BY watermark ASC').toArray()
+    ).toEqual([{ watermark: 5 }, { watermark: 6 }])
+    expect(
+      sql.exec('SELECT last_value FROM _zero_change_state WHERE id = 1').one()
+    ).toEqual({ last_value: 6 })
+
+    // Below retained floor -> 410 watermarkTooOld
+    const stale = await zero.fetch(new Request('http://do/changes?watermark=3'))
+    expect(stale.status).toBe(410)
+    expect(await stale.json()).toMatchObject({
+      error: 'watermarkTooOld',
+      watermark: 6,
+      oldestWatermark: 5,
+    })
+
+    // At retained floor boundary (watermark = 4 -> needs >= 5) -> 200 OK
+    const boundary = await zero.fetch(new Request('http://do/changes?watermark=4'))
+    expect(boundary.status).toBe(200)
+    const boundaryBody = (await boundary.json()) as any
+    expect(boundaryBody.watermark).toBe(6)
+    expect(boundaryBody.changes.map((c: any) => c.watermark)).toEqual([5, 6])
+
+    // Prune everything with keepRows: 0 -> _zero_change_state stays at 6, next write gets 7
+    const prunedAll = (zero as any).pruneChanges({ keepRows: 0 })
+    expect(prunedAll).toEqual({
+      deleted: 2,
+      batches: 1,
+      watermark: 6,
+      oldestWatermark: null,
+    })
+    expect(zero.watermarks.current()).toBe(6)
+
+    // Caught-up replica at head (watermark = 6) still gets 200 with empty changes
+    const caughtUp = await zero.fetch(new Request('http://do/changes?watermark=6'))
+    expect(caughtUp.status).toBe(200)
+    expect(await caughtUp.json()).toMatchObject({
+      watermark: 6,
+      changes: [],
+    })
+
+    // Next write does not regress watermark and does not trip the write budget
+    const nextRes = await zero.handleBatch(
+      batchRequest([
+        {
+          sql: "INSERT INTO item VALUES ('id-7', 'body-7')",
+          track: ITEM_TRACK,
+        },
+      ])
+    )
+    expect(nextRes.status).toBe(200)
+    expect(zero.watermarks.current()).toBe(7)
+    expect(sql.exec('SELECT MIN(watermark) AS w FROM _zero_changes').one()).toEqual({
+      w: 7,
+    })
+  })
+
+  it('prunes by olderThanMs and combines keepRows + olderThanMs as a strict prefix', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+
+    for (let i = 1; i <= 5; i++) {
+      await zero.handleBatch(
+        batchRequest([
+          {
+            sql: 'INSERT INTO item VALUES (?, ?)',
+            params: [`id-${i}`, `body-${i}`],
+            track: ITEM_TRACK,
+          },
+        ])
+      )
+    }
+
+    // Stamp deterministic timestamps: watermarks 1..2 at t=1000s, 3..5 at t=2000s
+    sql.exec('UPDATE _zero_changes SET created_at = 1000 WHERE watermark <= 2')
+    sql.exec('UPDATE _zero_changes SET created_at = 2000 WHERE watermark >= 3')
+
+    const byAge = (zero as any).pruneChanges({
+      olderThanMs: 500_000,
+      now: 1_600_000,
+    })
+    expect(byAge).toEqual({
+      deleted: 2,
+      batches: 1,
+      watermark: 5,
+      oldestWatermark: 3,
+    })
+
+    // Combining olderThanMs (none expired at now=2_100_000 with 500_000ms) + keepRows: 1
+    // still prunes down to 1 retained row.
+    const combined = (zero as any).pruneChanges({
+      olderThanMs: 500_000,
+      keepRows: 1,
+      now: 2_100_000,
+    })
+    expect(combined).toEqual({
+      deleted: 2,
+      batches: 1,
+      watermark: 5,
+      oldestWatermark: 5,
+    })
+  })
+
+  it('fails loudly with 500 changeLogGap when a row is missing in the middle or tail of _zero_changes', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+
+    for (let i = 1; i <= 5; i++) {
+      await zero.handleBatch(
+        batchRequest([
+          {
+            sql: 'INSERT INTO item VALUES (?, ?)',
+            params: [`id-${i}`, `body-${i}`],
+            track: ITEM_TRACK,
+          },
+        ])
+      )
+    }
+
+    // Corrupt the log with a mid-log hole (delete watermark 3)
+    sql.exec('DELETE FROM _zero_changes WHERE watermark = 3')
+
+    const midHole = await zero.fetch(new Request('http://do/changes?watermark=1'))
+    expect(midHole.status).toBe(500)
+    expect(await midHole.json()).toMatchObject({
+      error: 'changeLogGap',
+    })
+
+    // Restore 3 and corrupt the tail (delete watermark 5 while _zero_change_state is 5)
+    sql.exec(
+      'INSERT INTO _zero_changes (watermark, table_name, op, row_data, created_at) VALUES (3, \'public.item\', \'INSERT\', \'{"id":"id-3","body":"body-3"}\', 1000)'
+    )
+    sql.exec('DELETE FROM _zero_changes WHERE watermark = 5')
+
+    const tailHole = await zero.fetch(new Request('http://do/changes?watermark=4'))
+    expect(tailHole.status).toBe(500)
+    expect(await tailHole.json()).toMatchObject({
+      error: 'changeLogGap',
+    })
+  })
+})

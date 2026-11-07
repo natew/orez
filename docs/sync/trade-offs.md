@@ -422,10 +422,10 @@ An upstream table still excluded from publication remains empty, with its
 bootstrap request retained. Existing tables continue ingesting normally. Once
 the upstream publishes it, the next ingestion resumes the baseline without
 requiring a mutation in that table. Both deployment orders are supported.
-A bootstrap whose live feed cursor has expired fails with HTTP 409 rather than
-silently resetting unrelated data. Full resnapshot remains an explicit operator
-operation. An existing full snapshot or dropped-column recovery keeps its
-existing full-snapshot semantics.
+A bootstrap whose live feed cursor has expired (HTTP 410) falls back to a full
+snapshot so a replica whose upstream pruned its change log during a schema deploy
+recovers automatically. An existing full snapshot or dropped-column recovery keeps
+its existing full-snapshot semantics.
 
 This detects additions relative to the previous persisted host schema. It does
 not infer which rows an older engine may already have missed after a historical
@@ -433,6 +433,38 @@ schema change, nor does it republish tables that are absent from the source's
 publication. The rolling-schema HTTP harness and paged-snapshot core suite cover
 initial rows, concurrent writes, client continuity, owner filtering, restart and
 publication write bounds.
+
+## Change-log retention and user erasure
+
+`ZeroDO` retains `_zero_changes` indefinitely by default. Applications can bound
+that table by prefix compaction (`watermark <= cutoff`) via `changeLogRetention`
+(`keepRows`, `olderThanMs`, `batchSize`), `pruneChanges()`, `POST /_orez/changes/prune`,
+or the `OREZ_CHANGE_LOG_KEEP_ROWS` and `OREZ_CHANGE_LOG_OLDER_THAN_MS` environment
+variables. Prefix compaction deletes contiguous oldest rows inside the Durable
+Object storage transaction without touching `_zero_change_state`, so monotonic
+watermark allocation continues across compactions and replicas behind the pruned
+prefix receive HTTP 410 (`changeLogPruned`) and resnapshot. `ZeroDO` and
+`sync-core` also detect interior gaps in `_zero_changes` (for example from a
+targeted `DELETE` by row value) and fail loudly (`500 changeLogGap`) rather than
+silently skipping mutations.
+
+When deleting a user account, durable per-user sync metadata can be scrubbed
+immediately across layers:
+
+- `sync_core::forget_user` / `POST /admin/forget-user` on `sync-cf-host` deletes
+  the user's `_zsync_clients`, `_zsync_client_group_seen`, `_zsync_query_rows`,
+  `_zsync_row_refs`, `_zsync_query_state`, `_zsync_queries`, `_zsync_desires`,
+  `_zsync_query_ack`, `_zsync_query_transform_group`,
+  `_zsync_query_transform_client`, `_zsync_wake_keys`, and `orez_revocations`
+  rows and closes active wake sockets for that user.
+- `executor.forgetUser(userID)` deletes `_zsync_clients` rows for that user in
+  `sync-executor`.
+
+Because deleting interior rows from `_zero_changes` or `_zsync_changes` would
+create gaps for active replicas, historical change-log payloads (`row_data` in
+`_zero_changes` and packed transaction ledgers in `_zsync_changes`) age out by
+prefix retention. The bounded erasure window for change-log payloads is
+`max(ZeroDO changeLogRetention.olderThanMs, sync-cf-host retainChanges)`.
 
 ## Where this engine fits, and where it does not
 

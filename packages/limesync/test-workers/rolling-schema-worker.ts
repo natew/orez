@@ -125,6 +125,7 @@ const hostConfig: SyncHostConfig<Env> = {
   authorize: () => true,
   authorizeWake: () => false,
   authorizeNotify: () => true,
+  authorizeAdmin: () => true,
   namespace(request) {
     return new URL(request.url).pathname.split('/')[1] || null
   },
@@ -245,6 +246,17 @@ export default {
           { status: 500 }
         )
       }
+    }
+    const prune = /^\/prune\/([^/]+)$/.exec(url.pathname)
+    if (prune && request.method === 'POST') {
+      const options = (await request.json()) as {
+        keepRows?: number
+        olderThanMs?: number
+        batchSize?: number
+      }
+      const id = env.ZERO_SQL_DO.idFromName(`ns:${prune[1]}`)
+      const result = await env.ZERO_SQL_DO.get(id).pruneChanges(options)
+      return Response.json(result)
     }
     return syncWorker.fetch(request, env, ctx)
   },

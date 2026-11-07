@@ -200,6 +200,8 @@ export interface SyncExecutor<S extends Schema> {
     claims: NormalizedClaims,
     work: (tx: ServerTransaction<S>) => Result | Promise<Result>
   ): Promise<Result>
+
+  forgetUser(userID: string): Promise<number>
 }
 
 export type TransactionQuery = Query<string, Schema, unknown>

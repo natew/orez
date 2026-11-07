@@ -365,6 +365,12 @@ class BrowserSyncHostImpl<
           this.#rawExecutor.query(claims, work)
         )
       },
+      forgetUser: (userID) => {
+        this.#assertAccepting()
+        return this.#runQueued('executor-transaction', () =>
+          this.#rawExecutor.forgetUser(userID)
+        )
+      },
     }
     this.#retainChanges = String(config.retainChanges ?? 4_096)
   }
