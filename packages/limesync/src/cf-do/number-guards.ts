@@ -34,9 +34,42 @@ export class NumberStorageGuards {
     )
   }
 
+  // workerd caps compound select terms well below stock SQLite, so an OR of
+  // EXISTS reads, chunked to stay under its expression depth limit
+  private anyRows(tables: readonly string[]): boolean {
+    for (let start = 0; start < tables.length; start += 20) {
+      const probe = tables
+        .slice(start, start + 20)
+        .map((table) => `EXISTS (SELECT 1 FROM ${quote(table)})`)
+        .join(' OR ')
+      if (this.sql.exec(`SELECT ${probe} AS present`).toArray()[0]?.present) return true
+    }
+    return false
+  }
+
   invalidCells(): Map<string, number> {
     const cells = new Map<string, number>()
-    for (const [name, table] of Object.entries(this.schema.tables)) {
+    // this runs around every schema change, so the common answer, that no
+    // guarded table holds a row (a fresh object booting through its
+    // migrations), costs a few reads instead of two per table.
+    const present = new Set(
+      this.sql
+        .exec("SELECT name FROM sqlite_schema WHERE type = 'table'")
+        .toArray()
+        .map((row) => String(row.name).toLowerCase())
+    )
+    const guarded = Object.entries(this.schema.tables).filter(([name, table]) =>
+      present.has((table.serverName ?? table.name ?? name).toLowerCase())
+    )
+    if (
+      guarded.length === 0 ||
+      !this.anyRows(
+        guarded.map(([name, table]) => table.serverName ?? table.name ?? name)
+      )
+    ) {
+      return cells
+    }
+    for (const [name, table] of guarded) {
       const physical = table.serverName ?? table.name ?? name
       const current = this.shape(physical)
       if (current.size === 0) continue

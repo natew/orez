@@ -1242,26 +1242,39 @@ export function snapshotSideEffectWriteTables(
     }
   }
 
-  for (const child of relations) {
-    // SQLite requires REFERENCES in every foreign-key declaration. skip
-    // metadata calls for unrelated tables using the schema rows already read.
-    if (child.type !== 'table' || !/\bREFERENCES\b/i.test(child.definition)) continue
-    for (const row of sql
-      .exec(`PRAGMA foreign_key_list(${quoteIdent(child.name)})`)
-      .toArray()) {
-      const parent = String(row.table ?? '')
-      if (!parent) continue
+  // one read for every foreign key, not a PRAGMA per table: this runs per
+  // tracked statement, and a fresh namespace's migration paid ~14k PRAGMA calls
+  // here. SQLite requires REFERENCES in every foreign-key declaration.
+  if (
+    relations.some(
+      (relation) =>
+        relation.type === 'table' && /\bREFERENCES\b/i.test(relation.definition)
+    )
+  ) {
+    const foreignKeys = sql
+      .exec(
+        'SELECT m.name AS child, f."table" AS parent, f.on_delete AS on_delete, f.on_update AS on_update ' +
+          'FROM sqlite_master AS m JOIN pragma_foreign_key_list(m.name) AS f ' +
+          "WHERE m.type = 'table' AND m.sql LIKE '%REFERENCES%' " +
+          "AND m.name NOT GLOB 'sqlite_*' AND m.name NOT GLOB '_cf_*' AND m.name NOT GLOB '_orez_bk_*' " +
+          'ORDER BY m.name, f.id, f.seq'
+      )
+      .toArray()
+    for (const row of foreignKeys) {
+      const childName = String(row.child ?? '')
+      const parent = String(row.parent ?? '')
+      if (!parent || !childName) continue
       const onDelete = String(row.on_delete ?? 'NO ACTION').toUpperCase()
       const onUpdate = String(row.on_update ?? 'NO ACTION').toUpperCase()
       // deleting a parent row deletes cascaded children and rewrites SET ones.
-      if (onDelete === 'CASCADE') addEdge(parent, 'DELETE', child.name, ['DELETE'], true)
+      if (onDelete === 'CASCADE') addEdge(parent, 'DELETE', childName, ['DELETE'], true)
       else if (onDelete === 'SET NULL' || onDelete === 'SET DEFAULT')
-        addEdge(parent, 'DELETE', child.name, ['UPDATE'], true)
+        addEdge(parent, 'DELETE', childName, ['UPDATE'], true)
       // updating a parent key rewrites children under every non-restricting
       // action. which columns the statement touched is not known here, so any
       // parent update follows the ON UPDATE edge.
       if (onUpdate === 'CASCADE' || onUpdate === 'SET NULL' || onUpdate === 'SET DEFAULT')
-        addEdge(parent, 'UPDATE', child.name, ['UPDATE'], true)
+        addEdge(parent, 'UPDATE', childName, ['UPDATE'], true)
     }
   }
 
