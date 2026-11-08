@@ -1244,20 +1244,21 @@ export function snapshotSideEffectWriteTables(
 
   // one read for every foreign key, not a PRAGMA per table: this runs per
   // tracked statement, and a fresh namespace's migration paid ~14k PRAGMA calls
-  // here. SQLite requires REFERENCES in every foreign-key declaration.
-  if (
-    relations.some(
+  // here. SQLite requires REFERENCES in every foreign-key declaration, so the
+  // schema rows already read name the only tables worth asking.
+  const referencing = relations
+    .filter(
       (relation) =>
         relation.type === 'table' && /\bREFERENCES\b/i.test(relation.definition)
     )
-  ) {
+    .map((relation) => relation.name)
+  if (referencing.length > 0) {
     const foreignKeys = sql
       .exec(
-        'SELECT m.name AS child, f."table" AS parent, f.on_delete AS on_delete, f.on_update AS on_update ' +
-          'FROM sqlite_master AS m JOIN pragma_foreign_key_list(m.name) AS f ' +
-          "WHERE m.type = 'table' AND m.sql LIKE '%REFERENCES%' " +
-          "AND m.name NOT GLOB 'sqlite_*' AND m.name NOT GLOB '_cf_*' AND m.name NOT GLOB '_orez_bk_*' " +
-          'ORDER BY m.name, f.id, f.seq'
+        'SELECT j.value AS child, f."table" AS parent, f.on_delete AS on_delete, f.on_update AS on_update ' +
+          'FROM json_each(?) AS j JOIN pragma_foreign_key_list(j.value) AS f ' +
+          'ORDER BY j.key, f.id, f.seq',
+        JSON.stringify(referencing)
       )
       .toArray()
     for (const row of foreignKeys) {
