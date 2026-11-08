@@ -958,6 +958,77 @@ describe('createOrezDataWorker', () => {
     })
     expect(readyVersion).toBe('schema-owned-by-do')
   })
+  it('keeps serving the previous schema version through a rollout when configured', async () => {
+    const migrate = vi.fn(async () => undefined)
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      migrations: { acceptPreviousVersion: true },
+      schema: { ...descriptor, version: 'v2', migrate },
+    })
+    let readyVersion: string | null = 'v1'
+    let previous: string | null = null
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.orezStorage = {
+      sql: {
+        exec(sql: string, ...params: unknown[]) {
+          const rows = (value: string | null) => ({
+            toArray: () => (value ? [{ version: value, name: value }] : []),
+          })
+          if (sql.startsWith('SELECT version FROM _orez_application_schema ')) {
+            return rows(readyVersion)
+          }
+          if (sql.startsWith('SELECT name FROM sqlite_master')) {
+            return rows(previous ? 'table' : null)
+          }
+          if (sql.startsWith('SELECT version FROM _orez_application_schema_previous')) {
+            return rows(previous)
+          }
+          if (sql.startsWith('CREATE TABLE IF NOT EXISTS')) return { toArray: () => [] }
+          if (sql.startsWith('INSERT INTO _orez_application_schema_previous')) {
+            if (readyVersion && readyVersion !== params[0]) previous = readyVersion
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('SELECT attempt_count, last_error ')) {
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('INSERT INTO _orez_application_schema_attempt ')) {
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('UPDATE _orez_application_schema_attempt ')) {
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('DELETE FROM _orez_application_schema ')) {
+            readyVersion = null
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('INSERT INTO _orez_application_schema ')) {
+            readyVersion = String(params[0])
+            return { toArray: () => [] }
+          }
+          throw new Error(`unexpected durable SQL: ${sql}`)
+        },
+      },
+    }
+    zero.applicationSqlLocalClient = () => ({})
+    zero.orezRestoreInProgress = () => false
+    zero.orezStateTablesExist = () => true
+    zero.invalidateSchemaCaches = () => {}
+    zero.orezSchemaRunVersion = null
+    zero.orezSchemaRun = null
+    zero.orezReadyVersion = null
+
+    expect(String(zero.orezApplicationSchemaStatus('v1').lastError)).not.toMatch(/mismatch/)
+    expect(zero.orezApplicationSchemaStatus('v0').lastError).toMatch(/mismatch/)
+
+    await zero.orezRunApplicationSchema('v2', 'singleton', { force: true })
+    expect(readyVersion).toBe('v2')
+    expect(zero.orezApplicationSchemaStatus('v1')).toMatchObject({
+      schemaVersion: 'v2',
+      ready: true,
+    })
+    expect(zero.orezApplicationSchemaStatus('v0').lastError).toMatch(/mismatch/)
+  })
+
   it('converges the schema before serving application sql that arrives over rpc', async () => {
     const order: string[] = []
     const runtime = createOrezDataWorker({

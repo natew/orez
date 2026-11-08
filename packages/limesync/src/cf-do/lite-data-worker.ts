@@ -202,6 +202,12 @@ export interface OrezDataWorkerOptions<
   migrations?: {
     /** Consecutive failures for a schema version before automatic retries stop. */
     suspendAfterFailures?: number
+    /**
+     * Keep serving callers built for the version this object held before the
+     * current one. Only valid while every migration is additive, so a worker
+     * still on the previous version keeps syncing until its rollout converges.
+     */
+    acceptPreviousVersion?: boolean
   }
   /** Per-object rolling row-write policy. Environment variables remain supported. */
   writeBudget?: {
@@ -681,6 +687,8 @@ export function createOrezDataWorker<
   const requestSignals = new AsyncLocalStorage<AbortSignal>()
   const schemaVersion = options.schema.version
   const readyTable = `${tablePrefix}_application_schema`
+  const previousTable = `${tablePrefix}_application_schema_previous`
+  const acceptPreviousVersion = options.migrations?.acceptPreviousVersion === true
   const attemptTable = `${tablePrefix}_application_schema_attempt`
   const backupMarkerTable = `${tablePrefix}_backup_meta`
   const restoreTable = `${tablePrefix}_restore`
@@ -869,6 +877,24 @@ export function createOrezDataWorker<
       return this.orezStateTables
     }
 
+    private orezAcceptsVersion(requested: string): boolean {
+      if (requested === schemaVersion) return true
+      if (!acceptPreviousVersion) return false
+      if (!this.orezStateTablesExist()) return false
+      const sql = this.orezStorage.sql
+      const stored = sql.exec(`SELECT version FROM ${readyTable} WHERE id = 1`).toArray()[0]
+      if (stored?.version === requested) return true
+      const previous = sql
+        .exec(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+          previousTable
+        )
+        .toArray()[0]
+        ? sql.exec(`SELECT version FROM ${previousTable} WHERE id = 1`).toArray()[0]
+        : undefined
+      return previous?.version === requested
+    }
+
     private orezEnsureStateTables(): void {
       if (this.orezStateTablesExist()) return
       const sql = this.orezStorage.sql
@@ -990,13 +1016,13 @@ export function createOrezDataWorker<
     ): OrezSchemaStatus {
       const status = this.orezApplicationSchemaStatus(requestedSchemaVersion)
       if (status.ready || status.running) return status
-      if (requestedSchemaVersion !== schemaVersion) return status
+      if (!this.orezAcceptsVersion(requestedSchemaVersion)) return status
       this.orezRunApplicationSchema(requestedSchemaVersion, instance).catch(() => {})
       return this.orezApplicationSchemaStatus(requestedSchemaVersion)
     }
 
     orezApplicationSchemaStatus(requestedSchemaVersion: string): OrezSchemaStatus {
-      if (requestedSchemaVersion !== schemaVersion) {
+      if (!this.orezAcceptsVersion(requestedSchemaVersion)) {
         return {
           schemaVersion,
           ready: false,
@@ -1043,7 +1069,17 @@ export function createOrezDataWorker<
     orezBeginApplicationSchemaReconcile(): void {
       this.orezReadyVersion = null
       this.orezEnsureStateTables()
-      this.orezStorage.sql.exec(`DELETE FROM ${readyTable} WHERE id = 1`)
+      const sql = this.orezStorage.sql
+      if (acceptPreviousVersion) {
+        sql.exec(
+          `CREATE TABLE IF NOT EXISTS ${previousTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL)`
+        )
+        sql.exec(
+          `INSERT INTO ${previousTable} (id, version) SELECT 1, version FROM ${readyTable} WHERE id = 1 AND version != ? ON CONFLICT (id) DO UPDATE SET version = excluded.version`,
+          schemaVersion
+        )
+      }
+      sql.exec(`DELETE FROM ${readyTable} WHERE id = 1`)
     }
 
     private orezMarkApplicationSchemaReady(): void {
@@ -1093,7 +1129,7 @@ export function createOrezDataWorker<
     }
 
     private orezAssertApplicationSchemaVersion(requestedSchemaVersion: string): void {
-      if (requestedSchemaVersion !== schemaVersion) {
+      if (!this.orezAcceptsVersion(requestedSchemaVersion)) {
         throw new Error(this.orezSchemaVersionMismatch(requestedSchemaVersion))
       }
     }
