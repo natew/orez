@@ -179,7 +179,7 @@ try {
   // includes removal of two inferred capture registrations; no commit callbacks.
   assert.deepEqual(restoreCost, {
     totalChanges: 17,
-    rowsRead: 3_373,
+    rowsRead: 3_384,
     rowsWritten: 26,
     sessions: 6,
     statements: 132,

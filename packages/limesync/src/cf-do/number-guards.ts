@@ -25,13 +25,37 @@ export class NumberStorageGuards {
     private readonly schema: ZeroSchemaConfig
   ) {}
 
-  private shape(table: string): Set<string> {
-    return new Set(
+  // a table's columns change only with its CREATE text, which SQLite rewrites
+  // on every ALTER. reconcile runs around each schema change and reads every
+  // guarded table, so a fresh object booting through its migrations asked for
+  // thousands of column lists that had not changed.
+  private readonly shapes = new Map<
+    string,
+    { definition: string; columns: Set<string> }
+  >()
+
+  private tables(): Map<string, string> {
+    return new Map(
+      this.sql
+        .exec("SELECT name, sql FROM sqlite_schema WHERE type = 'table'")
+        .toArray()
+        .map((row) => [String(row.name).toLowerCase(), String(row.sql ?? '')])
+    )
+  }
+
+  private shape(table: string, tables: Map<string, string>): Set<string> {
+    const definition = tables.get(table.toLowerCase())
+    if (definition === undefined) return new Set()
+    const cached = this.shapes.get(table)
+    if (cached?.definition === definition) return cached.columns
+    const columns = new Set(
       this.sql
         .exec(`PRAGMA table_xinfo(${quote(table)})`)
         .toArray()
         .map((row) => String(row.name))
     )
+    this.shapes.set(table, { definition, columns })
+    return columns
   }
 
   // workerd caps compound select terms well below stock SQLite, so an OR of
@@ -52,14 +76,9 @@ export class NumberStorageGuards {
     // this runs around every schema change, so the common answer, that no
     // guarded table holds a row (a fresh object booting through its
     // migrations), costs a few reads instead of two per table.
-    const present = new Set(
-      this.sql
-        .exec("SELECT name FROM sqlite_schema WHERE type = 'table'")
-        .toArray()
-        .map((row) => String(row.name).toLowerCase())
-    )
+    const tables = this.tables()
     const guarded = Object.entries(this.schema.tables).filter(([name, table]) =>
-      present.has((table.serverName ?? table.name ?? name).toLowerCase())
+      tables.has((table.serverName ?? table.name ?? name).toLowerCase())
     )
     if (
       guarded.length === 0 ||
@@ -71,7 +90,7 @@ export class NumberStorageGuards {
     }
     for (const [name, table] of guarded) {
       const physical = table.serverName ?? table.name ?? name
-      const current = this.shape(physical)
+      const current = this.shape(physical, tables)
       if (current.size === 0) continue
       // an empty table holds no cell to be invalid, and a fresh object boots
       // through every migration with all of them empty
@@ -117,9 +136,10 @@ export class NumberStorageGuards {
     }
     const expected = new Set<string>()
     const ddl = new Map<string, string>()
+    const tables = this.tables()
     for (const [name, table] of Object.entries(this.schema.tables)) {
       const physical = table.serverName ?? table.name ?? name
-      const current = this.shape(physical)
+      const current = this.shape(physical, tables)
       if (current.size === 0) continue
       const columns = Object.entries(table.columns)
         .map(([column, definition]) => ({
