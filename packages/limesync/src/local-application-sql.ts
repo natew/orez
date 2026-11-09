@@ -23,6 +23,13 @@ export interface LocalApplicationSqlClient {
     work: (executor: LocalApplicationSqlTransaction) => Value | Promise<Value>,
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<Value>
+  // the deployed client runs reads beside one another; one local process has
+  // a single connection per namespace, so a read takes the same queue.
+  readTransaction<Value>(
+    compileQuery: ApplicationSqlQueryCompiler,
+    work: (executor: LocalApplicationSqlTransaction) => Value | Promise<Value>,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ): Promise<Value>
 }
 
 export interface LocalApplicationSqlClientFactory {
@@ -246,6 +253,9 @@ export function createLocalApplicationSqlClientFactory(options: {
           state.active = false
           release()
         }
+      },
+      readTransaction(compileQuery, work, queryBudget) {
+        return client.transaction(compileQuery, work, queryBudget)
       },
     }
     clients.set(namespace, client)
