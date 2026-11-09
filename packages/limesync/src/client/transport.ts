@@ -207,7 +207,7 @@ export type HttpPullTransportOptions = {
   // minutes; wake notifications normally trigger pulls immediately.
   pullIntervalMs?: number
   /**
-   * opens a notification-only socket to <origin>/wake and pulls immediately on
+   * opens a notification-only socket to <pullOrigin>/wake and pulls immediately on
    * any wake, demoting interval polling to a safety net.
    * createZeroClientTransport leaves this disabled unless the consumer opts in
    * with true, which carries Zero's existing auth token in a WebSocket
@@ -911,7 +911,8 @@ class ZeroHttpSocket {
     if (this.state.wake) this.openWakeChannel()
   }
 
-  // wake channel: a websocket to <origin>/wake that sends keepalives. wake
+  // wake channel: a websocket to <pullOrigin>/wake, on the host that serves
+  // pulls, that sends keepalives. wake
   // frames trigger an immediate (coalesced) pull without waiting on
   // the poll interval. advisory only: if it drops we reconnect, and the
   // interval poll remains the safety net that guarantees convergence.
@@ -926,7 +927,7 @@ class ZeroHttpSocket {
       return
     }
     this.wakeConnecting = true
-    const wsBase = this.state.originString.replace(/^http/, 'ws')
+    const wsBase = this.state.pullOriginString.replace(/^http/, 'ws')
     void (async () => {
       let wakeToken: string | undefined
       let socket: {
