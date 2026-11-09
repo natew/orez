@@ -127,7 +127,9 @@ describe('skills generation ownership', () => {
           const root = join(fixture, harness, 'skills')
           expect(lstatSync(join(root, 'upgrade')).isSymbolicLink()).toBe(true)
           expect(lstatSync(join(root, 'takeout-linked')).isSymbolicLink()).toBe(true)
-          expect(existsSync(join(root, 'takeout-stale'))).toBe(false)
+          expect(readFileSync(join(root, 'takeout-stale/SKILL.md'), 'utf8')).toBe(
+            'old generated skill'
+          )
         }
       }
       run(false)
@@ -146,6 +148,69 @@ describe('skills generation ownership', () => {
       expect(
         readFileSync(join(fixture, '.agents/skills/current/SKILL.md'), 'utf8')
       ).toContain('model: md')
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  })
+
+  it('removes only published stale skills and preserves other files', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'orez-skill-cleanup-'))
+    try {
+      const docs = join(fixture, 'skills')
+      mkdirSync(docs)
+      const source = join(docs, 'generated.md')
+      writeFileSync(
+        source,
+        '---\nname: generated\ndescription: generated skill\nmodel: md\n---\nsource\n'
+      )
+      for (const harness of ['.claude', '.agents']) {
+        const root = join(fixture, harness, 'skills')
+        mkdirSync(join(root, 'one-loaders'), { recursive: true })
+        writeFileSync(join(root, 'one-loaders/SKILL.md'), 'committed One skill')
+        mkdirSync(join(root, 'takeout-manual'))
+        writeFileSync(join(root, 'takeout-manual/SKILL.md'), 'manual skill')
+      }
+      const run = (clean: boolean) => {
+        const result = Bun.spawnSync({
+          cmd: [
+            process.execPath,
+            resolve(import.meta.dir, '../cli.ts'),
+            'skills',
+            'generate',
+            ...(clean ? ['--clean'] : []),
+          ],
+          cwd: fixture,
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        expect(result.exitCode).toBe(0)
+        expect(result.stderr.toString()).toBe('')
+      }
+      run(false)
+      expect(
+        lstatSync(join(fixture, '.agents/skills/generated/SKILL.md')).isSymbolicLink()
+      ).toBe(true)
+      expect(
+        readFileSync(join(fixture, '.claude/skills/generated/SKILL.md'), 'utf8')
+      ).toContain('model: sonnet')
+      writeFileSync(join(fixture, '.claude/skills/generated/keep.txt'), 'keep')
+      rmSync(source)
+      run(true)
+      for (const harness of ['.claude', '.agents']) {
+        const root = join(fixture, harness, 'skills')
+        expect(readFileSync(join(root, 'one-loaders/SKILL.md'), 'utf8')).toBe(
+          'committed One skill'
+        )
+        expect(readFileSync(join(root, 'takeout-manual/SKILL.md'), 'utf8')).toBe(
+          'manual skill'
+        )
+        expect(
+          lstatSync(join(root, 'generated/SKILL.md'), { throwIfNoEntry: false })
+        ).toBeUndefined()
+      }
+      expect(
+        readFileSync(join(fixture, '.claude/skills/generated/keep.txt'), 'utf8')
+      ).toBe('keep')
     } finally {
       rmSync(fixture, { recursive: true, force: true })
     }
