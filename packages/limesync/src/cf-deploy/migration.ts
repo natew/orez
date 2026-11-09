@@ -51,6 +51,7 @@ export type CloudflareNativeBootSets = {
     {
       tables: string[]
       nativeSqlStatements: unknown
+      freshSchemaStatements?: string[]
       publicTables?: CloudflareNativePublicTable[]
       expectedTables?: CloudflareNativeTableShape[]
       expectedIndexes?: CloudflareNativeIndexShape[]
@@ -115,6 +116,7 @@ function quoteIdentifier(value) {
 function createNativeMigrations({
   schema,
   nativeSqlStatements,
+  freshSchemaStatements,
   configuredPublicTables,
   expectedTables,
   expectedIndexes,
@@ -985,6 +987,36 @@ async function applyNativeSchema(tx, instance, {
   // transaction is stale once a concurrent runMigrations commits between
   // files, and inserting those ids again fails the caller.
   const applied = await readAppliedMigrationStatements(tx)
+  if (prepare && freshSchemaStatements && applied.size === 0) {
+    const existing = await tx.query(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'" +
+        " AND name NOT GLOB '_orez_*' AND name NOT GLOB '_zero_*'" +
+        " AND name NOT GLOB '_zsync_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '__miniflare_*'" +
+        ' AND name <> ?',
+      [migrationTable],
+    )
+    const ledger = await tx.query('SELECT 1 FROM ' + quoteIdentifier(migrationTable) + ' LIMIT 1')
+    if (existing.length === 0 && ledger.length === 0) {
+      await tx.execMany(freshSchemaStatements.map((sql) => ({ sql, params: [] })))
+      const rows = nativeSqlStatements.flatMap((statement, index) => {
+        const item = typeof statement === 'string'
+          ? { id: 'statement-' + index, sql: statement } : statement
+        if (!hasExecutableMigrationSql(item)) return []
+        const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+        if (supersededStatementIds.has(baseId)) return []
+        return [{
+          sql: 'INSERT INTO ' + quoteIdentifier(migrationTable) + ' (id, applied_at) VALUES (?, ?)',
+          params: [baseId + ':' + hashMigrationSql(item.sql), Date.now()],
+        }]
+      })
+      await tx.execMany(rows)
+      await assertExpectedSchema(tx)
+      await tx.exec('CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)')
+      await tx.execMany(schemaMetadataStatements())
+      await tx.registerTables(publicTables())
+      return { applied: new Set(rows.map((row) => row.params[0])), pendingMigrationFiles: [] }
+    }
+  }
   if (prepare) await reconcilePhantomLedger(tx, applied)
   // register BEFORE the statements, not only after them. a cdc trigger whose
   // _orez_cdc_tables row is missing is invisible to beginSchemaChange, which
@@ -1394,6 +1426,7 @@ function migrationsForInstance(instance) {
     migrations = createNativeMigrations({
       schema: schemaForTables(set.tables),
       nativeSqlStatements: set.nativeSqlStatements,
+      freshSchemaStatements: set.freshSchemaStatements,
       configuredPublicTables: set.publicTables || [],
       expectedTables: set.expectedTables || [],
       expectedIndexes: set.expectedIndexes || [],
