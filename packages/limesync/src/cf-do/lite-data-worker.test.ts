@@ -951,6 +951,17 @@ describe('createOrezDataWorker', () => {
       force: true,
     })
     expect(migrate).toHaveBeenCalledOnce()
+    expect(migrate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        internalTables: [
+          '_orez_application_schema',
+          '_orez_application_schema_previous',
+          '_orez_application_schema_attempt',
+          '_orez_backup_meta',
+          '_orez_restore',
+        ],
+      })
+    )
     expect(zero.orezApplicationSchemaStatus('schema-owned-by-do')).toMatchObject({
       schemaVersion: 'schema-owned-by-do',
       ready: true,
@@ -1017,7 +1028,9 @@ describe('createOrezDataWorker', () => {
     zero.orezSchemaRun = null
     zero.orezReadyVersion = null
 
-    expect(String(zero.orezApplicationSchemaStatus('v1').lastError)).not.toMatch(/mismatch/)
+    expect(String(zero.orezApplicationSchemaStatus('v1').lastError)).not.toMatch(
+      /mismatch/
+    )
     expect(zero.orezApplicationSchemaStatus('v0').lastError).toMatch(/mismatch/)
 
     await zero.orezRunApplicationSchema('v2', 'singleton', { force: true })

@@ -330,6 +330,69 @@ function decompose(written: Array<{ sql: string; rows: number }>) {
 }
 
 describe('stale namespace migration replay cost', () => {
+  it('uses a fresh snapshot with custom engine tables and preserves populated namespaces', async () => {
+    const schemaUrl = `data:text/javascript;base64,${Buffer.from(`
+      export const schema = { tables: { widget: {
+        name: 'widget', columns: { id: { type: 'string' } }, primaryKey: ['id']
+      } }, relationships: {} }
+    `).toString('base64')}`
+    const module = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'fresh-snapshot',
+        schemaImportSpecifier: schemaUrl,
+        nativeSqlStatements: [
+          { id: '0000_widget:0', sql: 'CREATE TABLE widget (id TEXT PRIMARY KEY)' },
+        ],
+        freshSchemaStatements: ['CREATE TABLE widget (id TEXT PRIMARY KEY)'],
+      })
+    )
+    const internalTables = [
+      '_custom_application_schema',
+      '_custom_application_schema_previous',
+      '_custom_application_schema_attempt',
+      '_custom_backup_meta',
+      '_custom_restore',
+    ]
+    const logged = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const fresh = await createWorkerCore()
+      for (const table of internalTables)
+        fresh.sql.exec(`CREATE TABLE "${table}" (id INTEGER)`)
+      await module.orezAppSchema.migrate({
+        client: migrationClient(fresh),
+        internalTables,
+      })
+      expect(
+        logged.mock.calls.some(
+          ([line]) => JSON.parse(String(line)).orezMigration.path === 'snapshot'
+        )
+      ).toBe(true)
+      expect(fresh.sql.exec('SELECT * FROM widget').toArray()).toEqual([])
+
+      logged.mockClear()
+      const populated = await createWorkerCore()
+      for (const table of internalTables)
+        populated.sql.exec(`CREATE TABLE "${table}" (id INTEGER)`)
+      populated.sql.exec('CREATE TABLE other (id TEXT PRIMARY KEY)')
+      populated.sql.exec("INSERT INTO other VALUES ('preserve')")
+      await module.orezAppSchema.migrate({
+        client: migrationClient(populated),
+        internalTables,
+      })
+      expect(
+        logged.mock.calls.some(
+          ([line]) => JSON.parse(String(line)).orezMigration.path === 'replay'
+        )
+      ).toBe(true)
+      expect(populated.sql.exec('SELECT id FROM other').toArray()).toEqual([
+        { id: 'preserve' },
+      ])
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
   it('checks a current namespace without writer sessions and still repairs publication and phantom effects', async () => {
     const core = await createWorkerCore()
     const schemaUrl = `data:text/javascript;base64,${Buffer.from(`

@@ -33,6 +33,7 @@ type JsonRecord = Record<string, unknown>
 export interface OrezSchemaMigrationOptions {
   client?: ApplicationSqlClient
   force?: boolean
+  internalTables?: readonly string[]
   instance?: string
   registrationOnly?: boolean
   schemaOnly?: boolean
@@ -882,7 +883,9 @@ export function createOrezDataWorker<
       if (!acceptPreviousVersion) return false
       if (!this.orezStateTablesExist()) return false
       const sql = this.orezStorage.sql
-      const stored = sql.exec(`SELECT version FROM ${readyTable} WHERE id = 1`).toArray()[0]
+      const stored = sql
+        .exec(`SELECT version FROM ${readyTable} WHERE id = 1`)
+        .toArray()[0]
       if (stored?.version === requested) return true
       const previous = sql
         .exec(
@@ -975,7 +978,17 @@ export function createOrezDataWorker<
           this.orezBeginApplicationSchemaReconcile()
           let result: Awaited<ReturnType<typeof options.schema.migrate>>
           try {
-            result = await options.schema.migrate({ client, instance })
+            result = await options.schema.migrate({
+              client,
+              instance,
+              internalTables: [
+                readyTable,
+                previousTable,
+                attemptTable,
+                backupMarkerTable,
+                restoreTable,
+              ],
+            })
           } finally {
             // each migration file commits through its own session, so a
             // migrate() that throws partway has already moved the persisted

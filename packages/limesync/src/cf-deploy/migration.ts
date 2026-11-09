@@ -977,6 +977,7 @@ async function applyNativeSchema(tx, instance, {
   prepare = true,
   migrationFile = null,
   finalize = true,
+  internalTables = [],
 } = {}) {
   if (prepare) {
     await tx.exec(
@@ -993,8 +994,8 @@ async function applyNativeSchema(tx, instance, {
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'" +
         " AND name NOT GLOB '_orez_*' AND name NOT GLOB '_zero_*'" +
         " AND name NOT GLOB '_zsync_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '__miniflare_*'" +
-        ' AND name <> ?',
-      [migrationTable],
+        ' AND name NOT IN (' + [migrationTable, ...internalTables].map(() => '?').join(', ') + ')',
+      [migrationTable, ...internalTables],
     )
     const ledger = await tx.query('SELECT 1 FROM ' + quoteIdentifier(migrationTable) + ' LIMIT 1')
     if (existing.length === 0 && ledger.length === 0) {
@@ -1306,6 +1307,7 @@ async function migrate({
   registrationOnly = false,
   instance = 'singleton',
   client: providedClient,
+  internalTables = [],
 } = {}) {
   if (schemaOnly && registrationOnly) {
     throw new Error('schemaOnly and registrationOnly are mutually exclusive')
@@ -1356,6 +1358,7 @@ async function migrate({
         prepare: true,
         migrationFile: null,
         finalize: true,
+        internalTables,
       })
       phase = migrationState.pendingMigrationFiles.length > 0
         ? 'first-migration-commit'
