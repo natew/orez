@@ -70,6 +70,7 @@ export type CloudflareMigrationModuleSourceParts =
       schemaVersion: string
       schemaImportSpecifier: string
       nativeSqlStatements: unknown
+      freshSchemaStatements?: string[]
       /** publish: false keeps rollback-image capture without a changefeed. */
       publicTables?: CloudflareNativePublicTable[]
       expectedTables?: CloudflareNativeTableShape[]
@@ -1014,7 +1015,7 @@ async function applyNativeSchema(tx, instance, {
       await tx.exec('CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)')
       await tx.execMany(schemaMetadataStatements())
       await tx.registerTables(publicTables())
-      return { applied: new Set(rows.map((row) => row.params[0])), pendingMigrationFiles: [] }
+      return { applied: new Set(rows.map((row) => row.params[0])), pendingMigrationFiles: [], path: 'snapshot' }
     }
   }
   if (prepare) await reconcilePhantomLedger(tx, applied)
@@ -1331,14 +1332,19 @@ async function migrate({
   // heals a dropped table correctly (verified against a real durable object),
   // so what is left is only reachable through a message that says more.
   let phase = 'session-acquire'
+  const startedAt = Date.now()
+  let firstPath = 'current'
   try {
     phase = 'schema-check'
     const current = await client.readTransaction(() => {
       throw new Error('native schema migration does not use queryAst')
     }, nativeSchemaIsCurrent)
-    if (current) return {
+    if (current) {
+      console.info(JSON.stringify({ orezMigration: { instance, path: firstPath, ms: Date.now() - startedAt } }))
+      return {
       tables: resolvedPublicTables.map((table) => table.publicTable),
       ...(schemaOnly ? { schemaOnly: true } : null),
+      }
     }
     phase = 'session-acquire'
     let migrationState
@@ -1355,6 +1361,7 @@ async function migrate({
         ? 'first-migration-commit'
         : 'finalize-commit'
     })
+    firstPath = migrationState.path ?? 'replay'
     const remainingMigrationFiles = migrationState.pendingMigrationFiles
     for (const [index, migrationFile] of remainingMigrationFiles.entries()) {
       await client.transaction(() => {
@@ -1379,6 +1386,7 @@ async function migrate({
       { cause: error },
     )
   }
+  console.info(JSON.stringify({ orezMigration: { instance, path: firstPath, ms: Date.now() - startedAt } }))
   return {
     tables: resolvedPublicTables.map((table) => table.publicTable),
     ...(schemaOnly ? { schemaOnly: true } : null),
@@ -1391,6 +1399,7 @@ return { migrate, resolvedPublicTables }
 const defaultMigrations = createNativeMigrations({
   schema,
   nativeSqlStatements: ${JSON.stringify(parts.nativeSqlStatements)},
+  freshSchemaStatements: ${JSON.stringify(parts.freshSchemaStatements)},
   configuredPublicTables: ${JSON.stringify(parts.publicTables ?? [])},
   expectedTables: ${JSON.stringify(parts.expectedTables ?? [])},
   expectedIndexes: ${JSON.stringify(parts.expectedIndexes ?? [])},
