@@ -9,6 +9,8 @@ import type { Plugin } from 'vite'
 // the new instance stops it first instead of failing to bind.
 const hostsByPort = new Map<number, LocalSyncHost>()
 
+const KEYED_NAMESPACE = /^[a-z][a-z0-9]{0,15}-[A-Za-z0-9_-]{1,64}$/
+
 export interface OrezLitePluginOptions {
   config?: string
   proxyPath?: string
@@ -41,8 +43,14 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
               target: `http://${localConfig.host ?? '127.0.0.1'}:${localConfig.port}`,
               changeOrigin: false,
               ws: true,
+              // <proxyPath>/<family>-<key>/... addresses a keyed namespace
+              // (usr-<id>, room-<id>); anything else is the configured one.
               rewrite(path: string) {
-                return `/${namespace}${path.slice(proxyPath.length)}`
+                const rest = path.slice(proxyPath.length)
+                const segment = /^\/([^/?]+)/.exec(rest)?.[1]
+                return segment && KEYED_NAMESPACE.test(segment)
+                  ? rest
+                  : `/${namespace}${rest}`
               },
             },
           },

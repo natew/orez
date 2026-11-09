@@ -71,6 +71,42 @@ function createLocalSyncNotifier(namespace: string) {
   }
 }
 
+function copyMissingSchema(database: DatabaseSync, sourcePath: string): void {
+  const hasTables = database
+    .prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    )
+    .get()
+  if (hasTables) return
+  const source = new DatabaseSync(sourcePath, { readOnly: true })
+  try {
+    const rows = source
+      .prepare(
+        `SELECT sql FROM sqlite_schema
+         WHERE type IN ('table', 'index') AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+         ORDER BY type = 'index', name`
+      )
+      .all()
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      for (const row of rows) {
+        database.exec(
+          String(row.sql)
+            .replace(/^CREATE TABLE\s+/i, 'CREATE TABLE IF NOT EXISTS ')
+            .replace(/^CREATE UNIQUE INDEX\s+/i, 'CREATE UNIQUE INDEX IF NOT EXISTS ')
+            .replace(/^CREATE INDEX\s+/i, 'CREATE INDEX IF NOT EXISTS ')
+        )
+      }
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+  } finally {
+    source.close()
+  }
+}
+
 function sqliteBindings(params: readonly unknown[]): SQLInputValue[] {
   return params.map((param) => {
     if (typeof param === 'boolean') return param ? 1 : 0
@@ -87,9 +123,15 @@ function sqliteBindings(params: readonly unknown[]): SQLInputValue[] {
   })
 }
 
-/** one cached connection and async transaction queue per namespace. */
+/**
+ * one cached connection and async transaction queue per namespace. with
+ * `schemaFrom`, a namespace opened with no tables first takes that namespace's
+ * tables and indexes, as the local sync host does for a namespace it opens, so
+ * a server write may reach a keyed namespace no client has synced yet.
+ */
 export function createLocalApplicationSqlClientFactory(options: {
   dataDir: string
+  schemaFrom?: string
 }): LocalApplicationSqlClientFactory {
   const dataDir = resolve(options.dataDir)
   const clients = new Map<string, LocalApplicationSqlClient>()
@@ -113,6 +155,9 @@ export function createLocalApplicationSqlClientFactory(options: {
     // the native sync host writes this file from its own connection; wait for its
     // write lock as it waits for ours, instead of failing the mutation at once
     database.exec('PRAGMA busy_timeout = 5000')
+    if (options.schemaFrom && namespace !== options.schemaFrom) {
+      copyMissingSchema(database, resolve(dataDir, `${options.schemaFrom}.sqlite`))
+    }
     connections.push(database)
     const notifySyncHost = createLocalSyncNotifier(namespace)
     const totalChanges = () =>
