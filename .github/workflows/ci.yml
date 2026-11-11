@@ -201,7 +201,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
