@@ -153,6 +153,14 @@ fn a_group_that_stops_pulling_is_collected_and_one_that_keeps_pulling_is_not() {
     // both groups sync, so both hold membership.
     let staying = host.first_pull("g-stays");
     host.first_pull("g-leaves");
+    host.first_pull("g-orphan");
+    assert!(host.count("_zsync_query_rows", "g-orphan") > 0);
+    host.db
+        .exec(
+            "DELETE FROM _zsync_client_group_seen WHERE clientGroupID = ?",
+            &[SqlValue::Text("g-orphan".into())],
+        )
+        .unwrap();
     assert!(
         host.count("_zsync_query_rows", "g-leaves") > 0,
         "the fixture must have membership to collect"
@@ -189,6 +197,9 @@ fn a_group_that_stops_pulling_is_collected_and_one_that_keeps_pulling_is_not() {
     assert_eq!(host.count("_zsync_row_refs", "g-leaves"), 0);
     assert_eq!(host.count("_zsync_query_state", "g-leaves"), 0);
     assert_eq!(host.count("_zsync_client_group_seen", "g-leaves"), 0);
+    assert_eq!(host.count("_zsync_query_rows", "g-orphan"), 0);
+    assert_eq!(host.count("_zsync_row_refs", "g-orphan"), 0);
+    assert_eq!(host.count("_zsync_query_state", "g-orphan"), 0);
     // the definitions stay: they are what a returning pull recomputes from.
     assert!(host.count("_zsync_queries", "g-leaves") > 0);
 

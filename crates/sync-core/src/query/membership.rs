@@ -665,8 +665,16 @@ pub(crate) fn collect_abandoned_client_groups(
     for table in ["_zsync_query_rows", "_zsync_row_refs", "_zsync_query_state"] {
         db.exec(
             &format!(
-                "DELETE FROM {table} WHERE clientGroupID NOT IN (
-                   SELECT clientGroupID FROM _zsync_client_group_seen WHERE watermark >= ?
+                "DELETE FROM {table} WHERE clientGroupID IN (
+                   WITH RECURSIVE groups(id) AS (
+                     SELECT MIN(clientGroupID) FROM {table}
+                     UNION ALL
+                     SELECT (SELECT MIN(clientGroupID) FROM {table} WHERE clientGroupID > groups.id)
+                     FROM groups WHERE id IS NOT NULL
+                   )
+                   SELECT id FROM groups WHERE id IS NOT NULL AND id NOT IN (
+                     SELECT clientGroupID FROM _zsync_client_group_seen WHERE watermark >= ?
+                   )
                  )"
             ),
             &[crate::store::counter(bound)],
