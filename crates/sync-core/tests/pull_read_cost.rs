@@ -19,6 +19,8 @@ struct Meter {
     pub stmts: u64,
     pub rows: u64,
     pub log: Vec<String>,
+    // SQLite VM steps of each collector delete, recorded as the pull runs them
+    pub collector_steps: Vec<(String, i32)>,
 }
 
 impl Meter {
@@ -35,6 +37,7 @@ impl Meter {
             stmts: 0,
             rows: 0,
             log: Vec::new(),
+            collector_steps: Vec::new(),
         }
     }
 
@@ -42,6 +45,7 @@ impl Meter {
         self.stmts = 0;
         self.rows = 0;
         self.log.clear();
+        self.collector_steps.clear();
     }
 
     fn short(line: &str) -> String {
@@ -58,6 +62,23 @@ impl SyncDb for Meter {
     fn exec(&mut self, sql: &str, params: &[SqlValue]) -> Result<(), DbError> {
         self.stmts += 1;
         self.log.push(format!("exec {sql}"));
+        if sql.contains("_zsync_client_group_seen WHERE watermark >= ?") {
+            let mut statement = self.db.conn.prepare(sql).expect("prepare collector");
+            let binds: Vec<rusqlite::types::Value> = params
+                .iter()
+                .map(|p| match p {
+                    SqlValue::Integer(n) => rusqlite::types::Value::Integer(*n),
+                    SqlValue::Text(t) => rusqlite::types::Value::Text(t.clone()),
+                    other => panic!("unexpected collector bind {other:?}"),
+                })
+                .collect();
+            statement
+                .execute(rusqlite::params_from_iter(binds.iter()))
+                .expect("collector delete");
+            let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+            self.collector_steps.push((Meter::short(sql), steps));
+            return Ok(());
+        }
         self.db.exec(sql, params)
     }
 
@@ -536,4 +557,108 @@ fn bulk_departure_write_cost_and_tombstone_replay() {
         replay_dels, 500,
         "a lagging client must replay every tombstoned departure or rows ghost"
     );
+}
+
+// The abandoned-group collector runs inside a real pull whenever pruning raises
+// the floor and some group has fallen behind it. It must cost in proportion to
+// the number of client groups, not to the membership rows of the groups that stay.
+#[test]
+fn abandoned_group_collector_does_not_scan_live_membership() {
+    const RETAIN: i64 = 8;
+    let (mut h, mut cookie) = steady_host_with_retain(RETAIN);
+    let tables = item_tables();
+
+    // a second live group holding far more membership than the collector may touch,
+    // spread over a few hundred rows per query as a real store holds them.
+    // the expired group has stale membership and a stale seen row; the orphan has
+    // membership and no seen row at all (left by an older engine).
+    h.db.conn
+        .execute_batch(
+            "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM n WHERE i < 29999)
+             INSERT INTO _zsync_query_rows SELECT 'g-big', 'qb' || (i % 50), 'item',
+               '{\"id\":\"big' || i || '\"}' FROM n;
+             WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM n WHERE i < 29999)
+             INSERT INTO _zsync_row_refs SELECT 'g-big', 'item',
+               '{\"id\":\"big' || i || '\"}', 1, 1, NULL FROM n;
+             WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM n WHERE i < 29999)
+             INSERT INTO _zsync_query_state SELECT 'g-big', 'qs' || i FROM n;
+             INSERT INTO _zsync_client_group_seen VALUES ('g-big', 1000000);
+             WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM n WHERE i < 99)
+             INSERT INTO _zsync_query_rows SELECT 'g-expired', 'qe', 'item',
+               '{\"id\":\"e' || i || '\"}' FROM n;
+             WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i + 1 FROM n WHERE i < 99)
+             INSERT INTO _zsync_row_refs SELECT 'g-expired', 'item',
+               '{\"id\":\"e' || i || '\"}', 1, 1, NULL FROM n;
+             INSERT INTO _zsync_query_state VALUES ('g-expired', 'qe');
+             INSERT INTO _zsync_client_group_seen VALUES ('g-expired', 0);
+             INSERT INTO _zsync_query_rows VALUES ('g-orphan', 'qo', 'item', '{\"id\":\"o\"}');
+             INSERT INTO _zsync_row_refs VALUES ('g-orphan', 'item', '{\"id\":\"o\"}', 1, 1, NULL);
+             INSERT INTO _zsync_query_state VALUES ('g-orphan', 'qo');",
+        )
+        .unwrap();
+    let count = |h: &mut Meter, table: &str, group: &str| -> i64 {
+        h.db.conn
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE clientGroupID = ?"),
+                [group],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let live_before: Vec<i64> = ["_zsync_query_rows", "_zsync_row_refs", "_zsync_query_state"]
+        .iter()
+        .flat_map(|t| ["g1", "g-big"].map(|g| count(&mut h, t, g)))
+        .collect();
+    assert!(live_before.iter().all(|n| *n > 0));
+
+    // history moves past the retained window while g1 keeps pulling; the first
+    // pull that raises the floor past the stale seen row runs the collector.
+    let mut collected = None;
+    for i in 0..(RETAIN * 3) {
+        h.db.exec(
+            "UPDATE item_record SET item_label = ? WHERE item_id = 'i612'",
+            &[SqlValue::Text(format!("v{i}"))],
+        )
+        .unwrap();
+        h.reset();
+        let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie });
+        let resp = h
+            .transaction(|db| handle_query_pull(db, &tables, RETAIN, &body, "u1"))
+            .unwrap();
+        cookie = resp["cookie"].clone();
+        if collected.is_none() && !h.collector_steps.is_empty() {
+            collected = Some(h.collector_steps.clone());
+        }
+    }
+    let steps = collected.expect("a real pull must run the collector");
+    assert_eq!(steps.len(), 3, "one delete per membership table");
+
+    for table in ["_zsync_query_rows", "_zsync_row_refs", "_zsync_query_state"] {
+        for group in ["g-expired", "g-orphan"] {
+            assert_eq!(count(&mut h, table, group), 0, "{table} kept {group}");
+        }
+    }
+    assert_eq!(
+        h.db.conn
+            .query_row(
+                "SELECT count(*) FROM _zsync_client_group_seen WHERE clientGroupID = 'g-expired'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let live_after: Vec<i64> = ["_zsync_query_rows", "_zsync_row_refs", "_zsync_query_state"]
+        .iter()
+        .flat_map(|t| ["g1", "g-big"].map(|g| count(&mut h, t, g)))
+        .collect();
+    assert_eq!(live_before, live_after, "live groups must keep all membership");
+
+    // 30,000 live rows per table sit beside a handful of groups. a full scan
+    // costs well over 100,000 VM steps per table; seeking by group costs
+    // hundreds.
+    for (sql, vm) in &steps {
+        println!("collector: {vm} VM steps: {sql}");
+        assert!(*vm < 2_000, "collector scanned live membership: {vm} VM steps");
+    }
 }
