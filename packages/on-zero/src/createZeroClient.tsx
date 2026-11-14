@@ -710,9 +710,12 @@ export function createZeroClientInternal<
   type CachedZeroEntry = {
     key: string
     instance: ZeroInstance
+    external?: boolean
     auth?: string | null
   }
   let cachedZero: CachedZeroEntry | null = null
+  const externalInstanceKeys = new WeakMap<ZeroInstance, number>()
+  let nextExternalInstanceKey = 0
 
   // instances the render phase displaced, waiting for a commit to close them.
   // react can throw a render away, so a rotation is only PROVISIONAL until
@@ -977,6 +980,7 @@ export function createZeroClientInternal<
     'schema' | 'mutators'
   > & {
     children: ReactNode
+    zero?: ZeroInstance
     authData?: AuthData | null
     // when true, ProvideZero renders a stable shell with stub Zero — no real
     // client is created, no websocket is opened, no IDB store is touched.
@@ -1042,6 +1046,7 @@ export function createZeroClientInternal<
 
   const ProvideZeroClient = ({
     children,
+    zero: externalZero,
     authData: authDataIn,
     transport,
     beforeReload,
@@ -1053,6 +1058,8 @@ export function createZeroClientInternal<
     disable,
     ...props
   }: ProvideZeroProps) => {
+    if (externalZero && transport)
+      throw new Error('a supplied Zero instance owns its transport')
     // resolve the auth token first: a real logout (token gone) must clear
     // authData so client mutators don't keep running as the old user, while a
     // transient authData blip with the token still present (session refresh, tab
@@ -1121,20 +1128,27 @@ export function createZeroClientInternal<
     // via hasAuth, matching zero's documented provider semantics). function
     // props (callbacks, logSink, batchViewUpdates) are bound at construction.
     // remintGeneration is included so remint() forces a fresh instance.
-    const instanceKey = JSON.stringify([
-      Object.entries({ kvStore: 'mem', ...scopedProps })
-        .filter(
-          ([key, value]) =>
-            key !== 'auth' && typeof value !== 'function' && value !== undefined
-        )
-        .sort(([a], [b]) => (a < b ? -1 : 1)),
-      hasAuth,
-      transport,
-      benignLogPatterns?.map((pattern) =>
-        typeof pattern === 'string' ? pattern : `/${pattern.source}/${pattern.flags}`
-      ),
-      remintGeneration,
-    ])
+    let externalKey: number | undefined
+    if (externalZero) {
+      externalKey = externalInstanceKeys.get(externalZero) ?? ++nextExternalInstanceKey
+      externalInstanceKeys.set(externalZero, externalKey)
+    }
+    const instanceKey = externalKey
+      ? `external:${externalKey}`
+      : JSON.stringify([
+          Object.entries({ kvStore: 'mem', ...scopedProps })
+            .filter(
+              ([key, value]) =>
+                key !== 'auth' && typeof value !== 'function' && value !== undefined
+            )
+            .sort(([a], [b]) => (a < b ? -1 : 1)),
+          hasAuth,
+          transport,
+          benignLogPatterns?.map((pattern) =>
+            typeof pattern === 'string' ? pattern : `/${pattern.source}/${pattern.flags}`
+          ),
+          remintGeneration,
+        ])
 
     // create/rotate DURING RENDER. a consumer that reads `zero`, or a
     // transport that has to be installed before the first connect, has to find
@@ -1164,17 +1178,20 @@ export function createZeroClientInternal<
         const nextCachedZero = revived ?? {
           key: instanceKey,
           auth,
-          instance: constructZeroInstance({
-            options: scopedProps as Omit<
-              ZeroOptions<Schema, ZeroMutators>,
-              'schema' | 'mutators'
-            >,
-            transport,
-            beforeReload,
-            scheduleReload,
-            guardStorage,
-            benignLogPatterns,
-          }),
+          external: !!externalZero,
+          instance:
+            externalZero ??
+            constructZeroInstance({
+              options: scopedProps as Omit<
+                ZeroOptions<Schema, ZeroMutators>,
+                'schema' | 'mutators'
+              >,
+              transport,
+              beforeReload,
+              scheduleReload,
+              guardStorage,
+              benignLogPatterns,
+            }),
         }
         cachedZero = nextCachedZero
       }
@@ -1206,7 +1223,8 @@ export function createZeroClientInternal<
       // close only. the replacement is already published and already fenced
       // the outgoing client's writes, and SetZeroInstance's effect emits the
       // one version change a rotation is allowed to produce.
-      for (const { instance: zeroInstance } of outgoing) zeroInstance.close()
+      for (const { instance: zeroInstance, external } of outgoing)
+        if (!external) zeroInstance.close()
     })
 
     // a changed token on the same identity refreshes auth in place — zero

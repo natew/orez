@@ -260,3 +260,39 @@ test('unmounting one of two overlapping providers keeps the shared instance publ
   root = null
   expect(() => client.zero.clientID).toThrow(/Zero instance not initialized/)
 })
+
+test('a supplied ready instance publishes synchronously and stays owned by its caller', () => {
+  const client = makeClient()
+  const first = new fakeZero.FakeZero({ userID: 'external' })
+  const second = new fakeZero.FakeZero({ userID: 'external' })
+  Object.defineProperty(second, 'clientID', { value: first.clientID })
+  let seen: unknown
+  function Probe() {
+    seen = useZero()
+    expect(client.zero.clientID).toBe(first.clientID)
+    return null
+  }
+  const render = (instance: typeof first) => {
+    act(() => {
+      root?.render(
+        <StrictMode>
+          <client.ProvideZero userID="external" zero={instance as never}>
+            <Probe />
+          </client.ProvideZero>
+        </StrictMode>
+      )
+    })
+  }
+  root = createRoot(container)
+  render(first)
+  expect(seen).toBe(first)
+  render(second)
+  expect(seen).toBe(second)
+  expect(fakeZero.instances).toHaveLength(2)
+  expect(first.close).not.toHaveBeenCalled()
+  act(() => root?.unmount())
+  root = createRoot(container)
+  render(second)
+  expect(seen).toBe(second)
+  expect(second.close).not.toHaveBeenCalled()
+})

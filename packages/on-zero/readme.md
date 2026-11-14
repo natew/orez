@@ -554,6 +554,14 @@ where passive effects are delayed or never flush. the exception is a server
 runtime, where `ProvideZero` creates nothing and descendants get the inert stub
 with every `useQuery` returning its empty shape.
 
+Pass `zero={readyInstance}` to supply a client opened by an asynchronous host.
+The provider publishes that instance before descendants render and preserves
+the caller's ownership: replacing it or unmounting does not close it. A new
+instance object replaces the prior instance even when both have the same durable
+client ID. Keep the provider disabled while opening the client, then pass the
+ready instance and enable it. The caller configures its transport and recovery;
+do not pass `transport` alongside `zero`.
+
 the client remains cached across provider unmounts so route transitions do not
 close a live connection. the cache also remembers the bearer token used by that
 instance. when a provider remounts with a different token but the same client
