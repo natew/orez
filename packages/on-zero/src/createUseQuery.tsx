@@ -92,10 +92,12 @@ export function createUseQuery<Schema extends ZeroSchema>({
   DisabledContext,
   customQueries,
   getQueryFaults,
+  getQueryScope,
 }: {
   DisabledContext: Context<QueryControlMode>
   customQueries: AnyQueryRegistry
   getQueryFaults: (zero: object) => QueryFaults | undefined
+  getQueryScope?: (zero: object) => number | undefined
 }): UseQueryHook<Schema> {
   // SSG: return an inert hook. on-zero's bundled React copy isn't the same
   // one the SSG build's renderer initialises, so hook dispatch returns null.
@@ -158,8 +160,21 @@ export function createUseQuery<Schema extends ZeroSchema>({
       () => ({ enabled: effectiveEnabled, ttl: optionTTL }),
       [effectiveEnabled, optionTTL]
     )
-    const rawOut = zeroUseQuery(queryRequest, effectiveOptions)
     const zero = useZero()
+    const scope = getQueryScope?.(zero)
+    const reactQuery = useMemo(() => {
+      if (scope === undefined) return queryRequest
+      const query = asQueryInternals(addContextToQuery(queryRequest, zero.context))
+      // zero-react keys its global views by clientID, which a native store retains across opens.
+      return new Proxy(query, {
+        get(target, property) {
+          if (property === 'hash') return () => `${target.hash()}:external:${scope}`
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    }, [queryRequest, zero, scope])
+    const rawOut = zeroUseQuery(reactQuery, effectiveOptions)
     const faultOut = useQueryFault(
       effectiveEnabled === false ? undefined : getQueryFaults(zero),
       queryRequest,

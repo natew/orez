@@ -617,6 +617,7 @@ export function createZeroClientInternal<
     DisabledContext,
     customQueries,
     getQueryFaults: (zero) => queryFaults.get(zero),
+    getQueryScope: (zero) => externalInstanceKeys.get(zero as ZeroInstance),
   })
 
   const useQueryDirect = createDirectUseQuery

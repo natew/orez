@@ -12,7 +12,7 @@
 // discarded, or never flushed — workers, double-rendered roots, concurrent
 // React — the same hole opens.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createBuilder, createSchema, string, table } from '@rocicorp/zero'
 import { useZero } from '@rocicorp/zero/react'
 import { act, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -295,4 +295,53 @@ test('a supplied ready instance publishes synchronously and stays owned by its c
   render(second)
   expect(seen).toBe(second)
   expect(second.close).not.toHaveBeenCalled()
+})
+
+test('external instances retaining a clientID materialize separate React views', () => {
+  const all = () => createBuilder(schema).todo
+  const client = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: { todo: { all } },
+  })
+  const first = new fakeZero.FakeZero({ userID: 'native' })
+  const second = new fakeZero.FakeZero({ userID: 'native' })
+  Object.defineProperty(second, 'clientID', { value: first.clientID })
+  const destroyed = new Set<object>()
+  for (const [instance, title] of [
+    [first, 'before'],
+    [second, 'after'],
+  ] as const) {
+    Object.assign(instance, {
+      materialize: vi.fn(() => ({
+        addListener(listener: (rows: object[], type: string) => void) {
+          listener([{ id: 'todo', title }], 'complete')
+        },
+        destroy() {
+          destroyed.add(instance)
+        },
+        updateTTL() {
+          if (destroyed.has(instance)) throw new Error('view is destroyed')
+        },
+      })),
+    })
+  }
+  let title: string | undefined
+  function Probe() {
+    const [rows] = client.useQuery(all)
+    title = rows[0]?.title
+    return null
+  }
+  root = createRoot(container)
+  const render = (instance: typeof first) =>
+    root?.render(
+      <client.ProvideZero userID="native" zero={instance as never}>
+        <Probe />
+      </client.ProvideZero>
+    )
+  act(() => render(first))
+  expect(title).toBe('before')
+  destroyed.add(first)
+  act(() => render(second))
+  expect(title).toBe('after')
 })

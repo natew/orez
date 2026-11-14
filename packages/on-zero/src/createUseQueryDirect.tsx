@@ -222,7 +222,10 @@ class DirectViewWrapper implements DirectView {
 }
 
 class DirectViewStore {
-  private readonly views = new Map<string, DirectViewWrapper>()
+  private readonly views = new WeakMap<
+    MaterializableZero,
+    Map<string, DirectViewWrapper>
+  >()
 
   getView(
     zero: MaterializableZero,
@@ -241,8 +244,13 @@ class DirectViewStore {
       }
     }
 
-    const hash = `${zero.clientID}:${queryInternals.hash()}`
-    let view = this.views.get(hash)
+    let views = this.views.get(zero)
+    if (!views) {
+      views = new Map()
+      this.views.set(zero, views)
+    }
+    const hash = queryInternals.hash()
+    let view = views.get(hash)
     if (!view) {
       view = new DirectViewWrapper(
         query,
@@ -250,12 +258,12 @@ class DirectViewStore {
         ttl,
         queryInternals.format.singular,
         (dematerialized) => {
-          if (this.views.get(hash) === dematerialized) {
-            this.views.delete(hash)
+          if (views.get(hash) === dematerialized) {
+            views.delete(hash)
           }
         }
       )
-      this.views.set(hash, view)
+      views.set(hash, view)
     } else {
       view.updateTTL(ttl)
     }
