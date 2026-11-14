@@ -1152,10 +1152,7 @@ fn collect_dependent_rows(
                 cr.child_table
             ))
         })?;
-        if isolate_errors {
-            validate_query_rows(db, child_spec, &cr.sql, &cr.params)?;
-        }
-        for row in db.query(&cr.sql, &cr.params)? {
+        for row in query_member_rows(db, child_spec, &cr.sql, &cr.params, isolate_errors)? {
             let pk_obj = raw_pk(child_spec, &row);
             let key = canonical_pk(child_spec, &pk_obj);
             live.insert((cr.child_table.clone(), key.clone()));
@@ -1409,38 +1406,60 @@ pub(crate) type MembershipDiff = (
     BTreeMap<String, String>,
 );
 
-// Check inside SQLite before reading the row through a JavaScript adapter. An
-// unsafe stored integer can fail at that boundary before Rust sees the value.
-fn validate_query_rows(
+// a query's member rows, refusing any row holding a stored value the client
+// cannot represent when errors are isolated per query. the check runs inside
+// sqlite: an adapter that reads every value intact gets it as a column of the
+// same statement, and any other adapter probes first, since reading the row
+// itself could fail before rust sees the value.
+fn query_member_rows(
     db: &mut dyn SyncDb,
     spec: &TableSpec,
     sql: &str,
     params: &[SqlValue],
-) -> Result<(), EngineError> {
+    isolate_errors: bool,
+) -> Result<Vec<Row>, EngineError> {
     let predicates = spec
         .columns
         .iter()
         .map(|(column, kind)| {
-            storage_predicate(&format!("_orez_guard_row.{}", quote_ident(column)), *kind)
+            format!(
+                "({})",
+                storage_predicate(&format!("_orez_guard_row.{}", quote_ident(column)), *kind)
+            )
         })
         .collect::<Vec<_>>();
-    if predicates.is_empty() {
-        return Ok(());
+    if !isolate_errors || predicates.is_empty() {
+        return Ok(db.query(sql, params)?);
     }
-    let query = format!(
-        "SELECT 1 AS invalid FROM ({sql}) AS _orez_guard_row WHERE NOT ({}) LIMIT 1",
-        predicates
-            .iter()
-            .map(|p| format!("({p})"))
-            .collect::<Vec<_>>()
-            .join(" AND ")
-    );
-    if !db.query(&query, params)?.is_empty() {
-        return Err(EngineError::corrupt(
-            "query contains a stored value that cannot be represented",
-        ));
+    let valid = predicates.join(" AND ");
+    let corrupt =
+        || EngineError::corrupt("query contains a stored value that cannot be represented");
+    if !db.reads_stored_values_intact() {
+        let probe = format!(
+            "SELECT 1 AS invalid FROM ({sql}) AS _orez_guard_row WHERE NOT ({valid}) LIMIT 1"
+        );
+        if !db.query(&probe, params)?.is_empty() {
+            return Err(corrupt());
+        }
+        return Ok(db.query(sql, params)?);
     }
-    Ok(())
+    let mut rows = db.query(
+        &format!(
+            "SELECT _orez_guard_row.*, CASE WHEN NOT ({valid}) THEN 1 ELSE 0 END AS _orez_guard_invalid FROM ({sql}) AS _orez_guard_row"
+        ),
+        params,
+    )?;
+    let Some(first) = rows.first() else {
+        return Ok(rows);
+    };
+    let columns: std::sync::Arc<[String]> = first.columns[..first.columns.len() - 1].into();
+    for row in &mut rows {
+        if row.values.pop() == Some(SqlValue::Integer(1)) {
+            return Err(corrupt());
+        }
+        row.columns = columns.clone();
+    }
+    Ok(rows)
 }
 
 pub(crate) fn has_uncomputed_queries(
@@ -1554,10 +1573,8 @@ pub(crate) fn recompute_group_with_rehydrate(
         let mut query_values: BTreeMap<(String, String), Row> = BTreeMap::new();
         let result = (|| -> Result<(), EngineError> {
             let compiled = compile(ast, tables)?;
-            if isolate_errors {
-                validate_query_rows(db, spec, &compiled.sql, &compiled.params)?;
-            }
-            for row in db.query(&compiled.sql, &compiled.params)? {
+            for row in query_member_rows(db, spec, &compiled.sql, &compiled.params, isolate_errors)?
+            {
                 let pk_obj = raw_pk(spec, &row);
                 let key = canonical_pk(spec, &pk_obj);
                 live.insert((q.root_table.clone(), key.clone()));

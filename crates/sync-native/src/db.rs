@@ -117,6 +117,10 @@ impl<'c> SyncDb for RusqliteDb<'c> {
     fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
         self.schema_write(sql, |db| db.query_raw(sql, params))
     }
+
+    fn reads_stored_values_intact(&self) -> bool {
+        true
+    }
 }
 
 impl RusqliteDb<'_> {

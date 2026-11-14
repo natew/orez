@@ -85,6 +85,10 @@ impl SyncDb for TestDb {
         }
         Ok(rows_out)
     }
+
+    fn reads_stored_values_intact(&self) -> bool {
+        true
+    }
 }
 
 impl Transactor for TestDb {

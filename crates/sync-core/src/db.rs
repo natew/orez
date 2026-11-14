@@ -37,4 +37,10 @@ pub struct DbError(pub String);
 pub trait SyncDb {
     fn exec(&mut self, sql: &str, params: &[SqlValue]) -> Result<(), DbError>;
     fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError>;
+    // true when every stored value reaches rust intact. a javascript adapter
+    // can throw on an unsafe integer before the engine sees the row, so it
+    // keeps the default and the engine probes storage in a separate statement.
+    fn reads_stored_values_intact(&self) -> bool {
+        false
+    }
 }
