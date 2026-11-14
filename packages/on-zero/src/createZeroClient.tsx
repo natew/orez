@@ -853,7 +853,7 @@ export function createZeroClientInternal<
   async function remint(opts: { dropLocalState?: boolean } = {}): Promise<boolean> {
     // no mounted provider to reconstruct through — bail BEFORE the guard so an
     // unmounted call doesn't burn an attempt or start the cooldown.
-    if (!remintControl.bump) return false
+    if (!remintControl.bump || cachedZero?.external) return false
     // capture the outgoing instance synchronously for the transition's
     // connected gate (see awaitReconnectedAfterRemint).
     remintPreviousInstance = zeroRuntime.zero
@@ -891,6 +891,7 @@ export function createZeroClientInternal<
   // account data must never survive into the wrong account. the recovery budget
   // resets too, so a new session does not inherit the old one's attempts.
   async function retire(): Promise<void> {
+    if (cachedZero?.external) return
     const parked = [...retiredZero.values()]
     retiredZero.clear()
     const live = zeroRuntime.zero ?? cachedZero?.instance ?? null
@@ -900,8 +901,8 @@ export function createZeroClientInternal<
     await deleteZeroInstance(live).catch(() => {})
     // parked instances were never published, so they only need their local
     // store dropped and their socket closed.
-    for (const { instance: parkedInstance } of parked) {
-      if (parkedInstance === live) continue
+    for (const { instance: parkedInstance, external } of parked) {
+      if (external || parkedInstance === live) continue
       try {
         await parkedInstance.delete()
       } catch {
