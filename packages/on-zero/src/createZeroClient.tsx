@@ -34,6 +34,7 @@ import { clearZeroClientData } from './helpers/clearZeroClientData'
 import { createMutators } from './helpers/createMutators'
 import { createEmitter, type Emitter } from './helpers/emitter'
 import { getAuth } from './helpers/getAuth'
+import { globalValue } from './helpers/globalValue'
 import { readHostStorageScope } from './helpers/hostStorageScope'
 import { createMutationLifecycle } from './helpers/mutationLifecycle'
 import { IS_SERVER_RUNTIME } from './helpers/platform'
@@ -107,6 +108,11 @@ export type ZeroProviderTransport = {
 export type ZeroProviderGeneration = {
   isCurrent: () => boolean
 }
+
+const externalInstances = globalValue('on-zero.external-instances', () => ({
+  keys: new WeakMap<object, number>(),
+  next: 0,
+}))
 
 export type WaitForZeroOptions = {
   signal?: AbortSignal
@@ -617,7 +623,7 @@ export function createZeroClientInternal<
     DisabledContext,
     customQueries,
     getQueryFaults: (zero) => queryFaults.get(zero),
-    getQueryScope: (zero) => externalInstanceKeys.get(zero as ZeroInstance),
+    getQueryScope: (zero) => externalInstances.keys.get(zero),
   })
 
   const useQueryDirect = createDirectUseQuery
@@ -715,8 +721,6 @@ export function createZeroClientInternal<
     auth?: string | null
   }
   let cachedZero: CachedZeroEntry | null = null
-  const externalInstanceKeys = new WeakMap<ZeroInstance, number>()
-  let nextExternalInstanceKey = 0
 
   // instances the render phase displaced, waiting for a commit to close them.
   // react can throw a render away, so a rotation is only PROVISIONAL until
@@ -1131,8 +1135,8 @@ export function createZeroClientInternal<
     // remintGeneration is included so remint() forces a fresh instance.
     let externalKey: number | undefined
     if (externalZero) {
-      externalKey = externalInstanceKeys.get(externalZero) ?? ++nextExternalInstanceKey
-      externalInstanceKeys.set(externalZero, externalKey)
+      externalKey = externalInstances.keys.get(externalZero) ?? ++externalInstances.next
+      externalInstances.keys.set(externalZero, externalKey)
     }
     const instanceKey = externalKey
       ? `external:${externalKey}`
