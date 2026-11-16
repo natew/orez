@@ -15,42 +15,24 @@ import { join, resolve } from 'node:path'
 import { transformSkillForHarness } from './skills'
 
 describe('transformSkillForHarness', () => {
-  it('maps runner tiers to Claude models for claude harness', () => {
-    const inputSm = `---
+  it('removes the model key for the claude harness', () => {
+    for (const model of ['sm', 'md', 'lg', 'xl', 'haiku']) {
+      const input = `---
 name: my-skill
-model: sm
+model: ${model}
 description: A helpful skill
 ---
 
-# My skill
+model: body
 `
-    const outputSm = transformSkillForHarness(inputSm, 'claude')
-    expect(outputSm).toContain('model: haiku')
-    expect(outputSm).not.toContain('model: sm')
-
-    const inputMd = `---
+      expect(transformSkillForHarness(input, 'claude')).toBe(`---
 name: my-skill
-model: md
 description: A helpful skill
 ---
-`
-    expect(transformSkillForHarness(inputMd, 'claude')).toContain('model: sonnet')
 
-    const inputLg = `---
-name: my-skill
-model: lg
-description: A helpful skill
----
-`
-    expect(transformSkillForHarness(inputLg, 'claude')).toContain('model: opus')
-
-    const inputXl = `---
-name: my-skill
-model: xl
-description: A helpful skill
----
-`
-    expect(transformSkillForHarness(inputXl, 'claude')).toContain('model: fable')
+model: body
+`)
+    }
   })
 
   it('leaves models untouched for agents harness', () => {
@@ -61,16 +43,6 @@ description: A helpful skill
 ---
 `
     expect(transformSkillForHarness(input, 'agents')).toBe(input)
-  })
-
-  it('leaves already-specific Claude models untouched', () => {
-    const input = `---
-name: my-skill
-model: haiku
-description: A helpful skill
----
-`
-    expect(transformSkillForHarness(input, 'claude')).toBe(input)
   })
 
   it('leaves files without model untouched', () => {
@@ -144,7 +116,7 @@ describe('skills generation ownership', () => {
       run(true)
       expect(
         readFileSync(join(fixture, '.claude/skills/current/SKILL.md'), 'utf8')
-      ).toContain('model: sonnet')
+      ).not.toContain('model:')
       expect(
         readFileSync(join(fixture, '.agents/skills/current/SKILL.md'), 'utf8')
       ).toContain('model: md')
@@ -192,7 +164,7 @@ describe('skills generation ownership', () => {
       ).toBe(true)
       expect(
         readFileSync(join(fixture, '.claude/skills/generated/SKILL.md'), 'utf8')
-      ).toContain('model: sonnet')
+      ).not.toContain('model:')
       writeFileSync(join(fixture, '.claude/skills/generated/keep.txt'), 'keep')
       rmSync(source)
       run(true)

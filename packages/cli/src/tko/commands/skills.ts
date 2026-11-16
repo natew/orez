@@ -61,27 +61,15 @@ export interface SkillTargetDir {
   harness: SkillHarness
 }
 
-export const TIER_TO_CLAUDE_MODEL: Record<string, string> = {
-  sm: 'haiku',
-  md: 'sonnet',
-  lg: 'opus',
-  xl: 'fable',
-}
-
+// a `model:` key in skill frontmatter makes Claude Code run the rest of the turn on
+// that model, so Claude copies carry none and the session keeps its own model.
 export function transformSkillForHarness(content: string, harness: SkillHarness): string {
   if (harness !== 'claude') return content
   if (!content.startsWith('---')) return content
   const endIndex = content.indexOf('---', 3)
   if (endIndex === -1) return content
-  const frontmatter = content.slice(0, endIndex)
-  const transformed = frontmatter.replace(
-    /^(\s*model:\s*)(sm|md|lg|xl)\s*$/m,
-    (match, prefix, tier) => {
-      const mapped = TIER_TO_CLAUDE_MODEL[tier]
-      return mapped ? `${prefix}${mapped}` : match
-    }
-  )
-  return transformed + content.slice(endIndex)
+  const frontmatter = content.slice(0, endIndex).replace(/^[ \t]*model:.*\r?\n/gm, '')
+  return frontmatter + content.slice(endIndex)
 }
 
 function getSkillsDirs(cwd: string): SkillTargetDir[] {
@@ -255,7 +243,7 @@ async function generateDocSkills(
           generated++
 
           console.info(
-            `  ${pc.cyan('✎')} ${skillName} ${pc.dim(`(${relative(cwd, skillsDir)}: model mapped)`)}`
+            `  ${pc.cyan('✎')} ${skillName} ${pc.dim(`(${relative(cwd, skillsDir)}: model removed)`)}`
           )
         }
       }
@@ -335,7 +323,7 @@ const generateCommand = defineCommand({
     if (symlinked > 0) console.info(`  ${pc.green(`${symlinked} symlinked`)}`)
     if (generated > 0)
       console.info(
-        `  ${pc.cyan(`${generated} generated`)} ${pc.dim('(model tier translated)')}`
+        `  ${pc.cyan(`${generated} generated`)} ${pc.dim('(model removed)')}`
       )
     if (skipped > 0)
       console.info(
