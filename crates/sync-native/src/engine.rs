@@ -47,9 +47,27 @@ pub struct SchemaColumn<'a> {
 /// Additive DDL operations that cannot rewrite or seed existing cells.
 pub struct SchemaInit<'a> {
     db: &'a mut dyn SyncDb,
+    tables: &'a Tables,
 }
 
 impl SchemaInit<'_> {
+    fn validate_column(&self, table: &str, column: &SchemaColumn<'_>) -> Result<(), String> {
+        let declared = self
+            .tables
+            .resolve_column(table, column.name)
+            .map_err(|e| e.message)?;
+        if !declared.physical_table.eq_ignore_ascii_case(table)
+            || !declared.physical_column.eq_ignore_ascii_case(column.name)
+            || declared.column_type != column.kind
+        {
+            return Err(format!(
+                "schema initializer column {table}.{} does not match the declared schema",
+                column.name
+            ));
+        }
+        Ok(())
+    }
+
     pub fn columns(&mut self, table: &str) -> Result<Vec<String>, String> {
         Ok(self
             .db
@@ -72,6 +90,9 @@ impl SchemaInit<'_> {
         columns: &[SchemaColumn<'_>],
         keys: &[&str],
     ) -> Result<(), String> {
+        for column in columns {
+            self.validate_column(table, column)?;
+        }
         let body = columns
             .iter()
             .map(column_ddl)
@@ -90,6 +111,7 @@ impl SchemaInit<'_> {
     }
 
     pub fn add_column(&mut self, table: &str, column: &SchemaColumn<'_>) -> Result<(), String> {
+        self.validate_column(table, column)?;
         self.db
             .exec(
                 &format!(
@@ -249,7 +271,10 @@ pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), St
                 sync_core::schema::validate_number_storage_changes(db, &ctx.tables, &before)
                     .map_err(|e| e.0)?;
             }
-            Initializer::Schema(initialize) => initialize(&mut SchemaInit { db })?,
+            Initializer::Schema(initialize) => initialize(&mut SchemaInit {
+                db,
+                tables: &ctx.tables,
+            })?,
         }
         db.exec(
             "INSERT INTO _zsync_app_init (lock, version) VALUES (1, ?)
@@ -516,5 +541,58 @@ impl Mutator for CallbackMutator {
         user_id: &str,
     ) -> Result<(), MutateError> {
         (self.f)(db, name, args, user_id)
+    }
+}
+
+#[cfg(test)]
+mod schema_initializer_tests {
+    use super::*;
+    use sync_core::value::ZeroColumnType;
+
+    #[test]
+    fn refuses_column_type_that_could_create_invalid_defaults() {
+        let tables = Tables::from_zero_schema(&serde_json::json!({"tables":{"item":{
+            "columns":{"id":{"type":"string"},"amount":{"type":"number"}},
+            "primaryKey":["id"]
+        }}}))
+        .unwrap();
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE item (id TEXT PRIMARY KEY); INSERT INTO item VALUES ('old')",
+            )
+            .unwrap();
+        let mut db = RusqliteDb::new(&connection);
+        let mut init = SchemaInit {
+            db: &mut db,
+            tables: &tables,
+        };
+        assert!(
+            init.add_column(
+                "item",
+                &SchemaColumn {
+                    name: "amount",
+                    kind: ZeroColumnType::String,
+                    optional: false
+                }
+            )
+            .is_err()
+        );
+        init.add_column(
+            "item",
+            &SchemaColumn {
+                name: "amount",
+                kind: ZeroColumnType::Number,
+                optional: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT amount FROM item WHERE id = 'old'", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }
