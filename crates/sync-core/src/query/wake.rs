@@ -418,14 +418,13 @@ pub(crate) fn init_wake_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     // not partial on refcount: sqlite rewrites a partial index entry whenever
     // its WHERE column is assigned, so a query joining or leaving a group
     // rewrote one leaf page per held row (tens of MB per refcount pass).
-    let partial = db
+    let partial = !db
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'index'
                AND name = '_zsync_row_refs_holders' AND sql LIKE '%WHERE%'",
             &[],
         )?
-        .first()
-        .is_some();
+        .is_empty();
     if partial {
         db.exec("DROP INDEX _zsync_row_refs_holders", &[])?;
     }

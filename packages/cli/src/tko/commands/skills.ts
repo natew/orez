@@ -322,9 +322,7 @@ const generateCommand = defineCommand({
     console.info(pc.bold('summary:'))
     if (symlinked > 0) console.info(`  ${pc.green(`${symlinked} symlinked`)}`)
     if (generated > 0)
-      console.info(
-        `  ${pc.cyan(`${generated} generated`)} ${pc.dim('(model removed)')}`
-      )
+      console.info(`  ${pc.cyan(`${generated} generated`)} ${pc.dim('(model removed)')}`)
     if (skipped > 0)
       console.info(
         `  ${pc.yellow(`${skipped} skipped`)} ${pc.dim('(linked directories or missing skill frontmatter)')}`
