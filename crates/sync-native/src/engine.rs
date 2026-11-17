@@ -27,6 +27,124 @@ use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
 /// Return Err(String) to fail opening the namespace.
 pub type InitFn = Arc<dyn Fn(&mut dyn SyncDb) -> Result<(), String> + Send + Sync>;
 
+/// Applies additive schema changes through the restricted schema interface.
+pub type SchemaInitFn = Arc<dyn Fn(&mut SchemaInit<'_>) -> Result<(), String> + Send + Sync>;
+
+/// General initializers may write data; schema initializers only create tables,
+/// add columns with safe defaults, and create indexes.
+#[derive(Clone)]
+pub enum Initializer {
+    General(InitFn),
+    Schema(SchemaInitFn),
+}
+
+pub struct SchemaColumn<'a> {
+    pub name: &'a str,
+    pub kind: sync_core::value::ZeroColumnType,
+    pub optional: bool,
+}
+
+/// Additive DDL operations that cannot rewrite or seed existing cells.
+pub struct SchemaInit<'a> {
+    db: &'a mut dyn SyncDb,
+}
+
+impl SchemaInit<'_> {
+    pub fn columns(&mut self, table: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .db
+            .query(
+                "SELECT name FROM pragma_table_info(?)",
+                &[SqlValue::Text(table.into())],
+            )
+            .map_err(|error| error.0)?
+            .into_iter()
+            .filter_map(|row| match row.values.into_iter().next() {
+                Some(SqlValue::Text(name)) => Some(name),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub fn create_table(
+        &mut self,
+        table: &str,
+        columns: &[SchemaColumn<'_>],
+        keys: &[&str],
+    ) -> Result<(), String> {
+        let body = columns
+            .iter()
+            .map(column_ddl)
+            .chain(std::iter::once(format!(
+                "PRIMARY KEY ({})",
+                keys.iter()
+                    .map(|key| quote(key))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.db
+            .exec(&format!("CREATE TABLE {} ({body})", quote(table)), &[])
+            .map_err(|error| error.0)
+    }
+
+    pub fn add_column(&mut self, table: &str, column: &SchemaColumn<'_>) -> Result<(), String> {
+        self.db
+            .exec(
+                &format!(
+                    "ALTER TABLE {} ADD COLUMN {}",
+                    quote(table),
+                    column_ddl(column)
+                ),
+                &[],
+            )
+            .map_err(|error| error.0)
+    }
+
+    pub fn create_index(
+        &mut self,
+        table: &str,
+        name: &str,
+        columns: &[&str],
+    ) -> Result<(), String> {
+        self.db
+            .exec(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
+                    quote(name),
+                    quote(table),
+                    columns
+                        .iter()
+                        .map(|column| quote(column))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                &[],
+            )
+            .map_err(|error| error.0)
+    }
+}
+
+fn quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn column_ddl(column: &SchemaColumn<'_>) -> String {
+    use sync_core::value::ZeroColumnType;
+    let (kind, default) = match column.kind {
+        ZeroColumnType::Number | ZeroColumnType::Boolean => ("INTEGER", "0"),
+        ZeroColumnType::Json => ("TEXT", "'null'"),
+        ZeroColumnType::String | ZeroColumnType::Null => ("TEXT", "''"),
+    };
+    let required = if column.optional {
+        String::new()
+    } else {
+        format!(" NOT NULL DEFAULT {default}")
+    };
+    format!("{} {kind}{required}", quote(column.name))
+}
+
 /// Runs a named mutator inside the push transaction. Return Ok(()) for
 /// success, Err(MutateError::app(msg)) for an app-level rejection (LMID
 /// still advances), or Err(MutateError::Other(msg)) for an infra failure
@@ -42,7 +160,7 @@ pub struct EngineContext {
     pub retain_changes: i64,
     // consumer-provided callbacks
     pub(crate) init_version: String,
-    pub(crate) init_fn: InitFn,
+    pub(crate) init_fn: Initializer,
     pub(crate) mutate_fn: MutateFn,
 }
 
@@ -122,11 +240,17 @@ pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), St
         .map_err(|error| error.0)?
         .is_empty();
     if !is_current {
-        let before = sync_core::schema::invalid_number_cells(db, &ctx.tables).map_err(|e| e.0)?;
-        sync_core::schema::init_number_storage_guards(db, &ctx.tables).map_err(|e| e.0)?;
-        (ctx.init_fn)(db)?;
-        sync_core::schema::validate_number_storage_changes(db, &ctx.tables, &before)
-            .map_err(|e| e.0)?;
+        match &ctx.init_fn {
+            Initializer::General(initialize) => {
+                let before =
+                    sync_core::schema::invalid_number_cells(db, &ctx.tables).map_err(|e| e.0)?;
+                sync_core::schema::init_number_storage_guards(db, &ctx.tables).map_err(|e| e.0)?;
+                initialize(db)?;
+                sync_core::schema::validate_number_storage_changes(db, &ctx.tables, &before)
+                    .map_err(|e| e.0)?;
+            }
+            Initializer::Schema(initialize) => initialize(&mut SchemaInit { db })?,
+        }
         db.exec(
             "INSERT INTO _zsync_app_init (lock, version) VALUES (1, ?)
              ON CONFLICT (lock) DO UPDATE SET version = excluded.version",

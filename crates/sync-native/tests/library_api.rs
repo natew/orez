@@ -135,7 +135,7 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
     SyncNativeConfig {
         tables: custom_tables(),
         initialize_version: "test-v1".to_string(),
-        initialize: custom_init(),
+        initialize: sync_native::engine::Initializer::General(custom_init()),
         mutate: custom_mutate(),
         authenticate: custom_auth(),
         authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(None) })),
@@ -684,7 +684,7 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
         })
     });
     let mut second_config = custom_config();
-    second_config.initialize = Arc::new(|db| {
+    second_config.initialize = sync_native::engine::Initializer::General(Arc::new(|db| {
         db.exec(
             "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
             &[],
@@ -696,7 +696,7 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
         )
         .map_err(|error| error.0)?;
         Ok(())
-    });
+    }));
     second_config.query_resolution = Some(QueryResolution { resolve: resolver });
     let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router_trusted();
     let body = json!({
@@ -871,7 +871,7 @@ async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
         })
     });
     let mut second_config = custom_config();
-    second_config.initialize = Arc::new(|db| {
+    second_config.initialize = sync_native::engine::Initializer::General(Arc::new(|db| {
         db.exec(
             "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
             &[],
@@ -883,7 +883,7 @@ async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
         )
         .map_err(|error| error.0)?;
         Ok(())
-    });
+    }));
     second_config.query_resolution = Some(QueryResolution { resolve: resolver });
     let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router_trusted();
 
@@ -1949,7 +1949,7 @@ async fn application_initialize_is_skipped_for_a_current_persisted_namespace() {
     let make_config = || {
         let mut config = custom_config();
         let initialize_calls = initialize_calls.clone();
-        config.initialize = Arc::new(move |db| {
+        config.initialize = sync_native::engine::Initializer::General(Arc::new(move |db| {
             initialize_calls.fetch_add(1, Ordering::SeqCst);
             db.exec(
                 "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
@@ -1961,7 +1961,7 @@ async fn application_initialize_is_skipped_for_a_current_persisted_namespace() {
                 &[],
             )
             .map_err(|error| error.0)
-        });
+        }));
         config
     };
 
@@ -1994,6 +1994,88 @@ async fn application_initialize_is_skipped_for_a_current_persisted_namespace() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["rows"][0]["count"], 1);
     assert_eq!(initialize_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn schema_initializer_adds_columns_and_preserves_guards() {
+    use sync_native::engine::{Initializer, SchemaColumn};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let first = test_host(custom_config(), tmp.path().to_path_buf()).into_router_trusted();
+    let push = push_body(json!([mutation(
+        1,
+        "item.create",
+        json!([{"id": "persisted", "label": "before upgrade"}]),
+        "upgrade-client"
+    )]));
+    let (status, _) = send(&first, push_req("schema-upgrade", &push, "Bearer user-1")).await;
+    assert_eq!(status, StatusCode::OK);
+    drop(first);
+
+    let mut config = custom_config();
+    let mut tables = Tables::new();
+    tables.push(
+        "item",
+        TableSpec {
+            columns: vec![
+                ("id".into(), ZeroColumnType::String),
+                ("label".into(), ZeroColumnType::String),
+                ("amount".into(), ZeroColumnType::Number),
+                ("metadata".into(), ZeroColumnType::Json),
+            ],
+            primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
+        },
+    );
+    config.tables = tables;
+    config.initialize_version = "schema-v2".into();
+    config.initialize = Initializer::Schema(Arc::new(|db| {
+        let columns = db.columns("item")?;
+        for (name, kind) in [
+            ("amount", ZeroColumnType::Number),
+            ("metadata", ZeroColumnType::Json),
+        ] {
+            if !columns.iter().any(|existing| existing == name) {
+                db.add_column(
+                    "item",
+                    &SchemaColumn {
+                        name,
+                        kind,
+                        optional: false,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }));
+    let upgraded = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
+    let (status, response) = send(
+        &upgraded,
+        admin_sql_req(
+            "schema-upgrade",
+            "SELECT label, amount, metadata FROM item WHERE id = 'persisted'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["rows"][0],
+        json!({"label": "before upgrade", "amount": 0, "metadata": "null"})
+    );
+    let (status, _) = send(
+        &upgraded,
+        admin_sql_req(
+            "schema-upgrade",
+            "UPDATE item SET amount = 9007199254740992 WHERE id = 'persisted'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -2037,7 +2119,7 @@ async fn application_initialize_migrates_a_populated_persisted_namespace() {
     let mut upgraded_config = custom_config();
     upgraded_config.tables = upgraded_tables;
     upgraded_config.initialize_version = "test-v2".to_string();
-    upgraded_config.initialize = Arc::new(|db| {
+    upgraded_config.initialize = sync_native::engine::Initializer::General(Arc::new(|db| {
         let has_category = !db
             .query(
                 "SELECT name FROM pragma_table_info('item') WHERE name = 'category'",
@@ -2053,7 +2135,7 @@ async fn application_initialize_migrates_a_populated_persisted_namespace() {
             .map_err(|error| error.0)?;
         }
         Ok(())
-    });
+    }));
     let upgraded = test_host(upgraded_config, tmp.path().to_path_buf()).into_router_trusted();
     let (status, response) = send(
         &upgraded,
@@ -2444,7 +2526,7 @@ async fn fixture_config_still_works() {
     let config = SyncNativeConfig {
         tables: fixture::build_tables(),
         initialize_version: "fixture-v1".to_string(),
-        initialize: fixture_init,
+        initialize: sync_native::engine::Initializer::General(fixture_init),
         mutate: fixture_mutate,
         authenticate: Arc::new(|headers, _namespace| {
             Box::pin(async move {

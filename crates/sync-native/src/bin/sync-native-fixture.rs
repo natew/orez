@@ -145,7 +145,7 @@ async fn main() {
     let config = SyncNativeConfig {
         tables: fixture::build_tables(),
         initialize_version: "fixture-v1".to_string(),
-        initialize,
+        initialize: sync_native::engine::Initializer::General(initialize),
         mutate,
         authenticate,
         authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(None) })),

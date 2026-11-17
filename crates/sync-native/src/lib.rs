@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::http::HeaderMap;
-use engine::{EngineContext, InitFn, MutateFn};
+use engine::{EngineContext, Initializer, MutateFn};
 use namespace::Manager;
 use serde_json::Value;
 use sync_core::schema::Tables;
@@ -290,7 +290,9 @@ pub struct SyncNativeConfig {
     pub initialize_version: String,
 
     /// Installs or migrates app DDL and optional seed data when
-    /// `initialize_version` changes. The callback must be idempotent because
+    /// `initialize_version` changes. Use `Initializer::Schema` for additive
+    /// schema-only changes to avoid scanning existing data. General
+    /// initializers retain full storage validation. The callback must be idempotent because
     /// stores created before initializer versioning run it once during their
     /// upgrade. It runs inside a transaction before the engine installs its
     /// `_zsync_*` change-tracking schema. Return `Err(String)` to fail opening
@@ -298,7 +300,7 @@ pub struct SyncNativeConfig {
     ///
     /// The engine's internal schema and triggers are installed
     /// automatically after this runs; you do not need to manage them.
-    pub initialize: InitFn,
+    pub initialize: Initializer,
 
     /// Runs a named mutator inside the push transaction.
     ///

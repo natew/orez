@@ -334,7 +334,7 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
         SyncNativeConfig {
             tables,
             initialize_version,
-            initialize,
+            initialize: crate::engine::Initializer::General(initialize),
             mutate,
             authenticate,
             authorize_wake,
