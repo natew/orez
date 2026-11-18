@@ -262,7 +262,9 @@ try {
   // A warm builds a cold namespace and ingests upstream before any pull, and
   // is refused without the identity a pull needs.
   const warmNamespace = `warm-${crypto.randomUUID()}`
-  const unauthorizedWarm = await fetch(`${base}/${warmNamespace}/warm`, { method: 'POST' })
+  const unauthorizedWarm = await fetch(`${base}/${warmNamespace}/warm`, {
+    method: 'POST',
+  })
   assert.equal(unauthorizedWarm.status, 401)
   const warm = await fetch(`${base}/${warmNamespace}/warm`, {
     method: 'POST',
