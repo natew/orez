@@ -2534,12 +2534,14 @@ export function createSyncDurableObject<
           headers.delete(NAMESPACE_HEADER)
           headers.delete(UPSTREAM_PATH_HEADER)
           headers.set('host', endpoint.host)
+          const upstreamStarted = performance.now()
           const upstreamResponse = await this.#fetchDelegatedPush(
             endpoint,
             headers,
             bytes,
             this.#engineState().upstreamWatermark === '0'
           )
+          const upstreamMs = performance.now() - upstreamStarted
           if (!upstreamResponse.ok) {
             const upstreamErrorBody = await readBoundedStream(
               upstreamResponse.body,
@@ -2590,7 +2592,9 @@ export function createSyncDurableObject<
           // contract. start an ingest round after that response, even if an
           // older round is still in flight, then journal lmids. every capped
           // log prefix therefore preserves effects-before-ack.
+          const ingestStarted = performance.now()
           await this.#ingestAfterCurrent(upstreamPath)
+          const ingestMs = performance.now() - ingestStarted
           for (const mutation of plan.mutations) {
             this.ctx.storage.transactionSync(() => {
               const decision = this.#wasm(() =>
@@ -2620,7 +2624,15 @@ export function createSyncDurableObject<
               this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges()))
             )
           }
-          return json({ pushResponse: delegatedResponse })
+          // the app's own stages ride along so a client can split do_handle
+          // into the mutator's work and the read of its effects
+          const pushed = json({ pushResponse: delegatedResponse })
+          const appTiming = upstreamResponse.headers.get('server-timing')
+          if (appTiming) pushed.headers.set('server-timing', appTiming)
+          return withServerTiming(pushed, [
+            ['do_push_upstream', upstreamMs],
+            ['do_push_ingest', ingestMs],
+          ])
         } catch (error) {
           return errorResponse(error)
         }
