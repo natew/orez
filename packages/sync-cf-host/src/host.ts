@@ -3178,6 +3178,7 @@ export function createSyncDurableObject<
     }
 
     async fetch(request: Request): Promise<Response> {
+      const enteredAt = performance.now()
       const route = routeAfterNamespace(new URL(request.url).pathname)
       if (
         route === '/notify' &&
@@ -3192,7 +3193,9 @@ export function createSyncDurableObject<
           rowsWritten: this.#sqlBilling.rowsWritten,
         })
       }
+      const coldStart = !this.#initialized
       this.#initialize()
+      const initMs = performance.now() - enteredAt
       this.#simulateIdleTeardown(Date.now())
       const namespace = request.headers.get(NAMESPACE_HEADER) ?? 'unknown'
       const upstreamPath = this.#rememberUpstreamPath(request)
@@ -3252,10 +3255,15 @@ export function createSyncDurableObject<
                   namespace,
                   upstreamPath
                 )
+          // do_total against the worker's do_forward separates time spent in
+          // this object from routing, construction and waiting for its turn
           return withServerTiming(response, [
+            ['do_cold', coldStart ? 1 : 0],
+            ['do_init', initMs],
             ['do_ingest', ingestMs],
             ['do_upstream_fetches', upstreamFetches],
             ['do_handle', performance.now() - handlerStarted],
+            ['do_total', performance.now() - enteredAt],
           ])
         } finally {
           if (clientGroupID) this.#endActivePull(clientGroupID)
