@@ -11,6 +11,14 @@ export class UpstreamResponseLimitError extends Error {
   }
 }
 
+export class UpstreamRetryResponse extends Error {
+  readonly status = 503
+
+  constructor(readonly response: Response) {
+    super(`upstream unavailable; retry after ${response.headers.get('retry-after')}`)
+  }
+}
+
 function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
@@ -58,7 +66,7 @@ export async function readBoundedStream(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
   signal: AbortSignal
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   if (!stream) return new Uint8Array()
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
@@ -111,6 +119,14 @@ export async function fetchBoundedUpstreamJson(
   const sendTimeMs = now()
   try {
     const response = await binding.fetch(input, { ...init, signal: controller.signal })
+    if (response.status === 503 && response.headers.has('retry-after')) {
+      const bytes = await readBoundedStream(
+        response.body,
+        options.maxBytes,
+        controller.signal
+      )
+      throw new UpstreamRetryResponse(new Response(bytes, response))
+    }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {})
       return { response, body: null, sendTimeMs, receiveTimeMs: now() }

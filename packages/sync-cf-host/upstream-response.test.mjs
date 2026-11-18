@@ -4,6 +4,7 @@ import {
   fetchBoundedUpstreamJson,
   readBoundedJsonResponse,
   UpstreamResponseLimitError,
+  UpstreamRetryResponse,
 } from './src/upstream-response.ts'
 
 describe('bounded upstream responses', () => {
@@ -60,6 +61,26 @@ describe('bounded upstream responses', () => {
     )
     expect(result.body).toEqual({ watermark: 0, changes: [] })
     expect(result).toMatchObject({ sendTimeMs: 100, receiveTimeMs: 140 })
+  })
+
+  test('keeps a retryable upstream response available to the caller', async () => {
+    const body = { error: 'upstream is updating', code: 'rollout_in_progress' }
+    const error = await fetchBoundedUpstreamJson(
+      {
+        fetch: async () =>
+          Response.json(body, { status: 503, headers: { 'retry-after': '10' } }),
+      },
+      'https://upstream.invalid/changes',
+      {},
+      { timeoutMs: 100, maxBytes: 1024 }
+    ).then(
+      () => null,
+      (error) => error
+    )
+    expect(error).toBeInstanceOf(UpstreamRetryResponse)
+    expect(error.response.status).toBe(503)
+    expect(error.response.headers.get('retry-after')).toBe('10')
+    expect(await error.response.json()).toEqual(body)
   })
 
   test('cancels an error response body without waiting for it to stream', async () => {

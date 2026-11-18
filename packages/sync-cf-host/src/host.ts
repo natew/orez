@@ -21,6 +21,7 @@ import {
   readBoundedJsonResponse,
   readBoundedStream,
   UpstreamResponseLimitError,
+  UpstreamRetryResponse,
 } from './upstream-response.js'
 import {
   engine_authorize_realtime_subscription,
@@ -330,7 +331,11 @@ function errorBody(error: unknown): Record<string, unknown> {
     'retryAfterMs' in error &&
     typeof error.retryAfterMs === 'number'
   ) {
-    return { error: errorMessage(error), retryAfterMs: error.retryAfterMs }
+    return {
+      error: errorMessage(error),
+      ...('code' in error && typeof error.code === 'string' ? { code: error.code } : {}),
+      retryAfterMs: error.retryAfterMs,
+    }
   }
   return { error: errorMessage(error) }
 }
@@ -338,6 +343,7 @@ function errorBody(error: unknown): Record<string, unknown> {
 // one response builder for every refusal, so a rejection that tells the caller
 // when to come back always says so in the header an HTTP client already reads.
 function errorResponse(error: unknown): Response {
+  if (error instanceof UpstreamRetryResponse) return error.response.clone()
   const body = errorBody(error)
   const retryAfterMs = body.retryAfterMs
   // whole seconds on the wire, rounded up: rounding down invites the caller
@@ -1537,6 +1543,7 @@ export function createSyncDurableObject<
       limit: number,
       fields: Record<string, unknown>
     ): number {
+      if (error instanceof UpstreamRetryResponse) throw error
       const status = statusOf(error)
       if (!(error instanceof IngestBreakerError) && status < 500) throw error
       if (limit <= MIN_SNAPSHOT_PAGE_ROWS) {
@@ -2156,6 +2163,8 @@ export function createSyncDurableObject<
         } catch (error) {
           lastError = error
         }
+        if (response?.status === 503 && response.headers.has('retry-after'))
+          return response
         const timedOut = response === null && timeout.aborted
         if (
           !shouldRetryDelegatedPush(
@@ -3262,13 +3271,14 @@ export function createSyncDurableObject<
       try {
         await this.#ingestAfterCurrent(null)
       } catch (error) {
-        console.error(
-          JSON.stringify({
-            event: 'sync_upstream_ingest_error',
-            status: statusOf(error),
-            error: errorMessage(error),
-          })
-        )
+        if (!(error instanceof UpstreamRetryResponse))
+          console.error(
+            JSON.stringify({
+              event: 'sync_upstream_ingest_error',
+              status: statusOf(error),
+              error: errorMessage(error),
+            })
+          )
       } finally {
         if (this.ctx.getWebSockets(WAKE_SUBSCRIBER_TAG).length > 0) {
           const retryAfterMs = this.#ingestBreaker.status().retryAfterMs
