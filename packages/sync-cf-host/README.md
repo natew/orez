@@ -208,6 +208,10 @@ callback succeeds or the request presents the deployment's `ADMIN_KEY` through
 includes the persisted writer-enabled state and wasm linear-memory byte length
 in addition to the engine/counter fields above.
 
+`POST /<namespace>/warm` is authenticated and authorized like a pull and
+returns once the namespace object is constructed and has ingested upstream, so a
+client can pay that cold start while it is still starting up.
+
 `POST /<namespace>/notify` is rejected unless `authorizeNotify` accepts a
 service or operator capability. Both `authorizeWake` and `authorizeNotify` run
 before `idFromName`, so rejected requests cannot instantiate namespace Durable

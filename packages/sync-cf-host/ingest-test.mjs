@@ -259,6 +259,26 @@ try {
     rowsWritten: 0,
   })
 
+  // A warm builds a cold namespace and ingests upstream before any pull, and
+  // is refused without the identity a pull needs.
+  const warmNamespace = `warm-${crypto.randomUUID()}`
+  const unauthorizedWarm = await fetch(`${base}/${warmNamespace}/warm`, { method: 'POST' })
+  assert.equal(unauthorizedWarm.status, 401)
+  const warm = await fetch(`${base}/${warmNamespace}/warm`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer token-user-a' },
+  })
+  assert.equal(warm.status, 200)
+  assert.match(warm.headers.get('server-timing') ?? '', /do_cold;dur=1/)
+  assert.equal(
+    (
+      await fetch(`${base}/upstream-change-requests/${warmNamespace}`).then((response) =>
+        response.json()
+      )
+    ).requests > 0,
+    true
+  )
+
   // A public caller cannot select the private idle shortcut by smuggling its
   // header through the authenticated /notify route.
   const publicNotifyNamespace = `public-notify-${crypto.randomUUID()}`

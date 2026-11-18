@@ -3222,6 +3222,24 @@ export function createSyncDurableObject<
         }
       }
 
+      // a client that is about to open this namespace pays its construction and
+      // first ingest here, overlapped with its own startup, instead of inside
+      // the first pull. the worker authenticates and authorizes it like a pull.
+      if (route === '/warm' && request.method === 'POST') {
+        const ingestStarted = performance.now()
+        try {
+          await this.#ingest(upstreamPath)
+        } catch (error) {
+          return errorResponse(error)
+        }
+        return withServerTiming(json({ ok: true }), [
+          ['do_cold', coldStart ? 1 : 0],
+          ['do_init', initMs],
+          ['do_ingest', performance.now() - ingestStarted],
+          ['do_total', performance.now() - enteredAt],
+        ])
+      }
+
       if ((route === '/pull' || route === '/push') && request.method === 'POST') {
         let forwarded
         try {
