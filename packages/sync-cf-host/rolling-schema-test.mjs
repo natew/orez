@@ -79,9 +79,21 @@ async function write(base, sql, params = [], project = namespace) {
   assert.equal(response.status, 200, `write failed: ${JSON.stringify(body)}`)
 }
 
+// a pull that meets a namespace mid-migration is told when to come back, and
+// honors it the way the zero transport does
+async function fetchPull(url, init) {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(url, init)
+    const retryAfter = response.headers.get('retry-after')
+    if (response.status !== 503 || retryAfter === null || attempt >= 20) return response
+    await response.body?.cancel()
+    await Bun.sleep(Number(retryAfter) * 1000)
+  }
+}
+
 // a fresh client group receives every row the replica holds
 async function pull(base) {
-  const response = await fetch(`${base}/${namespace}/pull`, {
+  const response = await fetchPull(`${base}/${namespace}/pull`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -212,7 +224,7 @@ try {
           version: 1,
           patch: [{ op: 'put', hash: 'ordinary', name: 'allItems', args: [] }],
         }
-      const response = await fetch(base + '/' + namespace + '/pull', {
+      const response = await fetchPull(base + '/' + namespace + '/pull', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -237,7 +249,7 @@ try {
     await deployed(state, { host: 'v4', data: 'v1' }, async (base) => {
       const existing = await ordinaryPull(base)
       assert.equal((existing.rowsPatch ?? []).length, 0)
-      const response = await fetch(base + '/' + namespace + '/pull', {
+      const response = await fetchPull(base + '/' + namespace + '/pull', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -368,7 +380,7 @@ try {
       assert.ok(!reconnected.rowsPatch?.some((p) => p.op === 'clear'))
       assert.equal((reconnected.rowsPatch ?? []).length, 0)
       assert.deepEqual(lastRows, [])
-      const response = await fetch(base + '/' + namespace + '/pull', {
+      const response = await fetchPull(base + '/' + namespace + '/pull', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -399,7 +411,7 @@ try {
           version: 1,
           patch: [{ op: 'put', hash: group, name: query, args: [] }],
         }
-      const response = await fetch(base + '/proj-racing/pull', {
+      const response = await fetchPull(base + '/proj-racing/pull', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -467,7 +479,7 @@ try {
           version: 1,
           patch: [{ op: 'put', hash: group, name: query, args: [] }],
         }
-      const response = await fetch(`${base}/${ns}/pull`, {
+      const response = await fetchPull(`${base}/${ns}/pull`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',

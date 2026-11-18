@@ -1271,7 +1271,9 @@ export function createOrezDataWorker<
             pending.lastError
               ? `${pending.lastError} (schema retry attempt ${pending.attemptCount} is in progress)`
               : 'namespace schema migration in progress',
-            { status: 503, headers: { 'retry-after': '10' } }
+            // a migration that just started usually lands within a second; a
+            // retry after a failed attempt is the slow path
+            { status: 503, headers: { 'retry-after': pending.lastError ? '10' : '1' } }
           )
         }
       }
