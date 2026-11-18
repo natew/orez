@@ -53,7 +53,10 @@ runs:
               --arg version '${{ inputs.version }}' \
               --arg source_commit '${{ github.sha }}' \
               'if .version == $version and .orezSourceCommit == $source_commit then .dist.tarball // empty else empty end')" || launcher_tarball=''
-          if [ -n "$platform_tarball" ] && [ -n "$launcher_tarball" ]; then
+          # a version record can be served before its tarball is
+          if [ -n "$platform_tarball" ] && [ -n "$launcher_tarball" ] &&
+            curl --fail --silent --head "$platform_tarball" >/dev/null &&
+            curl --fail --silent --head "$launcher_tarball" >/dev/null; then
             break
           fi
           attempt=$((attempt + 1))
