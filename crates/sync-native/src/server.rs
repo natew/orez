@@ -774,7 +774,7 @@ async fn admin_sql(
         (None, None) => {
             let tables = state.ctx.clone();
             let result = namespace
-                .run(move |conn| {
+                .run_admin_sql(move |conn| {
                     let total_changes = conn.total_changes();
                     let mut db = RusqliteDb::guarded(conn, &tables.tables);
                     let rows = db.query(&query, &params);

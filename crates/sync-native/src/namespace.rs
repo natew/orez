@@ -3,8 +3,8 @@
 // invalidate) is submitted to that one thread and runs serially on its
 // Connection, so the plan's "one writer per namespace" invariant is
 // structural. there is exactly one thread that can touch a namespace's db, so
-// no lock and no SQLITE_BUSY. WAL + synchronous=FULL make committed cookies
-// durable through SIGKILL, so reopening the same file resumes monotonically.
+// no lock and no SQLITE_BUSY. pull commits use WAL + synchronous=FULL, so
+// reopening the same file resumes from every cookie we published.
 //
 // admin transactions (multi-request BEGIN/.../COMMIT over /admin/sql) are owned
 // by the worker, not the client. the worker runs the actual BEGIN, COMMIT, and
@@ -30,6 +30,7 @@ use tokio::sync::oneshot;
 
 use sync_core::{DbError, Row, SyncDb};
 
+use crate::SqliteDurability;
 use crate::db::RusqliteDb;
 use crate::retain::{ReplicaFile, RetentionError, RetentionPolicy, SweepOutcome, plan_deletions};
 
@@ -73,7 +74,10 @@ enum Job {
     // a non-transactional operation (pull, push, one-shot admin sql, invalidate,
     // reset). runs only when no admin transaction owns the namespace. the closure
     // captures its own reply channel, so it stays generic over the return type.
-    Plain(Box<dyn FnOnce(&Connection) + Send>),
+    Plain {
+        projection: bool,
+        run: Box<dyn FnOnce(&Connection) + Send>,
+    },
     // open a server-owned admin transaction keyed by id.
     Begin {
         id: String,
@@ -128,10 +132,29 @@ impl Namespace {
         F: FnOnce(&Connection) -> T + Send + 'static,
         T: Send + 'static,
     {
+        self.run_plain(false, f).await
+    }
+
+    pub async fn run_admin_sql<T, F>(&self, f: F) -> T
+    where
+        F: FnOnce(&Connection) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.run_plain(true, f).await
+    }
+
+    async fn run_plain<T, F>(&self, projection: bool, f: F) -> T
+    where
+        F: FnOnce(&Connection) -> T + Send + 'static,
+        T: Send + 'static,
+    {
         let (tx, rx) = oneshot::channel();
-        self.send(Job::Plain(Box::new(move |conn| {
-            let _ = tx.send(f(conn));
-        })));
+        self.send(Job::Plain {
+            projection,
+            run: Box::new(move |conn| {
+                let _ = tx.send(f(conn));
+            }),
+        });
         rx.await.expect("namespace worker dropped the reply")
     }
 
@@ -240,8 +263,18 @@ fn worker_loop(
     receiver: std::sync::mpsc::Receiver<Job>,
     lease: Duration,
     transaction_active: Arc<AtomicBool>,
+    durability: SqliteDurability,
 ) {
     let mut active_transaction: Option<ActiveTransaction> = None;
+    let mut deferred_sync = false;
+    let mut set_sync = |projection| {
+        let defer = projection && durability == SqliteDurability::DeferredProjection;
+        if defer != deferred_sync {
+            conn.pragma_update(None, "synchronous", if defer { "NORMAL" } else { "FULL" })?;
+            deferred_sync = defer;
+        }
+        Ok::<(), rusqlite::Error>(())
+    };
     // plain jobs that arrived while a transaction owned the namespace. drained in
     // arrival order once it frees. begins are never deferred (they are rejected
     // while a transaction is active), so this only ever holds plain work.
@@ -364,10 +397,14 @@ fn worker_loop(
                     },
                 };
                 match job {
-                    Job::Plain(run) => run(&conn),
+                    Job::Plain { projection, run } => {
+                        set_sync(projection)
+                            .expect("cannot set namespace durability outside a transaction");
+                        run(&conn);
+                    }
                     Job::Begin { id, reply } => {
                         let total_changes = conn.total_changes();
-                        match conn.execute_batch("BEGIN") {
+                        match set_sync(true).and_then(|()| conn.execute_batch("BEGIN")) {
                             Ok(()) => {
                                 transaction_active.store(true, Ordering::Release);
                                 if reply.send(Ok(())).is_ok() {
@@ -466,7 +503,13 @@ fn spawn(
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
-            worker_loop(conn, receiver, lease, worker_transaction_active);
+            worker_loop(
+                conn,
+                receiver,
+                lease,
+                worker_transaction_active,
+                tuning.durability,
+            );
         })
         .map_err(|e| e.to_string())?;
     ready_rx
@@ -1280,11 +1323,27 @@ mod tests {
             crate::SqliteTuning {
                 page_cache_kb: 131072,
                 mmap_bytes: 1073741824,
+                durability: SqliteDurability::DeferredProjection,
             },
         );
         let ns = manager.get("tuned").unwrap();
         assert_eq!(pragma_value(&ns, "cache_size").await, -131072);
         assert_eq!(pragma_value(&ns, "mmap_size").await, 1073741824);
+        let synchronous = |conn: &Connection| {
+            conn.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(ns.run_admin_sql(synchronous).await, 1);
+        ns.tx_begin("projection".into()).await.unwrap();
+        let (rows, _) = ns
+            .tx_query("projection".into(), |conn| {
+                RusqliteDb::new(conn).query("PRAGMA synchronous", &[])
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows[0].values, vec![sync_core::SqlValue::Integer(1)]);
+        ns.tx_end("projection".into(), TxEnd::Commit).await.unwrap();
+        assert_eq!(ns.run(synchronous).await, 2);
     }
 
     async fn row_count(ns: &Namespace, table: &str) -> i64 {

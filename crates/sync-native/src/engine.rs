@@ -15,6 +15,7 @@ use sync_core::push::{Mutator, Transactor, handle_push};
 use sync_core::schema::Tables;
 use sync_core::{DbError, SqlValue, SyncDb};
 
+use crate::SqliteDurability;
 use crate::db::RusqliteDb;
 use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
 
@@ -184,6 +185,7 @@ pub struct EngineContext {
     pub(crate) init_version: String,
     pub(crate) init_fn: Initializer,
     pub(crate) mutate_fn: MutateFn,
+    pub(crate) durability: SqliteDurability,
 }
 
 // ---- helpers -------------------------------------------------------------
@@ -286,6 +288,16 @@ pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), St
     sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;
     sync_core::schema::init_number_storage_guards(db, &ctx.tables).map_err(|e| e.0)?;
     sync_core::query::init_query_schema(db).map_err(|e| e.message)?;
+    if ctx.durability == SqliteDurability::DeferredProjection {
+        db.exec(
+            "CREATE TABLE IF NOT EXISTS _zsync_native_published (
+                lock INTEGER PRIMARY KEY CHECK (lock = 1),
+                watermark INTEGER NOT NULL
+            )",
+            &[],
+        )
+        .map_err(|e| e.0)?;
+    }
     Ok(())
 }
 
@@ -303,12 +315,33 @@ pub fn pull(
 ) -> Observed {
     let floor_before = read_floor(conn);
     conn.execute_batch("BEGIN").expect("BEGIN failed");
-    let mut result = {
+    let mut result = (|| {
         let mut db = RusqliteDb::new(conn);
         // desired queries in the body drive membership; permissions ride the
         // resolved ASTs, so there is no whole-namespace visibility filter.
-        sync_core::query::handle_query_pull(&mut db, &ctx.tables, ctx.retain_changes, body, user_id)
-    };
+        let response = sync_core::query::handle_query_pull(
+            &mut db,
+            &ctx.tables,
+            ctx.retain_changes,
+            body,
+            user_id,
+        )?;
+        if ctx.durability == SqliteDurability::DeferredProjection {
+            let watermark = sync_core::wire::parse_cookie(response.get("cookie"))
+                .ok()
+                .flatten()
+                .ok_or_else(|| EngineError::new(500, "pull did not return a valid cookie"))?;
+            // a read-only pull still needs a full-sync commit before it can publish
+            // a new cookie. repeated pulls at that cookie leave the WAL untouched.
+            db.exec(
+                "INSERT INTO _zsync_native_published (lock, watermark) VALUES (1, ?)
+                 ON CONFLICT (lock) DO UPDATE SET watermark = excluded.watermark
+                 WHERE watermark < excluded.watermark",
+                &[SqlValue::Integer(watermark)],
+            )?;
+        }
+        Ok(response)
+    })();
     // fault: mid pull transaction, before COMMIT. Kill exits (SIGKILL-shaped, so
     // the tx never commits); Error/Quota roll back via finish() below.
     if result.is_ok()
@@ -459,17 +492,27 @@ pub fn prune_to_head(conn: &Connection) -> Result<(), EngineError> {
 // floor, and durable high-water mark to simulate a restored/behind server, so
 // a persisted client whose cookie is ahead gets the 409 reset path.
 pub fn reset_cursor(conn: &Connection) -> Result<(), DbError> {
-    conn.execute_batch(
-        "BEGIN;
-         DELETE FROM _zsync_log_segments;
+    let reset = || {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DELETE FROM _zsync_log_segments;
          INSERT INTO _zsync_log_segments
            (startVersion, endVersion, payload, pending, captureMode)
          VALUES (1, 0, '{\"format\":2,\"transactions\":[]}', '[]', 0);
          UPDATE _zsync_meta SET floor = 0;
-         UPDATE _zsync_watermark SET high = 0;
-         COMMIT;",
-    )
-    .map_err(|e| DbError(e.to_string()))
+         UPDATE _zsync_watermark SET high = 0;",
+        )?;
+        let has_published_watermark: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = '_zsync_native_published')",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_published_watermark {
+            tx.execute("DELETE FROM _zsync_native_published", [])?;
+        }
+        tx.commit()
+    };
+    reset().map_err(|e| DbError(e.to_string()))
 }
 
 fn finish(conn: &Connection, ok: bool) {

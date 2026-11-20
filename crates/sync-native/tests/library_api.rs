@@ -1573,6 +1573,76 @@ async fn push_applies_mutation_and_pull_sees_it() {
 }
 
 #[tokio::test]
+async fn deferred_projection_persists_published_cookies_and_mutation_receipts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = custom_config();
+    config.sqlite_tuning.durability = sync_native::SqliteDurability::DeferredProjection;
+    let normal_mutate = config.mutate;
+    config.mutate = Arc::new(move |db, name, args, user| {
+        assert_eq!(
+            db.query("PRAGMA synchronous", &[]).unwrap()[0].values,
+            vec![SqlValue::Integer(2)]
+        );
+        normal_mutate(db, name, args, user)
+    });
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
+    let ns = "test-ns";
+    let user = "Bearer user-1";
+    let (status, initial) = send(&router, pull_req(ns, &pull_body(None), user)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        admin_sql_req(
+            ns,
+            "INSERT INTO item VALUES ('i2', 'projected')",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let persisted_watermark = || {
+        let db = rusqlite::Connection::open_with_flags(
+            tmp.path().join("test-ns.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row("SELECT watermark FROM _zsync_native_published", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(json!(persisted_watermark()), initial["cookie"]);
+    let body = pull_body(Some(&initial["cookie"]));
+    let (status, projected) = send(&router, pull_req(ns, &body, user)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patch_count(&projected, "item", "put"), 1);
+    assert!(projected["cookie"].as_i64().unwrap() > initial["cookie"].as_i64().unwrap());
+    assert_eq!(json!(persisted_watermark()), projected["cookie"]);
+
+    let push = push_body(json!([mutation(
+        1,
+        "item.create",
+        json!([{"id": "i3", "label": "mutated"}]),
+        "test-client"
+    )]));
+    let (status, _) = send(&router, push_req(ns, &push, user)).await;
+    assert_eq!(status, StatusCode::OK);
+    drop(router);
+
+    let mut config = custom_config();
+    config.sqlite_tuning.durability = sync_native::SqliteDurability::DeferredProjection;
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
+    let body = pull_body(Some(&projected["cookie"]));
+    let (status, resumed) = send(&router, pull_req(ns, &body, user)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patch_count(&resumed, "item", "put"), 1);
+    assert_eq!(resumed["lastMutationIDChanges"]["test-client"], 1);
+    assert_eq!(json!(persisted_watermark()), resumed["cookie"]);
+}
+
+#[tokio::test]
 async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());

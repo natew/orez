@@ -252,7 +252,19 @@ fn valid_origin(origin: &str) -> bool {
 
 // ---- public config -------------------------------------------------------
 
-/// SQLite page-cache and mmap sizing for namespace replica connections.
+/// Durability policy for a native namespace replica.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteDurability {
+    /// Sync each committed transaction to disk.
+    #[default]
+    Full,
+    /// Use WAL NORMAL for rebuildable writes through `/admin/sql`. Pulls
+    /// persist the watermark before returning it, and push acknowledgments
+    /// keep full durability. Use only when admin writes are replayable.
+    DeferredProjection,
+}
+
+/// SQLite durability, page-cache and mmap settings for namespace replicas.
 ///
 /// The 2 MB SQLite default keeps tiny hosts lean but turns every B-tree
 /// descent into a pread once the store passes a few hundred MB (measured:
@@ -265,6 +277,7 @@ pub struct SqliteTuning {
     pub page_cache_kb: i64,
     /// Mmap ceiling in bytes (`PRAGMA mmap_size = <this>`).
     pub mmap_bytes: i64,
+    pub durability: SqliteDurability,
 }
 
 impl Default for SqliteTuning {
@@ -272,6 +285,7 @@ impl Default for SqliteTuning {
         Self {
             page_cache_kb: 65536,
             mmap_bytes: 268435456,
+            durability: SqliteDurability::Full,
         }
     }
 }
@@ -392,6 +406,7 @@ impl SyncNativeHost {
             init_version: config.initialize_version,
             init_fn: config.initialize,
             mutate_fn: config.mutate,
+            durability: config.sqlite_tuning.durability,
         });
 
         let init_ctx = ctx.clone();
