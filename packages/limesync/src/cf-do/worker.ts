@@ -427,6 +427,15 @@ type ApplicationSqlGrantStall = {
   holders: ApplicationSqlTurn[]
 }
 
+type ApplicationSqlSlowQuery = {
+  enteredAt: number
+  admissionMs: number
+  runMs: number
+  queueDepth: number
+  writerActive: boolean
+  activeReaders: number
+}
+
 type ApplicationSqlHolder = {
   sessionID: string
   readOnly: boolean
@@ -729,6 +738,7 @@ export class ZeroDO extends DurableObject {
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
   private applicationSqlTurns: ApplicationSqlTurn[] = []
   private applicationSqlGrantStalls: ApplicationSqlGrantStall[] = []
+  private applicationSqlSlowQueries: ApplicationSqlSlowQuery[] = []
   private applicationSqlGrantTimeouts: ApplicationSqlGrantTimeout[] = []
   private applicationSqlEvictions: ApplicationSqlEviction[] = []
   protected applicationSqlDidCommit(_published: boolean, _changedData: boolean): void {}
@@ -1427,6 +1437,7 @@ export class ZeroDO extends DurableObject {
         queuedWriters: this.applicationSqlQueue.length - queuedReadSessions,
         writeGrantWaitMs: this.writeGrantWaitMs.status(),
         grantStalls: this.applicationSqlGrantStalls,
+        slowQueries: this.applicationSqlSlowQueries,
         grantTimeouts: this.applicationSqlGrantTimeouts,
         evictions: this.applicationSqlEvictions,
       },
@@ -2984,16 +2995,57 @@ export class ZeroDO extends DurableObject {
     params: readonly unknown[] = [],
     options: ApplicationSqlQueryOptions = {}
   ): Promise<Row[]> {
-    this.assertApplicationSqlRecovery()
-    if (options.provision === false && !this.applicationNamespaceProvisioned()) {
-      return []
+    const enteredAt = Date.now()
+    const startedAt = performance.now()
+    let admittedAt = startedAt
+    try {
+      this.assertApplicationSqlRecovery()
+      if (options.provision === false && !this.applicationNamespaceProvisioned()) {
+        return []
+      }
+      await this.admitApplicationSql()
+      admittedAt = performance.now()
+      return await this.withLocalApplicationSqlSession(
+        true,
+        (session) => session.query<Row>(sql, params),
+        options.priority
+      )
+    } finally {
+      this.recordSlowApplicationSqlQuery(enteredAt, startedAt, admittedAt)
     }
-    await this.admitApplicationSql()
-    return this.withLocalApplicationSqlSession(
-      true,
-      (session) => session.query<Row>(sql, params),
-      options.priority
-    )
+  }
+
+  // a single-statement read never opens a client session, so neither the
+  // sampled transaction record nor the client's slow-session record sees it.
+  // this names where its time went inside the object: schema admission versus
+  // the grant, run and commit. time before enteredAt belongs to dispatch.
+  private recordSlowApplicationSqlQuery(
+    enteredAt: number,
+    startedAt: number,
+    admittedAt: number
+  ): void {
+    const now = performance.now()
+    if (now - startedAt < 500) return
+    const record: ApplicationSqlSlowQuery = {
+      enteredAt,
+      admissionMs: Math.round(admittedAt - startedAt),
+      runMs: Math.round(now - admittedAt),
+      queueDepth: this.applicationSqlQueue.length,
+      writerActive: this.applicationSqlWriter !== null,
+      activeReaders: this.applicationSqlReaders.size,
+    }
+    this.applicationSqlSlowQueries.push(record)
+    if (this.applicationSqlSlowQueries.length > 8) this.applicationSqlSlowQueries.shift()
+    try {
+      console.log(
+        JSON.stringify({
+          event: 'orez_sql_query_slow',
+          ...this.durableObjectIdentity(),
+          bootID: this.bootID,
+          ...record,
+        })
+      )
+    } catch {}
   }
 
   /**
