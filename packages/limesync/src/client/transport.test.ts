@@ -1127,6 +1127,51 @@ describe('Orez HTTP transport', () => {
     expect(paths).toEqual(['/pull'])
   })
 
+  test('recovery pull waits for the preceding push to commit', async () => {
+    let finishPush!: () => void
+    const pushGate = new Promise<void>((resolve) => {
+      finishPush = resolve
+    })
+    const paths: string[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/push') {
+        paths.push('push started')
+        await pushGate
+        paths.push('push committed')
+        return jsonResponse({ mutations: [] })
+      }
+      if (request.body.clientGroupID === 'old-group') paths.push('recovery pull')
+      return jsonResponse({ cookie: 1, lastMutationIDChanges: {}, rowsPatch: [] })
+    })
+    install(fetch)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+    )
+
+    socket.send(JSON.stringify(['push', { ...pushBody(1), clientGroupID: 'old-group' }]))
+    await eventually(() => expect(paths).toEqual(['push started']))
+    socket.send(
+      JSON.stringify([
+        'pull',
+        { clientGroupID: 'old-group', cookie: null, requestID: 'recovery' },
+      ])
+    )
+    await Promise.resolve()
+    finishPush()
+    await eventually(() =>
+      expect(paths).toEqual(['push started', 'push committed', 'recovery pull'])
+    )
+    await eventually(() =>
+      expect(
+        messages.some(
+          (message) => message[0] === 'pull' && message[1].requestID === 'recovery'
+        )
+      ).toBe(true)
+    )
+  })
+
   test('decodes initial, direct, wake, and recovery pulls at the fetch boundary', async () => {
     const wakeSockets = useFakeNativeWebSocket()
     const decodePull = vi.fn(async (response: PullResponse) => {

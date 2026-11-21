@@ -1276,6 +1276,7 @@ class ZeroHttpSocket {
     cookie: string | null
     requestID: string
   }) {
+    await this.pushCompletion
     const response = await this.fetchPull(body.clientGroupID, body.cookie, false)
     const cookie = toWebSocketCookie(response.cookie)
     this.emitMessage([
