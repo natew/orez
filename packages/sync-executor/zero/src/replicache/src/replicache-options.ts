@@ -14,31 +14,11 @@ import type {MutatorDefs, RequestOptions} from './types.ts';
 
 export interface ReplicacheOptions<MD extends MutatorDefs> {
   /**
-   * This is the URL to the server endpoint dealing with the push updates. See
-   * [Push Endpoint Reference](https://doc.replicache.dev/reference/server-push) for more
-   * details.
-   *
-   * If not provided, push requests will not be made unless a custom
-   * {@link ReplicacheOptions.pusher} is provided.
-   */
-  pushURL?: string | undefined;
-
-  /**
    * This is the authorization token used when doing a
    * [pull](https://doc.replicache.dev/reference/server-pull#authorization) and
    * [push](https://doc.replicache.dev/reference/server-push#authorization).
    */
   auth?: string | undefined;
-
-  /**
-   * This is the URL to the server endpoint dealing with pull. See [Pull
-   * Endpoint Reference](https://doc.replicache.dev/reference/server-pull) for more
-   * details.
-   *
-   * If not provided, pull requests will not be made unless a custom
-   * {@link ReplicacheOptions.puller} is provided.
-   */
-  pullURL?: string | undefined;
 
   /**
    * The name of the Replicache database.
@@ -51,8 +31,7 @@ export interface ReplicacheOptions<MD extends MutatorDefs> {
    * instance with the same `name`, domain and browser profile.
    *
    * Mutations from one {@link Replicache} instance may be pushed using the
-   * {@link ReplicacheOptions.auth}, {@link ReplicacheOptions.pushURL},
-   * {@link ReplicacheOptions.pullURL}, {@link ReplicacheOptions.pusher}, and
+   * {@link ReplicacheOptions.auth}, {@link ReplicacheOptions.pusher}, and
    * {@link ReplicacheOptions.puller}  of another Replicache instance with the same
    * `name`, domain and browser profile.
    *
@@ -178,25 +157,9 @@ export interface ReplicacheOptions<MD extends MutatorDefs> {
    */
   requestOptions?: RequestOptions | undefined;
 
-  /**
-   * Allows passing in a custom implementation of a {@link Puller} function. This
-   * function is called when doing a pull and it is responsible for
-   * communicating with the server.
-   *
-   * Normally, this is just a POST to a URL with a JSON body but you can provide
-   * your own function if you need to do things differently.
-   */
-  puller?: Puller | undefined;
+  puller: Puller;
 
-  /**
-   * Allows passing in a custom implementation of a {@link Pusher} function. This
-   * function is called when doing a push and it is responsible for
-   * communicating with the server.
-   *
-   * Normally, this is just a POST to a URL with a JSON body but you can provide
-   * your own function if you need to do things differently.
-   */
-  pusher?: Pusher | undefined;
+  pusher: Pusher;
 
   /**
    * @deprecated Replicache no longer uses a license key. This option is now

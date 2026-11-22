@@ -31,8 +31,6 @@ import {
 } from './error-responses.ts';
 import * as FormatVersion from './format-version-enum.ts';
 import {deepFreeze} from './frozen-json.ts';
-import {getDefaultPuller, isDefaultPuller} from './get-default-puller.ts';
-import {getDefaultPusher, isDefaultPusher} from './get-default-pusher.ts';
 import {getKVStoreProvider} from './get-kv-store-provider.ts';
 import {assertHash, emptyHash, type Hash, newRandomHash} from './hash.ts';
 import type {HTTPRequestInfo} from './http-request-info.ts';
@@ -181,11 +179,6 @@ export interface ReplicacheImplOptions {
   enableRefresh?: (() => boolean) | undefined;
 
   /**
-   * Defaults to true.
-   */
-  enablePullAndPushInOpen?: boolean | undefined;
-
-  /**
    * @deprecated Not used anymore.
    */
   makeSubscriptionsManager?: unknown;
@@ -211,12 +204,6 @@ export interface ReplicacheImplOptions {
 }
 
 export class ReplicacheImpl<MD extends MutatorDefs = {}> {
-  /** The URL to use when doing a pull request. */
-  pullURL: string;
-
-  /** The URL to use when doing a push request. */
-  pushURL: string;
-
   /** The authorization token used when doing a push request. */
   #auth: string;
 
@@ -324,7 +311,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   readonly #enableScheduledPersist: boolean;
   readonly #enableScheduledRefresh: boolean;
   readonly #enableRefresh: () => boolean;
-  readonly #enablePullAndPushInOpen: boolean;
   #persistScheduler = new ProcessScheduler(
     () => this.persist(),
     PERSIST_IDLE_TIMEOUT_MS,
@@ -413,10 +399,8 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       name,
       logLevel = 'info',
       logSinks = [consoleLogSink],
-      pullURL = '',
       auth,
       pushDelay = 10,
-      pushURL = '',
       schemaVersion = '',
       pullInterval = 60000,
       mutators = {} as MD,
@@ -431,25 +415,21 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       enableScheduledPersist = true,
       enableScheduledRefresh = true,
       enableRefresh = () => true,
-      enablePullAndPushInOpen = true,
       enableClientGroupForking = true,
       onClientsDeleted = () => promiseVoid,
     } = implOptions;
     this.#zero = implOptions.zero;
     this.#auth = auth ?? '';
-    this.pullURL = pullURL;
-    this.pushURL = pushURL;
     this.name = name;
     this.schemaVersion = schemaVersion;
     this.pullInterval = pullInterval;
     this.pushDelay = pushDelay;
-    this.puller = puller ?? getDefaultPuller(this);
-    this.pusher = pusher ?? getDefaultPusher(this);
+    this.puller = puller;
+    this.pusher = pusher;
 
     this.#enableScheduledPersist = enableScheduledPersist;
     this.#enableScheduledRefresh = enableScheduledRefresh;
     this.#enableRefresh = enableRefresh;
-    this.#enablePullAndPushInOpen = enablePullAndPushInOpen;
 
     this.#lc = createLogContext(logLevel, logSinks, {name});
     this.#lc.debug?.('Constructing Replicache', {
@@ -564,11 +544,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     // Now we have a profileID, a clientID, a clientGroupID and DB!
     await this.#zero?.init(headHash, this.memdag);
     resolveReady();
-
-    if (this.#enablePullAndPushInOpen) {
-      this.pull().catch(noop);
-      this.push().catch(noop);
-    }
 
     const {signal} = this.#closeAbortController;
 
@@ -814,7 +789,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   }
 
   #invokePull(): Promise<boolean> {
-    if (this.#isPullDisabled()) {
+    if (this.isClientGroupDisabled) {
       return Promise.resolve(true);
     }
 
@@ -835,13 +810,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       }
       return true;
     }, 'Pull');
-  }
-
-  #isPullDisabled() {
-    return (
-      this.isClientGroupDisabled ||
-      (this.pullURL === '' && isDefaultPuller(this.puller))
-    );
   }
 
   async #wrapInOnlineCheck(
@@ -960,15 +928,8 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     };
   }
 
-  #isPushDisabled() {
-    return (
-      this.isClientGroupDisabled ||
-      (this.pushURL === '' && isDefaultPusher(this.pusher))
-    );
-  }
-
   async #invokePush(): Promise<boolean> {
-    if (this.#isPushDisabled()) {
+    if (this.isClientGroupDisabled) {
       return true;
     }
 
@@ -1034,7 +995,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   }
 
   /**
-   * Push pushes pending changes to the {@link pushURL}.
+   * Push sends pending changes to the server.
    *
    * You do not usually need to manually call push. If {@link pushDelay} is
    * non-zero (which it is by default) pushes happen automatically shortly after
@@ -1055,8 +1016,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   }
 
   /**
-   * Pull pulls changes from the {@link pullURL}. If there are any changes local
-   * changes will get replayed on top of the new server state.
+   * Pull fetches server changes and replays local changes on top of them.
    *
    * If the server endpoint fails pull will be continuously retried with an
    * exponential backoff.

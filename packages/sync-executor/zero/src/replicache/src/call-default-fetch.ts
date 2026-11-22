@@ -1,7 +1,7 @@
 import type {HTTPRequestInfo} from './http-request-info.ts';
 
 /**
- * Helper function for {@link getDefaultPuller} and {@link getDefaultPusher}.
+ * Helper function for {@link getDefaultPuller}.
  */
 export async function callDefaultFetch<Body>(
   url: string,

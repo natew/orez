@@ -20,14 +20,14 @@ import {newWriteSnapshotDD31} from '../db/write.ts';
 import {isErrorResponse} from '../error-responses.ts';
 import type * as FormatVersion from '../format-version-enum.ts';
 import {deepFreeze, type FrozenJSONValue} from '../frozen-json.ts';
-import {assertPullerResultV1} from '../get-default-puller.ts';
 import {emptyHash, type Hash} from '../hash.ts';
 import type {HTTPRequestInfo} from '../http-request-info.ts';
-import type {
-  Puller,
-  PullerResult,
-  PullResponseOKV1Internal,
-  PullResponseV1,
+import {
+  assertPullerResultV1,
+  type Puller,
+  type PullerResult,
+  type PullResponseOKV1Internal,
+  type PullResponseV1,
 } from '../puller.ts';
 import {ReportError} from '../report-error.ts';
 import {toError} from '../to-error.ts';

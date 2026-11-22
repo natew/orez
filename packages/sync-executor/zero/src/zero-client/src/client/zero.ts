@@ -565,7 +565,6 @@ export class Zero<
     const replicacheImplOptions: ReplicacheImplOptions = {
       enableClientGroupForking: false,
       enableMutationRecovery: false,
-      enablePullAndPushInOpen: false, // Zero calls push in its connection management code
       enableRefresh: () => this.#enableRefresh(),
       onClientsDeleted: deletedClients =>
         this.#deleteClientsManager.onClientsDeleted(deletedClients),
