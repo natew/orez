@@ -1,7 +1,6 @@
 import type {LogContext} from '@rocicorp/logger';
 import {initBgIntervalProcess} from '../bg-interval.ts';
 import type {Store} from '../dag/store.ts';
-import type {ClientGroupID} from '../sync/ids.ts';
 import {withWrite} from '../with-transactions.ts';
 import {
   clientGroupHasPendingMutations,
@@ -23,14 +22,20 @@ export function initClientGroupGC(
   enableMutationRecovery: boolean,
   lc: LogContext,
   signal: AbortSignal,
+  singleProcess: boolean,
 ): void {
+  let delay = singleProcess ? 0 : GC_INTERVAL_MS;
   initBgIntervalProcess(
     'ClientGroupGC',
     () => {
       latestGCUpdate = gcClientGroups(dagStore, enableMutationRecovery);
       return latestGCUpdate;
     },
-    () => GC_INTERVAL_MS,
+    () => {
+      const next = delay;
+      delay = GC_INTERVAL_MS;
+      return next;
+    },
     lc,
     signal,
   );
@@ -53,18 +58,16 @@ export function gcClientGroups(
       clientGroupIDs.add(client.clientGroupID);
     }
     const clientGroups = new Map();
-    const removeClientGroups: Set<ClientGroupID> = new Set();
-    for (const [clientGroupID, clientGroup] of await getClientGroups(tx)) {
+    const storedGroups = await getClientGroups(tx);
+    for (const [clientGroupID, clientGroup] of storedGroups) {
       if (
         clientGroupIDs.has(clientGroupID) ||
-        (enableMutationRecovery && clientGroupHasPendingMutations(clientGroup))
+        (enableMutationRecovery && !clientGroup.disabled && clientGroupHasPendingMutations(clientGroup))
       ) {
         clientGroups.set(clientGroupID, clientGroup);
-      } else {
-        removeClientGroups.add(clientGroupID);
       }
     }
-    await setClientGroups(clientGroups, tx);
+    if (clientGroups.size !== storedGroups.size) await setClientGroups(clientGroups, tx);
     // Client group GC doesn't delete individual clients, so we don't call onClientsDeleted
     return clientGroups;
   });

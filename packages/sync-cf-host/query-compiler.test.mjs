@@ -3,6 +3,22 @@ import { describe, expect, test } from 'bun:test'
 
 import { createQueryCompiler } from 'orez-sync-cf-host/query-compiler'
 import { executeTransactionQueryPlan } from 'orez-sync-cf-host/transaction-query'
+import wasmModule from 'orez-sync-cf-host/wasm-module.wasm'
+
+import { initSync } from './dist/generated/sync_wasm.js'
+import { withWasm } from './dist/wasm.js'
+
+test('a Wasm trap replaces the instance before the next engine call', () => {
+  const instance = withWasm(() => initSync({ module: wasmModule }))
+  const before = instance()
+  const trap = new WebAssembly.RuntimeError('unreachable')
+  expect(
+    withWasm(() => {
+      throw trap
+    })
+  ).toThrow(trap)
+  expect(instance()).not.toBe(before)
+})
 
 const schema = {
   tables: {

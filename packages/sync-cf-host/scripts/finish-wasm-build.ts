@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer'
-import { cp, mkdtemp, rm } from 'node:fs/promises'
+import { appendFile, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -38,6 +38,28 @@ try {
   if (!webModule.equals(bundlerModule)) {
     throw new Error('web and bundler Wasm builds produced different modules')
   }
+
+  const gluePath = join(generatedDir, 'sync_wasm.js')
+  const glue = await readFile(gluePath, 'utf8')
+  const wasmState = 'let wasmModule, wasmInstance, wasm;'
+  if (!glue.includes(wasmState)) {
+    throw new Error('wasm-bindgen module state declaration changed')
+  }
+  await writeFile(
+    gluePath,
+    glue.replace(
+      wasmState,
+      `${wasmState}
+export function resetWasm() {
+    wasm = wasmInstance = wasmModule = undefined;
+    cachedDataViewMemory0 = cachedUint8ArrayMemory0 = null;
+}`
+    )
+  )
+  await appendFile(
+    join(generatedDir, 'sync_wasm.d.ts'),
+    '\nexport function resetWasm(): void;\n'
+  )
 
   await cp(join(bundlerDir, 'sync_wasm_bg.js'), join(generatedDir, 'sync_wasm_bg.js'))
   await Bun.write(

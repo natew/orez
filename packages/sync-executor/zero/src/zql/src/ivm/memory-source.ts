@@ -205,7 +205,8 @@ export class MemorySource implements Source {
   #disconnect(input: Input): void {
     const idx = this.#connections.findIndex(c => c.input === input);
     assert(idx !== -1, 'Connection not found');
-    this.#connections.splice(idx, 1);
+    const [connection] = this.#connections.splice(idx, 1);
+    for (const index of this.#indexes.values()) index.usedBy.delete(connection);
 
     // TODO: We used to delete unused indexes here. But in common cases like
     // navigating into issue detail pages it caused a ton of constantly

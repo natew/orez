@@ -297,19 +297,60 @@ export async function dropDatabase(dbName: string, opts?: DropDatabaseOptions) {
 export async function dropAllDatabases(opts?: DropDatabaseOptions): Promise<{
   dropped: string[];
   errors: unknown[];
+  kept: string[];
 }> {
   const logContext = createLogContext(opts?.logLevel, opts?.logSinks, {
     dropAllDatabases: undefined,
   });
   const kvStoreProvider = getKVStoreProvider(logContext, opts?.kvStore);
-  const store = new IDBDatabasesStore(kvStoreProvider.create);
+  return dropMatchingDatabases(kvStoreProvider, () => true);
+}
+
+export async function dropMatchingDatabases(
+  provider: StoreProvider,
+  matches: (database: IndexedDBDatabase) => boolean,
+): Promise<{dropped: string[]; errors: unknown[]; kept: string[]}> {
+  const registry = new IDBDatabasesStore(provider.create);
   try {
-    const databases = await store.getDatabases();
-    const dbNames = Object.values(databases).map(db => db.name);
-    return await dropDatabases(store, dbNames, kvStoreProvider.drop);
+    const drop: string[] = [];
+    const kept: string[] = [];
+    const errors: unknown[] = [];
+    for (const database of Object.values(await registry.getDatabases())) {
+      if (!matches(database)) continue;
+      try {
+        const target = (await mustKeepDatabase(database, provider.create)) ? kept : drop;
+        target.push(database.name);
+      } catch (error) {
+        kept.push(database.name);
+        errors.push(error);
+      }
+    }
+    const result = await dropDatabases(registry, drop, provider.drop);
+    return {dropped: result.dropped, errors: [...errors, ...result.errors], kept};
   } finally {
-    await store.close();
+    await registry.close();
   }
+}
+
+async function mustKeepDatabase(
+  database: IndexedDBDatabase,
+  createStore: CreateStore,
+): Promise<boolean> {
+  if (database.replicacheFormatVersion > FormatVersion.Latest) return true;
+  if (database.replicacheFormatVersion < FormatVersion.DD31) return false;
+  const dag = defaultNewDagStore(database.name, createStore);
+  try {
+    return await withRead(dag, hasRecoverableMutations);
+  } finally {
+    await dag.close();
+  }
+}
+
+async function hasRecoverableMutations(read: Parameters<typeof getClientGroups>[0]) {
+  for (const group of (await getClientGroups(read)).values()) {
+    if (!group.disabled && clientGroupHasPendingMutations(group)) return true;
+  }
+  return false;
 }
 
 /**
@@ -340,13 +381,8 @@ function canDatabaseBeCollectedAndGetDeletedClientIDs(
   return withRead(perdag, async read => {
     // If mutation recovery is disabled we do not care if there are pending
     // mutations when we decide if we can collect the database.
-    if (enableMutationRecovery) {
-      const clientGroups = await getClientGroups(read);
-      for (const clientGroup of clientGroups.values()) {
-        if (clientGroupHasPendingMutations(clientGroup)) {
-          return [false];
-        }
-      }
+    if (enableMutationRecovery && (await hasRecoverableMutations(read))) {
+      return [false];
     }
 
     const clients = await getClients(read);

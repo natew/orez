@@ -19,8 +19,21 @@ export function withWasm<Args extends unknown[], Result>(
   operation: (...args: Args) => Result
 ): (...args: Args) => Result {
   return (...args) => {
-    ensureWasm()
-    return operation(...args)
+    try {
+      ensureWasm()
+      return operation(...args)
+    } catch (error) {
+      // a trap can leave the allocator unusable in this instance.
+      if (
+        error instanceof WebAssembly.RuntimeError ||
+        (error instanceof RangeError && error.message === 'Invalid array buffer length')
+      ) {
+        generated.resetWasm()
+        initialized = false
+        console.error('sync engine instance discarded', error)
+      }
+      throw error
+    }
   }
 }
 

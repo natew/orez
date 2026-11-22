@@ -39,6 +39,7 @@ import type {IndexDefinitions} from './index-defs.ts';
 import type {StoreProvider} from './kv/store.ts';
 import {createLogContext} from './log-options.ts';
 import {makeIDBName} from './make-idb-name.ts';
+import {MutationRecovery} from './mutation-recovery.ts';
 import {initNewClientChannel} from './new-client-channel.ts';
 import {
   initOnPersistChannel,
@@ -304,6 +305,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   readonly #idbDatabases: IDBDatabasesStore;
   readonly #lc: LogContext;
   readonly #zero: ZeroOption | undefined;
+  readonly #mutationRecovery: MutationRecovery;
 
   readonly #closeAbortController = new AbortController();
 
@@ -490,6 +492,15 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     const clientGroupIDResolver = resolver<string>();
     this.#clientGroupIDPromise = clientGroupIDResolver.promise;
 
+    this.#mutationRecovery = new MutationRecovery({
+      delegate: this,
+      lc: this.#lc,
+      enableMutationRecovery,
+      wrapInOnlineCheck: this.#wrapInOnlineCheck.bind(this),
+      wrapInReauthRetries: this.#wrapInReauthRetries.bind(this),
+      clientGroupIDPromise: this.#clientGroupIDPromise,
+    });
+
     this.#onPersist = initOnPersistChannel(
       this.name,
       this.#closeAbortController.signal,
@@ -524,6 +535,8 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     // If we are currently closing a Replicache instance with the same name,
     // wait for it to finish closing.
     await closingInstances.get(this.name);
+    const liveClientIDs = this.#kvStoreProvider.singleProcess ? singleProcessClients : undefined;
+    liveClientIDs?.add(clientID);
     await this.#idbDatabases.getProfileID().then(profileIDResolver);
     await this.#idbDatabases.putDatabase(this.#idbDatabase);
     const [client, headHash, , isNewClientGroup] = await initClientV6(
@@ -542,7 +555,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     );
 
     // Now we have a profileID, a clientID, a clientGroupID and DB!
-    await this.#zero?.init(headHash, this.memdag);
+    await this.#zero?.init(headHash, this.memdag, liveClientIDs ? 64 : 1);
     resolveReady();
 
     const {signal} = this.#closeAbortController;
@@ -565,19 +578,20 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       onClientsDeleted,
       this.#lc,
       signal,
+      liveClientIDs,
     );
     initCollectIDBDatabases(
       this.#idbDatabases,
       this.#kvStoreProvider,
       COLLECT_IDB_INTERVAL,
-      INITIAL_COLLECT_IDB_DELAY,
+      liveClientIDs ? 0 : INITIAL_COLLECT_IDB_DELAY,
       2 * clientMaxAgeMs,
       enableMutationRecovery,
       onClientsDeleted,
       this.#lc,
       signal,
     );
-    initClientGroupGC(this.perdag, enableMutationRecovery, this.#lc, signal);
+    initClientGroupGC(this.perdag, enableMutationRecovery, this.#lc, signal, liveClientIDs !== undefined);
     initNewClientChannel(
       this.name,
       this.idbName,
@@ -727,6 +741,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
 
       await Promise.all(closingPromises);
     } finally {
+      singleProcessClients.delete(this.clientID);
       closingInstances.delete(this.name);
       resolve();
     }
@@ -1572,7 +1587,15 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     return ex;
   }
 
-  recoverMutations(): Promise<boolean> | void {}
+  recoverMutations(): Promise<boolean> {
+    return this.#mutationRecovery.recoverMutations(
+      this.#ready,
+      this.perdag,
+      this.#idbDatabase,
+      this.#idbDatabases,
+      this.#kvStoreProvider.create,
+    );
+  }
 
   /**
    * List of pending mutations. The order of this is from oldest to newest.
@@ -1590,6 +1613,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
 // This map is used to keep track of closing instances of Replicache. When an
 // instance is opening we wait for any currently closing instances.
 const closingInstances: Map<string, Promise<unknown>> = new Map();
+const singleProcessClients = new Set<ClientID>();
 
 async function throwIfError(p: Promise<undefined | {error: unknown}>) {
   const res = await p;

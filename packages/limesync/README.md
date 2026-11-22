@@ -28,6 +28,12 @@ is based on Zero 1.9.0 and includes the maintained fork's database lifetime fixe
 `limesync/client` to supply separate endpoints, a wake subscription, or a
 payload codec. An optional WebSocket carries wake signals.
 
+Use `limesync/zero/sqlite` for an application-owned persistent SQLite store.
+`Zero.delete()` and `dropAllDatabases()` return the database names they kept in
+`kept`. Keep those files and the database registry during a local reset so
+the next connected client can replay their pending mutations. After the server
+acknowledges the writes, the old database can be collected.
+
 The HTTP client reports rejected pull and push status codes through its lifecycle
 callback. A 401 or 403 emits Zero's `Unauthorized` frame and parks the client in
 `needs-auth`; other non-retryable 4xx responses are terminal. Applications own

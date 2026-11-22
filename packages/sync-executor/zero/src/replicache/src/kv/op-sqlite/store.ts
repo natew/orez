@@ -53,13 +53,18 @@ class OpSQLitePreparedStatement implements PreparedStatement {
     this.#sql = sql;
   }
 
-  async exec(params: string[]): Promise<void> {
+  async exec(params: (string | null)[]): Promise<void> {
     await this.#db.executeRaw(this.#sql, params);
   }
 
-  async all(params: string[]): Promise<unknown[][]> {
+  async all(params: (string | null)[]): Promise<unknown[][]> {
     return rawResultRows(await this.#db.executeRaw(this.#sql, params));
   }
+
+  async *iterate(params: (string | null)[]): AsyncIterable<unknown[]> {
+    yield* await this.all(params);
+  }
+
 }
 
 class OpSQLiteDatabase implements SQLiteDatabase {
@@ -104,7 +109,7 @@ class OpSQLiteDatabase implements SQLiteDatabase {
     return new OpSQLitePreparedStatement(this.#db, sql);
   }
 
-  execSync(sql: string): void {
-    this.#db.executeRawSync(sql, []);
+  async exec(sql: string): Promise<void> {
+    await this.#db.executeRaw(sql, []);
   }
 }

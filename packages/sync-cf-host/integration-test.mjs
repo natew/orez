@@ -306,10 +306,35 @@ try {
   )
   assertions++
 
+  const recoveryBody = {
+    clientID: 'client-a',
+    clientGroupID: 'group-client-a',
+    cookie: null,
+  }
+  const replay = await post('/pull', recoveryBody)
+  assert.ok(replay.body.rowsPatch.length > 60, 'the normal pull replays fixture rows')
+  const beforeRecovery = await admin('/admin/sql-billing')
+  const recovery = await post('/pull', { ...recoveryBody, includeRows: false })
+  equal(recovery.status, 200, 'standalone recovery pull status')
+  equal(recovery.body.rowsPatch, [], 'standalone recovery omits rows')
+  equal(recovery.body.cookie, replay.body.cookie, 'recovery keeps the pull cookie')
+  equal(
+    recovery.body.lastMutationIDChanges,
+    replay.body.lastMutationIDChanges,
+    'recovery keeps mutation acknowledgements'
+  )
+  const afterRecovery = await admin('/admin/sql-billing')
+  equal(
+    afterRecovery.rowsWritten - beforeRecovery.rowsWritten,
+    0,
+    'recovery on unchanged membership writes no billed rows'
+  )
+
   const queryPull = await post('/pull', {
     clientID: 'query-client',
     clientGroupID: 'query-group',
     cookie: null,
+    includeRows: false,
     queries: {
       version: 1,
       patch: [

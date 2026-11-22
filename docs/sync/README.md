@@ -10,6 +10,12 @@ The Rust engine replicates upstream data, feeds row changes to clients, runs
 custom mutators, tracks each client's last mutation ID, and serves per-query
 incremental sync.
 
+On startup a connected Zero client recovers pending mutations from its older
+local databases. Recovery pushes use the original client and group IDs. The
+acknowledgement pull asks for mutation IDs and the cookie with an empty row
+patch. Cache reset APIs return kept databases so applications can preserve
+their pending writes through a reset.
+
 ## Start here
 
 - **[Architecture](./architecture.md)**: the Rust engine, its WASM wrapper,

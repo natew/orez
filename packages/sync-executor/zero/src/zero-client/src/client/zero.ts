@@ -6,8 +6,10 @@ import {
   ReplicacheImpl,
   type ReplicacheImplOptions,
 } from '../../../replicache/src/impl.ts';
-import {dropDatabase as dropReplicacheDatabase} from '../../../replicache/src/persist/collect-idb-databases.ts';
-import {IDBDatabasesStore} from '../../../replicache/src/persist/idb-databases-store.ts';
+import {
+  dropDatabase as dropReplicacheDatabase,
+  dropMatchingDatabases,
+} from '../../../replicache/src/persist/collect-idb-databases.ts';
 import type {PullerResult} from '../../../replicache/src/puller.ts';
 import type {PusherResult} from '../../../replicache/src/pusher.ts';
 import type {ReplicacheOptions} from '../../../replicache/src/replicache-options.ts';
@@ -564,7 +566,7 @@ export class Zero<
 
     const replicacheImplOptions: ReplicacheImplOptions = {
       enableClientGroupForking: false,
-      enableMutationRecovery: false,
+      enableMutationRecovery: server !== null,
       enableRefresh: () => this.#enableRefresh(),
       onClientsDeleted: deletedClients =>
         this.#deleteClientsManager.onClientsDeleted(deletedClients),
@@ -2207,38 +2209,15 @@ export class Zero<
     }
   }
 
-  async delete(): Promise<{deleted: string[]; errors: unknown[]}> {
+  async delete(): Promise<{deleted: string[]; errors: unknown[]; kept: string[]}> {
+    await this.#rep.persist();
     await this.close();
-
     const kvStoreProvider = getKVStoreProvider(this.#lc, this.#kvStore);
-    const idbDatabasesStore = new IDBDatabasesStore(kvStoreProvider.create);
-    try {
-      const databases = await idbDatabasesStore.getDatabases();
-      const dbNamesToDelete = Object.values(databases)
-        .filter(database => database.replicacheName === this.#rep.name)
-        .map(database => database.name);
-
-      const deleteResults = await Promise.allSettled(
-        dbNamesToDelete.map(async dbName => {
-          await dropReplicacheDatabase(dbName, {kvStore: this.#kvStore});
-          return dbName;
-        }),
-      );
-
-      const deleted: string[] = [];
-      const errors: unknown[] = [];
-      for (const result of deleteResults) {
-        if (result.status === 'fulfilled') {
-          deleted.push(result.value);
-        } else {
-          errors.push(result.reason);
-        }
-      }
-
-      return {deleted, errors};
-    } finally {
-      await idbDatabasesStore.close();
-    }
+    const {dropped, kept, errors} = await dropMatchingDatabases(
+      kvStoreProvider,
+      database => database.replicacheName === this.#rep.name,
+    );
+    return {deleted: dropped, errors, kept};
   }
 
   #addMetric: <K extends keyof MetricMap>(

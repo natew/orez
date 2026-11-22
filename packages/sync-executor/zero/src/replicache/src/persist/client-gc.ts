@@ -35,7 +35,9 @@ export function initClientGC(
   onClientsDeleted: OnClientsDeleted,
   lc: LogContext,
   signal: AbortSignal,
+  liveClientIDs?: ReadonlySet<ClientID>,
 ): void {
+  let delay = liveClientIDs ? 2_000 : gcInterval;
   initBgIntervalProcess(
     'ClientGC',
     () => {
@@ -44,10 +46,15 @@ export function initClientGC(
         dagStore,
         clientMaxInactiveTime,
         onClientsDeleted,
+        liveClientIDs,
       );
       return latestGCUpdate;
     },
-    () => gcInterval,
+    () => {
+      const next = delay;
+      delay = gcInterval;
+      return next;
+    },
     lc,
     signal,
   );
@@ -58,35 +65,42 @@ function gcClients(
   dagStore: Store,
   clientMaxInactiveTime: number,
   onClientsDeleted: OnClientsDeleted,
+  liveClientIDs: ReadonlySet<ClientID> | undefined,
 ): Promise<ClientMap> {
   return withWrite(dagStore, async dagWrite => {
     const now = Date.now();
     const clients = await getClients(dagWrite);
     const deletedClients: WritableDeletedClients = [];
     const newClients: Map<ClientID, Client> = new Map();
+    let releasedPins = false;
     for (const [id, client] of clients) {
-      if (
-        id === clientID /* never collect ourself */ ||
-        now - client.heartbeatTimestampMs <= clientMaxInactiveTime
-      ) {
+      if (id === clientID || liveClientIDs?.has(id)) {
         newClients.set(id, client);
-      } else {
+      } else if (now - client.heartbeatTimestampMs > clientMaxInactiveTime) {
         deletedClients.push({
           clientGroupID: client.clientGroupID,
           clientID: id,
         });
+      } else if (
+        liveClientIDs &&
+        'refreshHashes' in client &&
+        (client.refreshHashes.length > 0 || client.persistHash)
+      ) {
+        // pending mutations belong to the group, independently of these read pins.
+        newClients.set(id, {...client, refreshHashes: [], persistHash: null});
+        releasedPins = true;
+      } else {
+        newClients.set(id, client);
       }
     }
 
-    if (newClients.size === clients.size) {
+    if (!releasedPins && deletedClients.length === 0) {
       return clients;
     }
     await setClients(newClients, dagWrite);
-    const normalizedDeletedClients = await addDeletedClients(
-      dagWrite,
-      deletedClients,
-    );
-    await onClientsDeleted(normalizedDeletedClients);
+    if (deletedClients.length > 0) {
+      await onClientsDeleted(await addDeletedClients(dagWrite, deletedClients));
+    }
     return newClients;
   });
 }

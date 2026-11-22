@@ -243,7 +243,7 @@ export interface ZeroOption {
   /**
    * Allow Zero to initialize its IVM state from the given hash and dag.
    */
-  init(hash: Hash, store: Store): Promise<void>;
+  init(hash: Hash, store: Store, readAhead: number): Promise<void>;
 
   /**
    * When a refresh, persist, or pullEnd occurs Zero must fork its IVM sources

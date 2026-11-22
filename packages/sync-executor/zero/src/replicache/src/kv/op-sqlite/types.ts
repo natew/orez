@@ -30,8 +30,7 @@ export function rawResultRows(result: RawResult): unknown[][] {
 export interface DB {
   close: () => void;
   delete: (location?: string) => void;
-  executeRaw: (query: string, params?: string[]) => Promise<RawResult>;
-  executeRawSync: (query: string, params?: string[]) => RawResult;
+  executeRaw: (query: string, params?: (string | null)[]) => Promise<RawResult>;
 }
 
 export type OpenFunction = (params: {

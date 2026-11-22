@@ -117,7 +117,7 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
   // determining from an entry.key alone whether it is a regular key or an
   // encoded IndexKey in an index map. Without encoding regular map keys the
   // caller has to deal with encoding and decoding the keys for the index map.
-  scan(fromKey: string): AsyncIterableIterator<Entry<FrozenJSONValue>> {
+  scan(fromKey: string, readAhead = 1): AsyncIterableIterator<Entry<FrozenJSONValue>> {
     return scanForHash(
       this.rootHash,
       () => this.rootHash,
@@ -138,6 +138,7 @@ export class BTreeRead implements AsyncIterable<Entry<FrozenJSONValue>> {
           this.getEntrySize,
         );
       },
+      readAhead,
     );
   }
 
@@ -295,27 +296,33 @@ async function* scanForHash(
   hash: Hash,
   fromKey: string,
   readNode: ReadNode,
+  readAhead: number,
+  prefetched?: ReadNodeResult,
 ): AsyncIterableIterator<Entry<FrozenJSONValue>> {
   if (hash === emptyHash) {
     return;
   }
 
-  const data = await readNode(hash);
+  const data = prefetched ?? await readNode(hash);
   const entries = data[NODE_ENTRIES];
   let i = 0;
   if (fromKey) {
     i = binarySearch(fromKey, entries);
   }
   if (data[NODE_LEVEL] > 0) {
-    for (; i < entries.length; i++) {
-      yield* scanForHash(
-        expectedRootHash,
-        getRootHash,
-        (entries[i] as Entry<Hash>)[1],
-        fromKey,
-        readNode,
-      );
-      fromKey = '';
+    while (i < entries.length) {
+      const start = i;
+      const end = Math.min(i + readAhead, entries.length);
+      const children = entries as readonly Entry<Hash>[];
+      const batch = end - start > 1
+        ? await Promise.all(children.slice(start, end).map(([, hash]) => readNode(hash)))
+        : undefined;
+      for (; i < end; i++) {
+        yield* scanForHash(
+          expectedRootHash, getRootHash, children[i][1], fromKey, readNode, readAhead, batch?.[i - start],
+        );
+        fromKey = '';
+      }
     }
   } else {
     for (; i < entries.length; i++) {
@@ -328,6 +335,7 @@ async function* scanForHash(
           rootHash,
           entries[i][0],
           readNode,
+          readAhead,
         );
         return;
       }

@@ -1,4 +1,5 @@
 import {RWLock} from '@rocicorp/lock';
+import {resolver} from '@rocicorp/resolver';
 import type {ReadonlyJSONValue} from '../../../shared/src/json.ts';
 import {deepFreeze} from '../frozen-json.ts';
 import type {Read, Store, Write} from './store.ts';
@@ -13,29 +14,34 @@ import {deleteSentinel, WriteImplBase} from './write-impl-base.ts';
  * A SQLite prepared statement.
  */
 export interface PreparedStatement {
-  exec(params: string[]): Promise<void>;
-  all(params: string[]): Promise<unknown[][]>;
+  exec(params: (string | null)[]): Promise<void>;
+  all(params: (string | null)[]): Promise<unknown[][]>;
+  iterate?(params: (string | null)[]): AsyncIterable<unknown[]>;
+  batch?(rows: string[][]): Promise<void>;
 }
 
 export interface SQLiteDatabase {
   /**
    * Close the database connection.
    */
-  close(): void;
+  close(): void | Promise<void>;
 
   /**
    * Destroy or delete the database (e.g. delete file).
    */
-  destroy(): void;
+  destroy(): void | Promise<void>;
 
   /**
    * Prepare a SQL string, returning a statement you can execute.
    * E.g. `const stmt = db.prepare("SELECT * FROM todos WHERE id=?");`
    */
-  prepare(sql: string): PreparedStatement;
+  prepare(sql: string): PreparedStatement | Promise<PreparedStatement>;
 
   // for PRAGMA statements, schema creation and transaction control.
-  execSync(sql: string): void;
+  exec?(sql: string): Promise<void>;
+  execSync?(sql: string): void;
+  initialize?(): Promise<void>;
+  maintain?(): Promise<void>;
 }
 
 export type CreateSQLiteDatabase = (
@@ -54,6 +60,7 @@ export class SQLiteStore implements Store {
   readonly #entry: StoreEntry;
 
   #closed = false;
+  #closing: Promise<void> | undefined;
 
   constructor(
     name: string,
@@ -66,57 +73,59 @@ export class SQLiteStore implements Store {
 
   async read(): Promise<Read> {
     throwIfStoreClosed(this);
-
     const entry = this.#entry;
-    const {db, lock, preparedStatements} = entry;
-    const release = await lock.read();
-
-    // Start shared read transaction if this is the first reader
-    // This ensures consistent reads across all concurrent readers
-    if (entry.activeReaders === 0) {
-      db.execSync('BEGIN');
-    }
-    entry.activeReaders++;
-
-    return new SQLiteStoreRead(() => {
-      entry.activeReaders--;
-      // Commit shared read transaction when last reader finishes
-      if (entry.activeReaders === 0) {
-        db.execSync('COMMIT');
+    const release = await entry.lock.read();
+    let joined = false;
+    try {
+      throwIfStoreClosed(this);
+      if (entry.dropped) throw transactionError();
+      const prepared = await entry.prepare();
+      if (entry.activeReaders++ === 0) {
+        entry.reading = entry.ending.then(() => entry.exec('BEGIN'));
       }
+      joined = true;
+      await entry.reading;
+      return new SQLiteStoreRead(() => {
+        if (--entry.activeReaders === 0) {
+          finishTransaction(entry, entry.exec('COMMIT'), release);
+        } else {
+          release();
+        }
+      }, prepared);
+    } catch (error) {
+      if (joined) entry.activeReaders--;
       release();
-    }, preparedStatements);
+      throw error;
+    }
   }
 
   async write(): Promise<Write> {
     throwIfStoreClosed(this);
-
-    const {lock, db, preparedStatements} = this.#entry;
-    const release = await lock.write();
-
-    // At this point, RWLock guarantees no active readers
-    // The last reader would have already committed the shared transaction
-
-    db.execSync('BEGIN IMMEDIATE');
-
-    return new SQLiteWrite(release, db, preparedStatements);
+    const entry = this.#entry;
+    const release = await entry.lock.write();
+    try {
+      throwIfStoreClosed(this);
+      if (entry.dropped) throw transactionError();
+      await entry.ending;
+      const prepared = await entry.prepare();
+      await entry.exec('BEGIN IMMEDIATE');
+      return new SQLiteWrite(release, entry, prepared);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) {
-      return;
-    }
-
-    const {lock, db} = this.#entry;
-    // Wait for all readers and writers to finish.
-    const writeRelease = await lock.write();
-
-    // Handle reference counting for shared stores - only close database
-    // when this is the last store instance using it
-    decrementStoreRefCount(this.#filename, db);
-
+  close(): Promise<void> {
     this.#closed = true;
-    writeRelease();
+    const entry = this.#entry;
+    return this.#closing ??= entry.lock.withWrite(async () => {
+      if (entry.dropped || --entry.refCount !== 0) return;
+      await closeEntry(entry);
+      if (stores.get(this.#filename) === entry && !entry.dropped) {
+        stores.delete(this.#filename);
+      }
+    });
   }
 
   get closed(): boolean {
@@ -158,20 +167,21 @@ export interface SQLiteStoreOptions {
  * Configures SQLite pragmas, creates the entry table, and prepares common statements.
  */
 
-export function setupDatabase(
+async function setupDatabase(
   delegate: SQLiteDatabase,
+  exec: (sql: string) => Promise<void>,
   opts?: SQLiteStoreOptions,
-): PreparedStatements {
+): Promise<PreparedStatements> {
   // Configure SQLite pragmas for optimal performance
-  delegate.execSync(`PRAGMA busy_timeout = ${opts?.busyTimeout ?? 200}`);
-  delegate.execSync(`PRAGMA journal_mode = '${opts?.journalMode ?? 'WAL'}'`);
-  delegate.execSync(`PRAGMA synchronous = '${opts?.synchronous ?? 'NORMAL'}'`);
-  delegate.execSync(
+  await exec(`PRAGMA busy_timeout = ${opts?.busyTimeout ?? 200}`);
+  await exec(`PRAGMA journal_mode = '${opts?.journalMode ?? 'WAL'}'`);
+  await exec(`PRAGMA synchronous = '${opts?.synchronous ?? 'NORMAL'}'`);
+  await exec(
     `PRAGMA read_uncommitted = ${Boolean(opts?.readUncommitted)}`,
   );
 
   // Create the entry table
-  delegate.execSync(`
+  await exec(`
     CREATE TABLE IF NOT EXISTS entry (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -179,23 +189,34 @@ export function setupDatabase(
   `);
 
   // Prepare common statements
-  return {
-    has: delegate.prepare(`SELECT 1 FROM entry WHERE key = ? LIMIT 1`),
-    get: delegate.prepare('SELECT value FROM entry WHERE key = ?'),
-    hasMany: delegate.prepare(
-      `SELECT key FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
-    ),
-    getMany: delegate.prepare(
-      `SELECT key, value FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
-    ),
-    put: delegate.prepare(
-      `INSERT OR REPLACE INTO entry (key, value)
-   SELECT e.value->>0, e.value->1 FROM json_each(?) e`,
-    ),
-    del: delegate.prepare(
-      `DELETE FROM entry WHERE key IN (SELECT value FROM json_each(?))`,
-    ),
-  };
+  await delegate.initialize?.();
+  const keys = Array(BATCH_KEYS).fill('?').join(', ');
+  const [has, get, hasMany, getMany, put, del] = await Promise.all([
+    delegate.prepare('SELECT 1 FROM entry WHERE key = ? LIMIT 1'),
+    delegate.prepare('SELECT value FROM entry WHERE key = ?'),
+    delegate.prepare(`SELECT key FROM entry WHERE key IN (${keys})`),
+    delegate.prepare(`SELECT key, value FROM entry WHERE key IN (${keys})`),
+    delegate.prepare(upsertStatement(1)),
+    delegate.prepare(`DELETE FROM entry WHERE key IN (${keys})`),
+  ]);
+  return {has, get, hasMany, getMany, put, del};
+}
+
+const BATCH_KEYS = 64;
+const BATCH_VALUE_UNITS = 128 * 1024;
+
+function upsertStatement(length: number): string {
+  const values = Array(length).fill('(?, ?)').join(', ');
+  return `INSERT INTO entry (key, value) VALUES ${values}
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE entry.value IS NOT excluded.value`;
+}
+
+function* keyBatches(keys: string[]): Iterable<(string | null)[]> {
+  for (let offset = 0; offset < keys.length; offset += BATCH_KEYS) {
+    const batch: (string | null)[] = keys.slice(offset, offset + BATCH_KEYS);
+    while (batch.length < BATCH_KEYS) batch.push(null);
+    yield batch;
+  }
 }
 
 // Callbacks are stored as striped pairs: [resolve, reject, resolve, reject, ...]
@@ -236,31 +257,35 @@ async function flushGets(
   callbacks: unknown[],
   ps: PreparedStatements,
 ): Promise<void> {
-  let rows: unknown[][];
   try {
-    rows =
-      keys.length === 1
-        ? await ps.get.all([keys[0]])
-        : await ps.getMany.all([JSON.stringify(keys)]);
-  } catch (e) {
-    rejectAll(callbacks, e);
-    return;
-  }
-  if (keys.length === 1) {
-    resolveGet(
-      callbacks[CB_RESOLVE] as GetResolve,
-      callbacks[CB_REJECT] as Reject,
-      rows[0]?.[0] as string | undefined,
-    );
-    return;
-  }
-  const resultMap = new Map(rows as [string, string][]);
-  for (let i = 0; i < keys.length; i++) {
-    resolveGet(
-      callbacks[i * CB_STRIDE + CB_RESOLVE] as GetResolve,
-      callbacks[i * CB_STRIDE + CB_REJECT] as Reject,
-      resultMap.get(keys[i]),
-    );
+    if (keys.length === 1) {
+      const rows = await ps.get.all(keys);
+      resolveGet(callbacks[CB_RESOLVE] as GetResolve, callbacks[CB_REJECT] as Reject, rows[0]?.[0] as string | undefined);
+      return;
+    }
+    const waiting = new Map<string, number[]>();
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const offsets = waiting.get(key);
+      if (offsets) offsets.push(i * CB_STRIDE);
+      else waiting.set(key, [i * CB_STRIDE]);
+    }
+    for (const batch of keyBatches([...waiting.keys()])) {
+      const {getMany} = ps;
+      const rows = getMany.iterate ? getMany.iterate(batch) : await getMany.all(batch);
+      for await (const row of rows) {
+        const [key, raw] = row as [string, string];
+        for (const offset of waiting.get(key) ?? []) {
+          resolveGet(callbacks[offset + CB_RESOLVE] as GetResolve, callbacks[offset + CB_REJECT] as Reject, raw);
+        }
+        waiting.delete(key);
+      }
+    }
+    for (const offsets of waiting.values()) {
+      for (const offset of offsets) (callbacks[offset + CB_RESOLVE] as GetResolve)(undefined);
+    }
+  } catch (error) {
+    rejectAll(callbacks, error);
   }
 }
 
@@ -269,25 +294,20 @@ async function flushHas(
   callbacks: unknown[],
   ps: PreparedStatements,
 ): Promise<void> {
-  let rows: unknown[][];
   try {
-    rows =
-      keys.length === 1
-        ? await ps.has.all([keys[0]])
-        : await ps.hasMany.all([JSON.stringify(keys)]);
-  } catch (e) {
-    rejectAll(callbacks, e);
-    return;
-  }
-  if (keys.length === 1) {
-    (callbacks[CB_RESOLVE] as HasResolve)(rows.length > 0);
-    return;
-  }
-  const existingKeys = new Set(rows.map(row => row[0] as string));
-  for (let i = 0; i < keys.length; i++) {
-    (callbacks[i * CB_STRIDE + CB_RESOLVE] as HasResolve)(
-      existingKeys.has(keys[i]),
-    );
+    if (keys.length === 1) {
+      (callbacks[CB_RESOLVE] as HasResolve)((await ps.has.all(keys)).length > 0);
+      return;
+    }
+    const existing = new Set<string>();
+    for (const batch of keyBatches(keys)) {
+      for (const [key] of await ps.hasMany.all(batch)) existing.add(key as string);
+    }
+    for (let i = 0; i < keys.length; i++) {
+      (callbacks[i * CB_STRIDE + CB_RESOLVE] as HasResolve)(existing.has(keys[i]));
+    }
+  } catch (error) {
+    rejectAll(callbacks, error);
   }
 }
 
@@ -295,6 +315,7 @@ export class SQLiteStoreRead implements Read {
   readonly #release: () => void;
   readonly #preparedStatements: PreparedStatements;
   #closed = false;
+  #activeLookups = 0;
   #pendingGetKeys: string[] = [];
   #pendingGetCallbacks: unknown[] = [];
   #pendingHasKeys: string[] = [];
@@ -352,19 +373,26 @@ export class SQLiteStoreRead implements Read {
         }
 
         if (getKeys.length > 0) {
-          void flushGets(getKeys, getCallbacks, ps);
+          this.#trackLookup(flushGets(getKeys, getCallbacks, ps));
         }
         if (hasKeys.length > 0) {
-          void flushHas(hasKeys, hasCallbacks, ps);
+          this.#trackLookup(flushHas(hasKeys, hasCallbacks, ps));
         }
       });
     }
   }
 
+  #trackLookup(lookup: Promise<void>): void {
+    this.#activeLookups++;
+    void lookup.then(() => {
+      if (--this.#activeLookups === 0 && this.#closed) this.#release();
+    });
+  }
+
   release(): void {
     if (!this.#closed) {
       this.#closed = true;
-      this.#release();
+      if (this.#activeLookups === 0) this.#release();
     }
   }
 
@@ -375,71 +403,71 @@ export class SQLiteStoreRead implements Read {
 
 export class SQLiteWrite extends WriteImplBase implements Write {
   readonly #release: () => void;
-  readonly #dbDelegate: SQLiteDatabase;
+  readonly #entry: StoreEntry;
   readonly #preparedStatements: PreparedStatements;
-  #committed = false;
+  readonly #readReleased: Promise<void>;
+  #committing: Promise<void> | undefined;
   #closed = false;
 
   constructor(
     release: () => void,
-    dbDelegate: SQLiteDatabase,
+    entry: StoreEntry,
     preparedStatements: PreparedStatements,
   ) {
-    super(new SQLiteStoreRead(() => undefined, preparedStatements));
+    const readReleased = resolver<void>();
+    super(new SQLiteStoreRead(readReleased.resolve, preparedStatements));
     this.#release = release;
-    this.#dbDelegate = dbDelegate;
+    this.#entry = entry;
     this.#preparedStatements = preparedStatements;
+    this.#readReleased = readReleased.promise;
   }
 
-  async commit(): Promise<void> {
-    if (this.#closed) {
-      throw transactionError();
-    }
+  commit(): Promise<void> {
+    if (this.#closed) return Promise.reject(transactionError());
+    return this.#committing ??= this.#commit();
+  }
 
-    const deleteKeys: string[] = [];
-    for (const entry of this._pending) {
-      if (entry[1] === deleteSentinel) {
-        deleteKeys.push(entry[0]);
-        this._pending.delete(entry[0]);
+  async #commit(): Promise<void> {
+    const {del, put} = this.#preparedStatements;
+    const upsert = put.batch?.bind(put) ?? (async (rows: string[][]) => {
+      const statement = await this.#entry.db.prepare(upsertStatement(rows.length));
+      await statement.exec(rows.flat());
+    });
+    const deleteKeys = [];
+    for (const [key, value] of this._pending) {
+      if (value === deleteSentinel) deleteKeys.push(key);
+    }
+    for (const batch of keyBatches(deleteKeys)) await del.exec(batch);
+    let rows: string[][] = [];
+    let units = 0;
+    for (const [key, value] of this._pending) {
+      if (value === deleteSentinel) continue;
+      const encoded = JSON.stringify(value);
+      rows.push([key, encoded]);
+      units += key.length + encoded.length;
+      if (rows.length === BATCH_KEYS || units >= BATCH_VALUE_UNITS) {
+        await upsert(rows);
+        rows = [];
+        units = 0;
       }
     }
-
-    const delP =
-      deleteKeys.length > 0
-        ? this.#preparedStatements.del.exec([JSON.stringify(deleteKeys)])
-        : undefined;
-    const putP =
-      this._pending.size > 0
-        ? this.#preparedStatements.put.exec([
-            JSON.stringify([...this._pending]),
-          ])
-        : undefined;
-
-    if (putP) await putP;
-    if (delP) await delP;
-
-    this.#dbDelegate.execSync('COMMIT');
+    if (rows.length > 0) await upsert(rows);
+    await this.#entry.exec('COMMIT');
     this._pending.clear();
-    this.#committed = true;
   }
 
   release(): void {
-    if (!this.#closed) {
-      this.#closed = true;
-      super.release();
-      let rollbackError: unknown;
-      if (!this.#committed) {
-        try {
-          this.#dbDelegate.execSync('ROLLBACK');
-        } catch (e) {
-          rollbackError = e;
-        }
-      }
-      this.#release();
-      if (rollbackError !== undefined) {
-        throw rollbackError;
-      }
-    }
+    if (this.#closed) return;
+    this.#closed = true;
+    super.release();
+    const rollback = () => this.#readReleased.then(() => this.#entry.exec('ROLLBACK'));
+    const ended = this.#committing
+      ? this.#committing.then(() => {
+        scheduleMaintenance(this.#entry);
+        return this.#readReleased;
+      }, rollback)
+      : rollback();
+    finishTransaction(this.#entry, ended, this.#release);
   }
 
   get closed(): boolean {
@@ -450,105 +478,93 @@ export class SQLiteWrite extends WriteImplBase implements Write {
 type StoreEntry = {
   readonly lock: RWLock;
   readonly db: SQLiteDatabase;
+  readonly exec: (sql: string) => Promise<void>;
+  readonly prepare: () => Promise<PreparedStatements>;
+  readonly previousClose: Promise<void>;
   refCount: number;
   activeReaders: number;
-  preparedStatements: PreparedStatements;
+  reading?: Promise<void>;
+  ending: Promise<void>;
+  closing?: Promise<void>;
+  dropping: Promise<void> | undefined;
+  dropped: boolean;
+  maintenanceAfter: number;
 };
 
-// Global map to share database connections between multiple store instances with the same name
 const stores = new Map<string, StoreEntry>();
 
-/**
- * Gets an existing store entry or creates a new one if it doesn't exist.
- * This implements the shared connection pattern where multiple stores with the same
- * name share the same database connection, lock, and delegate.
- */
+function finishTransaction(entry: StoreEntry, ended: Promise<void>, release: () => void) {
+  entry.ending = ended;
+  void ended.then(release, release);
+}
+
+function scheduleMaintenance(entry: StoreEntry) {
+  const now = Date.now();
+  if (!entry.db.maintain || entry.dropped || now < entry.maintenanceAfter) return;
+  entry.maintenanceAfter = now + 60_000;
+  void entry.lock.withWrite(async () => {
+    if (entry.refCount > 0 && !entry.dropped) await entry.db.maintain!();
+  }).catch(error => console.error('SQLite store maintenance failed', error));
+}
+
 function getOrCreateEntry(
   filename: string,
-  create: (filename: string, opts?: SQLiteStoreOptions) => SQLiteDatabase,
+  create: CreateSQLiteDatabase,
   opts?: SQLiteStoreOptions,
 ): StoreEntry {
   const entry = stores.get(filename);
-
-  if (entry) {
+  if (entry?.dropped) throw transactionError();
+  if (entry && !entry.closing) {
     entry.refCount++;
     return entry;
   }
-
-  const dbDelegate = create(filename, opts);
-  const preparedStatements = setupDatabase(dbDelegate, opts);
-
-  const lock = new RWLock();
-
-  const newEntry: StoreEntry = {
-    lock,
-    db: dbDelegate,
+  const db = create(filename, opts);
+  const execSync = db.execSync?.bind(db);
+  const exec = db.exec?.bind(db) ?? (async (sql: string) => {
+    if (!execSync) throw new TypeError('SQLite adapters must provide exec or execSync');
+    execSync(sql);
+  });
+  const previousClose = entry?.closing ?? Promise.resolve();
+  let prepared: Promise<PreparedStatements> | undefined;
+  const opened: StoreEntry = {
+    lock: new RWLock(),
+    db,
+    exec,
+    prepare: () => prepared ??= previousClose.then(() => setupDatabase(db, exec, opts)),
+    previousClose,
     refCount: 1,
     activeReaders: 0,
-    preparedStatements,
+    ending: previousClose,
+    dropping: undefined,
+    dropped: false,
+    maintenanceAfter: Date.now() + 30_000,
   };
-  stores.set(filename, newEntry);
-  return newEntry;
+  stores.set(filename, opened);
+  return opened;
 }
 
-/**
- * Decrements the reference count for a shared store and cleans up resources
- * when the last reference is released.
- */
-
-function decrementStoreRefCount(
-  filename: string,
-  dbDelegate: SQLiteDatabase,
-): void {
-  const entry = stores.get(filename);
-  if (entry) {
-    entry.refCount--;
-    if (entry.refCount <= 0) {
-      dbDelegate.close();
-      stores.delete(filename);
-    }
-  }
+function closeEntry(entry: StoreEntry): Promise<void> {
+  return entry.closing ??= entry.previousClose.then(() => entry.db.close());
 }
-export function clearAllNamedStoresForTesting(): void {
-  for (const entry of stores.values()) {
-    entry.db.close();
-  }
+
+export async function clearAllNamedStoresForTesting(): Promise<void> {
+  await Promise.all([...stores.values()].map(entry => entry.lock.withWrite(() => closeEntry(entry))));
   stores.clear();
 }
 
 export function dropStore(
   name: string,
-  createDelegate: (
-    filename: string,
-    opts?: SQLiteStoreOptions,
-  ) => SQLiteDatabase,
+  create: CreateSQLiteDatabase,
   opts?: SQLiteStoreOptions,
 ): Promise<void> {
   const filename = resolveFilename(name, opts);
-  const entry = stores.get(filename);
-  if (entry) {
-    try {
-      entry.db.close();
-    } catch {
-      // Ignore close errors
-    }
+  const entry = stores.get(filename) ?? getOrCreateEntry(filename, create, opts);
+  entry.dropped = true;
+  return entry.dropping ??= entry.lock.withWrite(async () => {
+    await closeEntry(entry);
+    await entry.db.destroy();
     stores.delete(filename);
-  }
-
-  // Create a temporary delegate to handle database deletion
-  const tempDelegate = createDelegate(filename, opts);
-  try {
-    // we close the db before destroying it - this
-    // caused an issue with expo-sqlite since it requires this
-    tempDelegate.close();
-  } catch {
-    // Ignore close errors
-  }
-  try {
-    tempDelegate.destroy();
-  } catch {
-    // Destroy errors shouldn't be fatal; the file may already be gone or locked
-  }
-
-  return Promise.resolve();
+  }).finally(() => {
+    entry.dropping = undefined;
+  });
 }

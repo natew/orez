@@ -43,7 +43,12 @@ export type DropStore = (name: string) => Promise<void>;
  * Provider for creating and deleting {@link Store} instances.
  *
  */
-export type StoreProvider = {create: CreateStore; drop: DropStore};
+export type StoreProvider = {
+  create: CreateStore;
+  drop: DropStore;
+  /** All clients using the provider share one JS process. */
+  singleProcess?: boolean;
+};
 
 /**
  * This interface is used so that we can release the lock when the transaction

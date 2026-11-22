@@ -850,6 +850,7 @@ export function createSyncDurableObject<
     #executorBeforeCommitFault: FaultKind | null = null
     #bootID = crypto.randomUUID()
     #initialized = false
+    #engineVersion: string | undefined
     #tableBootstrap: string[] | null = null
     #snapshotRequired = false
     #initSkipped = false
@@ -1054,6 +1055,7 @@ export function createSyncDurableObject<
 
     #initialize(): void {
       if (this.#initialized) return
+      this.#engineVersion = engine_version()
       this.ctx.storage.transactionSync(() => {
         this.#directSql.exec(`CREATE TABLE IF NOT EXISTS _zsync_host_control (
           key TEXT PRIMARY KEY,
@@ -2216,7 +2218,7 @@ export function createSyncDurableObject<
         JSON.stringify({
           event: 'sync_request',
           hostVersion: config.hostVersion,
-          engineVersion: engine_version(),
+          engineVersion: this.#engineVersion,
           ...fields,
         })
       )
@@ -2348,6 +2350,7 @@ export function createSyncDurableObject<
       this.#engineDb.resetStats()
       const started = performance.now()
       let transactionMs = 0
+      let pullSqlRowsWritten: number | null = null
       let body: Record<string, unknown> | undefined
       try {
         body = await requestObject(request)
@@ -2381,6 +2384,7 @@ export function createSyncDurableObject<
           body = { ...body, _serverQueryTransformVersion: transformVersion }
           const clientID = typeof body.clientID === 'string' ? body.clientID : ''
           this.#pulling.add(clientID)
+          const rowsWrittenBefore = this.#sqlBilling.rowsWritten
           try {
             const txStarted = performance.now()
             const duringFault = this.#takeFault('pull_during_tx')
@@ -2399,7 +2403,18 @@ export function createSyncDurableObject<
             })
             transactionMs = performance.now() - txStarted
           } finally {
+            pullSqlRowsWritten = this.#sqlBilling.rowsWritten - rowsWrittenBefore
             this.#pulling.delete(clientID)
+          }
+        }
+        if (
+          body.includeRows === false &&
+          (body.queries === undefined || body.queries === null) &&
+          Array.isArray(response.rowsPatch)
+        ) {
+          response.rowsPatch = []
+          if (response.gotQueries && typeof response.gotQueries === 'object') {
+            response.gotQueries = { ...response.gotQueries, patch: [] }
           }
         }
         const afterPullFault = this.#takeFault('pull_after_commit')
@@ -2428,6 +2443,7 @@ export function createSyncDurableObject<
           rowDeletes: patch.filter((entry) => entry?.op === 'del').length,
           lmidAdvances: 0,
           transactionMs,
+          pullSqlRowsWritten,
           totalMs: performance.now() - started,
           resetReason: null,
           wasmBoundaryCalls: this.#counters.wasmBoundaryCalls,
@@ -2458,6 +2474,7 @@ export function createSyncDurableObject<
           rowDeletes: 0,
           lmidAdvances: 0,
           transactionMs,
+          pullSqlRowsWritten,
           totalMs: performance.now() - started,
           resetReason: status === 409 ? errorMessage(error) : null,
         })

@@ -1260,7 +1260,7 @@ class HttpConnection implements SyncConnection {
       clientID: this.clientID,
       clientGroupID,
       cookie: typeof cookie === 'number' ? cookie : toHttpCookie(cookie),
-      ...(includeQueries ? { queryErrorMode: 'per-query-v1' } : {}),
+      ...(includeQueries ? { queryErrorMode: 'per-query-v1' } : { includeRows: false }),
     }
     // ship the un-acked desired-query delta with the pull; remember what we
     // sent so the server ack can clear exactly that prefix. a recovery pull
@@ -1276,7 +1276,7 @@ class HttpConnection implements SyncConnection {
         baseVersion: this.ackVersion,
         patch: [...this.queryPatch],
       }
-    } else {
+    } else if (includeQueries) {
       this.sentVersion = undefined
     }
     if (includeQueries && deletedClientIDs.length > 0) {
