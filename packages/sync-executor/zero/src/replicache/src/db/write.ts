@@ -3,7 +3,7 @@ import {assert} from '../../../shared/src/asserts.ts';
 import type {Enum} from '../../../shared/src/enum.ts';
 import {diff} from '../btree/diff.ts';
 import type {InternalDiff} from '../btree/node.ts';
-import {BTreeRead, allEntriesAsDiff} from '../btree/read.ts';
+import {BTreeRead} from '../btree/read.ts';
 import {BTreeWrite} from '../btree/write.ts';
 import type {FrozenCookie} from '../cookies.ts';
 import type {Write as DagWrite} from '../dag/store.ts';
@@ -26,10 +26,9 @@ import {
   getMutationID,
 } from './commit.ts';
 import * as IndexOperation from './index-operation-enum.ts';
-import type {IndexRead} from './index.ts';
 import {IndexWrite, indexValue} from './index.ts';
 import * as MetaType from './meta-type-enum.ts';
-import {Read, readIndexesForRead} from './read.ts';
+import {Read} from './read.ts';
 
 type FormatVersion = Enum<typeof FormatVersion>;
 
@@ -243,42 +242,6 @@ export class Write extends Read {
       valueDiff = await diff(basisMap, this.map);
     }
     diffsMap.set('', valueDiff);
-    let basisIndexes: Map<string, IndexRead>;
-    if (this.#basis) {
-      basisIndexes = readIndexesForRead(
-        this.#basis,
-        this.#dagWrite,
-        this.#formatVersion,
-      );
-    } else {
-      basisIndexes = new Map();
-    }
-
-    for (const [name, index] of this.indexes) {
-      if (!diffConfig.shouldComputeDiffsForIndex(name)) {
-        continue;
-      }
-      const basisIndex = basisIndexes.get(name);
-      assert(index !== basisIndex, 'Expected index to differ from basisIndex');
-
-      const indexDiffResult = await (basisIndex
-        ? diff(basisIndex.map, index.map)
-        : // No basis. All keys are new.
-          allEntriesAsDiff(index.map, 'add'));
-      diffsMap.set(name, indexDiffResult);
-    }
-
-    // Handle indexes in basisIndex but not in this.indexes. All keys are
-    // deleted.
-    for (const [name, basisIndex] of basisIndexes) {
-      if (
-        !this.indexes.has(name) &&
-        diffConfig.shouldComputeDiffsForIndex(name)
-      ) {
-        const indexDiffResult = await allEntriesAsDiff(basisIndex.map, 'del');
-        diffsMap.set(name, indexDiffResult);
-      }
-    }
     return diffsMap;
   }
 

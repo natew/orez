@@ -84,17 +84,14 @@ export class MutationTracker {
 
   setClientIDAndWatch(
     clientID: string,
-    experimentalWatch: ReplicacheImpl['experimentalWatch'],
+    watch: ReplicacheImpl['watch'],
   ) {
     assert(this.#clientID === undefined, 'clientID already set');
     this.#clientID = clientID;
-    experimentalWatch(
+    watch(
+      MUTATIONS_KEY_PREFIX + clientID + '/',
       diffs => {
         this.#processMutationResponses(diffs);
-      },
-      {
-        prefix: MUTATIONS_KEY_PREFIX + clientID + '/',
-        initialValuesInFirstDiff: true,
       },
     );
   }

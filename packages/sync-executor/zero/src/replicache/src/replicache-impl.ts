@@ -9,6 +9,7 @@ import {getDocumentVisibilityWatcher} from '../../shared/src/document-visible.ts
 import type {JSONValue, ReadonlyJSONValue} from '../../shared/src/json.ts';
 import {promiseVoid} from '../../shared/src/resolved-promises.ts';
 import type {MaybePromise} from '../../shared/src/types.ts';
+import type {NoIndexDiff} from './btree/node.ts';
 import {PullDelegate, PushDelegate} from './connection-loop-delegates.ts';
 import {ConnectionLoop, MAX_DELAY_MS, MIN_DELAY_MS} from './connection-loop.ts';
 import {assertCookie, type Cookie} from './cookies.ts';
@@ -88,17 +89,7 @@ import type {
 } from './replicache-options.ts';
 import {ReportError} from './report-error.ts';
 import {setIntervalWithSignal} from './set-interval-with-signal.ts';
-import {
-  type SubscribeOptions,
-  SubscriptionImpl,
-  type SubscriptionsManager,
-  SubscriptionsManagerImpl,
-  type WatchCallback,
-  type WatchCallbackForOptions,
-  type WatchNoIndexCallback,
-  type WatchOptions,
-  WatchSubscription,
-} from './subscriptions.ts';
+import {SubscriptionsManager} from './subscriptions.ts';
 import type {DiffsMap} from './sync/diff.ts';
 import * as HandlePullResponseResultEnum from './sync/handle-pull-response-result-type-enum.ts';
 import type {ClientGroupID, ClientID} from './sync/ids.ts';
@@ -152,11 +143,6 @@ const updateNeededReasonNewClientGroup: UpdateNeededReason = {
   type: 'NewClientGroup',
 } as const;
 
-/** @deprecated Not used any more */
-export interface MakeSubscriptionsManager {
-  (queryInternal: QueryInternal, lc: LogContext): SubscriptionsManager;
-}
-
 export interface ReplicacheImplOptions {
   /**
    * Defaults to true.
@@ -177,11 +163,6 @@ export interface ReplicacheImplOptions {
    * Defaults to `() => true`.
    */
   enableRefresh?: (() => boolean) | undefined;
-
-  /**
-   * @deprecated Not used anymore.
-   */
-  makeSubscriptionsManager?: unknown;
 
   /**
    * Callback for when Replicache has deleted clients.
@@ -429,7 +410,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       'replicache version': version,
     });
 
-    this.#subscriptions = new SubscriptionsManagerImpl(
+    this.#subscriptions = new SubscriptionsManager(
       this.#queryInternal,
       this.#lc,
       this.#closeAbortController.signal,
@@ -1289,81 +1270,8 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     }
   }
 
-  /**
-   * Subscribe to the result of a {@link query}. The `body` function is
-   * evaluated once and its results are returned via `onData`.
-   *
-   * Thereafter, each time the the result of `body` changes, `onData` is fired
-   * again with the new result.
-   *
-   * `subscribe()` goes to significant effort to avoid extraneous work
-   * re-evaluating subscriptions:
-   *
-   * 1. subscribe tracks the keys that `body` accesses each time it runs. `body`
-   *    is only re-evaluated when those keys change.
-   * 2. subscribe only re-fires `onData` in the case that a result changes by
-   *    way of the `isEqual` option which defaults to doing a deep JSON value
-   *    equality check.
-   *
-   * Because of (1), `body` must be a pure function of the data in Replicache.
-   * `body` must not access anything other than the `tx` parameter passed to it.
-   *
-   * Although subscribe is as efficient as it can be, it is somewhat constrained
-   * by the goal of returning an arbitrary computation of the cache. For even
-   * better performance (but worse dx), see {@link experimentalWatch}.
-   *
-   * If an error occurs in the `body` the `onError` function is called if
-   * present. Otherwise, the error is logged at log level 'error'.
-   *
-   * To cancel the subscription, call the returned function.
-   *
-   * @param body The function to evaluate to get the value to pass into
-   *    `onData`.
-   * @param options Options is either a function or an object. If it is a
-   *    function it is equivalent to passing it as the `onData` property of an
-   *    object.
-   */
-  subscribe<R>(
-    body: (tx: ReadTransaction) => Promise<R>,
-    options: SubscribeOptions<R> | ((result: R) => void),
-  ): () => void {
-    if (typeof options === 'function') {
-      options = {onData: options};
-    }
-
-    const {onData, onError, onDone, isEqual} = options;
-    return this.#subscriptions.add(
-      new SubscriptionImpl(body, onData, onError, onDone, isEqual),
-    );
-  }
-
-  /**
-   * Watches Replicache for changes.
-   *
-   * The `callback` gets called whenever the underlying data changes and the
-   * `key` changes matches the `prefix` of {@link ExperimentalWatchIndexOptions} or
-   * {@link ExperimentalWatchNoIndexOptions} if present. If a change
-   * occurs to the data but the change does not impact the key space the
-   * callback is not called. In other words, the callback is never called with
-   * an empty diff.
-   *
-   * This gets called after commit (a mutation or a rebase).
-   *
-   * @experimental This method is under development and its semantics will
-   * change.
-   */
-  experimentalWatch(callback: WatchNoIndexCallback): () => void;
-  experimentalWatch<Options extends WatchOptions>(
-    callback: WatchCallbackForOptions<Options>,
-    options?: Options,
-  ): () => void;
-  experimentalWatch<Options extends WatchOptions>(
-    callback: WatchCallbackForOptions<Options>,
-    options?: Options,
-  ): () => void {
-    return this.#subscriptions.add(
-      new WatchSubscription(callback as WatchCallback, options),
-    );
+  watch(prefix: string, onDiff: (diff: NoIndexDiff) => void): void {
+    this.#subscriptions.add(prefix, onDiff);
   }
 
   /**

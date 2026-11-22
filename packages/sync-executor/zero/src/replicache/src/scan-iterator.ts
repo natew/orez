@@ -33,18 +33,15 @@ export class ScanResultImpl<
   readonly #iter: AsyncIterable<EntryForOptions<Options, ReadonlyJSONValue>>;
   readonly #options: Options;
   readonly #dbDelegateOptions: Closed;
-  readonly #onLimitKey: (inclusiveLimitKey: string) => void;
 
   constructor(
     iter: AsyncIterable<EntryForOptions<Options, ReadonlyJSONValue>>,
     options: Options,
     dbDelegateOptions: Closed,
-    onLimitKey: (inclusiveLimitKey: string) => void,
   ) {
     this.#iter = iter;
     this.#options = options;
     this.#dbDelegateOptions = dbDelegateOptions;
-    this.#onLimitKey = onLimitKey;
   }
 
   /** The default AsyncIterable. This is the same as {@link values}. */
@@ -98,7 +95,6 @@ export class ScanResultImpl<
       this.#iter,
       this.#options,
       this.#dbDelegateOptions,
-      this.#onLimitKey,
     );
   }
 }
@@ -171,7 +167,6 @@ async function* scanIterator<Options extends ScanOptions, Value>(
   iter: AsyncIterable<EntryForOptions<Options, ReadonlyJSONValue>>,
   options: Options,
   closed: Closed,
-  onLimitKey: (inclusiveLimitKey: string) => void,
 ): AsyncIterableIterator<Value> {
   throwIfClosed(closed);
 
@@ -207,10 +202,6 @@ async function* scanIterator<Options extends ScanOptions, Value>(
     yield toValue(entry);
 
     if (--limit === 0) {
-      // We do not do the limit optimization for index scans in subscriptions.
-      if (!isIndexScan) {
-        onLimitKey(key as string);
-      }
       return;
     }
   }
@@ -316,9 +307,6 @@ export function makeScanResult<Options extends ScanOptions>(
       ) as AsyncIter,
       options,
       {closed: false},
-      _ => {
-        // noop
-      },
     );
   }
   const fromKey = fromKeyForNonIndexScan(options);
@@ -326,9 +314,6 @@ export function makeScanResult<Options extends ScanOptions>(
     (getScanIterator as GetScanIterator)(fromKey) as AsyncIter,
     options,
     {closed: false},
-    _ => {
-      // noop
-    },
   );
 }
 

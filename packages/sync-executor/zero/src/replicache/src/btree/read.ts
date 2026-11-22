@@ -8,7 +8,6 @@ import {type Hash, emptyHash} from '../hash.ts';
 import type {DataNodeImpl, InternalNodeImpl} from './node.ts';
 import {
   type Entry,
-  type InternalDiff,
   type InternalDiffOperation,
   NODE_ENTRIES,
   NODE_LEVEL,
@@ -342,28 +341,4 @@ async function* scanForHash(
       yield entries[i] as Entry<FrozenJSONValue>;
     }
   }
-}
-
-export async function allEntriesAsDiff(
-  map: BTreeRead,
-  op: 'add' | 'del',
-): Promise<InternalDiff> {
-  const diff: InternalDiffOperation[] = [];
-  const make: (entry: Entry<FrozenJSONValue>) => InternalDiffOperation =
-    op === 'add'
-      ? entry => ({
-          op: 'add',
-          key: entry[0],
-          newValue: entry[1],
-        })
-      : entry => ({
-          op: 'del',
-          key: entry[0],
-          oldValue: entry[1],
-        });
-
-  for await (const entry of map.entries()) {
-    diff.push(make(entry));
-  }
-  return diff;
 }

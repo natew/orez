@@ -597,7 +597,7 @@ export class Zero<
     );
     this.#mutationTracker.setClientIDAndWatch(
       rep.clientID,
-      rep.experimentalWatch.bind(rep),
+      rep.watch.bind(rep),
     );
 
     this.#activeClientsManager = makeActiveClientsManager(
@@ -709,7 +709,7 @@ export class Zero<
 
         this.#sendIfConnected([msg[0], body]);
       },
-      rep.experimentalWatch.bind(rep),
+      rep.watch.bind(rep),
       maxRecentQueries,
       options.queryChangeThrottleMs ?? DEFAULT_QUERY_CHANGE_THROTTLE_MS,
       slowMaterializeThreshold,

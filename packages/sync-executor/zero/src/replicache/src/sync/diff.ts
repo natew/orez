@@ -1,12 +1,12 @@
-import {assert} from '../../../shared/src/asserts.ts';
+import {compareUTF8} from 'compare-utf8';
+import {binarySearch} from '../../../shared/src/binary-search.ts';
 import type {Enum} from '../../../shared/src/enum.ts';
 import {diff as btreeDiff} from '../btree/diff.ts';
 import type {InternalDiff} from '../btree/node.ts';
-import {allEntriesAsDiff, BTreeRead} from '../btree/read.ts';
+import {BTreeRead} from '../btree/read.ts';
 import type {Read} from '../dag/store.ts';
 import type {Commit} from '../db/commit.ts';
 import {commitFromHash, type Meta} from '../db/commit.ts';
-import {readIndexesForRead} from '../db/read.ts';
 import type * as FormatVersion from '../format-version-enum.ts';
 import type {Hash} from '../hash.ts';
 
@@ -17,7 +17,6 @@ type FormatVersion = Enum<typeof FormatVersion>;
  */
 export interface DiffComputationConfig {
   shouldComputeDiffs(): boolean;
-  shouldComputeDiffsForIndex(name: string): boolean;
 }
 
 /**
@@ -34,8 +33,7 @@ export class DiffsMap extends Map<string, InternalDiff> {
 }
 
 /**
- * Diffs the state of the db at two different hashes.
- * It will include the primary indexes as well as all the secondary indexes.
+ * Diffs the primary index at two different commit hashes.
  */
 export async function diff(
   oldHash: Hash,
@@ -53,8 +51,7 @@ export async function diff(
 }
 
 /**
- * Diffs the state of the db at two different commits.
- * It will include the primary indexes as well as all the secondary indexes.
+ * Diffs the primary index at two different commits.
  */
 // TODO: this should probably move to db/
 export async function diffCommits(
@@ -74,56 +71,12 @@ export async function diffCommits(
   const valueDiff = await btreeDiff(oldMap, newMap);
   diffsMap.set('', valueDiff);
 
-  await addDiffsForIndexes(
-    oldCommit,
-    newCommit,
-    read,
-    diffsMap,
-    diffConfig,
-    formatVersion,
-  );
-
   return diffsMap;
 }
 
-export async function addDiffsForIndexes(
-  mainCommit: Commit<Meta>,
-  syncCommit: Commit<Meta>,
-  read: Read,
-  diffsMap: DiffsMap,
-  diffConfig: DiffComputationConfig,
-  formatVersion: FormatVersion,
-) {
-  const oldIndexes = readIndexesForRead(mainCommit, read, formatVersion);
-  const newIndexes = readIndexesForRead(syncCommit, read, formatVersion);
-
-  for (const [oldIndexName, oldIndex] of oldIndexes) {
-    if (!diffConfig.shouldComputeDiffsForIndex(oldIndexName)) {
-      continue;
-    }
-
-    const newIndex = newIndexes.get(oldIndexName);
-    if (newIndex !== undefined) {
-      assert(
-        newIndex !== oldIndex,
-        'Expected newIndex to differ from oldIndex',
-      );
-      const diffs = await btreeDiff(oldIndex.map, newIndex.map);
-      newIndexes.delete(oldIndexName);
-      diffsMap.set(oldIndexName, diffs);
-    } else {
-      // old index name is not in the new indexes. All entries removed!
-      const diffs = await allEntriesAsDiff(oldIndex.map, 'del');
-      diffsMap.set(oldIndexName, diffs);
-    }
-  }
-
-  for (const [newIndexName, newIndex] of newIndexes) {
-    if (!diffConfig.shouldComputeDiffsForIndex(newIndexName)) {
-      continue;
-    }
-    // new index name is not in the old indexes. All keys added!
-    const diffs = await allEntriesAsDiff(newIndex.map, 'add');
-    diffsMap.set(newIndexName, diffs);
-  }
+export function diffBinarySearch(
+  diff: readonly {readonly key: string}[],
+  prefix: string,
+): number {
+  return binarySearch(diff.length, i => compareUTF8(prefix, diff[i].key));
 }

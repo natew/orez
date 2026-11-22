@@ -17,7 +17,6 @@ import {
   isScanIndexOptions,
   toDbScanOptions,
 } from './scan-options.ts';
-import type {ScanSubscriptionInfo} from './subscriptions.ts';
 import type {ClientID} from './sync/ids.ts';
 import {rejectIfClosed, throwIfClosed} from './transaction-closed-error.ts';
 
@@ -42,9 +41,7 @@ export type DeepReadonlyObject<T> = {
 };
 
 /**
- * ReadTransactions are used with {@link Replicache.query} and
- * {@link Replicache.subscribe} and allows read operations on the
- * database.
+ * A read transaction provides a consistent view of the database.
  */
 export interface ReadTransaction {
   readonly clientID: ClientID;
@@ -169,101 +166,11 @@ export class ReadTransactionImpl implements ReadTransaction {
   scan(
     options?: ScanOptions,
   ): ScanResult<IndexKey | string, ReadonlyJSONValue> {
-    return scan(options, this.dbtx, noop);
-  }
-}
-
-function noop(_: unknown): void {
-  // empty
-}
-
-function scan<Options extends ScanOptions, V extends JSONValue>(
-  options: Options | undefined,
-  dbRead: Read,
-  onLimitKey: (inclusiveLimitKey: string) => void,
-): ScanResult<KeyTypeForScanOptions<Options>, V> {
-  const iter = getScanIterator<Options, V>(dbRead, options);
-  return makeScanResultFromScanIteratorInternal(
-    iter,
-    options ?? ({} as Options),
-    dbRead,
-    onLimitKey,
-  );
-}
-
-// An implementation of ReadTransaction that keeps track of `keys` and `scans`
-// for use with Subscriptions.
-export class SubscriptionTransactionWrapper implements ReadTransaction {
-  readonly #keys: Set<string> = new Set();
-  readonly #scans: ScanSubscriptionInfo[] = [];
-  readonly #tx: ReadTransactionImpl;
-
-  constructor(tx: ReadTransactionImpl) {
-    this.#tx = tx;
-  }
-
-  get environment(): TransactionLocation {
-    return this.#tx.location;
-  }
-
-  get location(): TransactionLocation {
-    return this.#tx.location;
-  }
-
-  get clientID(): string {
-    return this.#tx.clientID;
-  }
-
-  isEmpty(): Promise<boolean> {
-    // Any change to the subscription requires rerunning it.
-    this.#scans.push({options: {}});
-    return this.#tx.isEmpty();
-  }
-
-  get(key: string): Promise<ReadonlyJSONValue | undefined>;
-  get<T extends JSONValue>(key: string): Promise<DeepReadonly<T> | undefined> {
-    this.#keys.add(key);
-    return this.#tx.get(key) as Promise<DeepReadonly<T> | undefined>;
-  }
-
-  has(key: string): Promise<boolean> {
-    this.#keys.add(key);
-    return this.#tx.has(key);
-  }
-
-  scan(options: ScanIndexOptions): ScanResult<IndexKey, ReadonlyJSONValue>;
-  scan(options?: ScanNoIndexOptions): ScanResult<string, ReadonlyJSONValue>;
-  scan(options?: ScanOptions): ScanResult<IndexKey | string, ReadonlyJSONValue>;
-
-  scan<V extends ReadonlyJSONValue>(
-    options: ScanIndexOptions,
-  ): ScanResult<IndexKey, DeepReadonly<V>>;
-  scan<V extends ReadonlyJSONValue>(
-    options?: ScanNoIndexOptions,
-  ): ScanResult<string, DeepReadonly<V>>;
-  scan<V extends ReadonlyJSONValue>(
-    options?: ScanOptions,
-  ): ScanResult<IndexKey | string, DeepReadonly<V>>;
-
-  scan(
-    options?: ScanOptions,
-  ): ScanResult<IndexKey | string, ReadonlyJSONValue> {
-    const scanInfo: ScanSubscriptionInfo = {
-      options: toDbScanOptions(options),
-      inclusiveLimitKey: undefined,
-    };
-    this.#scans.push(scanInfo);
-    return scan(options, this.#tx.dbtx, inclusiveLimitKey => {
-      scanInfo.inclusiveLimitKey = inclusiveLimitKey;
-    });
-  }
-
-  get keys(): ReadonlySet<string> {
-    return this.#keys;
-  }
-
-  get scans(): ScanSubscriptionInfo[] {
-    return this.#scans;
+    return new ScanResultImpl(
+      getScanIterator<ScanOptions, ReadonlyJSONValue>(this.dbtx, options),
+      options ?? {},
+      this.dbtx,
+    );
   }
 }
 
@@ -384,18 +291,6 @@ export function fromKeyForNonIndexScan(
     return start.key;
   }
   return prefix;
-}
-
-function makeScanResultFromScanIteratorInternal<
-  Options extends ScanOptions,
-  V extends JSONValue,
->(
-  iter: AsyncIterable<EntryForOptions<Options, V>>,
-  options: Options,
-  dbRead: Read,
-  onLimitKey: (inclusiveLimitKey: string) => void,
-): ScanResult<KeyTypeForScanOptions<Options>, V> {
-  return new ScanResultImpl(iter, options, dbRead, onLimitKey);
 }
 
 async function* getScanIteratorForIndexMap(

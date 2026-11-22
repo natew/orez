@@ -9,9 +9,8 @@ import {readFromHash} from '../../../replicache/src/db/read.ts';
 import * as FormatVersion from '../../../replicache/src/format-version-enum.ts';
 import type {Hash} from '../../../replicache/src/hash.ts';
 import type {ZeroReadOptions} from '../../../replicache/src/replicache-options.ts';
-import {diffBinarySearch} from '../../../replicache/src/subscriptions.ts';
 import type {DiffsMap} from '../../../replicache/src/sync/diff.ts';
-import {diff} from '../../../replicache/src/sync/diff.ts';
+import {diff, diffBinarySearch} from '../../../replicache/src/sync/diff.ts';
 import {using, withRead} from '../../../replicache/src/with-transactions.ts';
 import {assert} from '../../../shared/src/asserts.ts';
 import {wrapIterable} from '../../../shared/src/iterables.ts';
@@ -206,9 +205,6 @@ async function computeDiffs(
       dagRead,
       {
         shouldComputeDiffs: () => true,
-        shouldComputeDiffsForIndex(_name) {
-          return false;
-        },
       },
       FormatVersion.Latest,
     );
@@ -227,7 +223,7 @@ async function computeDiffs(
 
 function applyDiffs(diffs: NoIndexDiff, branch: IVMSourceBranch) {
   for (
-    let i = diffBinarySearch(diffs, ENTITIES_KEY_PREFIX, diff => diff.key);
+    let i = diffBinarySearch(diffs, ENTITIES_KEY_PREFIX);
     i < diffs.length;
     i++
   ) {

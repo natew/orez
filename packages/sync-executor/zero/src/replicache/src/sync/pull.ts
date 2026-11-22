@@ -33,7 +33,6 @@ import {ReportError} from '../report-error.ts';
 import {toError} from '../to-error.ts';
 import {withRead, withWriteNoImplicitCommit} from '../with-transactions.ts';
 import {
-  addDiffsForIndexes,
   type DiffComputationConfig,
   DiffsMap,
 } from './diff.ts';
@@ -402,7 +401,7 @@ export function maybeEndPull<M extends LocalMeta>(
 
     // TODO check invariants
 
-    // Compute diffs (changed keys) for value map and index maps.
+    // Compute diffs for the value map.
     const mainHead = await commitFromHash(mainHeadHash, dagRead);
     if (diffConfig.shouldComputeDiffs()) {
       const mainHeadMap = new BTreeRead(
@@ -417,14 +416,6 @@ export function maybeEndPull<M extends LocalMeta>(
       );
       const valueDiff = await diff(mainHeadMap, syncHeadMap);
       diffsMap.set('', valueDiff);
-      await addDiffsForIndexes(
-        mainHead,
-        syncHead,
-        dagRead,
-        diffsMap,
-        diffConfig,
-        formatVersion,
-      );
     }
 
     // No mutations to replay so set the main head to the sync head and sync complete!

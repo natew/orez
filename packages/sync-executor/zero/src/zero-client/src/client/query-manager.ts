@@ -81,7 +81,7 @@ export class QueryManager {
     clientID: ClientID,
     tables: Record<string, TableSchema>,
     send: (change: ChangeDesiredQueriesMessage) => void,
-    experimentalWatch: ReplicacheImpl['experimentalWatch'],
+    watch: ReplicacheImpl['watch'],
     recentQueriesMaxSize: number,
     queryChangeThrottleMs: number,
     slowMaterializeThreshold: number,
@@ -107,7 +107,8 @@ export class QueryManager {
       }
     });
 
-    experimentalWatch(
+    watch(
+      GOT_QUERIES_KEY_PREFIX,
       diff => {
         for (const diffOp of diff) {
           const queryHash = diffOp.key.substring(GOT_QUERIES_KEY_PREFIX.length);
@@ -124,10 +125,6 @@ export class QueryManager {
               break;
           }
         }
-      },
-      {
-        prefix: GOT_QUERIES_KEY_PREFIX,
-        initialValuesInFirstDiff: true,
       },
     );
   }
