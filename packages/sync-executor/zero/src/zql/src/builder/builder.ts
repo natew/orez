@@ -1,4 +1,3 @@
-import type {LogContext} from '@rocicorp/logger';
 import {assert, unreachable} from '../../../shared/src/asserts.ts';
 import type {JSONValue} from '../../../shared/src/json.ts';
 import {must} from '../../../shared/src/must.ts';
@@ -36,9 +35,6 @@ import type {Source, SourceInput} from '../ivm/source.ts';
 import {Take} from '../ivm/take.ts';
 import {UnionFanIn} from '../ivm/union-fan-in.ts';
 import {UnionFanOut} from '../ivm/union-fan-out.ts';
-import {planQuery} from '../planner/planner-builder.ts';
-import type {ConnectionCostModel} from '../planner/planner-connection.ts';
-import type {PlanDebugger} from '../planner/planner-debug.ts';
 import {completeOrdering} from '../query/complete-ordering.ts';
 import type {DebugDelegate} from './debug-delegate.ts';
 import {createPredicate, type NoSubqueryCondition} from './filter.ts';
@@ -127,9 +123,6 @@ export function buildPipeline(
   ast: AST,
   delegate: BuilderDelegate,
   queryID: string,
-  costModel?: ConnectionCostModel,
-  lc?: LogContext,
-  planDebugger?: PlanDebugger,
 ): Input {
   ast = delegate.mapAst ? delegate.mapAst(ast) : ast;
   ast = completeOrdering(
@@ -137,9 +130,6 @@ export function buildPipeline(
     tableName => must(delegate.getSource(tableName)).tableSchema.primaryKey,
   );
 
-  if (costModel) {
-    ast = planQuery(ast, costModel, planDebugger, lc);
-  }
   return buildPipelineInternal(ast, delegate, queryID, '');
 }
 
