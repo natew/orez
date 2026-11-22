@@ -1,3 +1,7 @@
+import {
+  httpConnectionFor,
+  type SyncConnection,
+} from 'orez-sync-executor/zero/sync-connection'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { Zero, defineMutator, defineMutators } from '../zero/zero.js'
@@ -71,11 +75,13 @@ function ackQueries(body: any) {
 
 const zeros: Zero<any, any>[] = []
 const transports: Array<{ uninstall(): void }> = []
+const connections: SyncConnection[] = []
 let storageID = 0
 let restoreNativeWebSocket: (() => void) | undefined
 
 afterEach(async () => {
   while (zeros.length) await zeros.pop()?.close()
+  while (connections.length) connections.pop()?.close()
   while (transports.length) transports.pop()?.uninstall()
   restoreNativeWebSocket?.()
   restoreNativeWebSocket = undefined
@@ -313,9 +319,7 @@ describe('Orez HTTP transport', () => {
       ])
     )
 
-    socket.send(
-      JSON.stringify(['deleteClients', { clientIDs: ['retired-from-live-frame'] }])
-    )
+    socket.send(['deleteClients', { clientIDs: ['retired-from-live-frame'] }])
     await eventually(() =>
       expect(requests.at(-1)?.body.deletedClientIDs).toEqual(['retired-from-live-frame'])
     )
@@ -777,10 +781,10 @@ describe('Orez HTTP transport', () => {
     )
     await eventually(() => expect(pulls).toBe(1))
 
-    socket.send(JSON.stringify(['push', pushBody(1)]))
+    socket.send(['push', pushBody(1)])
     await firstPushStarted.promise
-    socket.send(JSON.stringify(['push', pushBody(2)]))
-    socket.send(JSON.stringify(['push', pushBody(3)]))
+    socket.send(['push', pushBody(2)])
+    socket.send(['push', pushBody(3)])
     releaseFirstPush.resolve()
     await eventually(() => expect(pushRequests).toEqual([[1], [2, 3]]))
 
@@ -854,7 +858,7 @@ describe('Orez HTTP transport', () => {
     await eventually(() => expect(requests.length).toBe(1))
     expect(requests[0].headers.authorization).toBe('Bearer token-old')
 
-    socket.send(JSON.stringify(['updateAuth', { auth: 'token-new' }]))
+    socket.send(['updateAuth', { auth: 'token-new' }])
     await transport.pull()
 
     expect(requests.at(-1)?.headers.authorization).toBe('Bearer token-new')
@@ -898,11 +902,11 @@ describe('Orez HTTP transport', () => {
     await eventually(() =>
       expect(messages.some((message) => message[0] === 'connected')).toBe(true)
     )
-    socket.send(JSON.stringify(['push', pushBody(1)]))
+    socket.send(['push', pushBody(1)])
     await firstPushStarted.promise
-    socket.send(JSON.stringify(['push', pushBody(2)]))
-    socket.send(JSON.stringify(['push', pushBody(3)]))
-    socket.send(JSON.stringify(['push', pushBody(4)]))
+    socket.send(['push', pushBody(2)])
+    socket.send(['push', pushBody(3)])
+    socket.send(['push', pushBody(4)])
     await sleep(25)
 
     expect(pushRequests).toEqual([[1]])
@@ -984,11 +988,11 @@ describe('Orez HTTP transport', () => {
     await eventually(() =>
       expect(messages.some((message) => message[0] === 'connected')).toBe(true)
     )
-    socket.send(JSON.stringify(['push', pushBody(1)]))
+    socket.send(['push', pushBody(1)])
     await firstPushStarted.promise
     const wide = 'x'.repeat(450 * 1024)
-    socket.send(JSON.stringify(['push', pushBody(2, wide)]))
-    socket.send(JSON.stringify(['push', pushBody(3, wide)]))
+    socket.send(['push', pushBody(2, wide)])
+    socket.send(['push', pushBody(3, wide)])
     releaseFirstPush.resolve()
     await eventually(() => expect(pushRequests).toEqual([[1], [2], [3]]), 5_000)
   })
@@ -1049,9 +1053,9 @@ describe('Orez HTTP transport', () => {
       expect(messages.some((message) => message[0] === 'connected')).toBe(true)
     )
 
-    socket.send(JSON.stringify(['push', pushBody(1)]))
+    socket.send(['push', pushBody(1)])
     await firstEncodeStarted.promise
-    socket.send(JSON.stringify(['push', pushBody(2)]))
+    socket.send(['push', pushBody(2)])
     await sleep(25)
 
     expect(encodedIDs).toEqual([1])
@@ -1088,7 +1092,7 @@ describe('Orez HTTP transport', () => {
       expect(messages.some((message) => message[0] === 'connected')).toBe(true)
     )
 
-    socket.send(JSON.stringify(['push', pushBody(1)]))
+    socket.send(['push', pushBody(1)])
 
     await eventually(() => expect(transport.connections).toBe(0))
     expect(paths).toEqual(['/pull'])
@@ -1121,7 +1125,7 @@ describe('Orez HTTP transport', () => {
       expect(messages.some((message) => message[0] === 'connected')).toBe(true)
     )
 
-    socket.send(JSON.stringify(['push', pushBody(1)]))
+    socket.send(['push', pushBody(1)])
 
     await eventually(() => expect(transport.connections).toBe(0))
     expect(paths).toEqual(['/pull'])
@@ -1150,14 +1154,12 @@ describe('Orez HTTP transport', () => {
       expect(messages.some((message) => message[0] === 'connected')).toBe(true)
     )
 
-    socket.send(JSON.stringify(['push', { ...pushBody(1), clientGroupID: 'old-group' }]))
+    socket.send(['push', { ...pushBody(1), clientGroupID: 'old-group' }])
     await eventually(() => expect(paths).toEqual(['push started']))
-    socket.send(
-      JSON.stringify([
-        'pull',
-        { clientGroupID: 'old-group', cookie: null, requestID: 'recovery' },
-      ])
-    )
+    socket.send([
+      'pull',
+      { clientGroupID: 'old-group', cookie: null, requestID: 'recovery' },
+    ])
     await Promise.resolve()
     finishPush()
     await eventually(() =>
@@ -1245,16 +1247,14 @@ describe('Orez HTTP transport', () => {
     wakeSockets[0].onmessage?.()
     await eventually(() => expect(decodePull).toHaveBeenCalledTimes(3))
 
-    socket.send(
-      JSON.stringify([
-        'pull',
-        {
-          clientGroupID: 'cg1',
-          cookie: null,
-          requestID: 'mutation-recovery',
-        },
-      ])
-    )
+    socket.send([
+      'pull',
+      {
+        clientGroupID: 'cg1',
+        cookie: null,
+        requestID: 'mutation-recovery',
+      },
+    ])
     await eventually(() => expect(decodePull).toHaveBeenCalledTimes(4))
     await eventually(() =>
       expect(
@@ -1825,19 +1825,19 @@ describe('Orez HTTP transport', () => {
     transports.push(transport)
     const first = openRawSocketWithMessages({ wsid: 'before-pull-500' })
     await vi.advanceTimersByTimeAsync(1)
-    expect(first.socket.readyState).toBe(first.socket.CLOSED)
+    expect(first.closed).toBe(true)
 
     let delayedOpened = false
     let delayedClosed = 0
-    const delayed = openRawSocketWithMessages({
+    openRawSocketWithMessages({
       wsid: 'delayed-reconnect',
       attemptStartedAt: performance.now() - 10_001,
-    })
-    delayed.socket.addEventListener('open', () => {
-      delayedOpened = true
-    })
-    delayed.socket.addEventListener('close', () => {
-      delayedClosed++
+      onOpen: () => {
+        delayedOpened = true
+      },
+      onClose: () => {
+        delayedClosed++
+      },
     })
     await vi.advanceTimersByTimeAsync(1)
 
@@ -1898,15 +1898,15 @@ describe('Orez HTTP transport', () => {
     let opened = false
     let closed = 0
     try {
-      const socket = openRawSocketWithMessages({
+      openRawSocketWithMessages({
         wsid: 'stalled-open',
         attemptStartedAt: performance.now() - 200,
-      })
-      socket.socket.addEventListener('open', () => {
-        opened = true
-      })
-      socket.socket.addEventListener('close', () => {
-        closed++
+        onOpen: () => {
+          opened = true
+        },
+        onClose: () => {
+          closed++
+        },
       })
       stallMs = 11_000
       await vi.advanceTimersByTimeAsync(1)
@@ -1934,22 +1934,19 @@ describe('Orez HTTP transport', () => {
 
     let connectStart: number | undefined = Date.now()
     const errors: string[] = []
-    const attachStockLifecycle = (socket: WebSocket) => {
-      socket.addEventListener('open', () => {
+    const callbacks = {
+      onOpen: () => {
         if (connectStart === undefined) {
           errors.push('Got open event but connect start time is undefined.')
         }
-      })
-      socket.addEventListener('message', (event) => {
-        const message = JSON.parse(String(event.data)) as [string, unknown]
+      },
+      onMessage: (message: [string, unknown]) => {
         if (message[0] === 'connected') connectStart = undefined
-      })
+      },
     }
 
-    const stale = openRawSocketWithMessages({ wsid: 'stale' }).socket
-    attachStockLifecycle(stale)
-    const current = openRawSocketWithMessages({ wsid: 'current' }).socket
-    attachStockLifecycle(current)
+    openRawSocketWithMessages({ wsid: 'stale', ...callbacks })
+    openRawSocketWithMessages({ wsid: 'current', ...callbacks })
     await vi.advanceTimersByTimeAsync(1)
 
     expect(
@@ -2091,7 +2088,7 @@ describe('Orez HTTP transport', () => {
     expect(wakeSockets[0].protocols).toBe('orez-auth.dG9rZW4tdTE')
   })
 
-  test('non-origin WebSockets pass through to the native implementation', () => {
+  test('keeps the native WebSocket constructor while the HTTP transport is installed', () => {
     const previous = globalThis.WebSocket
     class NativeWebSocket {
       static CONNECTING = 0
@@ -2106,6 +2103,11 @@ describe('Orez HTTP transport', () => {
     globalThis.WebSocket = NativeWebSocket as unknown as typeof WebSocket
 
     const transport = installHttpPullTransport({ origin: ORIGIN, fetch: vi.fn() })
+    transports.push(transport)
+    restoreNativeWebSocket = () => {
+      globalThis.WebSocket = previous
+    }
+    expect(globalThis.WebSocket).toBe(NativeWebSocket)
     const socket = new WebSocket('wss://elsewhere.local/socket', 'native')
 
     expect(socket).toBeInstanceOf(NativeWebSocket)
@@ -2227,20 +2229,13 @@ describe('Orez HTTP transport', () => {
     const transport = createZeroClientTransport({ fetch }).install(origin)
     transports.push(transport)
 
-    const url = new URL(`${origin}/sync/v51/connect`)
-    url.protocol = 'wss:'
-    url.searchParams.set('clientID', 'c1')
-    url.searchParams.set('clientGroupID', 'cg1')
-    const socket = new WebSocket(
-      url,
-      encodeSecProtocol(['initConnection', { desiredQueriesPatch: [] }], 'token-u1')
-    )
+    const { socket } = openRawSocketWithMessages({ origin })
 
     await vi.advanceTimersByTimeAsync(1)
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(wakeSockets).toEqual([])
 
-    socket.send(JSON.stringify(['updateAuth', { auth: 'token-u2' }]))
+    socket.send(['updateAuth', { auth: 'token-u2' }])
     await vi.advanceTimersByTimeAsync(1)
     expect(wakeSockets).toEqual([])
 
@@ -2681,43 +2676,54 @@ function openRawSocket() {
 }
 
 function openRawSocketWithMessages(opts?: {
+  origin?: string
   authToken?: string
   deletedClientIDs?: string[]
   desiredQueriesPatch?: unknown[]
   wsid?: string
   attemptStartedAt?: number
+  onOpen?: () => void
+  onMessage?: (message: [string, unknown]) => void
+  onClose?: () => void
 }) {
-  const url = new URL(`${ORIGIN}/sync/v51/connect`)
-  url.protocol = 'wss:'
-  url.searchParams.set('clientID', 'c1')
-  url.searchParams.set('clientGroupID', 'cg1')
-  url.searchParams.set('userID', 'u1')
-  url.searchParams.set('baseCookie', '')
-  url.searchParams.set('lmid', '0')
-  url.searchParams.set('wsid', opts?.wsid ?? 'ws-test')
-  if (opts?.attemptStartedAt !== undefined) {
-    url.searchParams.set('ts', String(opts.attemptStartedAt))
-  }
   const messages: Array<[string, any]> = []
-  const socket = new WebSocket(
-    url,
-    encodeSecProtocol(
-      [
-        'initConnection',
-        {
-          desiredQueriesPatch: opts?.desiredQueriesPatch ?? [],
-          ...(opts?.deletedClientIDs
-            ? { deleted: { clientIDs: opts.deletedClientIDs } }
-            : {}),
-        },
-      ],
-      opts?.authToken ?? 'token-u1'
-    )
-  )
-  socket.addEventListener('message', (event) => {
-    messages.push(JSON.parse(String(event.data)))
+  const connect = httpConnectionFor(opts?.origin ?? ORIGIN)
+  if (!connect) throw new Error('HTTP transport is not installed')
+  const socket = connect({
+    clientID: 'c1',
+    clientGroupID: 'cg1',
+    connectionID: opts?.wsid ?? 'ws-test',
+    baseCookie: null,
+    attemptStartedAt: opts?.attemptStartedAt,
+    authToken: opts?.authToken ?? 'token-u1',
+    init: {
+      desiredQueriesPatch: (opts?.desiredQueriesPatch ?? []) as NonNullable<
+        Parameters<typeof connect>[0]['init']
+      >['desiredQueriesPatch'],
+      deleted: opts?.deletedClientIDs ? { clientIDs: opts.deletedClientIDs } : undefined,
+    },
   })
-  return { messages, socket }
+  connections.push(socket)
+  let closed = false
+  socket.listen({
+    open: () => opts?.onOpen?.(),
+    close: () => {
+      closed = true
+      opts?.onClose?.()
+    },
+    message: (data) => {
+      const message = data as [string, unknown]
+      messages.push(message)
+      opts?.onMessage?.(message)
+    },
+  })
+  return {
+    messages,
+    socket,
+    get closed() {
+      return closed
+    },
+  }
 }
 
 function pushBody(id: number, wide = '') {
@@ -2742,15 +2748,6 @@ function findMessage(messages: Array<[string, any]>, type: string) {
   const message = messages.find((item) => item[0] === type)
   expect(message).toBeDefined()
   return message as [string, any]
-}
-
-function encodeSecProtocol(
-  initConnectionMessage: [string, Record<string, unknown>],
-  authToken: string
-) {
-  return encodeURIComponent(
-    Buffer.from(JSON.stringify({ initConnectionMessage, authToken })).toString('base64')
-  )
 }
 
 function defer<T>() {
@@ -2817,16 +2814,14 @@ describe('Orez HTTP desired-query sync', () => {
       expect(poke?.[1].gotQueriesPatch).toEqual([{ op: 'put', hash: 'h1' }])
     })
 
-    socket.send(
-      JSON.stringify([
-        'changeDesiredQueries',
-        {
-          desiredQueriesPatch: [
-            { op: 'put', hash: 'h1', name: 'byOwner', args: [{ ownerId: 'u1' }] },
-          ],
-        },
-      ])
-    )
+    socket.send([
+      'changeDesiredQueries',
+      {
+        desiredQueriesPatch: [
+          { op: 'put', hash: 'h1', name: 'byOwner', args: [{ ownerId: 'u1' }] },
+        ],
+      },
+    ])
     await eventually(() => expect(requests.length).toBeGreaterThan(1))
     expect(requests[1].body.queries.baseVersion).toBe(1)
   })
@@ -2850,14 +2845,12 @@ describe('Orez HTTP desired-query sync', () => {
       expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
     )
 
-    socket.send(
-      JSON.stringify([
-        'changeDesiredQueries',
-        {
-          desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }],
-        },
-      ])
-    )
+    socket.send([
+      'changeDesiredQueries',
+      {
+        desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }],
+      },
+    ])
     await eventually(() => expect(requests.length).toBeGreaterThan(1))
     expect(requests[1].body.queries).toEqual({
       version: 2,
@@ -2910,25 +2903,21 @@ describe('Orez HTTP desired-query sync', () => {
     })
     await eventually(() => expect(messages.some((m) => m[0] === 'pokeEnd')).toBe(true))
 
-    socket.send(
-      JSON.stringify([
-        'changeDesiredQueries',
-        { desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }] },
-      ])
-    )
+    socket.send([
+      'changeDesiredQueries',
+      { desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }] },
+    ])
     await eventually(() => expect(requests.length).toBe(2))
     const supersededAt = Date.now()
-    socket.send(
-      JSON.stringify([
-        'changeDesiredQueries',
-        {
-          desiredQueriesPatch: [
-            { op: 'del', hash: 'h2' },
-            { op: 'put', hash: 'h3', name: 'byOwner', args: [] },
-          ],
-        },
-      ])
-    )
+    socket.send([
+      'changeDesiredQueries',
+      {
+        desiredQueriesPatch: [
+          { op: 'del', hash: 'h2' },
+          { op: 'put', hash: 'h3', name: 'byOwner', args: [] },
+        ],
+      },
+    ])
 
     await eventually(() => expect(requests.length).toBe(3))
     // the replacement leaves at once instead of after the hung response and
@@ -2951,7 +2940,7 @@ describe('Orez HTTP desired-query sync', () => {
       ).toBe(true)
     )
     expect(failures).toEqual([])
-    expect(socket.readyState).toBe(WebSocket.OPEN)
+    expect(() => socket.send(['ping', {}])).not.toThrow()
   })
 
   test('a query change that drops nothing in flight waits for the current pull', async () => {
@@ -2975,20 +2964,16 @@ describe('Orez HTTP desired-query sync', () => {
       desiredQueriesPatch: [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }],
     })
     await eventually(() => expect(messages.some((m) => m[0] === 'pokeEnd')).toBe(true))
-    socket.send(
-      JSON.stringify([
-        'changeDesiredQueries',
-        { desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }] },
-      ])
-    )
+    socket.send([
+      'changeDesiredQueries',
+      { desiredQueriesPatch: [{ op: 'put', hash: 'h2', name: 'byOwner', args: [] }] },
+    ])
     await eventually(() => expect(requests.length).toBe(2))
     // h1 was shipped by an earlier pull, so dropping it does not touch the one in flight
-    socket.send(
-      JSON.stringify([
-        'changeDesiredQueries',
-        { desiredQueriesPatch: [{ op: 'del', hash: 'h1' }] },
-      ])
-    )
+    socket.send([
+      'changeDesiredQueries',
+      { desiredQueriesPatch: [{ op: 'del', hash: 'h1' }] },
+    ])
     await sleep(100)
     expect(signals[1].aborted).toBe(false)
     expect(requests.length).toBe(2)
@@ -3016,12 +3001,10 @@ describe('Orez HTTP desired-query sync', () => {
     })
     await eventually(() => expect(messages.some((m) => m[0] === 'pokeEnd')).toBe(true))
     const put = (hash: string) =>
-      socket.send(
-        JSON.stringify([
-          'changeDesiredQueries',
-          { desiredQueriesPatch: [{ op: 'put', hash, name: 'byOwner', args: [] }] },
-        ])
-      )
+      socket.send([
+        'changeDesiredQueries',
+        { desiredQueriesPatch: [{ op: 'put', hash, name: 'byOwner', args: [] }] },
+      ])
     // right after a pull ended: the spacing would hold this one for 250ms
     const openedAt = Date.now()
     put('h2')
@@ -3113,13 +3096,11 @@ describe('Orez HTTP desired-query sync', () => {
       })
     })
     installWithQueries(fetch, (name) => ({ resolved: name }))
-    const change = (socket: WebSocket, hash: string) =>
-      socket.send(
-        JSON.stringify([
-          'changeDesiredQueries',
-          { desiredQueriesPatch: [{ op: 'put', hash, name: 'byOwner', args: [] }] },
-        ])
-      )
+    const change = (socket: SyncConnection, hash: string) =>
+      socket.send([
+        'changeDesiredQueries',
+        { desiredQueriesPatch: [{ op: 'put', hash, name: 'byOwner', args: [] }] },
+      ])
     const queryRequests = () => requests.filter((request) => request.body.queries)
 
     const desired = [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }]

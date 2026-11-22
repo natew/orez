@@ -41,7 +41,7 @@ import {assertTesting, TESTING} from '../../../shared/src/testing.ts';
 import * as valita from '../../../shared/src/valita.ts';
 import type {Writable} from '../../../shared/src/writable.ts';
 import {type ClientSchema} from '../../../zero-protocol/src/client-schema.ts';
-import type {ConnectedMessage} from '../../../zero-protocol/src/connect.ts';
+import type {ConnectedMessage, InitConnectionBody} from '../../../zero-protocol/src/connect.ts';
 import {encodeSecProtocols} from '../../../zero-protocol/src/connect.ts';
 import type {DeleteClientsBody} from '../../../zero-protocol/src/delete-clients.ts';
 import type {Downstream} from '../../../zero-protocol/src/down.ts';
@@ -127,6 +127,7 @@ import {
   throwIfConnectionError,
 } from './connection-manager.ts';
 import {ConnectionStatus} from './connection-status.ts';
+import {httpConnectionFor, type SyncConnection} from './sync-connection.ts';
 import {type Connection, ConnectionImpl} from './connection.ts';
 import {ZeroContext} from './context.ts';
 import {
@@ -196,7 +197,7 @@ export type TestingContext = {
   setReload: (r: () => void) => void;
   logOptions: LogOptions;
   connectStart: () => number | undefined;
-  socketResolver: () => Resolver<WebSocket>;
+  socketResolver: () => Resolver<SyncConnection>;
   connectionManager: () => ConnectionManager;
   queryDelegate: () => QueryDelegate;
   queryManager: () => QueryManager;
@@ -450,8 +451,9 @@ export class Zero<
   #pendingPullsByRequestID: Map<string, Resolver<PullResponseBody>> = new Map();
   #lastMutationIDReceived = 0;
 
-  #socket: WebSocket | undefined = undefined;
-  #socketResolver = resolver<WebSocket>();
+  #socket: SyncConnection | undefined = undefined;
+  #unlisten: (() => void) | undefined;
+  #socketResolver = resolver<SyncConnection>();
 
   // Resolves when the run loop establishes a usable connection. The run loop
   // replaces it if the attempt fails or the established connection disconnects.
@@ -948,6 +950,10 @@ export class Zero<
 
   #send(msg: Upstream): void {
     if (this.#socket) {
+      if (!this.#socket.webSocket) {
+        this.#socket.send(msg);
+        return;
+      }
       const json = JSON.stringify(msg);
       if (msg[0] !== 'ping') {
         const history = this.#recentSentMessages;
@@ -960,7 +966,7 @@ export class Zero<
           snippet: json.slice(0, 200),
         });
       }
-      this.#socket.send(json);
+      this.#socket.send(msg, json);
     }
   }
 
@@ -1298,19 +1304,18 @@ export class Zero<
     }
   }
 
-  #onMessage = (e: MessageEvent<string>) => {
+  #onMessage = (data: unknown) => {
     const lc = this.#lc;
-    lc.debug?.('received message', e.data);
+    lc.debug?.('received message', data);
     if (this.closed) {
       lc.debug?.('ignoring message because already closed');
       return;
     }
 
     let downMessage: Downstream;
-    const {data} = e;
     try {
       downMessage = valita.parse(
-        JSON.parse(data),
+        typeof data === 'string' ? JSON.parse(data) : data,
         downstreamSchema,
         'passthrough',
       );
@@ -1425,7 +1430,7 @@ export class Zero<
     }
   };
 
-  #onClose = async (e: CloseEvent) => {
+  #onClose = async (e: Pick<CloseEvent, 'code' | 'reason' | 'wasClean'>) => {
     let lc = this.#lc;
     try {
       assert(this.#socket, 'Socket is not set before onClose');
@@ -1690,7 +1695,6 @@ export class Zero<
     }
 
     assert(this.#server, 'No server provided');
-    const socketOrigin = toWSString(this.#server);
 
     // can be called from both disconnected and connecting states.
     // connecting() handles incrementing attempt counter if already connecting.
@@ -1739,7 +1743,7 @@ export class Zero<
       this.#rep,
       this.#queryManager,
       this.#deleteClientsManager,
-      socketOrigin,
+      this.#server,
       connectCookie,
       this.clientID,
       clientGroupID,
@@ -1776,10 +1780,12 @@ export class Zero<
     this.#connectCookie = connectCookie;
     this.#initConnectionQueries = initConnectionQueries;
     this.#deletedClients = deletedClients;
-    ws.addEventListener('message', this.#onMessage);
-    ws.addEventListener('open', this.#onOpen);
-    ws.addEventListener('close', this.#onClose);
     this.#socket = ws;
+    this.#unlisten = ws.listen({
+      open: this.#onOpen,
+      close: this.#onClose,
+      message: this.#onMessage,
+    });
     this.#socketResolver.resolve(ws);
 
     this.#addConnectEvent(
@@ -1865,9 +1871,8 @@ export class Zero<
     this.#messageCount = 0;
     this.#connectStart = undefined; // don't reset this._totalToConnectStart
     this.#connectedAt = 0;
-    this.#socket?.removeEventListener('message', this.#onMessage);
-    this.#socket?.removeEventListener('open', this.#onOpen);
-    this.#socket?.removeEventListener('close', this.#onClose);
+    this.#unlisten?.();
+    this.#unlisten = undefined;
     this.#socket?.close(closeCode);
     this.#socket = undefined;
     this.#lastMutationIDsSent.clear();
@@ -2620,7 +2625,7 @@ export class Zero<
         this.#zeroContext,
         async () => {
           await this.#connectionReadyResolver.promise;
-          return must(this.#socket);
+          return must(this.#socket?.webSocket, 'Inspecting the server requires a WebSocket connection');
         },
       ));
     }
@@ -2706,7 +2711,7 @@ export async function createSocket(
   rep: ReplicacheImpl,
   queryManager: QueryManager,
   deleteClientsManager: DeleteClientsManager,
-  socketOrigin: WSString,
+  server: HTTPString,
   baseCookie: NullableVersion,
   clientID: string,
   clientGroupID: string,
@@ -2727,14 +2732,16 @@ export async function createSocket(
   onEvent?: (event: string) => void,
 ): Promise<
   [
-    WebSocket,
+    SyncConnection,
     Map<string, UpQueriesPatchOp> | undefined,
     DeleteClientsBody | undefined,
   ]
 > {
   onEvent?.('reading the profile ID');
-  const url = await createConnectionURL(
-    socketOrigin,
+  const connectHttp = httpConnectionFor(server);
+  const attemptStartedAt = performance.now();
+  const url = connectHttp ? undefined : await createConnectionURL(
+    toWSString(server),
     clientID,
     clientGroupID,
     userID,
@@ -2747,12 +2754,6 @@ export async function createSocket(
     lc,
   );
 
-  // Pass auth to the server via the `Sec-WebSocket-Protocol` header by passing
-  // it as a `protocol` to the `WebSocket` constructor.  The empty string is an
-  // invalid `protocol`, and will result in an exception, so pass undefined
-  // instead.  encodeURIComponent to ensure it only contains chars allowed
-  // for a `protocol`.
-  const WS = mustGetBrowserGlobal('WebSocket');
   const queriesPatchP = rep.query(tx => queryManager.getQueriesPatch(tx));
   onEvent?.('reading deleted clients');
   const deletedClientsArray = await deleteClientsManager.getDeletedClients();
@@ -2763,24 +2764,35 @@ export async function createSocket(
     await queriesPatchP;
   const {activeClients} = activeClientsManager;
 
-  let secProtocol = encodeSecProtocols(
-    [
-      'initConnection',
-      {
-        desiredQueriesPatch: [...queriesPatch.values()],
-        deleted: skipEmptyDeletedClients(deletedClients),
-        // The clientSchema only needs to be sent for the very first request.
-        // Henceforth it is stored with the CVR and verified automatically.
-        ...(baseCookie === null ? {clientSchema} : {}),
-        userPushURL,
-        userPushHeaders,
-        userQueryURL,
-        userQueryHeaders,
-        activeClients: [...activeClients],
-      },
-    ],
-    auth,
-  );
+  const init: InitConnectionBody = {
+    desiredQueriesPatch: [...queriesPatch.values()],
+    deleted: skipEmptyDeletedClients(deletedClients),
+    ...(baseCookie === null ? {clientSchema} : {}),
+    userPushURL,
+    userPushHeaders,
+    userQueryURL,
+    userQueryHeaders,
+    activeClients: [...activeClients],
+  };
+  if (connectHttp) {
+    onEvent?.('opening the HTTP connection');
+    return [
+      connectHttp({
+        clientID,
+        clientGroupID,
+        connectionID: wsid,
+        baseCookie,
+        attemptStartedAt,
+        authToken: auth,
+        init,
+      }),
+      queriesPatch,
+      undefined,
+    ];
+  }
+
+  const WS = mustGetBrowserGlobal('WebSocket');
+  let secProtocol = encodeSecProtocols(['initConnection', init], auth);
   if (secProtocol.length > maxHeaderLength) {
     secProtocol = encodeSecProtocols(undefined, auth);
     if (secProtocol.length > maxHeaderLength) {
@@ -2795,15 +2807,29 @@ export async function createSocket(
     deletedClients = undefined;
   }
   onEvent?.('creating the WebSocket');
-  return [
-    new WS(
-      // toString() required for RN URL polyfill.
-      url.toString(),
-      secProtocol,
-    ),
-    queriesPatch,
-    skipEmptyDeletedClients(deletedClients),
-  ];
+  const webSocket = new WS(must(url).toString(), secProtocol);
+  const connection: SyncConnection = {
+    id: wsid,
+    webSocket,
+    listen(listener) {
+      const message = (e: MessageEvent<string>) => listener.message(e.data);
+      webSocket.addEventListener('open', listener.open);
+      webSocket.addEventListener('message', message);
+      webSocket.addEventListener('close', listener.close);
+      return () => {
+        webSocket.removeEventListener('open', listener.open);
+        webSocket.removeEventListener('message', message);
+        webSocket.removeEventListener('close', listener.close);
+      };
+    },
+    send(message, serialized) {
+      webSocket.send(serialized ?? JSON.stringify(message));
+    },
+    close(code, reason) {
+      webSocket.close(code, reason);
+    },
+  };
+  return [connection, queriesPatch, skipEmptyDeletedClients(deletedClients)];
 }
 
 export async function createConnectionURL(
@@ -2894,16 +2920,11 @@ function convertDeletedClientsToBody(
   return {clientIDs};
 }
 
-/**
- * Adds the wsid query parameter to the log context. If the URL does not
- * have a wsid we use a randomID instead.
- */
 function addWebSocketIDFromSocketToLogContext(
-  {url}: {url: string},
+  {id}: SyncConnection,
   lc: LogContext,
 ): LogContext {
-  const wsid = new URL(url).searchParams.get('wsid') ?? nanoid();
-  return addWebSocketIDToLogContext(wsid, lc);
+  return addWebSocketIDToLogContext(id, lc);
 }
 
 function addWebSocketIDToLogContext(wsid: string, lc: LogContext): LogContext {

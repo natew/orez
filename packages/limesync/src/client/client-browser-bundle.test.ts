@@ -15,5 +15,6 @@ test('limesync/client stays a browser-only leaf package', async () => {
   expect(inputs).toEqual([
     'packages/limesync/src/client/payload-codec.ts',
     'packages/limesync/src/client/transport.ts',
+    'packages/sync-executor/dist/zero/zero-client/src/client/sync-connection.js',
   ])
 })

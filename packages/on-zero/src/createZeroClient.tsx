@@ -390,9 +390,7 @@ export function createZeroClientInternal<
     reload,
   }: ConstructZeroInstanceArgs): ZeroInstance {
     let installedTransport: ReturnType<ZeroProviderTransport['install']>
-    // install before construction so the instance's first connect goes through
-    // HTTP. ensureHttpPullTransport is per-origin idempotent by design (a
-    // rotation would otherwise chain shims), so repeat calls reuse.
+    // register the HTTP transport before construction starts the connection.
     if (transport) {
       // same precedence as zero's own getServer (cacheURL is the current
       // option name; server is its deprecated alias)

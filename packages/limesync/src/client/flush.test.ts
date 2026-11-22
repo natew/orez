@@ -1,10 +1,14 @@
+import {
+  httpConnectionFor,
+  type SyncConnection,
+} from 'orez-sync-executor/zero/sync-connection'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { installHttpPullTransport } from './transport.js'
 
 const ORIGIN = 'https://chat-zero-flush.test'
 const transports: Array<{ uninstall(): void }> = []
-const sockets: WebSocket[] = []
+const sockets: SyncConnection[] = []
 
 afterEach(() => {
   while (sockets.length) sockets.pop()?.close()
@@ -41,11 +45,9 @@ describe('http pull transport flush', () => {
       fetch: fetchImpl as unknown as typeof globalThis.fetch,
     })
     transports.push(transport)
-    const socket = openSocket()
-    sockets.push(socket)
-    await new Promise<void>((resolve) => socket.addEventListener('open', () => resolve()))
+    const socket = await openTrackedSocket('c1')
 
-    socket.send(JSON.stringify(['push', pushBody()]))
+    socket.send(['push', pushBody()])
     let flushed = false
     const flush = transport.flush().then(() => {
       flushed = true
@@ -72,11 +74,9 @@ describe('http pull transport flush', () => {
       fetch: fetchImpl as unknown as typeof globalThis.fetch,
     })
     transports.push(transport)
-    const socket = openSocket()
-    sockets.push(socket)
-    await new Promise<void>((resolve) => socket.addEventListener('open', () => resolve()))
+    const socket = await openTrackedSocket('c1')
 
-    socket.send(JSON.stringify(['push', pushBody()]))
+    socket.send(['push', pushBody()])
     await expect(transport.flush()).rejects.toThrow('offline')
   })
 
@@ -116,13 +116,13 @@ describe('http pull transport flush', () => {
     transports.push(transport)
 
     const first = await openTrackedSocket('c1')
-    first.send(JSON.stringify(['push', pushBody('c1')]))
+    first.send(['push', pushBody('c1')])
     const firstFlush = transport.flush()
     await pushes.get('c1')?.started.promise
 
     first.close()
     const second = await openTrackedSocket('c2')
-    second.send(JSON.stringify(['push', pushBody('c2')]))
+    second.send(['push', pushBody('c2')])
     pushes.get('c1')?.release.resolve()
     await expect(firstFlush).rejects.toThrow('transport changed during flush')
 
@@ -130,7 +130,7 @@ describe('http pull transport flush', () => {
     await pushes.get('c2')?.started.promise
     second.close()
     const third = await openTrackedSocket('c3')
-    third.send(JSON.stringify(['push', pushBody('c3')]))
+    third.send(['push', pushBody('c3')])
     pushes.get('c2')?.release.resolve()
     await expect(secondFlush).rejects.toThrow('transport changed during flush')
 
@@ -192,7 +192,7 @@ describe('http pull transport flush', () => {
     })
     await finalPullStarted.promise
 
-    socket.send(JSON.stringify(['push', pushBody('late-push')]))
+    socket.send(['push', pushBody('late-push')])
     await pushStarted.promise
     releaseFinalPull.resolve()
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -205,32 +205,25 @@ describe('http pull transport flush', () => {
 })
 
 async function openTrackedSocket(clientID: string) {
-  const socket = openSocket(clientID)
+  const connect = httpConnectionFor(ORIGIN)
+  if (!connect) throw new Error('HTTP transport is not installed')
+  const socket = connect({
+    clientID,
+    clientGroupID: 'cg1',
+    connectionID: 'ws-test',
+    baseCookie: null,
+    authToken: 'token-u1',
+    init: { desiredQueriesPatch: [] },
+  })
   sockets.push(socket)
-  await new Promise<void>((resolve) => socket.addEventListener('open', () => resolve()))
-  return socket
-}
-
-function openSocket(clientID = 'c1') {
-  const url = new URL(`${ORIGIN}/sync/v51/connect`)
-  url.protocol = 'wss:'
-  url.searchParams.set('clientID', clientID)
-  url.searchParams.set('clientGroupID', 'cg1')
-  url.searchParams.set('userID', 'u1')
-  url.searchParams.set('baseCookie', '')
-  url.searchParams.set('lmid', '0')
-  url.searchParams.set('wsid', 'ws-test')
-  return new WebSocket(
-    url,
-    encodeURIComponent(
-      Buffer.from(
-        JSON.stringify({
-          initConnectionMessage: ['initConnection', { desiredQueriesPatch: [] }],
-          authToken: 'token-u1',
-        })
-      ).toString('base64')
-    )
+  await new Promise<void>((resolve) =>
+    socket.listen({
+      open: resolve,
+      close() {},
+      message() {},
+    })
   )
+  return socket
 }
 
 function pushBody(clientID = 'c1') {
