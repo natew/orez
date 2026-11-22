@@ -13,6 +13,9 @@ Chat used it before upstream ingest existed and has since migrated.)
 Both pass the same Zero query registry used by their clients into
 `config.queries`. The host resolves desired named queries in-process, with
 authenticated claims as the query context.
+Application code gets Zero's client and schema builders from `limesync/zero`,
+React hooks from `limesync/zero/react`, and the HTTP transport configuration
+from `limesync/client`.
 
 ## Chat: delegated push with upstream ingest
 

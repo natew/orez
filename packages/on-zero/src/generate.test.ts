@@ -510,6 +510,33 @@ export async function writeAudit(tx: Transaction) {
     })
   })
 
+  test('generates action namespaces without adding their names to the schema', async () => {
+    const dir = dataDir()
+    writeFileSync(
+      join(dir, '../database/schema.ts'),
+      `export const post = pgTable('post', { id: text() })`
+    )
+    writeFileSync(join(dir, 'post/mutations.ts'), `export const mutate = mutations({})`)
+    writeFileSync(
+      join(dir, 'admin/mutations.ts'),
+      `export const mutate = mutations({
+  publish: async (ctx, args: { id: string }) => ctx.tx.mutate.post.update(args),
+})`
+    )
+
+    await generate({ dir, silent: true })
+
+    expect(readFileSync(join(dir, 'generated/drizzleSchema.ts'), 'utf8')).toContain(
+      'export { post }'
+    )
+    expect(readFileSync(join(dir, 'generated/syncedMutations.ts'), 'utf8')).toMatch(
+      /admin: \{\s+publish: v\.object\(\{\s+id: v\.string\(\)/
+    )
+    await expect(deriveDataMembership({ dir })).resolves.toMatchObject({
+      instances: { default: { syncTables: ['post'], supportTables: [] } },
+    })
+  })
+
   test('derives aggregate source and target membership', async () => {
     writeFileSync(
       join(dataDir(), 'expense/mutations.ts'),

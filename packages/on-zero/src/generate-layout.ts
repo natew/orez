@@ -309,10 +309,12 @@ function namespaceExportKinds(
 function mutationTable(
   project: NativeTypeScriptProject,
   path: string,
-  namespace: string
-): string {
+  namespace: string,
+  databaseColumns: ReadonlyMap<string, Set<string>>
+): string | null {
   const source = project.sourceFile(path)
   let schemaTable: string | null = null
+  let actionOnly = false
 
   for (const statement of source.statements) {
     if (!ts.isVariableStatement(statement)) continue
@@ -333,6 +335,10 @@ function mutationTable(
         if (firstArgument && ts.isStringLiteral(firstArgument)) {
           return firstArgument.text
         }
+        actionOnly =
+          declaration.initializer.arguments.length === 1 &&
+          firstArgument !== undefined &&
+          ts.isObjectLiteralExpression(firstArgument)
       }
       if (declaration.name.text !== 'schema') continue
       const visit = (node: ts.Node) => {
@@ -351,14 +357,15 @@ function mutationTable(
     }
   }
 
-  return schemaTable ?? namespace
+  return schemaTable ?? (actionOnly && !databaseColumns.has(namespace) ? null : namespace)
 }
 
 function discoverNamespaces(
   project: NativeTypeScriptProject,
   baseDir: string,
   instance: DataInstance,
-  instanceDirs: Set<string>
+  instanceDirs: Set<string>,
+  databaseColumns: ReadonlyMap<string, Set<string>>
 ) {
   const namespaces: DataNamespace[] = []
   for (const entry of readdirSync(instance.dir, { withFileTypes: true }).sort((a, b) =>
@@ -378,7 +385,7 @@ function discoverNamespaces(
         // missing mutations.ts leaves modelPath null
         modelPath: kinds.model ? path : null,
         aggregatePath: null,
-        table: kinds.model ? mutationTable(project, path, name) : null,
+        table: kinds.model ? mutationTable(project, path, name, databaseColumns) : null,
         sourcePaths: [path],
       })
       continue
@@ -411,7 +418,9 @@ function discoverNamespaces(
       queryPath: hasQueries ? queryPath : null,
       modelPath: hasMutations ? modelPath : null,
       aggregatePath: hasAggregates ? aggregatePath : null,
-      table: hasMutations ? mutationTable(project, modelPath, entry.name) : null,
+      table: hasMutations
+        ? mutationTable(project, modelPath, entry.name, databaseColumns)
+        : null,
       sourcePaths: [
         hasQueries && queryPath,
         hasMutations && modelPath,
@@ -495,15 +504,10 @@ function relationTargets(
 
 function tableColumns(
   project: NativeTypeScriptProject,
-  paths: string[],
-  namespaces: DataNamespace[]
+  paths: Iterable<string>,
+  columns = new Map<string, Set<string>>()
 ): Map<string, Set<string>> {
-  const columns = new Map<string, Set<string>>()
-  const sources = new Set([
-    ...paths,
-    ...namespaces.flatMap((namespace) => namespace.sourcePaths),
-  ])
-  for (const path of sources) {
+  for (const path of paths) {
     const source = project.sourceFile(path)
     const visit = (node: ts.Node) => {
       if (
@@ -879,9 +883,17 @@ export function discoverDataLayout(
     declaredSupportTables: instance.supportTables,
   }))
   const instanceDirs = new Set(instances.map((instance) => instance.dir))
+  const metadata = metadataPaths(baseDir)
+  const columns = tableColumns(project, metadata)
 
   for (const instance of instances) {
-    instance.namespaces = discoverNamespaces(project, baseDir, instance, instanceDirs)
+    instance.namespaces = discoverNamespaces(
+      project,
+      baseDir,
+      instance,
+      instanceDirs,
+      columns
+    )
   }
   const namespaces = instances.flatMap((instance) => instance.namespaces)
   const namespaceOwners = new Map<string, string>()
@@ -906,9 +918,12 @@ export function discoverDataLayout(
     tableOwners.set(namespace.table, namespace.instance)
   }
 
-  const metadata = metadataPaths(baseDir)
   const relations = relationTargets(project, metadata)
-  const columns = tableColumns(project, metadata, namespaces)
+  tableColumns(
+    project,
+    new Set(namespaces.flatMap((namespace) => namespace.sourcePaths)),
+    columns
+  )
   const relatedOwners = new Map<string, string>()
   for (const instance of instances) {
     const tables = new Set(
