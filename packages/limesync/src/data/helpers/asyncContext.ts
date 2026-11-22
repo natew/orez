@@ -14,11 +14,7 @@ interface AsyncLocalStorageConstructor {
   new <T>(): NodeAsyncLocalStorage<T>
 }
 
-let nodeAsyncLocalStorageCache: AsyncLocalStorageConstructor | null = null
 let configuredAsyncLocalStorage: AsyncLocalStorageConstructor | null = null
-
-// hide from vite/esbuild static analysis to avoid browser compat warning
-const nodeModuleId = ['node', 'async_hooks'].join(':')
 
 // install an AsyncLocalStorage for a host that runs the server bindings on a
 // runtime this build is not compiled as: Contrast's web preview, for instance,
@@ -33,19 +29,6 @@ export function setupAsyncLocalStorage(
   configuredAsyncLocalStorage = AsyncLocalStorage
 }
 
-async function getNodeAsyncLocalStorage(): Promise<AsyncLocalStorageConstructor | null> {
-  if (!nodeAsyncLocalStorageCache) {
-    try {
-      const module = await import(/* @vite-ignore */ nodeModuleId)
-      nodeAsyncLocalStorageCache =
-        module.AsyncLocalStorage as AsyncLocalStorageConstructor
-    } catch {
-      return null
-    }
-  }
-  return nodeAsyncLocalStorageCache
-}
-
 // which storage backs a context is decided at FIRST USE, never here. these
 // contexts are created while limesync's own modules load, so a host can only call
 // setupAsyncLocalStorage() afterwards; deciding at construction time made that
@@ -53,32 +36,25 @@ async function getNodeAsyncLocalStorage(): Promise<AsyncLocalStorageConstructor 
 // authData to null on runtimes that report themselves as non-server.
 export function createAsyncContext<T>(): AsyncContext<T> {
   let storage: NodeAsyncLocalStorage<T> | null = null
-  let nodeStorageReady: Promise<void> | null = null
 
-  // returns a promise only while the node storage still has to be imported
-  const resolveStorage = (): Promise<void> | null => {
-    if (storage) return null
-    const configured = configuredAsyncLocalStorage
-    if (configured) {
-      storage = new configured<T>()
-      return null
-    }
-    if (!IS_SERVER_RUNTIME) return null
-    nodeStorageReady ??= getNodeAsyncLocalStorage().then((AsyncLocalStorage) => {
-      if (AsyncLocalStorage && !storage) storage = new AsyncLocalStorage<T>()
-    })
-    return nodeStorageReady
+  const resolveStorage = () => {
+    if (storage) return storage
+    const AsyncLocalStorage =
+      configuredAsyncLocalStorage ??
+      (IS_SERVER_RUNTIME
+        ? process.getBuiltinModule?.('node:async_hooks')?.AsyncLocalStorage
+        : undefined)
+    if (AsyncLocalStorage) storage = new AsyncLocalStorage<T>()
+    return storage
   }
 
   return {
     get(): T | undefined {
-      resolveStorage()
-      return storage?.getStore()
+      return resolveStorage()?.getStore()
     },
 
     async run<R>(value: T, fn: () => R | Promise<R>): Promise<R> {
-      const pending = resolveStorage()
-      if (pending) await pending
+      const storage = resolveStorage()
       if (storage) return storage.run(value, fn)
       if (IS_SERVER_RUNTIME) {
         throw new Error(`AsyncContext storage unavailable in server runtime`)
