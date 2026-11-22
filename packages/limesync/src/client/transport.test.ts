@@ -1,7 +1,7 @@
 import {
   httpConnectionFor,
   type SyncConnection,
-} from 'orez-sync-executor/zero/sync-connection'
+} from 'orez-sync-executor/zero/http-transport'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { Zero, defineMutator, defineMutators } from '../zero/zero.js'

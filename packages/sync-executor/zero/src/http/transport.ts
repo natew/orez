@@ -1,5 +1,3 @@
-import { httpConnectionFor, registerHttpConnection } from '../zero-client/src/client/sync-connection.ts'
-
 import { identityPayloadCodec } from './payload-codec.js'
 
 import type { PayloadCodec, PullResponse, PushRequest } from './payload-codec.js'
@@ -8,6 +6,7 @@ import type {
   SyncConnection,
   SyncConnectionListener,
 } from '../zero-client/src/client/sync-connection.ts'
+export type { SyncConnection } from '../zero-client/src/client/sync-connection.ts'
 
 export type {
   EncryptedColumnManifest,
@@ -259,7 +258,10 @@ type HttpPullPageRegistry = {
   readonly pageID: string
   nextTransportGeneration: number
   readonly transportsByOrigin: Map<string, HttpPullTransportRegistration>
+  readonly connectionsByOrigin: Map<string, Set<ConnectHttp>>
 }
+
+type ConnectHttp = (options: HttpConnectOptions) => SyncConnection
 
 type HttpPullTransportRegistration = {
   readonly transport: HttpPullTransport
@@ -306,7 +308,8 @@ function isHttpPullPageRegistry(value: unknown): value is HttpPullPageRegistry {
     seen !== null &&
     typeof seen.pageID === 'string' &&
     typeof seen.nextTransportGeneration === 'number' &&
-    seen.transportsByOrigin instanceof Map
+    seen.transportsByOrigin instanceof Map &&
+    seen.connectionsByOrigin instanceof Map
   )
 }
 
@@ -317,9 +320,22 @@ function getHttpPullPageRegistry(): HttpPullPageRegistry {
     pageID: `page-${Date.now().toString(36)}`,
     nextTransportGeneration: 0,
     transportsByOrigin: new Map(),
+    connectionsByOrigin: new Map(),
   }
   Reflect.set(globalThis, HTTP_PULL_PAGE_REGISTRY, registry)
   return registry
+}
+
+function connectionOriginKey(origin: string) {
+  const url = new URL(origin)
+  return url.origin + trimTrailingSlash(url.pathname)
+}
+
+export function httpConnectionFor(origin: string): ConnectHttp | undefined {
+  const connections = getHttpPullPageRegistry().connectionsByOrigin.get(
+    connectionOriginKey(origin)
+  )
+  if (connections) return [...connections].at(-1)
 }
 
 function normalizePayloadCodec(codec: PayloadCodec | undefined): PayloadCodec {
@@ -384,10 +400,14 @@ export function installHttpPullTransport(
     lifecycleListeners: new Set(),
   }
 
-  const unregister = registerHttpConnection(
-    state.originString,
-    (options) => new HttpConnection(state, options)
-  )
+  const key = connectionOriginKey(state.originString)
+  let connections = pageRegistry.connectionsByOrigin.get(key)
+  if (!connections) {
+    connections = new Set()
+    pageRegistry.connectionsByOrigin.set(key, connections)
+  }
+  const connect: ConnectHttp = (options) => new HttpConnection(state, options)
+  connections.add(connect)
 
   const transport: HttpPullTransport = {
     pull: async () => {
@@ -415,7 +435,9 @@ export function installHttpPullTransport(
     pageID: state.pageID,
     transportID: state.transportID,
     uninstall: () => {
-      unregister()
+      if (connections.delete(connect) && !connections.size) {
+        pageRegistry.connectionsByOrigin.delete(key)
+      }
       const registered = pageRegistry.transportsByOrigin.get(state.originString)
       if (registered?.transport === transport) {
         pageRegistry.transportsByOrigin.delete(state.originString)

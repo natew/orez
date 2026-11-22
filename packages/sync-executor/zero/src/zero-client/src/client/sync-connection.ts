@@ -28,32 +28,3 @@ export type SyncConnection = {
   send(message: Upstream): void;
   close(code?: number, reason?: string): void;
 };
-
-type ConnectHttp = (options: HttpConnectOptions) => SyncConnection;
-
-const transports = new Map<string, Set<ConnectHttp>>();
-
-function originKey(origin: string) {
-  const url = new URL(origin);
-  return url.origin + url.pathname.replace(/\/$/, '');
-}
-
-export function registerHttpConnection(origin: string, connect: ConnectHttp) {
-  const key = originKey(origin);
-  let connections = transports.get(key);
-  if (!connections) {
-    connections = new Set();
-    transports.set(key, connections);
-  }
-  connections.add(connect);
-  return () => {
-    if (connections.delete(connect) && !connections.size) {
-      transports.delete(key);
-    }
-  };
-}
-
-export function httpConnectionFor(origin: string): ConnectHttp | undefined {
-  const connections = transports.get(originKey(origin));
-  if (connections) return [...connections].at(-1);
-}

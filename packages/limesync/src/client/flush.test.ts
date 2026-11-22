@@ -1,7 +1,7 @@
 import {
   httpConnectionFor,
   type SyncConnection,
-} from 'orez-sync-executor/zero/sync-connection'
+} from 'orez-sync-executor/zero/http-transport'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { installHttpPullTransport } from './transport.js'
