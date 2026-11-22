@@ -88,5 +88,5 @@ export type { HostConnection, HostSocket, RealtimeSocketHost } from './socket-ho
 export { createSocketProducer } from './producer-socket.js'
 export type { ProducerSocket, SocketProducer } from './producer-socket.js'
 
-// The React binding lives in on-zero, which already owns the React peer
-// dependency. limesync stays framework-free: see on-zero's useStreamingField.
+// The React binding is limesync/data/streaming (useStreamingField); this
+// executor stays framework-free.

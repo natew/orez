@@ -6,7 +6,7 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts', 'packages/limesync/src/**/*.test.ts'],
     setupFiles: ['src/test-setup.ts'],
-    exclude: ['**/demo/**', '**/node_modules/**'],
+    exclude: ['**/demo/**', '**/node_modules/**', 'packages/limesync/src/data/**'],
     testTimeout: 15_000,
     fileParallelism: false,
     disableConsoleIntercept: true,

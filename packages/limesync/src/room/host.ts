@@ -17,7 +17,7 @@ import {
  */
 
 export type RoomSocket = {
-  send(data: string | Uint8Array): void
+  send(data: string | Uint8Array<ArrayBuffer>): void
   close(code: number, reason: string): void
 }
 
@@ -126,11 +126,11 @@ export type RoomHost = {
 }
 
 export type RoomConnection = {
-  message(data: string | Uint8Array): void
+  message(data: string | Uint8Array<ArrayBuffer>): void
   close(): void
 }
 
-const sizeOf = (data: string | Uint8Array) =>
+const sizeOf = (data: string | Uint8Array<ArrayBuffer>) =>
   typeof data === 'string' ? data.length : data.byteLength
 
 function randomMark() {
@@ -161,7 +161,7 @@ export function createRoomHost(options: {
     link.closed = true
     link.socket.close(code, reason)
   }
-  const write = (link: Link, data: string | Uint8Array) => {
+  const write = (link: Link, data: string | Uint8Array<ArrayBuffer>) => {
     if (link.closed) return
     link.socket.send(data)
     link.sent += sizeOf(data)

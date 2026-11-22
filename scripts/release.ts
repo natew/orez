@@ -361,13 +361,6 @@ if (into) {
     })
   }
 
-  const onZeroDir = resolve(root, 'packages', 'on-zero')
-  const onZeroPkgPath = resolve(onZeroDir, 'package.json')
-  if (existsSync(onZeroPkgPath)) {
-    const onZeroPkg = JSON.parse(readFileSync(onZeroPkgPath, 'utf-8'))
-    pkgDirs.push({ name: onZeroPkg.name, dir: onZeroDir, pkg: onZeroPkg })
-  }
-
   for (const packageDirectory of sharedReleasePackageDirectories) {
     const dir = resolve(root, 'packages', packageDirectory)
     const pkgPath = resolve(dir, 'package.json')
@@ -582,20 +575,6 @@ if (existsSync(drizzleZeroSqlitePkgPath)) {
     originalVersion: drizzleZeroSqlitePkg.version,
     pkgPath: drizzleZeroSqlitePkgPath,
     pkg: drizzleZeroSqlitePkg,
-    next: orezNext,
-  })
-}
-
-// on-zero shares the orez version with the rest of the release family.
-const onZeroDir = resolve(root, 'packages', 'on-zero')
-const onZeroPkgPath = resolve(onZeroDir, 'package.json')
-if (existsSync(onZeroPkgPath)) {
-  const onZeroPkg = JSON.parse(readFileSync(onZeroPkgPath, 'utf-8'))
-  packages.push({
-    dir: onZeroDir,
-    originalVersion: onZeroPkg.version,
-    pkgPath: onZeroPkgPath,
-    pkg: onZeroPkg,
     next: orezNext,
   })
 }

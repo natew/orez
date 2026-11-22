@@ -16,6 +16,10 @@
   optimistic client updates.
 - `limesync/cloudflare` provides the Cloudflare runtime and data-worker factory.
 - `limesync/cloudflare/build` provides Node-side worker build and deployment tools.
+- `limesync/data` turns plain query and mutation files under `data/` into typed
+  synced queries, permissioned mutations and React hooks; `limesync generate`
+  writes their registries. `limesync/data/server` runs them on the server. See
+  [the data guide](../../docs/data.md).
 
 The package derives its database projection from the application’s Zero schema.
 Applications do not maintain separate table or column maps.

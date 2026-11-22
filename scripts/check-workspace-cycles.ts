@@ -20,6 +20,8 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import ts from 'typescript'
+
 import { orderReleasePackages } from './release-package-order.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -58,8 +60,6 @@ const workspaceNames = new Set(manifests.map(({ pkg }) => pkg.name))
 
 const SOURCE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'types', '.turbo'])
-// static and dynamic imports, re-exports, and require calls
-const IMPORT_SPECIFIER = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -76,9 +76,9 @@ function sourceFiles(dir: string): string[] {
 function importedWorkspacePackages(dir: string): Set<string> {
   const imported = new Set<string>()
   for (const file of sourceFiles(dir)) {
-    const source = readFileSync(file, 'utf8')
-    for (const match of source.matchAll(IMPORT_SPECIFIER)) {
-      const specifier = match[1]!
+    // the tokenizer skips strings, so a code generator's output text is not its import
+    const { importedFiles } = ts.preProcessFile(readFileSync(file, 'utf8'), true, true)
+    for (const { fileName: specifier } of importedFiles) {
       if (specifier.startsWith('.') || specifier.startsWith('node:')) continue
       const name = specifier.startsWith('@')
         ? specifier.split('/').slice(0, 2).join('/')

@@ -191,7 +191,7 @@ Clients advertising `per-query-v1` receive an error for each query containing
 an unrepresentable stored value while other queries continue. An errored query
 is recomputed on later pulls and completes after repair. Older clients retain
 the fail-closed pull behavior. Stock Zero's ArrayView settles its status once,
-so on-zero exposes later query errors in its shared hook layer and rematerializes
+so limesync/data exposes later query errors in its shared hook layer and rematerializes
 an errored view on recovery or retry.
 
 **Push** (`POST /<namespace>/push`). A v51 custom-mutator body. In local-mutator

@@ -63,11 +63,7 @@ export function attachRoomServer(server: Server, options: RoomServerOptions) {
       const bytes = Array.isArray(data)
         ? Buffer.concat(data)
         : Buffer.from(data as ArrayBuffer)
-      connection.message(
-        binary
-          ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-          : bytes.toString('utf8')
-      )
+      connection.message(binary ? new Uint8Array(bytes) : bytes.toString('utf8'))
     })
     socket.on('close', () => {
       connection.close()

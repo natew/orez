@@ -81,7 +81,7 @@ The `satisfies` annotation is what reports an unknown table, a non-numeric
 column, or a bad mode in the file that declares it. Without it the mistake
 surfaces in generated output instead.
 
-`on-zero generate` collects every namespace that has one and emits
+`limesync generate` collects every namespace that has one and emits
 `data/generated/aggregates.ts`, which calls `defineAggregates` once over the
 union. Compiling in one place is what makes the cross-namespace checks possible:
 two namespaces writing the same target column, or reusing one aggregate name,
@@ -93,7 +93,7 @@ Nothing registers a namespace. Adding the file is the whole step.
 ## Optimistic client contract
 
 Pass the generated set to `createZeroClient({ aggregates, ... })`. Orez wraps the
-transaction seen by every generated or custom on-zero mutator. Source writes
+transaction seen by every generated or custom limesync data mutator. Source writes
 update locally available target rows during the optimistic run. The
 authoritative server run does not perform that client projection because the
 SQLite trigger owns it.

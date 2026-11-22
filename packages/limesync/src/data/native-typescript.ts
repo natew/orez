@@ -1,0 +1,229 @@
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+import { parse } from '@babel/parser'
+import { API, type Project } from 'typescript/unstable/async'
+
+import type { SourceFile } from 'typescript/unstable/ast'
+
+process.env.GOMAXPROCS ??= '2'
+
+export type NativeTypeScriptProject = {
+  configurationKey: string
+  projectForFile(path: string): Project
+  sourceFilePaths(): Promise<string[]>
+  loadSources(): Promise<void>
+  sourceFile(path: string): SourceFile
+  hasParseErrors(path: string): boolean
+  close(): Promise<void>
+}
+
+type CompilerSession = {
+  api: API
+  paths: Set<string>
+  root: string
+  tsconfig?: string
+}
+
+let compiler: CompilerSession | null = null
+let compilerClose: Promise<void> | null = null
+let compilerCloseTimer: ReturnType<typeof setTimeout> | null = null
+let compilerTurn = Promise.resolve()
+
+async function closeCompiler(session: CompilerSession) {
+  try {
+    if (session.paths.size > 0) {
+      const snapshot = await session.api.updateSnapshot({
+        ...(session.tsconfig
+          ? { closeProjects: [session.tsconfig] }
+          : { closeFiles: [...session.paths] }),
+      })
+      await snapshot.dispose()
+    }
+  } finally {
+    await session.api.close()
+  }
+}
+
+async function acquireCompiler(root: string, sourcePaths: string[], tsconfig?: string) {
+  const previousTurn = compilerTurn
+  let releaseTurn = () => {}
+  compilerTurn = new Promise<void>((resolveTurn) => {
+    releaseTurn = resolveTurn
+  })
+  await previousTurn
+  if (compilerCloseTimer) {
+    clearTimeout(compilerCloseTimer)
+    compilerCloseTimer = null
+  }
+  if (compilerClose) await compilerClose
+  // configured projects cache their root membership. reopen after generation
+  // adds files so a following run includes those outputs in its new program.
+  if (
+    compiler &&
+    (tsconfig || compiler.root !== root || compiler.tsconfig !== tsconfig)
+  ) {
+    const previous = compiler
+    compiler = null
+    await closeCompiler(previous)
+  }
+  compiler ??= { api: new API({ cwd: root }), paths: new Set(), root, tsconfig }
+  compiler.api.clearSourceFileCache()
+  const previousPaths = compiler.paths
+  const nextPaths = new Set(sourcePaths)
+  compiler.paths = nextPaths
+  if (previousPaths.size > 0) {
+    const closedSnapshot = await compiler.api.updateSnapshot({
+      ...(tsconfig ? { closeProjects: [tsconfig] } : { closeFiles: [...previousPaths] }),
+      fileChanges: { invalidateAll: true },
+    })
+    await closedSnapshot.dispose()
+    compiler.api.clearSourceFileCache()
+  }
+  const snapshot = await compiler.api.updateSnapshot({
+    ...(tsconfig ? { openProjects: [tsconfig] } : { openFiles: sourcePaths }),
+    fileChanges: { invalidateAll: true },
+  })
+  compiler.api.clearSourceFileCache()
+  return { session: compiler, snapshot, releaseTurn }
+}
+
+function releaseCompiler(session: CompilerSession, releaseTurn: () => void) {
+  releaseTurn()
+  compilerCloseTimer = setTimeout(() => {
+    compilerCloseTimer = null
+    if (compiler !== session) return
+    compiler = null
+    compilerClose = closeCompiler(session).finally(() => {
+      compilerClose = null
+    })
+  }, 25)
+  compilerCloseTimer.unref?.()
+}
+
+export function collectTypeScriptSourcePaths(roots: string[]): string[] {
+  const paths = new Set<string>()
+  const visited = new Set<string>()
+  const walk = (dir: string) => {
+    if (visited.has(dir) || !existsSync(dir)) return
+    visited.add(dir)
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules') continue
+      const path = resolve(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(path)
+      } else if (
+        entry.isFile() &&
+        (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx'))
+      ) {
+        paths.add(path)
+      }
+    }
+  }
+  for (const root of roots) walk(resolve(root))
+  return [...paths].sort()
+}
+
+export async function createNativeTypeScriptProject(
+  root: string,
+  sourcePaths: string[],
+  options: { deferSources?: boolean; tsconfig?: string } = {}
+): Promise<NativeTypeScriptProject> {
+  if (sourcePaths.length === 0) {
+    throw new Error(`[limesync] no TypeScript source files found under ${root}`)
+  }
+
+  const { session, snapshot, releaseTurn } = await acquireCompiler(
+    root,
+    sourcePaths,
+    options.tsconfig
+  )
+  const sources = new Map<string, SourceFile>()
+  const projectsByFile = new Map<string, Project>()
+  const parseErrors = new Set<string>()
+
+  const loadSources = async () => {
+    for (const path of sourcePaths) {
+      if (sources.has(path)) continue
+      const project = projectsByFile.get(path)
+      if (!project) throw new Error(`[limesync] TypeScript did not open ${path}`)
+      const source = await project.program.getSourceFile(path)
+      if (!source) throw new Error(`[limesync] TypeScript did not parse ${path}`)
+      sources.set(path, source)
+      try {
+        parse(readFileSync(path, 'utf8'), {
+          plugins: ['jsx', 'typescript'],
+          sourceType: 'module',
+        })
+      } catch {
+        parseErrors.add(path)
+      }
+    }
+  }
+
+  try {
+    const scopedProject = options.tsconfig
+      ? snapshot.getProject(options.tsconfig)
+      : undefined
+    if (options.tsconfig) {
+      if (!scopedProject)
+        throw new Error(`[limesync] TypeScript did not open ${options.tsconfig}`)
+      const included = new Set(await scopedProject.program.getSourceFileNames())
+      for (const path of sourcePaths) {
+        if (!included.has(path))
+          throw new Error(`[limesync] generation project does not include ${path}`)
+      }
+    }
+    for (const path of sourcePaths) {
+      const project = options.tsconfig
+        ? scopedProject
+        : await snapshot.getDefaultProjectForFile(path)
+      if (!project) throw new Error(`[limesync] TypeScript did not open ${path}`)
+      projectsByFile.set(path, project)
+    }
+    if (!options.deferSources) await loadSources()
+  } catch (error) {
+    await snapshot.dispose()
+    releaseCompiler(session, releaseTurn)
+    throw error
+  }
+
+  let closed = false
+  return {
+    configurationKey: JSON.stringify(
+      [...new Map([...projectsByFile.values()].map((p) => [p.id, p])).values()]
+        .map((project) => [project.configFileName, project.compilerOptions])
+        .sort(([left], [right]) => String(left).localeCompare(String(right)))
+    ),
+    loadSources,
+    async sourceFilePaths() {
+      const paths = new Set<string>()
+      const projects = new Map([...projectsByFile.values()].map((p) => [p.id, p]))
+      for (const project of projects.values()) {
+        for (const path of await project.program.getSourceFileNames()) paths.add(path)
+      }
+      return [...paths].sort()
+    },
+    projectForFile(path) {
+      const project = projectsByFile.get(resolve(path))
+      if (!project)
+        throw new Error(`[limesync] TypeScript project does not contain ${path}`)
+      return project
+    },
+    sourceFile(path) {
+      const source = sources.get(resolve(path))
+      if (!source)
+        throw new Error(`[limesync] TypeScript project does not contain ${path}`)
+      return source
+    },
+    hasParseErrors(path) {
+      return parseErrors.has(resolve(path))
+    },
+    async close() {
+      if (closed) return
+      closed = true
+      await snapshot.dispose()
+      releaseCompiler(session, releaseTurn)
+    },
+  }
+}

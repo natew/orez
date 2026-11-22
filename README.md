@@ -24,7 +24,7 @@ hosts and speaks the Zero protocol to the vendored `limesync/zero` client.
 
 `limesync/aggregate` maintains queryable count and sum columns until Zero ships
 aggregate queries. One declaration generates the SQLite migration and triggers
-and projects the same change during optimistic on-zero mutations. See the
+and projects the same change during optimistic limesync data mutations. See the
 [aggregate documentation](docs/aggregates.md).
 
 ## Cloudflare

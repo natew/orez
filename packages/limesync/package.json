@@ -152,6 +152,39 @@
       "types": "./dist/zero/sqlite.d.ts",
       "import": "./dist/zero/sqlite.js",
       "default": "./dist/zero/sqlite.js"
+    },
+    "./data": {
+      "types": "./dist/data/index.d.ts",
+      "default": "./dist/data/index.js"
+    },
+    "./data/server": {
+      "types": "./dist/data/server.d.ts",
+      "default": "./dist/data/server.js"
+    },
+    "./data/multi": {
+      "types": "./dist/data/multi.d.ts",
+      "default": "./dist/data/multi.js"
+    },
+    "./data/streaming": {
+      "types": "./dist/data/streaming.d.ts",
+      "default": "./dist/data/streaming.js"
+    },
+    "./data/kv-store": {
+      "types": "./dist/data/kvStore.d.ts",
+      "react-native": "./dist/data/kvStore.native.js",
+      "default": "./dist/data/kvStore.js"
+    },
+    "./data/generate": {
+      "types": "./dist/data/generate.d.ts",
+      "default": "./dist/data/generate.js"
+    },
+    "./data/generate-lite": {
+      "types": "./dist/data/generate-lite.d.ts",
+      "default": "./dist/data/generate-lite.js"
+    },
+    "./data/vite": {
+      "types": "./dist/data/vite-plugin.d.ts",
+      "default": "./dist/data/vite-plugin.js"
     }
   },
   "bin": {
@@ -167,24 +200,36 @@
     "test:migration-workerd": "bun migration-workerd-test.mjs",
     "test:write-attribution-workerd": "bun write-attribution-workerd-test.mjs",
     "test:package": "bun run build && node package-runtime-test.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:data": "vitest run --config vitest.data.config.ts && tsc -p data-type-fixtures/tsconfig.json"
   },
   "dependencies": {
+    "@babel/parser": "7.29.7",
     "@noble/ciphers": "1.3.0",
     "@noble/curves": "1.9.7",
     "@noble/hashes": "1.8.0",
+    "@rocicorp/logger": "6.2.0",
     "bedrock-sqlite": "workspace:*",
+    "chokidar": "^4.0.3",
+    "citty": "^0.1.6",
+    "dequal": "^2.0.3",
     "es-module-lexer": "1.7.0",
     "esbuild": "^0.25.0",
     "orez-sync-cf-host": "workspace:*",
     "orez-sync-executor": "workspace:*",
+    "typescript": "7.0.2",
+    "valibot": "^1.1.0",
     "ws": "^8.19.0"
   },
   "peerDependencies": {
-    "vite": ">=5"
+    "vite": ">=5",
+    "react": "*"
   },
   "peerDependenciesMeta": {
     "vite": {
+      "optional": true
+    },
+    "react": {
       "optional": true
     }
   },
@@ -193,10 +238,13 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0",
     "vitest": "^3.2.7",
     "wrangler": "^4.75.0",
-    "@types/ws": "^8.18.1"
+    "@types/ws": "^8.18.1",
+    "@types/react": "^19.0.0",
+    "jsdom": "29.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   },
   "files": [
     "dist",

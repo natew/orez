@@ -251,7 +251,7 @@ function remoteRows(rows: unknown[] | undefined): { rows: any[] } {
 }
 
 function bunBindings(params: readonly unknown[]): SQLQueryBindings[] {
-  // on-zero accepts unknown bindings so every native provider can expose one
+  // limesync/data accepts unknown bindings so every native provider can expose one
   // structural contract. Bun validates these at its typed boundary.
   return params as SQLQueryBindings[]
 }

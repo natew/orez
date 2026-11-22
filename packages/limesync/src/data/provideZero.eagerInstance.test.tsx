@@ -1,0 +1,356 @@
+// @vitest-environment jsdom
+//
+// Zero must be available in the consumer's FIRST render. Not one effect tick
+// later, not after a passive-effect flush — immediately.
+//
+// regression: soot's sootsim tenant render worker rendered ProvideZero (its
+// `globalThis.__testZero` was set, which only the provider's render body does)
+// and still had no Zero: `zero.query` threw "Zero instance not initialized",
+// and the http-pull page registry symbol was absent because the transport is
+// installed inside constructZeroInstance. That tenant's passive effects never
+// ran, and construction lived in a useEffect. Anywhere effects are delayed,
+// discarded, or never flushed — workers, double-rendered roots, concurrent
+// React — the same hole opens.
+
+import { act, StrictMode } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { renderToString } from 'react-dom/server'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+
+import { useZero } from '../zero/react.js'
+import { createBuilder, createSchema, string, table } from '../zero/zero.js'
+
+// counting constructions is the whole point here, so Zero is faked: a real
+// client would open a store and a socket per test.
+const fakeZero = vi.hoisted(() => {
+  const instances: any[] = []
+  class FakeZero {
+    readonly clientID: string
+    readonly context = {}
+    readonly query = {}
+    readonly connection = {
+      state: { current: { name: 'connecting' }, subscribe: () => () => {} },
+      connect: vi.fn(async () => {}),
+    }
+    readonly close = vi.fn()
+    readonly delete = vi.fn(async () => ({ errors: [] }))
+    readonly run = vi.fn(async () => [])
+    constructor(options: { userID?: string }) {
+      instances.push(this)
+      this.clientID = `fake-${instances.length}-${options.userID ?? 'anon'}`
+    }
+  }
+  return { FakeZero, instances }
+})
+
+vi.mock('../zero/zero.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../zero/zero.js')>()
+  return { ...actual, Zero: fakeZero.FakeZero }
+})
+
+import { createZeroClient } from './createZeroClient.js'
+
+declare global {
+  // eslint-disable-next-line no-var
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined
+}
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+const todoTable = table('todo')
+  .columns({ id: string(), title: string() })
+  .primaryKey('id')
+const schema = createSchema({ tables: [todoTable] })
+
+let clientCount = 0
+// each test gets its own client: the instance cache and the namespace registry
+// are per-client and per-module, so sharing one leaks state across tests.
+const makeClient = () =>
+  createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: `eager-instance-${++clientCount}`,
+  })
+
+let container: HTMLDivElement
+let root: Root | null
+
+beforeEach(() => {
+  fakeZero.instances.length = 0
+  container = document.createElement('div')
+  root = null
+})
+
+afterEach(() => {
+  if (root) act(() => root?.unmount())
+})
+
+test('a consumer reading zero in its first render gets a live instance, with no effects flushed', () => {
+  const client = makeClient()
+  const install = vi.fn()
+  const seen: {
+    facadeClientID?: string
+    contextClientID?: string
+    error?: string
+    transportInstalled?: boolean
+  } = {}
+
+  const Probe = () => {
+    // the transport has to be installed BEFORE the instance connects, so by
+    // the time a child renders it must already have happened.
+    seen.transportInstalled = install.mock.calls.length > 0
+    seen.contextClientID = (useZero() as unknown as { clientID: string }).clientID
+    try {
+      seen.facadeClientID = (client.zero as unknown as { clientID: string }).clientID
+    } catch (error) {
+      seen.error = (error as Error).message
+    }
+    return null
+  }
+
+  // renderToString never flushes an effect — that is exactly the environment
+  // the soot tenant was in.
+  renderToString(
+    <client.ProvideZero
+      cacheURL="http://127.0.0.1:7788/zero"
+      userID="first-render"
+      transport={{ install }}
+    >
+      <Probe />
+    </client.ProvideZero>
+  )
+
+  expect(seen.error).toBeUndefined()
+  expect(fakeZero.instances.length).toBe(1)
+  expect(seen.facadeClientID).toBe(fakeZero.instances[0].clientID)
+  expect(seen.contextClientID).toBe(fakeZero.instances[0].clientID)
+  expect(seen.transportInstalled).toBe(true)
+})
+
+test('the first committed render already carries the real instance', () => {
+  const client = makeClient()
+  const clientIDs: string[] = []
+  const Probe = () => {
+    clientIDs.push((useZero() as unknown as { clientID: string }).clientID)
+    return null
+  }
+
+  root = createRoot(container)
+  act(() => {
+    root?.render(
+      <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID="committed">
+        <Probe />
+      </client.ProvideZero>
+    )
+  })
+
+  // no render of a child ever sees the disabled stub
+  expect(clientIDs.length).toBeGreaterThan(0)
+  expect(clientIDs).not.toContain('disabled')
+  expect(clientIDs[0]).toBe(fakeZero.instances[0].clientID)
+})
+
+test('StrictMode double-invoked render constructs exactly one instance', () => {
+  const client = makeClient()
+  root = createRoot(container)
+  act(() => {
+    root?.render(
+      <StrictMode>
+        <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID="strict">
+          <span>ok</span>
+        </client.ProvideZero>
+      </StrictMode>
+    )
+  })
+
+  expect(fakeZero.instances.length).toBe(1)
+  expect(fakeZero.instances[0].close).not.toHaveBeenCalled()
+})
+
+test('an identity change rotates the instance and closes the outgoing one', () => {
+  const client = makeClient()
+  root = createRoot(container)
+  const render = (userID: string) =>
+    act(() => {
+      root?.render(
+        <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID={userID}>
+          <span>ok</span>
+        </client.ProvideZero>
+      )
+    })
+
+  render('one')
+  expect(fakeZero.instances.length).toBe(1)
+  render('two')
+  expect(fakeZero.instances.length).toBe(2)
+  expect(fakeZero.instances[0].close).toHaveBeenCalled()
+  expect(fakeZero.instances[1].close).not.toHaveBeenCalled()
+})
+
+test('a rotation that never commits is undone, not duplicated', () => {
+  const client = makeClient()
+  root = createRoot(container)
+  const mount = (userID: string) =>
+    act(() => {
+      root?.render(
+        <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID={userID}>
+          <span>ok</span>
+        </client.ProvideZero>
+      )
+    })
+
+  mount('committed')
+  const first = fakeZero.instances[0]
+
+  // stand-in for a render react throws away: a full render pass of the same
+  // provider at a different identity that no commit ever follows.
+  renderToString(
+    <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID="abandoned">
+      <span>ok</span>
+    </client.ProvideZero>
+  )
+  expect(fakeZero.instances.length).toBe(2)
+  // the committed tree's instance survives an uncommitted rotation
+  expect(first.close).not.toHaveBeenCalled()
+
+  // back to the committed identity: revive the original rather than build a
+  // third client beside it, and close the abandoned one
+  mount('committed')
+  expect(fakeZero.instances.length).toBe(2)
+  expect(first.close).not.toHaveBeenCalled()
+  expect(fakeZero.instances[1].close).toHaveBeenCalled()
+})
+
+test('disable=true constructs nothing', () => {
+  const client = makeClient()
+  root = createRoot(container)
+  act(() => {
+    root?.render(
+      <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID="off" disable>
+        <span>ok</span>
+      </client.ProvideZero>
+    )
+  })
+
+  expect(fakeZero.instances.length).toBe(0)
+})
+
+test('unmounting one of two overlapping providers keeps the shared instance published', () => {
+  const client = makeClient()
+  const first = createRoot(document.createElement('div'))
+  root = createRoot(container)
+  const mount = (target: Root | null) =>
+    act(() => {
+      target?.render(
+        <client.ProvideZero cacheURL="http://127.0.0.1:7788/zero" userID="shared">
+          <span>ok</span>
+        </client.ProvideZero>
+      )
+    })
+
+  mount(first)
+  mount(root)
+  expect(fakeZero.instances.length).toBe(1)
+
+  act(() => first.unmount())
+  expect((client.zero as unknown as { clientID: string }).clientID).toBe(
+    fakeZero.instances[0].clientID
+  )
+
+  act(() => root?.unmount())
+  root = null
+  expect(() => client.zero.clientID).toThrow(/Zero instance not initialized/)
+})
+
+test('a supplied ready instance publishes synchronously and stays owned by its caller', async () => {
+  const client = makeClient()
+  const first = new fakeZero.FakeZero({ userID: 'external' })
+  const second = new fakeZero.FakeZero({ userID: 'external' })
+  Object.defineProperty(second, 'clientID', { value: first.clientID })
+  let seen: unknown
+  function Probe() {
+    seen = useZero()
+    expect(client.zero.clientID).toBe(first.clientID)
+    return null
+  }
+  const render = (instance: typeof first) => {
+    act(() => {
+      root?.render(
+        <StrictMode>
+          <client.ProvideZero userID="external" zero={instance as never}>
+            <Probe />
+          </client.ProvideZero>
+        </StrictMode>
+      )
+    })
+  }
+  root = createRoot(container)
+  render(first)
+  expect(seen).toBe(first)
+  await act(async () => {
+    expect(await client.remint({ dropLocalState: false })).toBe(false)
+    expect(await client.remint({ dropLocalState: true })).toBe(false)
+    await client.retire()
+  })
+  expect(first.delete).not.toHaveBeenCalled()
+  expect(first.close).not.toHaveBeenCalled()
+  expect(client.zero.clientID).toBe(first.clientID)
+  render(second)
+  expect(seen).toBe(second)
+  expect(fakeZero.instances).toHaveLength(2)
+  expect(first.close).not.toHaveBeenCalled()
+  act(() => root?.unmount())
+  root = createRoot(container)
+  render(second)
+  expect(seen).toBe(second)
+  expect(second.close).not.toHaveBeenCalled()
+})
+
+test('external instances retaining a clientID materialize separate React views', () => {
+  const all = () => createBuilder(schema).todo
+  const client = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: { todo: { all } },
+  })
+  const first = new fakeZero.FakeZero({ userID: 'native' })
+  const second = new fakeZero.FakeZero({ userID: 'native' })
+  Object.defineProperty(second, 'clientID', { value: first.clientID })
+  const destroyed = new Set<object>()
+  for (const [instance, title] of [
+    [first, 'before'],
+    [second, 'after'],
+  ] as const) {
+    Object.assign(instance, {
+      materialize: vi.fn(() => ({
+        addListener(listener: (rows: object[], type: string) => void) {
+          listener([{ id: 'todo', title }], 'complete')
+        },
+        destroy() {
+          destroyed.add(instance)
+        },
+        updateTTL() {
+          if (destroyed.has(instance)) throw new Error('view is destroyed')
+        },
+      })),
+    })
+  }
+  let title: string | undefined
+  function Probe() {
+    const [rows] = client.useQuery(all)
+    title = rows[0]?.title
+    return null
+  }
+  root = createRoot(container)
+  const render = (instance: typeof first) =>
+    root?.render(
+      <client.ProvideZero userID="native" zero={instance as never}>
+        <Probe />
+      </client.ProvideZero>
+    )
+  act(() => render(first))
+  expect(title).toBe('before')
+  destroyed.add(first)
+  act(() => render(second))
+  expect(title).toBe('after')
+})
