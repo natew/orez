@@ -525,14 +525,19 @@ function tableColumns(
           candidate.forEachChild(inspect)
           return
         }
+        const isTable = /table/i.test(candidate.expression.getText(source))
         for (const argument of candidate.arguments) {
-          if (
-            ts.isStringLiteral(argument) &&
-            /table/i.test(candidate.expression.getText(source))
-          ) {
+          if (isTable && ts.isStringLiteral(argument)) {
             tableNames.add(argument.text)
           }
           if (ts.isObjectLiteralExpression(argument)) foundColumns = argument
+        }
+        const columnBuilder = candidate.arguments[1]
+        if (isTable && columnBuilder && ts.isArrowFunction(columnBuilder)) {
+          const body = ts.isParenthesizedExpression(columnBuilder.body)
+            ? columnBuilder.body.expression
+            : columnBuilder.body
+          if (ts.isObjectLiteralExpression(body)) foundColumns = body
         }
         inspect(candidate.expression)
       }

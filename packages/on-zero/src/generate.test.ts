@@ -514,7 +514,7 @@ export async function writeAudit(tx: Transaction) {
     const dir = dataDir()
     writeFileSync(
       join(dir, '../database/schema.ts'),
-      `export const post = pgTable('post', { id: text() })`
+      `export const post = sqliteTable('post', (t) => ({ id: t.text() }))`
     )
     writeFileSync(join(dir, 'post/mutations.ts'), `export const mutate = mutations({})`)
     writeFileSync(
