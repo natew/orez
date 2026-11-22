@@ -86,5 +86,11 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "imports": {
+    "#native-platform": {
+      "one-native": "./dist/nativePlatformOne.js",
+      "default": "./dist/nativePlatformReactNative.js"
+    }
   }
 }

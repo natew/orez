@@ -1,10 +1,7 @@
-// platform booleans, react-native variant.
-// Mirrors @tamagui/constants (native) so @o/helpers carries no @tamagui/* runtime dep.
-// react-native is an optional peer dep and is always present in the native runtime
-// where this file is loaded, so importing it here is safe.
+// platform booleans for native runtimes. the package import selects the host platform.
 
+import { Platform } from '#native-platform'
 import { useLayoutEffect, type useEffect } from 'react'
-import { Platform } from 'react-native'
 
 export const IS_WEB: boolean = false
 export const IS_BROWSER: boolean = false
@@ -15,7 +12,7 @@ export const useIsomorphicLayoutEffect: typeof useEffect = useLayoutEffect
 export const IS_CHROME: boolean = false
 export const IS_WEB_TOUCHABLE: boolean = false
 export const IS_NATIVE_DESKTOP: boolean =
-  Platform?.OS === 'macos' || Platform?.OS === 'windows'
+  Platform?.OS === 'macos' || Platform?.OS === 'windows' || Platform?.OS === 'linux'
 export const IS_TOUCHABLE: boolean = !IS_NATIVE_DESKTOP
 // optional chain required: babel extractor loads native.cjs in node where Platform is undefined
 // on Android TV: Platform.OS === 'android' per react-native-tvos
@@ -35,15 +32,23 @@ export const IS_TV: boolean =
   process.env.TEST_NATIVE_PLATFORM === 'androidtv' ||
   process.env.TEST_NATIVE_PLATFORM === 'tvos'
 
-type CurrentPlatform = 'web' | 'ios' | 'native' | 'android' | 'macos' | 'windows'
+type CurrentPlatform =
+  | 'web'
+  | 'ios'
+  | 'native'
+  | 'android'
+  | 'macos'
+  | 'windows'
+  | 'linux'
 
 // Platform.OS includes 'web' in its type (PlatformOSType) but never at native runtime,
 // so the map is partial — any unmapped OS falls through to 'native'.
-const platforms: Partial<Record<typeof Platform.OS, CurrentPlatform>> = {
+const platforms: Partial<Record<string, CurrentPlatform>> = {
   ios: 'ios',
   android: 'android',
   macos: 'macos',
   windows: 'windows',
+  linux: 'linux',
 }
 /**
  * Reflects Platform.OS. TV platforms are intentionally NOT separate values:
