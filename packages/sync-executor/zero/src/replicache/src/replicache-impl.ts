@@ -10,8 +10,7 @@ import type {JSONValue, ReadonlyJSONValue} from '../../shared/src/json.ts';
 import {promiseVoid} from '../../shared/src/resolved-promises.ts';
 import type {MaybePromise} from '../../shared/src/types.ts';
 import type {NoIndexDiff} from './btree/node.ts';
-import {PullDelegate, PushDelegate} from './connection-loop-delegates.ts';
-import {ConnectionLoop, MAX_DELAY_MS, MIN_DELAY_MS} from './connection-loop.ts';
+import {ConnectionLoop} from './connection-loop.ts';
 import {assertCookie, type Cookie} from './cookies.ts';
 import {LazyStore} from './dag/lazy-store.ts';
 import {StoreImpl} from './dag/store-impl.ts';
@@ -35,7 +34,6 @@ import {deepFreeze} from './frozen-json.ts';
 import {getKVStoreProvider} from './get-kv-store-provider.ts';
 import {assertHash, emptyHash, type Hash, newRandomHash} from './hash.ts';
 import type {HTTPRequestInfo} from './http-request-info.ts';
-import {httpStatusUnauthorized} from './http-status-unauthorized.ts';
 import type {StoreProvider} from './kv/store.ts';
 import {createLogContext} from './log-options.ts';
 import {makeIDBName} from './make-idb-name.ts';
@@ -109,7 +107,6 @@ import type {
   MutatorReturn,
   PokeInternal,
   QueryInternal,
-  RequestOptions,
   UpdateNeededReason,
 } from './types.ts';
 import {version} from './version.ts';
@@ -118,12 +115,6 @@ import {
   withWrite,
   withWriteNoImplicitCommit,
 } from './with-transactions.ts';
-
-/**
- * The maximum number of time to call out to getAuth before giving up
- * and throwing an error.
- */
-const MAX_REAUTH_TRIES = 8;
 
 const PERSIST_IDLE_TIMEOUT_MS = 1000;
 const REFRESH_IDLE_TIMEOUT_MS = 1000;
@@ -134,10 +125,6 @@ const REFRESH_THROTTLE_MS = 500;
 const LAZY_STORE_SOURCE_CHUNK_CACHE_SIZE_LIMIT = 100 * 2 ** 20; // 100 MB
 
 const RECOVER_MUTATIONS_INTERVAL_MS = 5 * 60 * 1000; // 5 mins
-
-const noop = () => {
-  // noop
-};
 
 const updateNeededReasonNewClientGroup: UpdateNeededReason = {
   type: 'NewClientGroup',
@@ -241,27 +228,8 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
    */
   readonly mutate: MakeMutators<MD>;
 
-  // Number of pushes/pulls at the moment.
-  #pushCounter = 0;
-  #pullCounter = 0;
-
-  #pullConnectionLoop: ConnectionLoop;
-  #pushConnectionLoop: ConnectionLoop;
-
-  /**
-   * The duration between each periodic {@link pull}. Setting this to `null`
-   * disables periodic pull completely. Pull will still happen if you call
-   * {@link pull} manually.
-   */
-  pullInterval: number | null;
-
-  /**
-   * The delay between when a change is made to Replicache and when Replicache
-   * attempts to push that change.
-   */
-  pushDelay: number;
-
-  readonly #requestOptions: Required<RequestOptions>;
+  readonly #pullConnectionLoop: ConnectionLoop;
+  readonly #pushConnectionLoop: ConnectionLoop;
 
   /**
    * The function to use to pull data from the server.
@@ -301,31 +269,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   );
 
   /**
-   * The options used to control the {@link pull} and push request behavior. This
-   * object is live so changes to it will affect the next pull or push call.
-   */
-  get requestOptions(): Required<RequestOptions> {
-    return this.#requestOptions;
-  }
-
-  /**
-   * `onSync(true)` is called when Replicache transitions from no push or pull
-   * happening to at least one happening. `onSync(false)` is called in the
-   * opposite case: when Replicache transitions from at least one push or pull
-   * happening to none happening.
-   *
-   * This can be used in a React like app by doing something like the following:
-   *
-   * ```js
-   * const [syncing, setSyncing] = useState(false);
-   * useEffect(() => {
-   *   rep.onSync = setSyncing;
-   * }, [rep]);
-   * ```
-   */
-  onSync: ((syncing: boolean) => void) | null = null;
-
-  /**
    * `onClientStateNotFound` is called when the persistent client has been
    * garbage collected. This can happen if the client has no pending mutations
    * and has not been used for a while.
@@ -357,14 +300,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
    */
   onUpdateNeeded: ((reason: UpdateNeededReason) => void) | null = reload;
 
-  /**
-   * This gets called when we get an HTTP unauthorized (401) response from the
-   * push or pull endpoint. Set this to a function that will ask your user to
-   * reauthenticate.
-   */
-  getAuth: (() => MaybePromise<string | null | undefined>) | null | undefined =
-    null;
-
   constructor(
     options: ReplicacheOptions<MD>,
     implOptions: ReplicacheImplOptions = {},
@@ -375,11 +310,8 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       logLevel = 'info',
       logSinks = [consoleLogSink],
       auth,
-      pushDelay = 10,
       schemaVersion = '',
-      pullInterval = 60000,
       mutators = {} as MD,
-      requestOptions = {},
       puller,
       pusher,
       clientMaxAgeMs = CLIENT_MAX_INACTIVE_TIME,
@@ -395,8 +327,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     this.#auth = auth ?? '';
     this.name = name;
     this.schemaVersion = schemaVersion;
-    this.pullInterval = pullInterval;
-    this.pushDelay = pushDelay;
     this.puller = puller;
     this.pusher = pusher;
 
@@ -435,10 +365,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     const readyResolver = resolver<void>();
     this.#ready = readyResolver.promise;
 
-    const {minDelayMs = MIN_DELAY_MS, maxDelayMs = MAX_DELAY_MS} =
-      requestOptions;
-    this.#requestOptions = {maxDelayMs, minDelayMs};
-
     const visibilityWatcher = getDocumentVisibilityWatcher(
       getBrowserGlobal('document'),
       0,
@@ -447,13 +373,15 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
 
     this.#pullConnectionLoop = new ConnectionLoop(
       this.#lc.withContext('PULL'),
-      new PullDelegate(this, () => this.#invokePull()),
+      () => this.#invokePull(),
+      60_000,
       visibilityWatcher,
     );
 
     this.#pushConnectionLoop = new ConnectionLoop(
       this.#lc.withContext('PUSH'),
-      new PushDelegate(this, () => this.#invokePush()),
+      () => this.#invokePush(),
+      null,
     );
 
     this.mutate = this.#registerMutators(mutators);
@@ -468,7 +396,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       lc: this.#lc,
       enableMutationRecovery,
       wrapInOnlineCheck: this.#wrapInOnlineCheck.bind(this),
-      wrapInReauthRetries: this.#wrapInReauthRetries.bind(this),
+      runRequest: this.#runRequest.bind(this),
       clientGroupIDPromise: this.#clientGroupIDPromise,
     });
 
@@ -631,12 +559,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   }
 
   /**
-   * `onOnlineChange` is called when the {@link online} property changes. See
-   * {@link online} for more details.
-   */
-  onOnlineChange: ((online: boolean) => void) | null = null;
-
-  /**
    * A rough heuristic for whether the client is currently online. Note that
    * there is no way to know for certain whether a client is online - the next
    * request can always fail. This property returns true if the last sync attempt succeeded,
@@ -773,7 +695,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
 
     return this.#wrapInOnlineCheck(async () => {
       try {
-        this.#changeSyncCounters(0, 1);
         const {syncHead, requestID, ok} = await this.beginPull();
         if (!ok) {
           return false;
@@ -783,8 +704,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
         }
       } catch (e) {
         throw await this.#convertToClientStateNotFoundError(e);
-      } finally {
-        this.#changeSyncCounters(0, -1);
       }
       return true;
     }, 'Pull');
@@ -822,7 +741,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     } finally {
       if (this.#online !== online) {
         this.#online = online;
-        this.onOnlineChange?.(online);
         if (online) {
           void this.recoverMutations();
         }
@@ -830,7 +748,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     }
   }
 
-  async #wrapInReauthRetries<R>(
+  async #runRequest<R>(
     f: (
       requestID: string,
       requestLc: LogContext,
@@ -840,70 +758,20 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     }>,
     verb: string,
     lc: LogContext,
-    preAuth: () => MaybePromise<void> = noop,
-    postAuth: () => MaybePromise<void> = noop,
-  ): Promise<{
-    result: R;
-    authFailure: boolean;
-  }> {
-    const {clientID} = this;
-    let reauthAttempts = 0;
-    let lastResult;
-    lc = lc.withContext(verb);
-    do {
-      const requestID = newRequestID(clientID);
-      const requestLc = lc.withContext('requestID', requestID);
-      const {httpRequestInfo, result} = await f(requestID, requestLc);
-      lastResult = result;
-      if (!httpRequestInfo) {
-        return {
-          result,
-          authFailure: false,
-        };
-      }
+  ): Promise<R> {
+    const requestID = newRequestID(this.clientID);
+    const requestLc = lc.withContext(verb).withContext('requestID', requestID);
+    const {httpRequestInfo, result} = await f(requestID, requestLc);
+    if (httpRequestInfo) {
       const {errorMessage, httpStatusCode} = httpRequestInfo;
-
       if (errorMessage || httpStatusCode !== 200) {
-        // TODO(arv): Maybe we should not log the server URL when the error comes
-        // from a Pusher/Puller?
         requestLc.error?.(
           `Got a non 200 response doing ${verb}: ${httpStatusCode}` +
             (errorMessage ? `: ${errorMessage}` : ''),
         );
       }
-      if (httpStatusCode !== httpStatusUnauthorized) {
-        return {
-          result,
-          authFailure: false,
-        };
-      }
-      if (!this.getAuth) {
-        return {
-          result,
-          authFailure: true,
-        };
-      }
-      let auth;
-      try {
-        await preAuth();
-        auth = await this.getAuth();
-      } finally {
-        await postAuth();
-      }
-      if (auth === null || auth === undefined) {
-        return {
-          result,
-          authFailure: true,
-        };
-      }
-      this.auth = auth;
-      reauthAttempts++;
-    } while (reauthAttempts < MAX_REAUTH_TRIES);
-    lc.info?.('Tried to reauthenticate too many times');
-    return {
-      result: lastResult,
-      authFailure: true,
-    };
+    }
+    return result;
   }
 
   async #invokePush(): Promise<boolean> {
@@ -916,28 +784,20 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     const {clientID} = this;
     const clientGroupID = await this.#clientGroupIDPromise;
     return this.#wrapInOnlineCheck(async () => {
-      const {result: pusherResult} = await this.#wrapInReauthRetries(
-        async (requestID: string, requestLc: LogContext) => {
-          try {
-            this.#changeSyncCounters(1, 0);
-            const pusherResult = await push(
-              requestID,
-              this.memdag,
-              requestLc,
-              profileID,
-              clientGroupID,
-              clientID,
-              this.pusher,
-              this.schemaVersion,
-              PUSH_VERSION_DD31,
-            );
-            return {
-              result: pusherResult,
-              httpRequestInfo: pusherResult?.httpRequestInfo,
-            };
-          } finally {
-            this.#changeSyncCounters(-1, 0);
-          }
+      const pusherResult = await this.#runRequest(
+        async (requestID, requestLc) => {
+          const result = await push(
+            requestID,
+            this.memdag,
+            requestLc,
+            profileID,
+            clientGroupID,
+            clientID,
+            this.pusher,
+            this.schemaVersion,
+            PUSH_VERSION_DD31,
+          );
+          return {result, httpRequestInfo: result?.httpRequestInfo};
         },
         'push',
         this.#lc,
@@ -972,53 +832,10 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     this.#fireOnUpdateNeeded(reason);
   }
 
-  /**
-   * Push sends pending changes to the server.
-   *
-   * You do not usually need to manually call push. If {@link pushDelay} is
-   * non-zero (which it is by default) pushes happen automatically shortly after
-   * mutations.
-   *
-   * If the server endpoint fails push will be continuously retried with an
-   * exponential backoff.
-   *
-   * @param [now=false] If true, push will happen immediately and ignore
-   *   {@link pushDelay}, {@link RequestOptions.minDelayMs} as well as the
-   *   exponential backoff in case of errors.
-   * @returns A promise that resolves when the next push completes. In case of
-   * errors the first error will reject the returned promise. Subsequent errors
-   * will not be reflected in the promise.
-   */
-  push({now = false} = {}): Promise<void> {
-    return throwIfError(this.#pushConnectionLoop.send(now));
+  push(): Promise<void> {
+    return throwIfError(this.#pushConnectionLoop.send());
   }
 
-  /**
-   * Pull fetches server changes and replays local changes on top of them.
-   *
-   * If the server endpoint fails pull will be continuously retried with an
-   * exponential backoff.
-   *
-   * @param [now=false] If true, pull will happen immediately and ignore
-   *   {@link RequestOptions.minDelayMs} as well as the exponential backoff in
-   *   case of errors.
-   * @returns A promise that resolves when the next pull completes. In case of
-   * errors the first error will reject the returned promise. Subsequent errors
-   * will not be reflected in the promise.
-   */
-  pull({now = false} = {}): Promise<void> {
-    return throwIfError(this.#pullConnectionLoop.send(now));
-  }
-
-  /**
-   * Applies an update from the server to Replicache.
-   * Throws an error if cookie does not match. In that case the server thinks
-   * this client has a different cookie than it does; the caller should disconnect
-   * from the server and re-register, which transmits the cookie the client actually
-   * has.
-   *
-   * @experimental This method is under development and its semantics will change.
-   */
   async poke(poke: PokeInternal): Promise<void> {
     await this.#ready;
     // TODO(MP) Previously we created a request ID here and included it with the
@@ -1072,9 +889,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     const profileID = await this.profileID;
     const {clientID} = this;
     const clientGroupID = await this.#clientGroupIDPromise;
-    const {
-      result: {beginPullResponse, requestID},
-    } = await this.#wrapInReauthRetries(
+    const {beginPullResponse, requestID} = await this.#runRequest(
       async (requestID: string, requestLc: LogContext) => {
         const beginPullResponse = await beginPullV1(
           profileID,
@@ -1094,8 +909,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       },
       'pull',
       this.#lc,
-      () => this.#changeSyncCounters(0, -1),
-      () => this.#changeSyncCounters(0, 1),
     );
 
     const {pullResponse} = beginPullResponse;
@@ -1254,20 +1067,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
    */
   runRefresh(): Promise<void> {
     return this.#refreshScheduler.run();
-  }
-
-  #changeSyncCounters(pushDelta: 0, pullDelta: 1 | -1): void;
-  #changeSyncCounters(pushDelta: 1 | -1, pullDelta: 0): void;
-  #changeSyncCounters(pushDelta: number, pullDelta: number): void {
-    this.#pushCounter += pushDelta;
-    this.#pullCounter += pullDelta;
-    const delta = pushDelta + pullDelta;
-    const counter = this.#pushCounter + this.#pullCounter;
-    if ((delta === 1 && counter === 1) || counter === 0) {
-      const syncing = counter > 0;
-      // Run in a new microtask.
-      void Promise.resolve().then(() => this.onSync?.(syncing));
-    }
   }
 
   watch(prefix: string, onDiff: (diff: NoIndexDiff) => void): void {
@@ -1452,7 +1251,7 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
         this.#zero?.advance(headHash, newHead, diffs.get('') ?? []);
 
         // Send is not supposed to reject
-        this.#pushConnectionLoop.send(false).catch(() => void 0);
+        this.#pushConnectionLoop.send().catch(() => void 0);
         await this.#subscriptions.fire(diffs);
         void this.#schedulePersist();
         return result;

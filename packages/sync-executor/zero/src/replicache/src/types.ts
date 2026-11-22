@@ -44,23 +44,7 @@ export type MakeMutator<
   ) => MutatorReturn,
 > = F extends (tx: WriteTransaction, ...args: infer Args) => infer Ret
   ? (...args: Args) => ToPromise<Ret>
-  : never; /**
- * Base options for {@link PullOptions} and {@link PushOptions}
- */
-
-export interface RequestOptions {
-  /**
-   * When there are pending pull or push requests this is the _minimum_ amount
-   * of time to wait until we try another pull/push.
-   */
-  minDelayMs?: number;
-
-  /**
-   * When there are pending pull or push requests this is the _maximum_ amount
-   * of time to wait until we try another pull/push.
-   */
-  maxDelayMs?: number;
-}
+  : never;
 
 export type MakeMutators<T extends MutatorDefs> = {
   readonly [P in keyof T]: MakeMutator<T[P]>;

@@ -528,11 +528,6 @@ export class Zero<
       name: `zero-${storageScopedUserID}-${hashedKey}`,
       pusher: (req, reqID) => this.#pusher(req, reqID),
       puller: (req, reqID) => this.#puller(req, reqID),
-      pushDelay: 0,
-      requestOptions: {
-        maxDelayMs: 0,
-        minDelayMs: 0,
-      },
       licenseKey: 'zero-client-static-key',
       kvStore,
     };

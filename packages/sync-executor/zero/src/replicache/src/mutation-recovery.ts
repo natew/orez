@@ -1,6 +1,5 @@
 import type {LogContext} from '@rocicorp/logger';
 import {assert, assertNotUndefined} from '../../shared/src/asserts.ts';
-import type {MaybePromise} from '../../shared/src/types.ts';
 import {throwChunkHasher} from './dag/chunk.ts';
 import {LazyStore} from './dag/lazy-store.ts';
 import {StoreImpl} from './dag/store-impl.ts';
@@ -55,7 +54,7 @@ interface MutationRecoveryOptions {
     f: () => Promise<boolean>,
     name: string,
   ) => Promise<boolean>;
-  readonly wrapInReauthRetries: <R>(
+  readonly runRequest: <R>(
     f: (
       requestID: string,
       requestLc: LogContext,
@@ -65,12 +64,7 @@ interface MutationRecoveryOptions {
     }>,
     verb: string,
     lc: LogContext,
-    preAuth?: () => MaybePromise<void>,
-    postAuth?: () => MaybePromise<void>,
-  ) => Promise<{
-    result: R;
-    authFailure: boolean;
-  }>;
+  ) => Promise<R>;
   readonly lc: LogContext;
   readonly enableMutationRecovery: boolean;
   readonly clientGroupIDPromise: Promise<ClientGroupID | undefined>;
@@ -283,7 +277,7 @@ async function recoverMutationsOfClientGroupDD31(
     delegate,
     lc,
     wrapInOnlineCheck,
-    wrapInReauthRetries,
+    runRequest,
     clientGroupIDPromise,
   } = options;
 
@@ -336,7 +330,7 @@ async function recoverMutationsOfClientGroupDD31(
 
     const pushDescription = 'recoveringMutationsPush';
     const pushSucceeded = await wrapInOnlineCheck(async () => {
-      const {result: pusherResult} = await wrapInReauthRetries(
+      const pusherResult = await runRequest(
         async (requestID: string, requestLc: LogContext) => {
           assert(clientID, 'Expected clientID to be defined');
           assert(
@@ -391,7 +385,7 @@ async function recoverMutationsOfClientGroupDD31(
     const pullDescription = 'recoveringMutationsPull';
     let okPullResponse: PullResponseOKV1 | undefined;
     const pullSucceeded = await wrapInOnlineCheck(async () => {
-      const {result: beginPullResponse} = await wrapInReauthRetries(
+      const beginPullResponse = await runRequest(
         async (requestID: string, requestLc: LogContext) => {
           assert(clientID, 'Expected clientID to be defined');
           const beginPullResponse = await beginPullV1(

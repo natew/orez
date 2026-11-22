@@ -5,7 +5,7 @@ import type {Hash} from './hash.ts';
 import type {StoreProvider} from './kv/store.ts';
 import type {Puller} from './puller.ts';
 import type {Pusher} from './pusher.ts';
-import type {MutatorDefs, RequestOptions} from './types.ts';
+import type {MutatorDefs} from './types.ts';
 
 /**
  * The options passed to {@link Replicache}.
@@ -45,18 +45,6 @@ export interface ReplicacheOptions<MD extends MutatorDefs> {
    * pull direction).
    */
   schemaVersion?: string | undefined;
-
-  /**
-   * The duration between each {@link pull} in milliseconds. Set this to `null` to
-   * prevent pulling in the background.  Defaults to 60 seconds.
-   */
-  pullInterval?: number | null | undefined;
-
-  /**
-   * The delay between when a change is made to Replicache and when Replicache
-   * attempts to push that change.
-   */
-  pushDelay?: number | undefined;
 
   /**
    * Determines how much logging to do. When this is set to `'debug'`,
@@ -146,15 +134,9 @@ export interface ReplicacheOptions<MD extends MutatorDefs> {
    *
    * *Mutators* are atomic: all their changes are applied together, or none are.
    * Throwing an exception aborts the transaction. Otherwise, it is committed.
-   * As with {@link query} and {@link subscribe} all reads will see a consistent view of
-   * the cache while they run.
+   * All reads within the transaction see a consistent view of the cache.
    */
   mutators?: MD | undefined;
-
-  /**
-   * Options to use when doing pull and push requests.
-   */
-  requestOptions?: RequestOptions | undefined;
 
   puller: Puller;
 
