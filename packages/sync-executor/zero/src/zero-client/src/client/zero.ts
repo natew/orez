@@ -565,7 +565,6 @@ export class Zero<
     this.query = createRunnableBuilder(this.#zeroContext, schema);
 
     const replicacheImplOptions: ReplicacheImplOptions = {
-      enableClientGroupForking: false,
       enableMutationRecovery: server !== null,
       enableRefresh: () => this.#enableRefresh(),
       onClientsDeleted: deletedClients =>

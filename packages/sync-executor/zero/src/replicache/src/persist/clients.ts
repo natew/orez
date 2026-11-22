@@ -1,31 +1,13 @@
-import type {LogContext} from '@rocicorp/logger';
-import {assert, assertObject} from '../../../shared/src/asserts.ts';
-import type {Enum} from '../../../shared/src/enum.ts';
+import {assertObject} from '../../../shared/src/asserts.ts';
 import {hasOwn} from '../../../shared/src/has-own.ts';
 import * as valita from '../../../shared/src/valita.ts';
 import {emptyDataNode} from '../btree/node.ts';
-import {BTreeRead} from '../btree/read.ts';
-import {type FrozenCookie, compareCookies} from '../cookies.ts';
 import {type Refs, toRefs} from '../dag/chunk.ts';
 import type {Read, Store, Write} from '../dag/store.ts';
-import type {Commit} from '../db/commit.ts';
-import {
-  type ChunkIndexDefinition,
-  type IndexRecord,
-  type SnapshotMetaDD31,
-  assertSnapshotCommitDD31,
-  baseSnapshotFromHash,
-  chunkIndexDefinitionEqualIgnoreName,
-  getRefs,
-  newSnapshotCommitDataDD31,
-  toChunkIndexDefinition,
-} from '../db/commit.ts';
-import {createIndexBTree} from '../db/write.ts';
+import {newSnapshotCommitDataDD31} from '../db/commit.ts';
 import type {DeletedClients} from '../deleted-clients.ts';
-import type * as FormatVersion from '../format-version-enum.ts';
 import {type FrozenJSONValue, deepFreeze} from '../frozen-json.ts';
 import {type Hash, hashSchema} from '../hash.ts';
-import {type IndexDefinitions, indexDefinitionsEqual} from '../index-defs.ts';
 import {
   type ClientGroupID,
   type ClientID,
@@ -40,8 +22,6 @@ import {
   setClientGroup,
 } from './client-groups.ts';
 import {makeClientID} from './make-client-id.ts';
-
-type FormatVersion = Enum<typeof FormatVersion>;
 
 export type ClientMap = ReadonlyMap<ClientID, ClientV5 | ClientV6>;
 
@@ -216,252 +196,61 @@ export async function mustGetClient(
   return client;
 }
 
-type InitClientV6Result = [
-  client: ClientV6,
-  hash: Hash,
-  clientMap: ClientMap,
-  newClientGroup: boolean,
-];
-
 export function initClientV6(
   newClientID: ClientID,
-  lc: LogContext,
   perdag: Store,
   mutatorNames: string[],
-  indexes: IndexDefinitions,
-  formatVersion: FormatVersion,
-  enableClientGroupForking: boolean,
-): Promise<InitClientV6Result> {
+): Promise<[client: ClientV6, headHash: Hash, isNewClientGroup: boolean]> {
   return withWrite(perdag, async dagWrite => {
-    async function setClientsAndClientGroupAndCommit(
-      basisHash: Hash | null,
-      cookieJSON: FrozenCookie,
-      valueHash: Hash,
-      indexRecords: readonly IndexRecord[],
-    ): Promise<InitClientV6Result> {
-      const newSnapshotData = newSnapshotCommitDataDD31(
-        basisHash,
-        {},
-        cookieJSON,
-        valueHash,
-        indexRecords,
-      );
-      const chunk = dagWrite.createChunk(
-        newSnapshotData,
-        getRefs(newSnapshotData),
-      );
-
-      const newClientGroupID = makeClientID();
-
-      const newClient: ClientV6 = {
-        heartbeatTimestampMs: Date.now(),
-        refreshHashes: [chunk.hash],
-        persistHash: null,
-        clientGroupID: newClientGroupID,
-      };
-
-      const newClients = new Map(clients).set(newClientID, newClient);
-
-      const clientGroup: ClientGroup = {
-        headHash: chunk.hash,
-        mutatorNames,
-        indexes,
-        mutationIDs: {},
-        lastServerAckdMutationIDs: {},
-        disabled: false,
-      };
-
-      await Promise.all([
-        dagWrite.putChunk(chunk),
-        setClients(newClients, dagWrite),
-        setClientGroup(newClientGroupID, clientGroup, dagWrite),
-      ]);
-
-      return [newClient, chunk.hash, newClients, true];
-    }
-
     const clients = await getClients(dagWrite);
-
-    const res = await findMatchingClient(dagWrite, mutatorNames, indexes);
-    if (res.type === FIND_MATCHING_CLIENT_TYPE_HEAD) {
-      // We found a client group with matching mutators and indexes. We can
-      // reuse it.
-      const {clientGroupID, headHash} = res;
-
-      const newClient: ClientV6 = {
-        clientGroupID,
-        refreshHashes: [headHash],
-        heartbeatTimestampMs: Date.now(),
-        persistHash: null,
-      };
-      const newClients = new Map(clients).set(newClientID, newClient);
-      await setClients(newClients, dagWrite);
-
-      return [newClient, headHash, newClients, false];
-    }
-
-    if (
-      !enableClientGroupForking ||
-      res.type === FIND_MATCHING_CLIENT_TYPE_NEW
-    ) {
-      // No client group to fork from. Create empty snapshot.
-      const emptyBTreeChunk = dagWrite.createChunk(emptyDataNode, []);
-      await dagWrite.putChunk(emptyBTreeChunk);
-
-      // Create indexes
-      const indexRecords: IndexRecord[] = [];
-
-      // At this point the value of replicache is the empty tree so all index
-      // maps will also be the empty tree.
-      for (const [name, indexDefinition] of Object.entries(indexes)) {
-        const chunkIndexDefinition = toChunkIndexDefinition(
-          name,
-          indexDefinition,
-        );
-        indexRecords.push({
-          definition: chunkIndexDefinition,
-          valueHash: emptyBTreeChunk.hash,
-        });
-      }
-
-      return setClientsAndClientGroupAndCommit(
-        null,
-        null,
-        emptyBTreeChunk.hash,
-        indexRecords,
-      );
-    }
-
-    // Now we create a new client and client group that we fork from the found
-    // snapshot.
-    assert(
-      res.type === FIND_MATCHING_CLIENT_TYPE_FORK,
-      'Expected result type to be FORK',
-    );
-
-    const {snapshot} = res;
-
-    // Create indexes
-    const indexRecords: IndexRecord[] = [];
-    const {valueHash, indexes: oldIndexes} = snapshot;
-    const map = new BTreeRead(dagWrite, formatVersion, valueHash);
-
-    for (const [name, indexDefinition] of Object.entries(indexes)) {
-      const {prefix = '', jsonPointer, allowEmpty = false} = indexDefinition;
-      const chunkIndexDefinition: ChunkIndexDefinition = {
-        name,
-        keyPrefix: prefix,
-        jsonPointer,
-        allowEmpty,
-      };
-
-      const oldIndex = findMatchingOldIndex(oldIndexes, chunkIndexDefinition);
-      if (oldIndex) {
-        indexRecords.push({
-          definition: chunkIndexDefinition,
-          valueHash: oldIndex.valueHash,
-        });
-      } else {
-        const indexBTree = await createIndexBTree(
-          lc,
-          dagWrite,
-          map,
-          prefix,
-          jsonPointer,
-          allowEmpty,
-          formatVersion,
-        );
-        indexRecords.push({
-          definition: chunkIndexDefinition,
-          valueHash: await indexBTree.flush(),
-        });
+    const clientGroups = await getClientGroups(dagWrite);
+    const mutatorNamesSet = new Set(mutatorNames);
+    for (const [clientGroupID, clientGroup] of clientGroups) {
+      if (
+        !clientGroup.disabled &&
+        mutatorNamesEqual(mutatorNamesSet, clientGroup.mutatorNames) &&
+        Object.keys(clientGroup.indexes).length === 0
+      ) {
+        const {headHash} = clientGroup;
+        const client: ClientV6 = {
+          clientGroupID,
+          refreshHashes: [headHash],
+          heartbeatTimestampMs: Date.now(),
+          persistHash: null,
+        };
+        await setClients(new Map(clients).set(newClientID, client), dagWrite);
+        return [client, headHash, false];
       }
     }
 
-    return setClientsAndClientGroupAndCommit(
-      snapshot.meta.basisHash,
-      snapshot.meta.cookieJSON,
-      snapshot.valueHash,
-      indexRecords,
+    const emptyBTreeChunk = dagWrite.createChunk(emptyDataNode, []);
+    await dagWrite.putChunk(emptyBTreeChunk);
+    const snapshot = dagWrite.createChunk(
+      newSnapshotCommitDataDD31(null, {}, null, emptyBTreeChunk.hash, []),
+      [emptyBTreeChunk.hash],
     );
+    const clientGroupID = makeClientID();
+    const client: ClientV6 = {
+      clientGroupID,
+      refreshHashes: [snapshot.hash],
+      heartbeatTimestampMs: Date.now(),
+      persistHash: null,
+    };
+    const clientGroup: ClientGroup = {
+      headHash: snapshot.hash,
+      mutatorNames,
+      indexes: {},
+      mutationIDs: {},
+      lastServerAckdMutationIDs: {},
+      disabled: false,
+    };
+    await Promise.all([
+      dagWrite.putChunk(snapshot),
+      setClients(new Map(clients).set(newClientID, client), dagWrite),
+      setClientGroup(clientGroupID, clientGroup, dagWrite),
+    ]);
+    return [client, snapshot.hash, true];
   });
-}
-
-function findMatchingOldIndex(
-  oldIndexes: readonly IndexRecord[],
-  chunkIndexDefinition: ChunkIndexDefinition,
-) {
-  return oldIndexes.find(index =>
-    chunkIndexDefinitionEqualIgnoreName(index.definition, chunkIndexDefinition),
-  );
-}
-
-export const FIND_MATCHING_CLIENT_TYPE_NEW = 0;
-export const FIND_MATCHING_CLIENT_TYPE_FORK = 1;
-export const FIND_MATCHING_CLIENT_TYPE_HEAD = 2;
-
-export type FindMatchingClientResult =
-  | {
-      type: typeof FIND_MATCHING_CLIENT_TYPE_NEW;
-    }
-  | {
-      type: typeof FIND_MATCHING_CLIENT_TYPE_FORK;
-      snapshot: Commit<SnapshotMetaDD31>;
-    }
-  | {
-      type: typeof FIND_MATCHING_CLIENT_TYPE_HEAD;
-      clientGroupID: ClientGroupID;
-      headHash: Hash;
-    };
-
-export async function findMatchingClient(
-  dagRead: Read,
-  mutatorNames: string[],
-  indexes: IndexDefinitions,
-): Promise<FindMatchingClientResult> {
-  let newestCookie: FrozenCookie | undefined;
-  let bestSnapshot: Commit<SnapshotMetaDD31> | undefined;
-  const mutatorNamesSet = new Set(mutatorNames);
-
-  const clientGroups = await getClientGroups(dagRead);
-  for (const [clientGroupID, clientGroup] of clientGroups) {
-    if (
-      !clientGroup.disabled &&
-      mutatorNamesEqual(mutatorNamesSet, clientGroup.mutatorNames) &&
-      indexDefinitionsEqual(indexes, clientGroup.indexes)
-    ) {
-      // exact match
-      return {
-        type: FIND_MATCHING_CLIENT_TYPE_HEAD,
-        clientGroupID,
-        headHash: clientGroup.headHash,
-      };
-    }
-
-    const clientGroupSnapshotCommit = await baseSnapshotFromHash(
-      clientGroup.headHash,
-      dagRead,
-    );
-    assertSnapshotCommitDD31(clientGroupSnapshotCommit);
-
-    const {cookieJSON} = clientGroupSnapshotCommit.meta;
-    if (
-      newestCookie === undefined ||
-      compareCookies(cookieJSON, newestCookie) > 0
-    ) {
-      newestCookie = cookieJSON;
-      bestSnapshot = clientGroupSnapshotCommit;
-    }
-  }
-
-  if (bestSnapshot) {
-    return {
-      type: FIND_MATCHING_CLIENT_TYPE_FORK,
-      snapshot: bestSnapshot,
-    };
-  }
-
-  return {type: FIND_MATCHING_CLIENT_TYPE_NEW};
 }
 
 function getRefsForClients(clients: ClientMap): Refs {

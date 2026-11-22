@@ -35,7 +35,6 @@ import {getKVStoreProvider} from './get-kv-store-provider.ts';
 import {assertHash, emptyHash, type Hash, newRandomHash} from './hash.ts';
 import type {HTTPRequestInfo} from './http-request-info.ts';
 import {httpStatusUnauthorized} from './http-status-unauthorized.ts';
-import type {IndexDefinitions} from './index-defs.ts';
 import type {StoreProvider} from './kv/store.ts';
 import {createLogContext} from './log-options.ts';
 import {makeIDBName} from './make-idb-name.ts';
@@ -183,13 +182,6 @@ export interface ReplicacheImplOptions {
    * @deprecated Not used anymore.
    */
   makeSubscriptionsManager?: unknown;
-
-  /**
-   * Default is `true`.  If `false` if an exact match client group
-   * is not found, a new client group is always made instead of forking
-   * from an existing client group.
-   */
-  enableClientGroupForking?: boolean | undefined;
 
   /**
    * Callback for when Replicache has deleted clients.
@@ -409,7 +401,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       requestOptions = {},
       puller,
       pusher,
-      indexes = {},
       clientMaxAgeMs = CLIENT_MAX_INACTIVE_TIME,
     } = options;
     const {
@@ -417,7 +408,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
       enableScheduledPersist = true,
       enableScheduledRefresh = true,
       enableRefresh = () => true,
-      enableClientGroupForking = true,
       onClientsDeleted = () => promiseVoid,
     } = implOptions;
     this.#zero = implOptions.zero;
@@ -510,8 +500,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     );
 
     void this.#open(
-      indexes,
-      enableClientGroupForking,
       enableMutationRecovery,
       clientMaxAgeMs,
       profileIDResolver.resolve,
@@ -522,8 +510,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   }
 
   async #open(
-    indexes: IndexDefinitions,
-    enableClientGroupForking: boolean,
     enableMutationRecovery: boolean,
     clientMaxAgeMs: number,
     profileIDResolver: (profileID: string) => void,
@@ -539,14 +525,10 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
     liveClientIDs?.add(clientID);
     await this.#idbDatabases.getProfileID().then(profileIDResolver);
     await this.#idbDatabases.putDatabase(this.#idbDatabase);
-    const [client, headHash, , isNewClientGroup] = await initClientV6(
+    const [client, headHash, isNewClientGroup] = await initClientV6(
       clientID,
-      this.#lc,
       this.perdag,
       Object.keys(this.#mutatorRegistry),
-      indexes,
-      FormatVersion.Latest,
-      enableClientGroupForking,
     );
 
     resolveClientGroupID(client.clientGroupID);

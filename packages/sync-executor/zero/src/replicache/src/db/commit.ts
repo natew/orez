@@ -19,7 +19,6 @@ import {
   deepFreeze,
 } from '../frozen-json.ts';
 import {type Hash, assertHash} from '../hash.ts';
-import type {IndexDefinition} from '../index-defs.ts';
 import type {ClientID} from '../sync/ids.ts';
 import * as MetaType from './meta-type-enum.ts';
 
@@ -369,17 +368,6 @@ export type ChunkIndexDefinition = {
   readonly allowEmpty?: boolean;
 };
 
-export function chunkIndexDefinitionEqualIgnoreName(
-  a: ChunkIndexDefinition,
-  b: ChunkIndexDefinition,
-): boolean {
-  return (
-    a.jsonPointer === b.jsonPointer &&
-    (a.allowEmpty ?? false) === (b.allowEmpty ?? false) &&
-    a.keyPrefix === b.keyPrefix
-  );
-}
-
 function assertChunkIndexDefinition(
   v: unknown,
 ): asserts v is ChunkIndexDefinition {
@@ -391,18 +379,6 @@ function assertChunkIndexDefinition(
   if (v.allowEmpty !== undefined) {
     assertBoolean(v.allowEmpty);
   }
-}
-
-export function toChunkIndexDefinition(
-  name: string,
-  indexDefinition: IndexDefinition,
-): Required<ChunkIndexDefinition> {
-  return {
-    name,
-    keyPrefix: indexDefinition.prefix ?? '',
-    jsonPointer: indexDefinition.jsonPointer,
-    allowEmpty: indexDefinition.allowEmpty ?? false,
-  };
 }
 
 export type IndexRecord = {

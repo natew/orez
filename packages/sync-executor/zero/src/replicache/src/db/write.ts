@@ -408,31 +408,3 @@ export function readIndexesForWrite(
   }
   return m;
 }
-
-export async function createIndexBTree(
-  lc: LogContext,
-  dagWrite: DagWrite,
-  valueMap: BTreeRead,
-  prefix: string,
-  jsonPointer: string,
-  allowEmpty: boolean,
-  formatVersion: FormatVersion,
-): Promise<BTreeWrite> {
-  const indexMap = new BTreeWrite(dagWrite, formatVersion);
-  for await (const entry of valueMap.scan(prefix)) {
-    const key = entry[0];
-    if (!key.startsWith(prefix)) {
-      break;
-    }
-    await indexValue(
-      lc,
-      indexMap,
-      IndexOperation.Add,
-      key,
-      entry[1],
-      jsonPointer,
-      allowEmpty,
-    );
-  }
-  return indexMap;
-}

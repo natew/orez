@@ -2,7 +2,6 @@ import type {LogLevel, LogSink} from '@rocicorp/logger';
 import type {InternalDiff} from './btree/node.ts';
 import type {Read, Store} from './dag/store.ts';
 import type {Hash} from './hash.ts';
-import type {IndexDefinitions} from './index-defs.ts';
 import type {StoreProvider} from './kv/store.ts';
 import type {Puller} from './puller.ts';
 import type {Pusher} from './pusher.ts';
@@ -171,11 +170,6 @@ export interface ReplicacheOptions<MD extends MutatorDefs> {
    * Allows providing a custom implementation of the underlying storage layer.
    */
   kvStore?: 'mem' | 'idb' | StoreProvider | undefined;
-
-  /**
-   * Defines the indexes, if any, to use on the data.
-   */
-  readonly indexes?: IndexDefinitions | undefined;
 
   /**
    * The maximum age of a client in milliseconds. If a client hasn't been seen
