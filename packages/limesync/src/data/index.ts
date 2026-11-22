@@ -7,6 +7,7 @@ export * from './helpers/mutatorContext.js'
 export * from './helpers/useMutation.js'
 export { ensureAuth, getAuth } from './helpers/getAuth.js'
 export { setAuthData, setEnvironment } from './state.js'
+export { createDataApp, DataProvider, type DataApp } from './DataProvider.js'
 
 export {
   createZeroClient,

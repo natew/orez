@@ -2,6 +2,7 @@ import { basename, dirname, resolve } from 'node:path'
 
 import { defineCommand } from 'citty'
 
+import { prepareDataApp } from './app-modules.js'
 import { generate, watch } from './generate.js'
 
 export const generateCommand = defineCommand({
@@ -58,5 +59,30 @@ export const generateCommand = defineCommand({
     } else {
       await generate(opts)
     }
+  },
+})
+
+export const prepareCommand = defineCommand({
+  meta: {
+    name: 'prepare',
+    description: 'Prepare typed data modules for tools that cannot load Bun plugins',
+  },
+  args: {
+    dir: {
+      type: 'positional',
+      description: 'Data directory (defaults to data)',
+      required: false,
+    },
+    schema: {
+      type: 'string',
+      description: 'Module exporting schema (defaults to <dir>/schema.ts)',
+    },
+    tsconfig: {
+      type: 'string',
+      description: 'TypeScript project used only for generation',
+    },
+  },
+  async run({ args }) {
+    await prepareDataApp(process.cwd(), args)
   },
 })

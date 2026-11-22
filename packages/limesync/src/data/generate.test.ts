@@ -19,6 +19,7 @@ import {
   generate,
   generateDrizzleSchemaFile,
   generateDrizzleSchemaInputFile,
+  generateModules,
 } from './generate.js'
 import { createNativeTypeScriptProject } from './native-typescript.js'
 
@@ -75,9 +76,14 @@ export const mutate = mutations(schema, permission, {
     expect(dependencies).toContain(ambient)
     expect(dependencies).not.toContain(unrelated)
 
+    const virtual = await generateModules({ dir: dataDir, tsconfig })
+    expect(virtual.watchFiles).toContain(ambient)
+    expect(existsSync(join(dataDir, 'generated'))).toBe(false)
+
     await generate({ dir: dataDir, tsconfig, silent: true })
     const outputPath = join(dataDir, 'generated/syncedMutations.ts')
     expect(readFileSync(outputPath, 'utf8')).toContain('count: v.number()')
+    expect(virtual.files['syncedMutations.ts']).toBe(readFileSync(outputPath, 'utf8'))
 
     writeFileSync(ambient, 'type ScopedArgs = { count: string }')
     await generate({ dir: dataDir, tsconfig, silent: true })

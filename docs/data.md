@@ -23,7 +23,37 @@ plus various hooks and helpers for react integration.
 
 each namespace is either one file exporting its queries and mutations, or a
 folder with `queries.ts` and `mutations.ts`. queries use the global `zql`
-builder. schema is derived from drizzle.
+builder.
+
+## one apps
+
+Export your Zero schema as `schema` from `data/schema.ts` and add
+`limesync()` from `limesync/data/bun` to `bun.plugins` in `one.config.ts`.
+The plugin discovers queries and mutations under `data/` and refreshes their
+registries when source files change.
+
+Import `app` from `limesync:app` and render `<DataProvider app={app}>`
+from `limesync/data`. The provider and `app.client` share a client.
+On the server import `app` from `limesync:app/server` and export the
+handler returned by `createDataServer` from `limesync/data/server`.
+Pass the app's `authData(request)` function, namespace executor and wake secret.
+If an embedded host already serves the sync endpoints, use its origin on
+the provider.
+
+One can build the virtual modules in memory. To use their types in an editor
+or load them from scripts or a worker bundler, run `limesync prepare`
+and add these mappings to `compilerOptions.paths` in `tsconfig.json`.
+
+```json
+{
+  "limesync:app": ["./node_modules/.limesync-data/app/app.ts"],
+  "limesync:app/server": ["./node_modules/.limesync-data/app/app-server.ts"]
+}
+```
+
+Run prepare again after a data source change when using those standalone tools.
+For generic module types without a cache, include `limesync/data/virtual`
+in `compilerOptions.types` instead.
 
 ## queries
 
