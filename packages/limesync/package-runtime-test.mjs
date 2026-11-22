@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -101,6 +102,29 @@ if (typeof built.compiledSql !== 'string' || built.compiledSql.length === 0) {
   )
 
   execFileSync('node', ['build.mjs'], { cwd: consumer, stdio: 'pipe' })
+  const packedRoot = join(nodeModules, 'limesync')
+  const nativeAsyncContext = readFileSync(
+    join(packedRoot, 'dist/data/helpers/asyncContext.native.js'),
+    'utf8'
+  )
+  assert.equal(nativeAsyncContext.includes('import('), false)
+  assert.equal(nativeAsyncContext.includes('nodeAsyncLocalStorageCache'), false)
+  assert.match(
+    readFileSync(join(packedRoot, 'dist/data/index.native.js'), 'utf8'),
+    /mutatorContext\.native\.js/
+  )
+  assert.match(
+    readFileSync(join(packedRoot, 'dist/data/multi.native.js'), 'utf8'),
+    /createZeroClient\.native\.js/
+  )
+  const packedExports = JSON.parse(
+    readFileSync(join(packedRoot, 'package.json'), 'utf8')
+  ).exports
+  assert.equal(packedExports['./data']['react-native'], './dist/data/index.native.js')
+  assert.equal(
+    packedExports['./data/multi']['react-native'],
+    './dist/data/multi.native.js'
+  )
   const native = await import(
     new URL('./node_modules/limesync/dist/native.js', `file://${consumer}/`)
   )

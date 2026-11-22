@@ -155,6 +155,7 @@
     },
     "./data": {
       "types": "./dist/data/index.d.ts",
+      "react-native": "./dist/data/index.native.js",
       "default": "./dist/data/index.js"
     },
     "./data/server": {
@@ -163,6 +164,7 @@
     },
     "./data/multi": {
       "types": "./dist/data/multi.d.ts",
+      "react-native": "./dist/data/multi.native.js",
       "default": "./dist/data/multi.js"
     },
     "./data/streaming": {
@@ -198,7 +200,7 @@
     "limesync": "dist/cli.js"
   },
   "scripts": {
-    "build:runtime": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "build:runtime": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/native-graph.mjs && chmod +x dist/cli.js",
     "build:dependencies": "bun run --cwd ../sync-cf-host build:dist",
     "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime",
     "test": "cd ../.. && vitest run --config vitest.config.ts packages/limesync/src",
