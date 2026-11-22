@@ -6,23 +6,31 @@ import { useEffect, useLayoutEffect } from 'react'
 
 export const IS_WEB: boolean = true
 
+const isClientEnvironment =
+  process.env.VITE_NATIVE === '1' ||
+  process.env.VITE_ENVIRONMENT === 'client' ||
+  process.env.VITE_ENVIRONMENT === 'ios' ||
+  process.env.VITE_ENVIRONMENT === 'android' ||
+  process.env.VITE_ENVIRONMENT === 'macos' ||
+  process.env.VITE_ENVIRONMENT === 'linux'
+
 // RN adds fake window and document so its not simple to get this right
 // check both navigator and location
 export const IS_BROWSER: boolean =
-  process.env.VITE_ENVIRONMENT === 'client' ||
+  isClientEnvironment ||
   (process.env.VITE_ENVIRONMENT !== 'ssr' &&
     typeof navigator !== 'undefined' &&
     typeof location !== 'undefined')
 
 export const IS_SERVER_RUNTIME: boolean =
   process.env.VITE_ENVIRONMENT === 'ssr' ||
-  (process.env.VITE_ENVIRONMENT !== 'client' &&
+  (!isClientEnvironment &&
     typeof process !== 'undefined' &&
     !!process.versions &&
     !!(process.versions.node || (process.versions as any).bun))
 export const IS_SERVER: boolean =
   process.env.VITE_ENVIRONMENT === 'ssr' ||
-  (process.env.VITE_ENVIRONMENT !== 'client' && IS_WEB && !IS_BROWSER)
+  (!isClientEnvironment && IS_WEB && !IS_BROWSER)
 export const IS_CLIENT: boolean = IS_WEB && !IS_SERVER
 
 export const useIsomorphicLayoutEffect: typeof useEffect = IS_SERVER
