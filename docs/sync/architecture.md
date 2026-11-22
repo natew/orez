@@ -1,16 +1,15 @@
 # Architecture
 
 The orez rust sync server is a Zero server that runs on SQLite. It speaks the
-Zero protocol to the real `@rocicorp/zero` client and replaces zero-cache for
+Zero protocol to the `limesync/zero` client and replaces zero-cache for
 deployments where you would rather not run Postgres and a long-lived cache
 process. On Cloudflare it runs as one Durable Object per namespace, holding both
 the sync engine and its SQLite storage inside the same object.
 
-The client half of Zero is unchanged. The ZQL query engine, the local store,
-and optimistic mutations stay exactly as Rocicorp ships them. What orez replaces
-is the server half: replicating upstream data, feeding row changes to clients,
-running custom mutators, tracking per-client last-mutation-ids, and serving
-per-query incremental sync.
+The vendored Zero 1.9.0 client supplies the ZQL query engine, local store,
+and optimistic mutations. Orez replicates upstream data, feeds row changes to
+clients, runs custom mutators, tracks each client's last mutation ID, and
+serves per-query incremental sync.
 
 ## The pieces
 
@@ -293,8 +292,6 @@ On Cloudflare the deployment has two Durable Object roles:
   pushes. Application writes and sync ingestion share the same authoritative
   SQLite object without a Postgres compatibility layer.
 
-The canonical Orez transport integration lives at `limesync/client`, with
-source in `packages/limesync/src/client/`. It keeps `@rocicorp/zero` as the
-client and maps its sync connection onto the Lime Sync pull, push, and wake
-server endpoints. Downstream vendored copies are refreshed from this
-implementation.
+The transport integration lives at `limesync/client`, with source in
+`packages/limesync/src/client/`. It maps the sync connection from
+`limesync/zero` onto the Lime Sync pull, push, and wake server endpoints.

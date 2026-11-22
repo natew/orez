@@ -1,4 +1,4 @@
-import { createSchema, json, string, table } from '@rocicorp/zero'
+import { createSchema, json, string, table } from 'orez-sync-executor/zero'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { defineStreamingFields } from './manifest.js'

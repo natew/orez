@@ -12,8 +12,8 @@
 // discarded, or never flushed — workers, double-rendered roots, concurrent
 // React — the same hole opens.
 
-import { createBuilder, createSchema, string, table } from '@rocicorp/zero'
-import { useZero } from '@rocicorp/zero/react'
+import { createBuilder, createSchema, string, table } from 'limesync/zero'
+import { useZero } from 'limesync/zero/react'
 import { act, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToString } from 'react-dom/server'
@@ -42,8 +42,8 @@ const fakeZero = vi.hoisted(() => {
   return { FakeZero, instances }
 })
 
-vi.mock('@rocicorp/zero', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@rocicorp/zero')>()
+vi.mock('limesync/zero', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('limesync/zero')>()
   return { ...actual, Zero: fakeZero.FakeZero }
 })
 

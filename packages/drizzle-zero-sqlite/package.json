@@ -32,11 +32,9 @@
     }
   },
   "peerDependencies": {
-    "@rocicorp/zero": ">=1.7.0",
     "drizzle-orm": ">=1.0.0-beta.0 <2"
   },
   "devDependencies": {
-    "@rocicorp/zero": "1.9.0",
     "drizzle-orm": "1.0.0-beta.9-e89174b",
     "oxfmt": "0.28.0",
     "oxlint": "1.43.0",
@@ -54,5 +52,8 @@
     "sqlite",
     "schema"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "limesync": "workspace:*"
+  }
 }

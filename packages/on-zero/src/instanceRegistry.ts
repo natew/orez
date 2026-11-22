@@ -11,7 +11,7 @@ import { globalValue } from './helpers/globalValue'
 import { getQueryName } from './queryRegistry'
 
 import type { ZeroRunner } from './zeroRunner'
-import type { AnyQueryRegistry } from '@rocicorp/zero'
+import type { AnyQueryRegistry } from 'limesync/zero'
 
 export type ZeroClientRuntime = {
   zero: unknown | null

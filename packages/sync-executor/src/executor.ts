@@ -26,7 +26,7 @@ import type {
   ServerTransaction,
   SyncExecutor,
 } from './types.js'
-import type { Schema } from '@rocicorp/zero'
+import type { Schema } from 'orez-sync-executor/zero'
 
 const CLEANUP_RESULTS_MUTATION_NAME = '_zero_cleanupResults'
 

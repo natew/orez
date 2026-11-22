@@ -6,7 +6,7 @@
 
 import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
-import type { Schema } from '@rocicorp/zero'
+import type { Schema } from 'orez-sync-executor/zero'
 
 export const harnessSchema = {
   tables: {

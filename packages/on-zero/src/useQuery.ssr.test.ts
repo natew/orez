@@ -10,8 +10,8 @@
 // then read row.name / row.id (SSR saw row=[], client saw row=undefined → text
 // content mismatch).
 
-import { createBuilder, createSchema, number, string, table } from '@rocicorp/zero'
-import { addContextToQuery } from '@rocicorp/zero/bindings'
+import { createBuilder, createSchema, number, string, table } from 'limesync/zero'
+import { addContextToQuery } from 'limesync/zero/bindings'
 import { expect, test } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'

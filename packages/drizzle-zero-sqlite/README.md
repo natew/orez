@@ -17,7 +17,7 @@ export const zeroSchema = drizzleZeroConfig(
 ```
 
 `drizzleZeroConfig()` returns a real Zero schema created with
-`@rocicorp/zero`. Pass it anywhere Zero expects your schema.
+`limesync/zero`. Pass it anywhere Zero expects your schema.
 
 The translator accepts Drizzle `sqliteTable` definitions and beta
 `defineRelations` exports, including `through(...)` relations. It rejects

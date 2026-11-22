@@ -26,7 +26,7 @@ export * from './where'
 export * from './serverWhere'
 export * from './zql'
 export { defineConfig, type DataConfig, type DataInstanceConfig } from './config'
-export { defineQuery, defineQueries } from '@rocicorp/zero'
+export { defineQuery, defineQueries } from 'limesync/zero'
 
 // drizzle-zero re-exports moved to 'on-zero/drizzle' to avoid pulling
 // drizzle-zero + drizzle-orm/_relations into the main bundle

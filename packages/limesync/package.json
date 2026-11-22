@@ -122,6 +122,36 @@
       "types": "./dist/cloudflare-bun-wasm-loader.d.ts",
       "import": "./dist/cloudflare-bun-wasm-loader.js",
       "default": "./dist/cloudflare-bun-wasm-loader.js"
+    },
+    "./zero": {
+      "types": "./dist/zero/zero.d.ts",
+      "import": "./dist/zero/zero.js",
+      "default": "./dist/zero/zero.js"
+    },
+    "./zero/bindings": {
+      "types": "./dist/zero/bindings.d.ts",
+      "import": "./dist/zero/bindings.js",
+      "default": "./dist/zero/bindings.js"
+    },
+    "./zero/react": {
+      "types": "./dist/zero/react.d.ts",
+      "import": "./dist/zero/react.js",
+      "default": "./dist/zero/react.js"
+    },
+    "./zero/server": {
+      "types": "./dist/zero/server.d.ts",
+      "import": "./dist/zero/server.js",
+      "default": "./dist/zero/server.js"
+    },
+    "./zero/op-sqlite": {
+      "types": "./dist/zero/op-sqlite.d.ts",
+      "import": "./dist/zero/op-sqlite.js",
+      "default": "./dist/zero/op-sqlite.js"
+    },
+    "./zero/sqlite": {
+      "types": "./dist/zero/sqlite.d.ts",
+      "import": "./dist/zero/sqlite.js",
+      "default": "./dist/zero/sqlite.js"
     }
   },
   "bin": {
@@ -151,7 +181,6 @@
     "ws": "^8.19.0"
   },
   "peerDependencies": {
-    "@rocicorp/zero": ">=1.7.0",
     "vite": ">=5"
   },
   "peerDependenciesMeta": {
@@ -163,7 +192,6 @@
     "orez-sync-native": "workspace:*"
   },
   "devDependencies": {
-    "@rocicorp/zero": "1.9.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.7",

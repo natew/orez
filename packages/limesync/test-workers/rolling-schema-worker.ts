@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from 'cloudflare:workers'
 // one data worker and one sync host, each built at the schema version wrangler
 // --define selects. rolling-schema-test.mjs restarts this worker over the same
 // persisted state with different versions to replay a real deploy order.
@@ -6,8 +7,7 @@ import {
   defineQueries,
   defineQuery,
   defineQueryWithType,
-} from '@rocicorp/zero'
-import { WorkerEntrypoint } from 'cloudflare:workers'
+} from 'limesync/zero'
 
 import {
   createSyncDurableObject,
@@ -17,7 +17,7 @@ import { createOrezDataWorker } from '../src/cf-do/lite-data-worker.js'
 
 import type { SyncHostConfig, SyncHostEnv } from '../../sync-cf-host/src/index.js'
 import type { OrezDataWorkerEnv } from '../src/cf-do/lite-data-worker.js'
-import type { Schema } from '@rocicorp/zero'
+import type { Schema } from 'limesync/zero'
 
 declare const HOST_SCHEMA: SchemaVersion
 declare const DATA_SCHEMA: SchemaVersion

@@ -1,4 +1,4 @@
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { describe, expect, test, vi } from 'vitest'
 
 import { combineZeroClients } from './combineZeroClients'
@@ -17,7 +17,7 @@ import { setRunner, type ZeroRunner } from './zeroRunner'
 import { zql } from './zql'
 
 import type { ZeroEvent } from './types'
-import type { AnyQueryRegistry, Query } from '@rocicorp/zero'
+import type { AnyQueryRegistry, Query } from 'limesync/zero'
 import type { ReactNode } from 'react'
 
 const userTable = table('user').columns({ id: string(), name: string() }).primaryKey('id')

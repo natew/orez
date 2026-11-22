@@ -1,4 +1,3 @@
-import { createBuilder, string as zeroString, type Row } from '@rocicorp/zero'
 import { defineRelations } from 'drizzle-orm'
 import { pgTable, text as pgText } from 'drizzle-orm/pg-core'
 import {
@@ -9,6 +8,7 @@ import {
   sqliteTable,
   text,
 } from 'drizzle-orm/sqlite-core'
+import { createBuilder, string as zeroString, type Row } from 'limesync/zero'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -17,7 +17,7 @@ import {
   type ZeroCustomType,
 } from '../src/index'
 
-import type { Schema } from '@rocicorp/zero'
+import type { Schema } from 'limesync/zero'
 
 const users = sqliteTable('user_records', {
   id: text().primaryKey(),

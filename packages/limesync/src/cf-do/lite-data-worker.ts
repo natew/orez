@@ -19,13 +19,13 @@ import {
 } from './worker.js'
 
 import type { NamespaceRoutingOptions } from '../worker/cf-do-shim.js'
+import type { Schema } from '../zero/zero.js'
 import type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlRpc,
 } from './application-sql.js'
-import type { Schema } from '@rocicorp/zero'
 
 type MaybePromise<Value> = Value | Promise<Value>
 type JsonRecord = Record<string, unknown>

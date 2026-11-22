@@ -13,7 +13,7 @@
 // worker exposed `publisher` but no `fields`, so a loop written against the
 // local surface could not run on it.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'orez-sync-executor/zero'
 import { describe, expect, it } from 'vitest'
 
 import { applyProducerFrame } from './host.js'

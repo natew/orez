@@ -1,0 +1,27 @@
+export const AbruptClose = 'AbruptClose';
+export const CleanClose = 'CleanClose';
+export const ClientClosed = 'ClientClosed';
+export const ConnectTimeout = 'ConnectTimeout';
+export const Hidden = 'Hidden';
+export const Internal = 'Internal';
+export const InvalidMessage = 'InvalidMessage';
+export const NoSocketOrigin = 'NoSocketOrigin';
+export const Offline = 'Offline';
+export const PingTimeout = 'PingTimeout';
+export const PullTimeout = 'PullTimeout';
+export const UnexpectedBaseCookie = 'UnexpectedBaseCookie';
+export const UserDisconnect = 'UserDisconnect';
+
+export type AbruptClose = typeof AbruptClose;
+export type CleanClose = typeof CleanClose;
+export type ClientClosed = typeof ClientClosed;
+export type ConnectTimeout = typeof ConnectTimeout;
+export type Hidden = typeof Hidden;
+export type Internal = typeof Internal;
+export type InvalidMessage = typeof InvalidMessage;
+export type NoSocketOrigin = typeof NoSocketOrigin;
+export type Offline = typeof Offline;
+export type PingTimeout = typeof PingTimeout;
+export type PullTimeout = typeof PullTimeout;
+export type UnexpectedBaseCookie = typeof UnexpectedBaseCookie;
+export type UserDisconnect = typeof UserDisconnect;

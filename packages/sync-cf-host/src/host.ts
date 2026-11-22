@@ -59,7 +59,6 @@ import {
 } from './write-safeguards.js'
 
 import type { SyncHostConfig, SyncHostEnv, SyncSql } from './types.js'
-import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
   ApplicationTransaction,
@@ -73,6 +72,7 @@ import type {
   RealtimeSocketHost,
   RealtimeTopic,
 } from 'orez-sync-executor/realtime'
+import type { Schema } from 'orez-sync-executor/zero'
 
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
 const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'

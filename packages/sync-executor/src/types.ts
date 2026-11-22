@@ -3,7 +3,7 @@ import type {
   Query,
   Schema,
   ServerTransaction as ZeroServerTransaction,
-} from '@rocicorp/zero'
+} from 'orez-sync-executor/zero'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue =

@@ -1,4 +1,4 @@
-import { createSchema, defineQueries, defineQuery, string, table } from '@rocicorp/zero'
+import { createSchema, defineQueries, defineQuery, string, table } from 'limesync/zero'
 import * as v from 'valibot'
 import { describe, expect, test, vi } from 'vitest'
 

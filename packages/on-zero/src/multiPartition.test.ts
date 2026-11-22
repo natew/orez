@@ -1,4 +1,4 @@
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { describe, expect, test, vi } from 'vitest'
 
 import { getInstanceForQueryFn } from './instanceRegistry'

@@ -8,7 +8,7 @@ import type {
   TableBuilderWithColumns,
   Schema as ZeroSchema,
   Transaction as ZeroTransaction,
-} from '@rocicorp/zero'
+} from 'limesync/zero'
 
 /**
  * ➗0️⃣ START OVERRIDDEN TYPES

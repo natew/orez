@@ -1,7 +1,7 @@
 import { serializeQueryParams } from './queryJson'
 import { getQueryName } from './queryRegistry'
 
-import type { AnyQueryRegistry, Query, Schema as ZeroSchema } from '@rocicorp/zero'
+import type { AnyQueryRegistry, Query, Schema as ZeroSchema } from 'limesync/zero'
 
 export type PlainQueryFn<
   TArg = any,

@@ -10,7 +10,7 @@ import { queries } from '../../../harness/src/query-resolver.mjs'
 import { harnessSchema, harnessStreaming } from './harness-schema.js'
 import { type SyncHostConfig, type SyncHostEnv, type SyncSql } from './index.js'
 
-import type { AnyQueryRegistry, Schema } from '@rocicorp/zero'
+import type { AnyQueryRegistry, Schema } from 'orez-sync-executor/zero'
 
 const DDL = [
   'CREATE TABLE IF NOT EXISTS "user" (id TEXT PRIMARY KEY, name TEXT NOT NULL)',

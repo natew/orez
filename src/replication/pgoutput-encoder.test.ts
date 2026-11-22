@@ -416,7 +416,7 @@ describe('pgoutput-encoder', () => {
     // relative path bypasses package.json exports restriction
     const parserPath = join(
       import.meta.dirname,
-      '../../node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/logical-replication/pgoutput-parser.js'
+      '../../harness/node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/logical-replication/pgoutput-parser.js'
     )
 
     // mock type parsers: unknown OIDs default to String (identity for text)
@@ -650,12 +650,12 @@ describe('pgoutput-encoder', () => {
       // verify lexi version ordering is preserved
       const lexiPath = join(
         import.meta.dirname,
-        '../../node_modules/@rocicorp/zero/out/zero-cache/src/types/lexi-version.js'
+        '../../harness/node_modules/@rocicorp/zero/out/zero-cache/src/types/lexi-version.js'
       )
       const { versionToLexi } = await import(lexiPath)
       const lsnPath = join(
         import.meta.dirname,
-        '../../node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/lsn.js'
+        '../../harness/node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/lsn.js'
       )
       const { toBigInt: lsnToBigInt } = await import(lsnPath)
 

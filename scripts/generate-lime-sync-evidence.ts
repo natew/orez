@@ -399,9 +399,9 @@ async function generate(): Promise<void> {
   }
 
   const evidence = readJson<Evidence>(evidencePath)
-  const rootPackage = readJson<{
-    devDependencies: Record<string, string>
-  }>(join(root, 'package.json'))
+  const harnessPackage = readJson<{
+    dependencies: Record<string, string>
+  }>(join(root, 'harness/package.json'))
   const litePackage = readJson<{ version: string }>(
     join(root, 'packages/limesync/package.json')
   )
@@ -478,7 +478,7 @@ async function generate(): Promise<void> {
     )
   }
   evidence.versions = {
-    zero: rootPackage.devDependencies['@rocicorp/zero'],
+    zero: harnessPackage.dependencies['@rocicorp/zero'],
     rust: rustVersion(),
     sqlite: sqliteVersion(libsqlite3Sys),
     rusqlite: packageVersion('rusqlite'),

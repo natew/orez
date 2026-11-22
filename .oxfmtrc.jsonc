@@ -38,5 +38,6 @@
     "**/tsconfig.json",
     "**/*.lock",
     "scripts/sync-native-licenses.hbs",
+    "packages/sync-executor/zero/src/**",
   ],
 }

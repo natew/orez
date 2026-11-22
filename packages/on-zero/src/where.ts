@@ -3,7 +3,7 @@ import { globalValue } from './helpers/globalValue'
 import { getEnvironment } from './state'
 
 import type { TableName, Where } from './types'
-import type { Condition, ExpressionBuilder } from '@rocicorp/zero'
+import type { Condition, ExpressionBuilder } from 'limesync/zero'
 
 // when true, serverWhere bypasses the client no-op so nested serverWhere
 // calls inside permission builders actually evaluate on the client

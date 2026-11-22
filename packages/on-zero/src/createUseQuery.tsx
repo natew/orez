@@ -1,5 +1,5 @@
-import { addContextToQuery, asQueryInternals } from '@rocicorp/zero/bindings'
-import { useQuery as zeroUseQuery, useZero } from '@rocicorp/zero/react'
+import { addContextToQuery, asQueryInternals } from 'limesync/zero/bindings'
+import { useQuery as zeroUseQuery, useZero } from 'limesync/zero/react'
 import { useContext, useEffect, useMemo, useRef, type Context } from 'react'
 
 import { IS_SERVER_RUNTIME } from './helpers/platform'
@@ -14,7 +14,7 @@ import type {
   Query,
   Schema as ZeroSchema,
   TTL,
-} from '@rocicorp/zero'
+} from 'limesync/zero'
 
 // false = enabled, 'empty' = disabled (return empty), 'last-value' = disabled (return cached)
 export type QueryControlMode = false | 'empty' | 'last-value'

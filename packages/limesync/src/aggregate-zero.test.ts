@@ -1,9 +1,9 @@
-import { Zero, createSchema, number, string, table } from '@rocicorp/zero'
 import { afterEach, expect, test } from 'vitest'
 
 import { count, defineAggregates, sum, withOptimisticAggregates } from './aggregate.js'
+import { Zero, createSchema, number, string, table } from './zero/zero.js'
 
-import type { Transaction } from '@rocicorp/zero'
+import type { Transaction } from './zero/zero.js'
 
 const expense = table('expense')
   .columns({ id: string(), category: string(), amount: number() })

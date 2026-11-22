@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 
-import * as zero from '@rocicorp/zero'
+import * as zero from 'limesync/zero'
 import * as v from 'valibot'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -258,7 +258,7 @@ export const relations = defineRelations(schema, (r) => ({
   test('preserves schemas owned by drizzle-zero configuration', async () => {
     const dataDir = join(testDir, 'src/data')
     const schemaPath = join(dataDir, 'generated/schema.ts')
-    const externalSchema = `import { createSchema, table, string } from '@rocicorp/zero'
+    const externalSchema = `import { createSchema, table, string } from 'limesync/zero'
 export const schema = createSchema({
   tables: [table('post').columns({ id: string() }).primaryKey('id')],
 })

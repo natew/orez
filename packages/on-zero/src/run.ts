@@ -8,7 +8,7 @@ import type {
   HumanReadable,
   Query,
   Schema as ZeroSchema,
-} from '@rocicorp/zero'
+} from 'limesync/zero'
 
 let customQueriesRef: AnyQueryRegistry | null = null
 

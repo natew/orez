@@ -1,4 +1,4 @@
-import { UpdateNeededReasonType } from '@rocicorp/zero'
+import { UpdateNeededReasonType } from 'limesync/zero'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 // @vitest-environment jsdom

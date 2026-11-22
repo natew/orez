@@ -3,7 +3,7 @@
 // RealtimeStore subscribers. Only the sockets are stand-ins, and they are just
 // function calls.
 
-import { createSchema, json, string, table } from '@rocicorp/zero'
+import { createSchema, json, string, table } from 'orez-sync-executor/zero'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { RealtimeHub } from './hub.js'

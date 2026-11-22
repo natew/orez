@@ -1,6 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
-import { createBuilder, defineQueries, defineQuery } from '@rocicorp/zero'
 import { WorkerEntrypoint } from 'cloudflare:workers'
+import { createBuilder, defineQueries, defineQuery } from 'limesync/zero'
 import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
 import {
@@ -12,7 +12,7 @@ import { createOrezDataWorker } from '../src/cf-do/lite-data-worker.js'
 
 import type { SyncHostConfig, SyncHostEnv } from '../../sync-cf-host/src/index.js'
 import type { OrezDataWorkerEnv } from '../src/cf-do/lite-data-worker.js'
-import type { Schema } from '@rocicorp/zero'
+import type { Schema } from 'limesync/zero'
 
 const schema = {
   tables: {

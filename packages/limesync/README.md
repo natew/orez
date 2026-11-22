@@ -3,7 +3,10 @@
 `limesync` is the SQLite and Rust sync engine for Zero applications.
 
 - `limesync` provides the host-neutral mutation executor.
-- `limesync/client` connects a stock Zero client to the HTTP sync protocol.
+- `limesync/zero` supplies the Zero client, schema and query builders.
+- `limesync/zero/react` supplies the React provider and hooks.
+- `limesync/zero/server` supplies the application query and mutation request handlers.
+- `limesync/client` connects the client to the HTTP sync protocol.
 - `limesync/browser` runs the engine with SQLite WASM in a browser worker.
 - `limesync/native` runs the prebuilt native engine from an application-owned
   Zero schema, SQLite initializer, and HTTP policy callbacks.
@@ -16,6 +19,10 @@
 
 The package derives its database projection from the application’s Zero schema.
 Applications do not maintain separate table or column maps.
+
+Import schema builders, query definitions and `Zero` from `limesync/zero`.
+Register generated schema types with `declare module 'limesync/zero'`. The client
+is based on Zero 1.9.0 and includes the maintained fork's database lifetime fixes.
 
 The HTTP client reports rejected pull and push status codes through its lifecycle
 callback. A 401 or 403 emits Zero's `Unauthorized` frame and parks the client in

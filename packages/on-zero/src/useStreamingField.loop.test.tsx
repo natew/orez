@@ -13,8 +13,8 @@
 // description looped React until the whole pane tree unmounted. The hooks now
 // carry their own per-hook stabilization, which this file locks in.
 
-import { createSchema, string, table } from '@rocicorp/zero'
 import { createLocalRealtime, defineStreamingFields } from 'limesync/realtime'
+import { createSchema, string, table } from 'limesync/zero'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'

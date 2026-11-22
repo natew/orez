@@ -1,5 +1,4 @@
 import type { TransactionQueryBudget } from './transaction-query.js'
-import type { AnyQueryRegistry, Schema } from '@rocicorp/zero'
 import type {
   ExecResult,
   MutatorRegistry,
@@ -7,6 +6,7 @@ import type {
   SqlStatementMetadata,
 } from 'orez-sync-executor'
 import type { StreamingManifest } from 'orez-sync-executor/realtime'
+import type { AnyQueryRegistry, Schema } from 'orez-sync-executor/zero'
 
 export interface SyncSql {
   exec(

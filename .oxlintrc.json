@@ -11,5 +11,13 @@
     "no-constant-binary-expression": "off",
     "no-control-regex": "off"
   },
-  "ignorePatterns": ["**/dist/**", "**/*.d.ts", "**/node_modules/**"]
+  "ignorePatterns": ["**/dist/**", "**/*.d.ts", "**/node_modules/**"],
+  "overrides": [
+    {
+      "files": ["packages/sync-executor/zero/src/**"],
+      "rules": {
+        "import/no-cycle": "off"
+      }
+    }
+  ]
 }

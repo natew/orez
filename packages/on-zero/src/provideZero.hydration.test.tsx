@@ -16,7 +16,7 @@
 // the SAME number of child slots inside ZeroContext.Provider — child index
 // stability is what keeps useId stable.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { useId, type ReactNode } from 'react'
 import { renderToString } from 'react-dom/server'
 import { expect, test } from 'vitest'

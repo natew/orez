@@ -1,0 +1,118 @@
+import type {
+  RowCountsByQuery,
+  RowCountsBySource,
+  RowsByQuery,
+  RowsBySource,
+} from '../../../zero-protocol/src/analyze-query-result.ts';
+import {type Row} from '../../../zero-protocol/src/data.ts';
+
+export const runtimeDebugFlags = {
+  trackRowCountsVended: false,
+  trackRowsVended: false,
+};
+
+type SourceName = string;
+type SQL = string;
+
+export type SQLitePlans = Record<SQL, string[]>;
+
+export interface DebugDelegate {
+  initQuery(table: SourceName, query: SQL): void;
+  rowVended(table: SourceName, query: SQL, row: Row): void;
+  getVendedRowCounts(): RowCountsBySource;
+  getVendedRows(): RowsBySource;
+  recordNVisit(table: SourceName, query: SQL, nvisit: number): void;
+  getNVisitCounts(): RowCountsBySource;
+  recordExplain(table: SourceName, query: SQL, plan: string[]): void;
+  getSQLitePlans(): SQLitePlans;
+  // clears all internal state
+  reset(): void;
+}
+
+export class Debug implements DebugDelegate {
+  #rowCountsBySource: RowCountsBySource;
+  #rowsBySource: RowsBySource;
+  #nvisitBySource: RowCountsBySource;
+  #plans: SQLitePlans;
+
+  constructor() {
+    this.#rowCountsBySource = {};
+    this.#rowsBySource = {};
+    this.#nvisitBySource = {};
+    this.#plans = {};
+  }
+
+  getVendedRowCounts(): RowCountsBySource {
+    return this.#rowCountsBySource;
+  }
+
+  getVendedRows(): RowsBySource {
+    return this.#rowsBySource;
+  }
+
+  getNVisitCounts(): RowCountsBySource {
+    return this.#nvisitBySource;
+  }
+
+  getSQLitePlans(): SQLitePlans {
+    return this.#plans;
+  }
+
+  initQuery(table: SourceName, query: SQL): void {
+    const {counts} = this.#getRowStats(table);
+    if (counts) {
+      if (!counts[query]) {
+        counts[query] = 0;
+      }
+    }
+  }
+
+  reset(): void {
+    this.#rowCountsBySource = {};
+    this.#rowsBySource = {};
+    this.#nvisitBySource = {};
+    this.#plans = {};
+  }
+
+  rowVended(table: SourceName, query: SQL, row: Row): void {
+    const {counts, rows} = this.#getRowStats(table);
+    if (counts) {
+      counts[query] = (counts[query] ?? 0) + 1;
+    }
+    if (rows) {
+      (rows[query] ??= []).push(row);
+    }
+  }
+
+  recordNVisit(table: SourceName, query: SQL, nvisit: number): void {
+    let nvisitCounts = this.#nvisitBySource[table];
+    if (!nvisitCounts) {
+      nvisitCounts = {};
+      this.#nvisitBySource[table] = nvisitCounts;
+    }
+    if (!nvisitCounts[query]) {
+      nvisitCounts[query] = 0;
+    }
+    nvisitCounts[query] += nvisit;
+  }
+
+  recordExplain(_table: SourceName, query: SQL, plan: string[]): void {
+    this.#plans[query] = plan;
+  }
+
+  #getRowStats(source: SourceName) {
+    let counts: RowCountsByQuery | undefined;
+    let rows: RowsByQuery | undefined;
+    counts = this.#rowCountsBySource[source];
+    if (!counts) {
+      counts = {};
+      this.#rowCountsBySource[source] = counts;
+    }
+    rows = this.#rowsBySource[source];
+    if (!rows) {
+      rows = {};
+      this.#rowsBySource[source] = rows;
+    }
+    return {counts, rows};
+  }
+}

@@ -8,7 +8,7 @@
 // scheduling for 8 minutes). acknowledgement has to follow the instance that
 // issued the mutation.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'

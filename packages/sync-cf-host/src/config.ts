@@ -1,5 +1,5 @@
 import type { SyncHostConfig, SyncHostEnv } from './types.js'
-import type { Schema } from '@rocicorp/zero'
+import type { Schema } from 'orez-sync-executor/zero'
 
 export function validateSyncHostConfig<
   Env extends SyncHostEnv,

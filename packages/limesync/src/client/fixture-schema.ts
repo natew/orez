@@ -1,6 +1,6 @@
-import { createSchema, relationships, string, table } from '@rocicorp/zero'
+import { createSchema, relationships, string, table } from '../zero/zero.js'
 
-import type { Transaction } from '@rocicorp/zero'
+import type { Transaction } from '../zero/zero.js'
 
 const user = table('user')
   .from('user_record')

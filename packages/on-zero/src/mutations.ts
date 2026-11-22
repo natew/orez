@@ -9,7 +9,7 @@ import type {
   TableUpdateRow,
   Where,
 } from './types'
-import type { TableBuilderWithColumns } from '@rocicorp/zero'
+import type { TableBuilderWithColumns } from 'limesync/zero'
 
 // derive a TableBuilderWithColumns from the global schema by table name
 type SchemaTableBuilder<TName extends TableName> = TableBuilderWithColumns<

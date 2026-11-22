@@ -1,4 +1,3 @@
-import { createSchema, number, string, table } from '@rocicorp/zero'
 // @ts-expect-error - CJS module
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it } from 'vitest'
@@ -12,6 +11,7 @@ import {
   withOptimisticAggregates,
 } from './aggregate.js'
 import { TransactionalCdc } from './cf-do/cdc.js'
+import { createSchema, number, string, table } from './zero/zero.js'
 
 import type { DurableSqlStorage } from './cf-do/watermark.js'
 

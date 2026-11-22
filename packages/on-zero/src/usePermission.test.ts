@@ -1,4 +1,4 @@
-import { boolean, createBuilder, string, table } from '@rocicorp/zero'
+import { boolean, createBuilder, string, table } from 'limesync/zero'
 import { describe, expect, test } from 'vitest'
 
 import {

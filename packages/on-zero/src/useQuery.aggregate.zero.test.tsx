@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
-import { createBuilder, createSchema, number, string, table } from '@rocicorp/zero'
 import { count, defineAggregates, sum } from 'limesync/aggregate'
 import { createZeroClientTransport, type HttpPullTransport } from 'limesync/client'
+import { createBuilder, createSchema, number, string, table } from 'limesync/zero'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'

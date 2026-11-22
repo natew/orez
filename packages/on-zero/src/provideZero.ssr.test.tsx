@@ -5,8 +5,8 @@
 // nothing: a render pass on the server must never open a store or a socket,
 // and every descendant still gets the inert stub plus DisabledContext='empty'.
 
-import { createSchema, string, table } from '@rocicorp/zero'
-import { useZero } from '@rocicorp/zero/react'
+import { createSchema, string, table } from 'limesync/zero'
+import { useZero } from 'limesync/zero/react'
 import { renderToString } from 'react-dom/server'
 import { expect, test, vi } from 'vitest'
 
@@ -20,8 +20,8 @@ const fakeZero = vi.hoisted(() => {
   return { FakeZero, instances }
 })
 
-vi.mock('@rocicorp/zero', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@rocicorp/zero')>()
+vi.mock('limesync/zero', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('limesync/zero')>()
   return { ...actual, Zero: fakeZero.FakeZero }
 })
 

@@ -17,7 +17,7 @@ import {
   number,
   string,
   table,
-} from '@rocicorp/zero'
+} from 'orez-sync-executor/zero'
 
 import { findPort } from '../../src/port.ts'
 import { installHttpPullTransport } from '../limesync/src/client/transport.ts'

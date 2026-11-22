@@ -1,4 +1,4 @@
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { defineConfig } from 'on-zero'
 import { createZeroClients, type ZeroInstanceManifestEntry } from 'on-zero/multi'
 

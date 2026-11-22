@@ -1,6 +1,6 @@
-import { Zero, defineMutator, defineMutators } from '@rocicorp/zero'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { Zero, defineMutator, defineMutators } from '../zero/zero.js'
 import { createEncryptedColumnCodec } from './encrypted-column-codec.js'
 import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
 import {

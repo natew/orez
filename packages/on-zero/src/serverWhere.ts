@@ -1,7 +1,7 @@
 import { where } from './where'
 
 import type { TableName, Where } from './types'
-import type { Condition } from '@rocicorp/zero'
+import type { Condition } from 'limesync/zero'
 
 export function serverWhere<Table extends TableName, Builder extends Where<Table>>(
   tableName: Table,

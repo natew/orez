@@ -5,7 +5,7 @@
 // mid-transition — but a REAL logout (auth token gone) must clear it, or client
 // mutators keep running as the old user until the instance rotates.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'

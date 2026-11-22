@@ -2,7 +2,7 @@ import { globalValue } from './globalValue'
 
 import type { ZeroEventsEmitter, ZeroRecoveryReasonKey } from '../types'
 import type { Context, LogLevel, LogSink } from '@rocicorp/logger'
-import type { UpdateNeededReason } from '@rocicorp/zero'
+import type { UpdateNeededReason } from 'limesync/zero'
 
 // per-reason guard window: the SAME reason re-failing right after its reload is
 // surfaced as fatal instead of reload-storming on something the reload can't fix.
@@ -905,7 +905,7 @@ function performReload(deps: ZeroRecoveryDeps): Promise<void> {
   // now — disarm it before the (possibly slow) delete/beforeReload chain so it
   // can't fire mid-flight and re-open scheduling under an in-progress reload.
   disarmReloadLatchTimeout()
-  // resolve the reload exactly as @rocicorp/zero does internally
+  // resolve the reload exactly as limesync/zero does internally
   // (`getBrowserGlobal('location')?.reload()`, zero.js): read location off the
   // global and optional-chain through it. a non-DOM host with a `window` shim
   // but no real `location` (the sootsim tenant render-worker hides `location`

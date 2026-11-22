@@ -31,7 +31,6 @@ import type {
   BrowserSyncHostOperation,
   BrowserSyncHostTransaction,
 } from './types.js'
-import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
   ApplicationTransaction,
@@ -43,6 +42,7 @@ import type {
   SqlStatementMetadata,
   SyncExecutor,
 } from 'orez-sync-executor'
+import type { Schema } from 'orez-sync-executor/zero'
 
 export type BrowserHostTestFaultPoint =
   | 'before_mutation'

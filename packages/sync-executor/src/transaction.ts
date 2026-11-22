@@ -1,5 +1,5 @@
-import { createBuilder } from '@rocicorp/zero'
-import { asQueryInternals } from '@rocicorp/zero/bindings'
+import { createBuilder } from 'orez-sync-executor/zero'
+import { asQueryInternals } from 'orez-sync-executor/zero/bindings'
 
 import { executeCrud } from './crud.js'
 
@@ -9,7 +9,7 @@ import type {
   ServerTransaction,
   TransactionQueryFormat,
 } from './types.js'
-import type { HumanReadable, Query, Schema } from '@rocicorp/zero'
+import type { HumanReadable, Query, Schema } from 'orez-sync-executor/zero'
 
 export function createServerTransaction<S extends Schema>(
   schema: S,

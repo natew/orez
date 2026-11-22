@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { createSchema, string, table, UpdateNeededReasonType } from '@rocicorp/zero'
+import { createSchema, string, table, UpdateNeededReasonType } from 'limesync/zero'
 import { act, Suspense, useLayoutEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -67,8 +67,8 @@ const fakeZero = vi.hoisted(() => {
   return { FakeZero, instances, group, setConnectionState }
 })
 
-vi.mock('@rocicorp/zero', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@rocicorp/zero')>()
+vi.mock('limesync/zero', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('limesync/zero')>()
   return {
     ...actual,
     Zero: fakeZero.FakeZero,

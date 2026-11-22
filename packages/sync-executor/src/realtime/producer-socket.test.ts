@@ -6,7 +6,7 @@
 // so these exercise the actual frame encoding, the actual routing in host.ts,
 // and the actual hub. What is faked is only the wire itself.
 
-import { createSchema, json, string, table } from '@rocicorp/zero'
+import { createSchema, json, string, table } from 'orez-sync-executor/zero'
 import { describe, expect, it } from 'vitest'
 
 import { applyProducerFrame } from './host.js'

@@ -24,7 +24,7 @@ const chatPackagePaths = [
   resolve(chatRoot, 'packages/start-server/runtime/package.json'),
 ]
 const [orezPackage, ...chatPackages] = await Promise.all([
-  readPackage(resolve(orezRoot, 'package.json')),
+  readPackage(resolve(orezRoot, 'harness/package.json')),
   ...chatPackagePaths.map(readPackage),
 ])
 const orezZero = versionOf(orezPackage, '@rocicorp/zero')

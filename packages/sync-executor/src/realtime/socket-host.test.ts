@@ -6,7 +6,7 @@
 // host, take its subscriptions, throw the host away, and rebuild from what a
 // runtime would have persisted.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'orez-sync-executor/zero'
 import { describe, expect, it } from 'vitest'
 
 import { defineStreamingFields } from './manifest.js'

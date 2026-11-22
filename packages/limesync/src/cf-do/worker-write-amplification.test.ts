@@ -1,10 +1,10 @@
-import { createSchema, number, string, table } from '@rocicorp/zero'
 // @ts-expect-error - CJS module
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
 import { count, defineAggregates, aggregateMigrationStatements } from '../aggregate.js'
 import { RollingRowWriteBudget } from '../do-sql-tracking.js'
+import { createSchema, number, string, table } from '../zero/zero.js'
 import { TransactionalCdc } from './cdc.js'
 import { beginTxJournal, commitTxJournal, TX_MANIFEST_DDL } from './tx-journal.js'
 import { DurableWatermarkState } from './watermark.js'

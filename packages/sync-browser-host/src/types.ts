@@ -1,4 +1,3 @@
-import type { AnyQueryRegistry, Schema } from '@rocicorp/zero'
 import type { TransactionQueryBudget } from 'orez-sync-cf-host/transaction-query'
 import type {
   AuthData,
@@ -7,6 +6,7 @@ import type {
   SqlStatementMetadata,
   SyncExecutor,
 } from 'orez-sync-executor'
+import type { AnyQueryRegistry, Schema } from 'orez-sync-executor/zero'
 
 export interface SyncSql {
   exec(

@@ -5,7 +5,7 @@ import type {
   Query,
   RunOptions,
   Schema as ZeroSchema,
-} from '@rocicorp/zero'
+} from 'limesync/zero'
 
 export type { RunOptions }
 

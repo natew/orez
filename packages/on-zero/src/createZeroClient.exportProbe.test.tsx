@@ -1,9 +1,9 @@
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { describe, expect, test } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'
 
-import type { Query } from '@rocicorp/zero'
+import type { Query } from 'limesync/zero'
 
 const userTable = table('user').columns({ id: string(), name: string() }).primaryKey('id')
 const schema = createSchema({ tables: [userTable] })

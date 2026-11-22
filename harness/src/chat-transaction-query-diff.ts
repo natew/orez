@@ -7,16 +7,16 @@ import { inspect } from 'node:util'
 import { PGlite } from '@electric-sql/pglite'
 
 import {
-  compile,
-  extractZqlResult,
-} from '../../node_modules/@rocicorp/zero/out/z2s/src/compiler.js'
-import { formatPgInternalConvert } from '../../node_modules/@rocicorp/zero/out/z2s/src/sql.js'
-import { getServerSchema } from '../../node_modules/@rocicorp/zero/out/zero-server/src/schema.js'
-import {
   engine_compile_query,
   initSync,
 } from '../../packages/sync-cf-host/src/generated/sync_wasm.js'
 import { executeTransactionQueryPlan } from '../../packages/sync-cf-host/src/transaction-query.js'
+import {
+  compile,
+  extractZqlResult,
+} from '../node_modules/@rocicorp/zero/out/z2s/src/compiler.js'
+import { formatPgInternalConvert } from '../node_modules/@rocicorp/zero/out/z2s/src/sql.js'
+import { getServerSchema } from '../node_modules/@rocicorp/zero/out/zero-server/src/schema.js'
 
 type ColumnType = 'string' | 'number' | 'boolean' | 'json'
 

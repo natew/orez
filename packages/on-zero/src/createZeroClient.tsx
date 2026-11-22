@@ -3,13 +3,13 @@ import {
   defineQueries,
   defineQuery,
   Zero as ZeroClient,
-} from '@rocicorp/zero'
+} from 'limesync/zero'
 import {
   useConnectionState,
   useZero,
   ZeroContext,
   ZeroProvider,
-} from '@rocicorp/zero/react'
+} from 'limesync/zero/react'
 import {
   createContext,
   memo,
@@ -70,6 +70,8 @@ import type {
   ZeroEventsEmitter,
   ZeroReconnectReasonKey,
 } from './types'
+import type { AggregateSet } from 'limesync/aggregate'
+import type { HttpPullLifecycleEvent, HttpPullTransport } from 'limesync/client'
 import type {
   AnyQueryRegistry,
   Query,
@@ -77,9 +79,7 @@ import type {
   Zero,
   ZeroOptions,
   Schema as ZeroSchema,
-} from '@rocicorp/zero'
-import type { AggregateSet } from 'limesync/aggregate'
-import type { HttpPullLifecycleEvent, HttpPullTransport } from 'limesync/client'
+} from 'limesync/zero'
 
 type PreloadOptions = { ttl?: 'always' | 'never' | number | undefined }
 

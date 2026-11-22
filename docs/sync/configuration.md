@@ -102,7 +102,7 @@ not call an application transform endpoint or require a service binding for
 query resolution.
 
 ```ts
-import { defineQueries, defineQuery } from '@rocicorp/zero'
+import { defineQueries, defineQuery } from 'limesync/zero'
 import { zql } from './zero.generated'
 
 export const appQueries = defineQueries({
@@ -269,7 +269,7 @@ authenticated claims as context. A client with no desired queries receives no
 application rows.
 
 ```ts
-import { defineQueries, defineQuery } from '@rocicorp/zero'
+import { defineQueries, defineQuery } from 'limesync/zero'
 import { createNativeHost } from 'limesync/native'
 import { zql } from './zero.generated'
 

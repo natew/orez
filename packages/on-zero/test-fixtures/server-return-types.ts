@@ -1,8 +1,8 @@
-import { string, table } from '@rocicorp/zero'
+import { string, table } from 'limesync/zero'
 import { mutations, serverWhere } from 'on-zero'
 import { createZeroServerBindings, type ZeroServerExecutor } from 'on-zero/server'
 
-import type { Schema as ZeroSchema } from '@rocicorp/zero'
+import type { Schema as ZeroSchema } from 'limesync/zero'
 import type { Config, MutatorContext } from 'on-zero'
 
 type AppAuthData = {

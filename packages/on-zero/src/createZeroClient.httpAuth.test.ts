@@ -1,5 +1,5 @@
-import { createSchema, string, table } from '@rocicorp/zero'
 import { createZeroClientTransport } from 'limesync/client'
+import { createSchema, string, table } from 'limesync/zero'
 import { expect, test, vi } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'

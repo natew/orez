@@ -1,7 +1,7 @@
 {
   "name": "on-zero",
   "version": "0.16.21",
-  "description": "A typed layer over @rocicorp/zero with queries, mutations, and permissions",
+  "description": "A typed layer over the Lime Sync client with queries, mutations, and permissions",
   "sideEffects": false,
   "files": [
     "dist",
@@ -118,7 +118,6 @@
     "valibot": "^1.1.0"
   },
   "peerDependencies": {
-    "@rocicorp/zero": ">=1.7.0",
     "drizzle-orm": ">=1.0.0-beta.0 <2",
     "drizzle-zero-sqlite": "^0.6.0",
     "react": "*",

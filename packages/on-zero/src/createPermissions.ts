@@ -9,7 +9,7 @@ import type {
   ExpressionBuilder,
   Query,
   Schema as ZeroSchema,
-} from '@rocicorp/zero'
+} from 'limesync/zero'
 
 export class PermissionError extends Error {
   constructor(message: string) {

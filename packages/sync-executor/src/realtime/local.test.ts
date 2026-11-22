@@ -6,7 +6,7 @@
 // message.parts is a text column holding a JSON array that is REPLACED rather
 // than extended. That last one is the trap this file is most concerned with.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'orez-sync-executor/zero'
 import { describe, expect, it } from 'vitest'
 
 import { createLocalRealtime } from './local.js'

@@ -1,7 +1,7 @@
 import type { BrowserHostTestHooks, BrowserHostTestFaultPoint } from './host.js'
 import type { BrowserSyncHost, BrowserSyncHostPortClient } from './types.js'
-import type { Schema } from '@rocicorp/zero'
 import type { SqlStatementMetadata } from 'orez-sync-executor'
+import type { Schema } from 'orez-sync-executor/zero'
 
 type SerializedRequest = {
   url: string

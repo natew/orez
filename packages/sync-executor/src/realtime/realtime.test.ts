@@ -1,4 +1,4 @@
-import { createSchema, json, number, string, table } from '@rocicorp/zero'
+import { createSchema, json, number, string, table } from 'orez-sync-executor/zero'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import canonicalPkVectors from '../../../../harness/fixtures/canonical-pk-vectors.json' with { type: 'json' }

@@ -1,6 +1,6 @@
 import { ellipsis } from './ellipsis'
 
-import type { Query } from '@rocicorp/zero'
+import type { Query } from 'limesync/zero'
 
 export const prettyFormatZeroQuery = (
   query: Query<any, any, any>,

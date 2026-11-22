@@ -3,7 +3,7 @@ import { useEffect, useId } from 'react'
 import { getCurrentComponentStack } from './getCurrentComponentStack'
 import { prettyFormatZeroQuery } from './prettyFormatZeroQuery'
 
-import type { Query } from '@rocicorp/zero'
+import type { Query } from 'limesync/zero'
 
 const activeQueries = new Map<string, number>()
 

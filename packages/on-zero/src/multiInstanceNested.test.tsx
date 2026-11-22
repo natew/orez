@@ -5,8 +5,8 @@
 // nested providers an outer instance's queries must NOT ride the context
 // path — they must materialize directly on the owning instance.
 
-import { createSchema, string, table } from '@rocicorp/zero'
-import { useZero } from '@rocicorp/zero/react'
+import { createSchema, string, table } from 'limesync/zero'
+import { useZero } from 'limesync/zero/react'
 import { act, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'

@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 
-import { createSchema, string, table } from '@rocicorp/zero'
 import {
   createSQLiteApplicationDatabase,
   createSyncExecutor,
@@ -9,6 +8,7 @@ import {
 } from 'limesync'
 import { createQueryCompiler } from 'limesync/cloudflare/query-compiler'
 import { executeTransactionQueryPlan } from 'limesync/cloudflare/transaction-query'
+import { createSchema, string, table } from 'limesync/zero'
 import { afterAll, describe, expect, test, vi } from 'vitest'
 
 import { createZeroServerBindings, setupAsyncLocalStorage } from './server'

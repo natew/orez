@@ -6,8 +6,8 @@
 // the obvious .filter / .find / .length / for-of on first render. Singular
 // queries get `[undefined, info]` instead (the established zero-react shape).
 
-import { createBuilder, createSchema, number, string, table } from '@rocicorp/zero'
-import { useQuery as useRawZeroQuery } from '@rocicorp/zero/react'
+import { createBuilder, createSchema, number, string, table } from 'limesync/zero'
+import { useQuery as useRawZeroQuery } from 'limesync/zero/react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'

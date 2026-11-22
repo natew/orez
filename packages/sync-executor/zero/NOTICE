@@ -1,0 +1,11 @@
+Zero 1.9.0
+Copyright Rocicorp, Inc.
+Licensed under the Apache License, Version 2.0.
+
+Source: rocicorp/mono, zero/v1.9.0 (53aaf364c188121d160eca3ac713a66e38eef33f).
+Lime Sync includes the client and application request-handler source.
+
+Modified by Orez contributors. The Replicache close and database collector
+repairs are from natew/mono, maintained/zero-1.9.0
+(a84bae5a, maintained-zero/zero-1.9.0.patch). The active-client startup abort
+check comes from Orez's original patch to Zero 1.9.0.

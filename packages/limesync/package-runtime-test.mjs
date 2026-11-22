@@ -44,11 +44,6 @@ try {
     'orez-sync-executor',
     join(repositoryRoot, 'packages', 'sync-executor')
   )
-  linkDependency(
-    nodeModules,
-    '@rocicorp/zero',
-    join(repositoryRoot, 'node_modules', '@rocicorp', 'zero')
-  )
   linkDependency(nodeModules, 'vite', join(repositoryRoot, 'node_modules', 'vite'))
 
   writeFileSync(

@@ -432,7 +432,7 @@ bun on-zero generate --force
 **types.ts:**
 
 ```ts
-import type { Row } from '@rocicorp/zero'
+import type { Row } from 'limesync/zero'
 import type { schema } from './schema'
 
 type Tables = typeof schema.tables
@@ -445,7 +445,7 @@ export type ChannelUpdate = Partial<Channel> & Pick<Channel, 'id'>
 
 ```ts
 import * as v from 'valibot'
-import { syncedQuery } from '@rocicorp/zero'
+import { syncedQuery } from 'limesync/zero'
 import * as messageQueries from '../message/queries'
 
 export const latestMessages = syncedQuery(

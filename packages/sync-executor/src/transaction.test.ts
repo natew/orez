@@ -1,4 +1,4 @@
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'orez-sync-executor/zero'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createServerTransaction } from './transaction.js'

@@ -1,15 +1,13 @@
 # The orez rust sync server
 
-A Zero server that runs on SQLite. It speaks the Zero protocol to the real
-`@rocicorp/zero` client and replaces zero-cache for deployments that would
-rather not run Postgres and a long-lived cache process. On Cloudflare it runs
-as one Durable Object per namespace, holding both the sync engine and its SQLite
-storage in the same object.
+A Zero server that runs on SQLite. It speaks the Zero protocol to the
+`limesync/zero` client. On Cloudflare it runs as one Durable Object per
+namespace, holding both the sync engine and its SQLite storage in the same object.
 
-The client half of Zero is unchanged. `limesync/client` supplies the browser
-transport without forking Zero's API. What this replaces is the server half:
-replicating upstream data, feeding row changes to clients, running custom
-mutators, tracking per-client last-mutation-ids, and serving per-query
+Lime Sync vendors the Zero 1.9.0 client and includes the maintained fork's
+database lifetime fixes. `limesync/client` supplies its browser transport.
+The Rust engine replicates upstream data, feeds row changes to clients, runs
+custom mutators, tracks each client's last mutation ID, and serves per-query
 incremental sync.
 
 ## Start here
@@ -60,17 +58,18 @@ state is a last-mutation-id and the client-group to user binding.
 
 ## Where the code lives
 
-| Path                                        | What it is                                                             |
-| ------------------------------------------- | ---------------------------------------------------------------------- |
-| `crates/sync-core`                          | The deterministic Rust sync engine.                                    |
-| `crates/sync-wasm`                          | The `wasm-bindgen` wrapper that compiles the engine for the DO host.   |
-| `crates/sync-native`                        | A standalone axum host for the same engine.                            |
-| `packages/sync-cf-host`                     | The Cloudflare Durable Object host, published as `orez-sync-cf-host`.  |
-| `packages/sync-browser-host`                | The Bedrock and IndexedDB browser worker host, exported by `limesync`. |
-| `packages/sync-executor`                    | Shared mutation transactions, CRUD, replay, and effect execution.      |
-| `packages/limesync/src/client/transport.ts` | The stock Zero browser transport for Orez pull, push, and wake.        |
-| `packages/limesync/src/cf-do/worker.ts`     | The data worker that owns writes and serves the change feed.           |
-| `harness/`                                  | The conformance and qualification test harness.                        |
+| Path                                        | What it is                                                                 |
+| ------------------------------------------- | -------------------------------------------------------------------------- |
+| `crates/sync-core`                          | The deterministic Rust sync engine.                                        |
+| `crates/sync-wasm`                          | The `wasm-bindgen` wrapper that compiles the engine for the DO host.       |
+| `crates/sync-native`                        | A standalone axum host for the same engine.                                |
+| `packages/sync-cf-host`                     | The Cloudflare Durable Object host, published as `orez-sync-cf-host`.      |
+| `packages/sync-browser-host`                | The Bedrock and IndexedDB browser worker host, exported by `limesync`.     |
+| `packages/sync-executor`                    | Shared mutation transactions, CRUD, replay, and effect execution.          |
+| `packages/limesync/src/client/transport.ts` | The browser transport for Orez pull, push, and wake.                       |
+| `packages/sync-executor/zero/`              | The vendored client and shared query runtime, exported by `limesync/zero`. |
+| `packages/limesync/src/cf-do/worker.ts`     | The data worker that owns writes and serves the change feed.               |
+| `harness/`                                  | The conformance and qualification test harness.                            |
 
 The broader orez project is a local Zero development stack (run Zero on PGlite or
 embedded Postgres with no native dependencies, see the repository README). The

@@ -1,6 +1,6 @@
 import { sleep } from './sleep'
 
-import type { Query, Row } from '@rocicorp/zero'
+import type { Query, Row } from 'limesync/zero'
 
 type ServerWithQuery = {
   query: (cb: (q: any) => any) => Promise<any>

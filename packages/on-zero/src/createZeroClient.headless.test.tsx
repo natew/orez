@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'limesync/zero'
 import { expect, test } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'
 import { onMutationError, type MutationError } from './helpers/useMutation'
 
-import type { Query } from '@rocicorp/zero'
+import type { Query } from 'limesync/zero'
 
 const userTable = table('user').columns({ id: string(), name: string() }).primaryKey('id')
 const schema = createSchema({ tables: [userTable] })

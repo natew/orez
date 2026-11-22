@@ -1,5 +1,5 @@
-import type { AnyQueryRegistry } from '@rocicorp/zero'
 import type { JsonValue } from 'orez-sync-executor'
+import type { AnyQueryRegistry } from 'orez-sync-executor/zero'
 
 // Zero separates registry path segments with '.' or '|' (its getValueAtPath).
 const NAME_SEPARATOR = /[.|]/

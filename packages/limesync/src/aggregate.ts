@@ -1,6 +1,6 @@
-import { createBuilder } from '@rocicorp/zero'
+import { createBuilder } from './zero/zero.js'
 
-import type { Schema } from '@rocicorp/zero'
+import type { Schema } from './zero/zero.js'
 
 export type AggregateMode = 'existing' | 'materialized'
 

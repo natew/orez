@@ -3,7 +3,7 @@ import {
   asQueryInternals,
   DEFAULT_TTL_MS,
   deepClone,
-} from '@rocicorp/zero/bindings'
+} from 'limesync/zero/bindings'
 import { useContext, useMemo, useRef, useSyncExternalStore, type Context } from 'react'
 
 import {
@@ -23,7 +23,7 @@ import type {
   AnyQueryRegistry,
   ReadonlyJSONValue,
   Schema as ZeroSchema,
-} from '@rocicorp/zero'
+} from 'limesync/zero'
 
 // optional multi-instance adapter. normal apps should use zero-react's native
 // useQuery path via createZeroClient; this exists only for nested providers

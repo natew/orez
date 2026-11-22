@@ -2,7 +2,7 @@
 // a synchronous set(id, value) on every model event, with no session
 // bookkeeping, then a durable write at turn end.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'orez-sync-executor/zero'
 import { describe, expect, it } from 'vitest'
 
 import { createLocalRealtime } from './local.js'

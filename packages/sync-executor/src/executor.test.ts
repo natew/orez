@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'orez-sync-executor/zero'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { MutationRetryError } from './errors.js'

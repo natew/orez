@@ -2,7 +2,7 @@
 // structured-clone boundary and are serialized by the real codec, so anything
 // the channel cannot carry fails here rather than in a browser.
 
-import { createSchema, string, table } from '@rocicorp/zero'
+import { createSchema, string, table } from 'orez-sync-executor/zero'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { defineStreamingFields } from './manifest.js'
