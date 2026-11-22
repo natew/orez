@@ -1,5 +1,5 @@
 import {getBrowserGlobal} from '../../../shared/src/browser-env.ts';
-import type {HTTPString} from './http-string.ts';
+export type HTTPString = `http${'' | 's'}://${string}`;
 
 function validateServerParam(paramName: string, server: string): HTTPString {
   const expectedProtocol = 'http';

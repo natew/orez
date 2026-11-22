@@ -1,6 +1,5 @@
 import {resolver} from '@rocicorp/resolver';
 import React, {useSyncExternalStore} from 'react';
-import {TESTING} from '../../shared/src/testing.ts';
 import {
   type Immutable,
   addContextToQuery,
@@ -348,15 +347,6 @@ function makeError(retry: () => void, error: ErroredQuery): QueryErrorDetails {
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyViewWrapper = ViewWrapper<any, any, any, any, any>;
 
-const allViews = new WeakMap<ViewStore, Map<string, AnyViewWrapper>>();
-
-export function getAllViewsSizeForTesting(store: ViewStore): number {
-  if (TESTING) {
-    return allViews.get(store)?.size ?? 0;
-  }
-  return 0;
-}
-
 /**
  * A global store of all active views.
  *
@@ -407,12 +397,6 @@ export function getAllViewsSizeForTesting(store: ViewStore): number {
  */
 export class ViewStore {
   #views = new Map<string, AnyViewWrapper>();
-
-  constructor() {
-    if (TESTING) {
-      allViews.set(this, this.#views);
-    }
-  }
 
   getView<
     TTable extends keyof TSchema['tables'] & string,

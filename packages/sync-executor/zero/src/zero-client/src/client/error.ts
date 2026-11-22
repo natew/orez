@@ -248,3 +248,19 @@ export function getErrorConnectionTransition(
     ),
   } as const;
 }
+
+export function shouldReportConnectError(reason: ZeroError): boolean {
+  if (!isClientError(reason)) {
+    return true;
+  }
+  switch (reason.kind) {
+    case ClientErrorKind.Hidden:
+    case ClientErrorKind.ClientClosed:
+    case ClientErrorKind.UserDisconnect:
+    case ClientErrorKind.CleanClose:
+    case ClientErrorKind.AbruptClose:
+      return false;
+    default:
+      return true;
+  }
+}

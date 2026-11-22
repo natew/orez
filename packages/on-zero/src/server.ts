@@ -28,10 +28,6 @@ import type {
   Schema as ZeroSchema,
   ServerTransaction as RocicorpServerTransaction,
 } from 'limesync/zero'
-// type-only: limesync/zero/server pulls node and postgresql formatting in, and
-// importing it eagerly means merely importing on-zero/server drags that into a
-// browser worker. the real import happens inside transformQueryRequest, which
-// only ever runs on a server.
 import type { handleQueryRequest as zeroHandleQueryRequest } from 'limesync/zero/server'
 
 // a host that runs these bindings off node supplies its own AsyncLocalStorage;

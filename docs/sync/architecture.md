@@ -293,6 +293,6 @@ On Cloudflare the deployment has two Durable Object roles:
   SQLite object without a Postgres compatibility layer.
 
 The transport integration lives at `limesync/client`, with source in
-`packages/limesync/src/client/`. It registers the HTTP transport for a server
-URL. The Zero client passes connection state and mutations to that transport
-directly. The wake socket asks the client to pull when the server changes.
+`packages/sync-executor/zero/src/http/`. The Zero client sends pulls and
+pushes over HTTP. The optional wake socket asks the client to pull when the
+server changes.

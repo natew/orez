@@ -52,6 +52,14 @@
     "./zero/sync-connection": {
       "types": "./dist/zero/zero-client/src/client/sync-connection.d.ts",
       "default": "./dist/zero/zero-client/src/client/sync-connection.js"
+    },
+    "./zero/http-transport": {
+      "types": "./dist/zero/http/transport.d.ts",
+      "default": "./dist/zero/http/transport.js"
+    },
+    "./zero/http-payload-codec": {
+      "types": "./dist/zero/http/payload-codec.d.ts",
+      "default": "./dist/zero/http/payload-codec.js"
     }
   },
   "scripts": {
@@ -78,15 +86,12 @@
   },
   "dependencies": {
     "@badrap/valita": "0.3.11",
-    "@databases/escape-identifier": "^1.0.3",
-    "@databases/sql": "^3.3.0",
     "@rocicorp/lock": "^1.0.4",
     "@rocicorp/logger": "^6.1.0",
     "@rocicorp/resolver": "^1.0.2",
     "@standard-schema/spec": "^1.0.0",
     "compare-utf8": "^0.2.0",
-    "js-xxhash": "^4.0.0",
-    "json-custom-numbers": "^3.1.1"
+    "js-xxhash": "^4.0.0"
   },
   "peerDependencies": {
     "@op-engineering/op-sqlite": ">=15",

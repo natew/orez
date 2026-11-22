@@ -1,11 +1,10 @@
 import type {LogContext} from '@rocicorp/logger';
 import type {ReplicacheImpl} from '../../../replicache/src/replicache-impl.ts';
 import type {ClientID} from '../../../replicache/src/sync/ids.ts';
-import {assert, unreachable} from '../../../shared/src/asserts.ts';
+import {assert} from '../../../shared/src/asserts.ts';
 import type {ReadonlyJSONValue} from '../../../shared/src/json.ts';
 import {must} from '../../../shared/src/must.ts';
 import {difference} from '../../../shared/src/set-utils.ts';
-import {TDigest} from '../../../shared/src/tdigest.ts';
 import {
   mapAST,
   normalizeAST,
@@ -24,7 +23,6 @@ import {
 } from '../../../zero-protocol/src/query-hash.ts';
 import {
   clientToServer,
-  serverToClient,
   type NameMapper,
 } from '../../../zero-schema/src/name-mapper.ts';
 import type {TableSchema} from '../../../zero-schema/src/table-schema.ts';
@@ -35,8 +33,6 @@ import {clampTTL, compareTTL, type TTL} from '../../../zql/src/query/ttl.ts';
 import type {ClientErrorKind} from './client-error-kind.ts';
 import type {ClientError} from './error.ts';
 import {type ZeroError} from './error.ts';
-import type {InspectorDelegate} from './inspector/inspector.ts';
-import type {QueryClientMetrics} from './inspector/lazy-inspector.ts';
 import {desiredQueriesPrefixForClient, GOT_QUERIES_KEY_PREFIX} from './keys.ts';
 import type {MutationTracker} from './mutation-tracker.ts';
 import type {ReadTransaction} from './replicache-types.ts';
@@ -44,7 +40,6 @@ import type {ReadTransaction} from './replicache-types.ts';
 type QueryHash = string;
 
 type Entry = {
-  // We keep track of the AST so we can use it in the inspector.
   normalized: AST;
   name: string | undefined;
   args: readonly ReadonlyJSONValue[] | undefined;
@@ -53,25 +48,14 @@ type Entry = {
   ttl: TTL;
 };
 
-type ClientMetric = {
-  [K in keyof ClientMetricMap]: TDigest;
-};
-
-type PerQueryClientMetric = {
-  'query-materialization-client': number | undefined;
-  'query-materialization-end-to-end': number | undefined;
-  'query-update-client': TDigest;
-};
-
 /**
  * Tracks what queries the client is currently subscribed to on the server.
  * Sends `changeDesiredQueries` message to server when this changes.
  * Deduplicates requests so that we only listen to a given unique query once.
  */
-export class QueryManager implements InspectorDelegate {
+export class QueryManager {
   readonly #clientID: ClientID;
   readonly #clientToServer: NameMapper;
-  readonly #serverToClient: NameMapper;
   readonly #send: (change: ChangeDesiredQueriesMessage) => void;
   readonly #onFatalError: (error: ZeroError) => void;
   readonly #queries: Map<QueryHash, Entry> = new Map();
@@ -88,13 +72,8 @@ export class QueryManager implements InspectorDelegate {
   #pendingRemovals: Array<() => void> = [];
   #batchTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #lc: LogContext;
-  readonly #metrics: ClientMetric = newMetrics();
-  readonly #queryMetrics: Map<string, PerQueryClientMetric> = new Map();
   readonly #slowMaterializeThreshold: number;
   #closedError: ZeroError | undefined;
-  #queryEvictedCallback:
-    | ((hash: string, ast: AST, metrics: QueryClientMetrics) => void)
-    | undefined;
 
   constructor(
     lc: LogContext,
@@ -111,7 +90,6 @@ export class QueryManager implements InspectorDelegate {
     this.#lc = lc.withContext('QueryManager');
     this.#clientID = clientID;
     this.#clientToServer = clientToServer(tables);
-    this.#serverToClient = serverToClient(tables);
     this.#recentQueriesMaxSize = recentQueriesMaxSize;
     this.#send = send;
     this.#mutationTracker = mutationTracker;
@@ -152,21 +130,6 @@ export class QueryManager implements InspectorDelegate {
         initialValuesInFirstDiff: true,
       },
     );
-  }
-
-  getAST(queryID: string): AST | undefined {
-    const ast = this.#queries.get(queryID)?.normalized;
-    return ast && mapAST(ast, this.#serverToClient);
-  }
-
-  setQueryEvictedCallback(
-    cb: (hash: string, ast: AST, metrics: QueryClientMetrics) => void,
-  ): void {
-    this.#queryEvictedCallback = cb;
-  }
-
-  mapClientASTToServer(ast: AST): AST {
-    return mapAST(ast, this.#clientToServer);
   }
 
   #fireGotCallbacks(queryHash: string, got: boolean) {
@@ -483,24 +446,11 @@ export class QueryManager implements InspectorDelegate {
       if (this.#recentQueries.size > this.#recentQueriesMaxSize) {
         const lruQueryID = this.#recentQueries.values().next().value;
         assert(lruQueryID, 'Expected LRU query ID to exist');
-        const evictedAST = this.getAST(lruQueryID);
-        const evictedMetrics =
-          this.#queryMetrics.get(lruQueryID) ?? newPerQueryMetrics();
         this.#queries.delete(lruQueryID);
         this.#recentQueries.delete(lruQueryID);
-        this.#queryMetrics.delete(lruQueryID);
         this.#queueQueryChange({op: 'del', hash: lruQueryID});
-        assert(evictedAST, 'Expected evicted AST to exist');
-        this.#queryEvictedCallback?.(lruQueryID, evictedAST, evictedMetrics);
       }
     }
-  }
-
-  /**
-   * Gets the aggregated metrics for all queries managed by this QueryManager.
-   */
-  get metrics(): ClientMetric {
-    return this.#metrics;
   }
 
   addMetric<K extends keyof ClientMetricMap>(
@@ -508,14 +458,6 @@ export class QueryManager implements InspectorDelegate {
     value: number,
     ...args: ClientMetricMap[K]
   ): void {
-    // Only query metrics are tracked at this point.
-    // If this check fails then we need to add a runtime check.
-    metric satisfies `query-${string}`;
-
-    // We track all materializations of queries as well as per
-    // query materializations.
-    this.#metrics[metric].add(value);
-
     const queryID = args[0];
 
     // Handle slow query logging for end-to-end materialization
@@ -542,32 +484,6 @@ export class QueryManager implements InspectorDelegate {
       }
     }
 
-    // The query manager manages metrics that are per query.
-    let existing = this.#queryMetrics.get(queryID);
-    if (!existing) {
-      existing = newPerQueryMetrics();
-      this.#queryMetrics.set(queryID, existing);
-    }
-    switch (metric) {
-      case 'query-update-client':
-        existing['query-update-client'].add(value);
-        break;
-      case 'query-materialization-client':
-      case 'query-materialization-end-to-end':
-        // Recorded once per query (last value wins).
-        existing[
-          metric as
-            | 'query-materialization-client'
-            | 'query-materialization-end-to-end'
-        ] = value;
-        break;
-      default:
-        unreachable(metric);
-    }
-  }
-
-  getQueryMetrics(queryID: string): PerQueryClientMetric | undefined {
-    return this.#queryMetrics.get(queryID);
   }
 
   /**
@@ -576,20 +492,4 @@ export class QueryManager implements InspectorDelegate {
   getAllNonGotQueryHashes(): Iterable<string> {
     return difference(this.#queries, this.#gotQueries);
   }
-}
-
-function newMetrics(): ClientMetric {
-  return {
-    'query-materialization-client': new TDigest(),
-    'query-materialization-end-to-end': new TDigest(),
-    'query-update-client': new TDigest(),
-  };
-}
-
-function newPerQueryMetrics(): PerQueryClientMetric {
-  return {
-    'query-materialization-client': undefined,
-    'query-materialization-end-to-end': undefined,
-    'query-update-client': new TDigest(),
-  };
 }

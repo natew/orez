@@ -8,7 +8,6 @@ import {getBrowserGlobal} from '../../shared/src/browser-env.ts';
 import {getDocumentVisibilityWatcher} from '../../shared/src/document-visible.ts';
 import type {JSONValue, ReadonlyJSONValue} from '../../shared/src/json.ts';
 import {promiseVoid} from '../../shared/src/resolved-promises.ts';
-import {TESTING} from '../../shared/src/testing.ts';
 import type {MaybePromise} from '../../shared/src/types.ts';
 import {PullDelegate, PushDelegate} from './connection-loop-delegates.ts';
 import {ConnectionLoop, MAX_DELAY_MS, MIN_DELAY_MS} from './connection-loop.ts';
@@ -404,11 +403,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
    */
   getAuth: (() => MaybePromise<string | null | undefined>) | null | undefined =
     null;
-
-  // These three are used for testing
-  onPushInvoked = () => undefined;
-  onBeginPull = () => undefined;
-  onRecoverMutations = (r: Promise<boolean>) => r;
 
   constructor(
     options: ReplicacheOptions<MD>,
@@ -974,9 +968,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   }
 
   async #invokePush(): Promise<boolean> {
-    if (TESTING) {
-      this.onPushInvoked();
-    }
     if (this.#isPushDisabled()) {
       return true;
     }
@@ -1139,9 +1130,6 @@ export class ReplicacheImpl<MD extends MutatorDefs = {}> {
   }
 
   async beginPull(): Promise<BeginPullResult> {
-    if (TESTING) {
-      this.onBeginPull();
-    }
     await this.#ready;
     const profileID = await this.profileID;
     const {clientID} = this;

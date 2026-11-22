@@ -1,4 +1,4 @@
-import {LogContext, type LogLevel, type LogSink} from '@rocicorp/logger';
+import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {type Resolver, resolver} from '@rocicorp/resolver';
 import {type DeletedClients} from '../../../replicache/src/deleted-clients.ts';
 import {getKVStoreProvider} from '../../../replicache/src/get-kv-store-provider.ts';
@@ -8,8 +8,8 @@ import {
 } from '../../../replicache/src/impl.ts';
 import {dropDatabase as dropReplicacheDatabase} from '../../../replicache/src/persist/collect-idb-databases.ts';
 import {IDBDatabasesStore} from '../../../replicache/src/persist/idb-databases-store.ts';
-import type {Puller, PullerResult} from '../../../replicache/src/puller.ts';
-import type {Pusher, PusherResult} from '../../../replicache/src/pusher.ts';
+import type {PullerResult} from '../../../replicache/src/puller.ts';
+import type {PusherResult} from '../../../replicache/src/pusher.ts';
 import type {ReplicacheOptions} from '../../../replicache/src/replicache-options.ts';
 import type {
   ClientGroupID,
@@ -23,10 +23,7 @@ import type {
 } from '../../../replicache/src/types.ts';
 import {AbortError} from '../../../shared/src/abort-error.ts';
 import {assert, unreachable} from '../../../shared/src/asserts.ts';
-import {
-  getBrowserGlobal,
-  mustGetBrowserGlobal,
-} from '../../../shared/src/browser-env.ts';
+import {getBrowserGlobal} from '../../../shared/src/browser-env.ts';
 import {getDocumentVisibilityWatcher} from '../../../shared/src/document-visible.ts';
 import {getErrorMessage} from '../../../shared/src/error.ts';
 import {h64} from '../../../shared/src/hash.ts';
@@ -37,12 +34,9 @@ import {promiseRace} from '../../../shared/src/promise-race.ts';
 import {emptyFunction} from '../../../shared/src/sentinels.ts';
 import {sleep, sleepWithAbort} from '../../../shared/src/sleep.ts';
 import {Subscribable} from '../../../shared/src/subscribable.ts';
-import {assertTesting, TESTING} from '../../../shared/src/testing.ts';
 import * as valita from '../../../shared/src/valita.ts';
 import type {Writable} from '../../../shared/src/writable.ts';
-import {type ClientSchema} from '../../../zero-protocol/src/client-schema.ts';
-import type {ConnectedMessage, InitConnectionBody} from '../../../zero-protocol/src/connect.ts';
-import {encodeSecProtocols} from '../../../zero-protocol/src/connect.ts';
+import type {ConnectedMessage} from '../../../zero-protocol/src/connect.ts';
 import type {DeleteClientsBody} from '../../../zero-protocol/src/delete-clients.ts';
 import type {Downstream} from '../../../zero-protocol/src/down.ts';
 import {downstreamSchema} from '../../../zero-protocol/src/down.ts';
@@ -127,7 +121,8 @@ import {
   throwIfConnectionError,
 } from './connection-manager.ts';
 import {ConnectionStatus} from './connection-status.ts';
-import {httpConnectionFor, type SyncConnection} from './sync-connection.ts';
+import {openHttpConnection} from '../../../http/transport.ts';
+import type {SyncConnection} from './sync-connection.ts';
 import {type Connection, ConnectionImpl} from './connection.ts';
 import {ZeroContext} from './context.ts';
 import {
@@ -138,7 +133,6 @@ import {
 } from './crud.ts';
 import type {CustomMutatorDefs, MutatorResult} from './custom.ts';
 import {DeleteClientsManager} from './delete-clients-manager.ts';
-import {shouldEnableAnalytics} from './enable-analytics.ts';
 import {
   ClientError,
   NO_STATUS_TRANSITION,
@@ -149,27 +143,12 @@ import {
   isClientError,
   isServerError,
   isZeroError,
+  shouldReportConnectError,
 } from './error.ts';
-import {
-  type HTTPString,
-  type WSString,
-  appendPath,
-  toWSString,
-} from './http-string.ts';
-import {Inspector} from './inspector/inspector.ts';
 import {IVMSourceBranch} from './ivm-branch.ts';
-import {type LogOptions, createLogOptions} from './log-options.ts';
 import type {MakeMutatePropertyType} from './make-mutate-property.ts';
 import {addCustomMutatorsProperties} from './make-mutate-property.ts';
 import {makeReplicacheMutators} from './make-replicache-mutators.ts';
-import {
-  DID_NOT_CONNECT_VALUE,
-  MetricManager,
-  REPORT_INTERVAL_MS,
-  type Series,
-  getLastConnectErrorValue,
-  shouldReportConnectError,
-} from './metrics.ts';
 import {MutationTracker} from './mutation-tracker.ts';
 import {MutatorProxy} from './mutator-proxy.ts';
 import type {UpdateNeededReason, ZeroOptions} from './options.ts';
@@ -180,7 +159,7 @@ import {
   reportReloadReason,
   resetBackoff,
 } from './reload-error-handler.ts';
-import {getServer} from './server-option.ts';
+import {getServer, type HTTPString} from './server-option.ts';
 import {version} from './version.ts';
 import {PokeHandler} from './zero-poke-handler.ts';
 import {
@@ -191,30 +170,6 @@ import {
 
 export type NoRelations = Record<string, never>;
 
-export type TestingContext = {
-  puller: Puller;
-  pusher: Pusher;
-  setReload: (r: () => void) => void;
-  logOptions: LogOptions;
-  connectStart: () => number | undefined;
-  socketResolver: () => Resolver<SyncConnection>;
-  connectionManager: () => ConnectionManager;
-  queryDelegate: () => QueryDelegate;
-  queryManager: () => QueryManager;
-  enableRefresh: () => boolean;
-};
-
-export const exposedToTestingSymbol = Symbol();
-export const createLogOptionsSymbol = Symbol();
-
-interface TestZero {
-  [exposedToTestingSymbol]?: TestingContext;
-  [createLogOptionsSymbol]?: (options: {
-    consoleLogLevel: LogLevel;
-    server: string | null;
-  }) => LogOptions;
-}
-
 type ConnectAttemptControl = {
   readonly controller: AbortController;
   readonly connected: Resolver<void>;
@@ -223,20 +178,12 @@ type ConnectAttemptControl = {
 
 function connectionReadyResolver(): Resolver<void> {
   const ready = resolver<void>();
-  // A connection attempt can fail without any push, pull, or inspector
+  // A connection attempt can fail without any push or pull
   // currently waiting on it. The run loop handles the corresponding attempt
   // failure; this handler prevents the optional readiness listener from
   // becoming an unhandled rejection.
   void ready.promise.catch(() => {});
   return ready;
-}
-
-function asTestZero<
-  S extends BaseDefaultSchema,
-  MD extends CustomMutatorDefs | undefined,
-  C extends BaseDefaultContext,
->(z: Zero<S, MD, C>): TestZero {
-  return z as TestZero;
 }
 
 export const RUN_LOOP_INTERVAL_MS = 5_000;
@@ -268,7 +215,6 @@ export const DEFAULT_DISCONNECT_TIMEOUT_MS = 60 * 1_000;
  */
 export const CONNECT_TIMEOUT_MS = 10_000;
 
-const CHECK_CONNECTIVITY_ON_ERROR_FREQUENCY = 6;
 
 const DEFAULT_QUERY_CHANGE_THROTTLE_MS = 10;
 
@@ -312,20 +258,6 @@ function onClientStateNotFoundServerReason(serverErrMsg: string) {
 const ON_CLIENT_STATE_NOT_FOUND_REASON_CLIENT =
   'The local persistent state needed to synchronize this client has been garbage collected.';
 
-// Keep in sync with packages/replicache/src/replicache-options.ts
-export interface ReplicacheInternalAPI {
-  lastMutationID(): number;
-}
-
-const internalReplicacheImplMap = new WeakMap<object, ReplicacheImpl>();
-
-export function getInternalReplicacheImplForTesting(
-  z: object,
-): ReplicacheImpl<MutatorDefs> {
-  assertTesting();
-  return must(internalReplicacheImplMap.get(z));
-}
-
 const CLOSE_CODE_NORMAL = 1000;
 const CLOSE_CODE_GOING_AWAY = 1001;
 type CloseCode = typeof CLOSE_CODE_NORMAL | typeof CLOSE_CODE_GOING_AWAY;
@@ -352,9 +284,6 @@ export class Zero<
   readonly storageKey: string;
 
   readonly #lc: LogContext;
-  readonly #logOptions: LogOptions;
-  readonly #enableAnalytics: boolean;
-  readonly #clientSchema: ClientSchema;
 
   readonly #pokeHandler: PokeHandler;
   readonly #queryManager: QueryManager;
@@ -363,24 +292,7 @@ export class Zero<
   readonly #deleteClientsManager: DeleteClientsManager;
   readonly #mutationTracker: MutationTracker;
 
-  /**
-   * The queries we sent when inside the sec-protocol header when establishing a connection.
-   * More queries could be registered while we're waiting for the 'connected' message
-   * to come back from the server. To understand what queries we need to send
-   * to the server, we diff the `initConnectionQueries` with the current set of desired queries.
-   *
-   * If this is set to `undefined` that means no queries were sent inside the `sec-protocol` header
-   * and an `initConnection` message must be sent to the server after receiving the `connected` message.
-   */
   #initConnectionQueries: Map<string, UpQueriesPatchOp> | undefined;
-
-  /**
-   * We try to send the deleted clients and (client groups) as part of the
-   * sec-protocol header. If we can't because the header would get too large we
-   * keep track of the deleted clients and send them after the connection is
-   * established.
-   */
-  #deletedClients: DeleteClientsBody | undefined;
 
   /**
    * The highest mutation ID we have sent on the current connection, for each
@@ -433,7 +345,6 @@ export class Zero<
   // Ring buffer of up to 5 recent outbound messages (excluding pings).
   // Tracks type, serialized size, and a 200-character snippet for diagnostics
   // when a 1009 (Message Too Big) close occurs.
-  #recentSentMessages: {type: string; size: number; snippet: string}[] = [];
 
   /**
    * The timeout in milliseconds for ping operations. Controls both:
@@ -453,7 +364,6 @@ export class Zero<
 
   #socket: SyncConnection | undefined = undefined;
   #unlisten: (() => void) | undefined;
-  #socketResolver = resolver<SyncConnection>();
 
   // Resolves when the run loop establishes a usable connection. The run loop
   // replaces it if the attempt fails or the established connection disconnects.
@@ -470,7 +380,6 @@ export class Zero<
   readonly #connectionManager: ConnectionManager;
   readonly #connection: Connection;
   readonly #activeClientsManager: Promise<ActiveClientsManager>;
-  #inspector: Inspector | undefined;
 
   #connectStart: number | undefined = undefined;
   // Set on connect attempt if currently undefined.
@@ -491,13 +400,7 @@ export class Zero<
    */
   readonly query: ConditionalSchemaQuery<S>;
 
-  // TODO: Metrics needs to be rethought entirely as we're not going to
-  // send metrics to customer server.
-  #metrics: MetricManager;
-
-  // Store as field to allow test subclass to override. Web API doesn't allow
-  // overwriting location fields for security reasons.
-  #reload = () => getBrowserGlobal('location')?.reload();
+  readonly #reload = () => getBrowserGlobal('location')?.reload();
 
   /**
    * Constructs a new Zero client.
@@ -531,11 +434,6 @@ export class Zero<
 
     const cacheURL = options.cacheURL ?? options.server;
     const server = getServer(cacheURL);
-    this.#enableAnalytics = shouldEnableAnalytics(
-      server,
-      false /*options.enableAnalytics,*/, // Reenable analytics
-    );
-
     let {kvStore = 'idb'} = options;
     if (kvStore === 'idb') {
       if (!getBrowserGlobal('indexedDB')) {
@@ -566,13 +464,8 @@ export class Zero<
 
     this.#options = options;
 
-    this.#logOptions = this.#createLogOptions({
-      consoleLogLevel: options.logLevel ?? 'warn',
-      server: null, //server, // Reenable remote logging
-      enableAnalytics: this.#enableAnalytics,
-      consoleLogSink: options.logSink,
-    });
-    const logOptions = this.#logOptions;
+    const logLevel = options.logLevel ?? 'warn';
+    const sink = options.logSink ?? consoleLogSink;
 
     this.#connectionManager = new ConnectionManager({
       disconnectTimeout: disconnectTimeoutMs,
@@ -588,8 +481,7 @@ export class Zero<
     syncConnectionState(this.#connectionManager.state);
     this.#connectionManager.subscribe(syncConnectionState);
 
-    const sink = logOptions.logSink;
-    const lc = new LogContext(logOptions.logLevel, {}, sink);
+    const lc = new LogContext(logLevel, {}, sink);
 
     this.#mutationTracker = new MutationTracker(
       lc,
@@ -611,8 +503,7 @@ export class Zero<
 
     this.storageKey = storageKey ?? '';
 
-    const {clientSchema, hash} = clientSchemaFrom(schema);
-    this.#clientSchema = clientSchema;
+    const {hash} = clientSchemaFrom(schema);
 
     // Create a hash that includes storage key, URL configuration, and query parameters
     const nameKey = JSON.stringify({
@@ -629,8 +520,8 @@ export class Zero<
       // The schema stored in IDB is dependent upon both the ClientSchema
       // and the AST schema (i.e. PROTOCOL_VERSION).
       schemaVersion: `${PROTOCOL_VERSION}.${hash}`,
-      logLevel: logOptions.logLevel,
-      logSinks: [logOptions.logSink],
+      logLevel,
+      logSinks: [sink],
       mutators: replicacheMutators,
       name: `zero-${storageScopedUserID}-${hashedKey}`,
       pusher: (req, reqID) => this.#pusher(req, reqID),
@@ -689,9 +580,6 @@ export class Zero<
     const rep = new ReplicacheImpl(replicacheOptions, replicacheImplOptions);
     this.#rep = rep;
 
-    if (TESTING) {
-      internalReplicacheImplMap.set(this, rep);
-    }
     this.#server = server;
     this.userID = userID ?? undefined;
     this.#lc = lc.withContext('clientID', rep.clientID);
@@ -842,17 +730,6 @@ export class Zero<
 
     reportReloadReason(this.#lc);
 
-    this.#metrics = new MetricManager({
-      reportIntervalMs: REPORT_INTERVAL_MS,
-      host: getBrowserGlobal('location')?.host ?? '',
-      source: 'client',
-      reporter: this.#enableAnalytics
-        ? allSeries => this.#reportMetrics(allSeries)
-        : () => Promise.resolve(),
-      lc: this.#lc,
-    });
-    this.#metrics.tags.push(`version:${this.version}`);
-
     this.#pokeHandler = new PokeHandler(
       async poke => {
         await this.#rep.poke(poke);
@@ -874,25 +751,6 @@ export class Zero<
     );
 
     void this.#runLoop();
-
-    this.#expose();
-
-    if (TESTING) {
-      asTestZero(this)[exposedToTestingSymbol] = {
-        puller: this.#puller,
-        pusher: this.#pusher,
-        setReload: (r: () => void) => {
-          this.#reload = r;
-        },
-        logOptions: this.#logOptions,
-        connectStart: () => this.#connectStart,
-        socketResolver: () => this.#socketResolver,
-        connectionManager: () => this.#connectionManager,
-        queryDelegate: () => this.#zeroContext,
-        queryManager: () => this.#queryManager,
-        enableRefresh: () => this.#enableRefresh(),
-      };
-    }
   }
 
   #enableRefresh(): boolean {
@@ -907,41 +765,6 @@ export class Zero<
     );
   }
 
-  #expose() {
-    // Expose the Zero instance to the global scope.
-    // oxlint-disable-next-line @typescript-eslint/no-explicit-any
-    const g = globalThis as any;
-    if (g.__zero === undefined) {
-      g.__zero = this;
-    } else if (g.__zero instanceof Zero) {
-      const prev = g.__zero;
-      g.__zero = {
-        [prev.clientID]: prev,
-        [this.clientID]: this,
-      };
-    } else {
-      g.__zero[this.clientID] = this;
-    }
-  }
-
-  #unexpose() {
-    // oxlint-disable-next-line @typescript-eslint/no-explicit-any
-    const g = globalThis as any;
-    assert(g.__zero !== undefined, 'No global zero instance found');
-    if (g.__zero instanceof Zero) {
-      assert(
-        g.__zero === this,
-        'Global zero instance does not match this instance',
-      );
-      delete g.__zero;
-    } else {
-      delete g.__zero[this.clientID];
-      if (Object.entries(g.__zero).length === 1) {
-        g.__zero = Object.values(g.__zero)[0];
-      }
-    }
-  }
-
   #sendIfConnected(msg: Upstream): void {
     if (this.#connectionManager.is(ConnectionStatus.Connected)) {
       this.#send(msg);
@@ -949,40 +772,7 @@ export class Zero<
   }
 
   #send(msg: Upstream): void {
-    if (this.#socket) {
-      if (!this.#socket.webSocket) {
-        this.#socket.send(msg);
-        return;
-      }
-      const json = JSON.stringify(msg);
-      if (msg[0] !== 'ping') {
-        const history = this.#recentSentMessages;
-        if (history.length >= 5) {
-          history.shift();
-        }
-        history.push({
-          type: msg[0],
-          size: json.length,
-          snippet: json.slice(0, 200),
-        });
-      }
-      this.#socket.send(msg, json);
-    }
-  }
-
-  #createLogOptions(options: {
-    consoleLogLevel: LogLevel;
-    server: HTTPString | null;
-    enableAnalytics: boolean;
-    consoleLogSink?: LogSink | undefined;
-  }): LogOptions {
-    if (TESTING) {
-      const testZero = asTestZero(this);
-      if (testZero[createLogOptionsSymbol]) {
-        return testZero[createLogOptionsSymbol](options);
-      }
-    }
-    return createLogOptions(options);
+    this.#socket?.send(msg);
   }
 
   /**
@@ -1146,24 +936,7 @@ export class Zero<
     return this.#rep.schemaVersion;
   }
 
-  /**
-   * The schema passed into Zero when it was constructed.
-   *
-   * This can be paired with the inspector API to explore the client cache for
-   * debugging or tooling. The inspector exposes the raw key/value map as well
-   * as the per-table rows that back `zero.query[tableName].run()`.
-   *
-   * ```ts
-   * const inspector = __zero.inspector;
-   * const client = inspector.client;
-   *
-   * console.log('client map:', await client.map());
-   *
-   * for (const tableName of Object.keys(__zero.schema.tables)) {
-   *   console.table(await client.rows(tableName));
-   * }
-   * ```
-   */
+  /** The schema passed into Zero when it was constructed. */
   get schema(): S {
     return this.#options.schema;
   }
@@ -1292,9 +1065,7 @@ export class Zero<
       }
       lc.debug?.('Aborting closeAbortController due to close()');
       this.#closeAbortController.abort();
-      this.#metrics.stop();
       const ret = await this.#rep.close();
-      this.#unexpose();
       return ret;
     } catch (e) {
       lc.error?.('Error closing Zero instance', e);
@@ -1315,7 +1086,7 @@ export class Zero<
     let downMessage: Downstream;
     try {
       downMessage = valita.parse(
-        typeof data === 'string' ? JSON.parse(data) : data,
+        data,
         downstreamSchema,
         'passthrough',
       );
@@ -1376,10 +1147,6 @@ export class Zero<
           this.#queryManager.handleTransformErrors(downMessage[1]);
           break;
 
-        case 'inspect':
-          // ignore at this layer.
-          break;
-
         default:
           unreachable(msgType);
       }
@@ -1404,7 +1171,7 @@ export class Zero<
     try {
       assert(this.#socket, 'Socket is not set before onOpen');
 
-      lc = addWebSocketIDFromSocketToLogContext(this.#socket, lc);
+      lc = addConnectionIDFromSocketToLogContext(this.#socket, lc);
       if (this.#connectStart === undefined) {
         throw new Error('Got open event but connect start time is undefined.');
       } else {
@@ -1430,12 +1197,12 @@ export class Zero<
     }
   };
 
-  #onClose = async (e: Pick<CloseEvent, 'code' | 'reason' | 'wasClean'>) => {
+  #onClose = (e: Pick<CloseEvent, 'code' | 'reason' | 'wasClean'>) => {
     let lc = this.#lc;
     try {
       assert(this.#socket, 'Socket is not set before onClose');
 
-      lc = addWebSocketIDFromSocketToLogContext(this.#socket, lc);
+      lc = addConnectionIDFromSocketToLogContext(this.#socket, lc);
       const {code, reason, wasClean} = e;
       // 1006 = abnormal closure, generated by the browser when the connection
       // drops (e.g. laptop sleep, network change). expected in practice.
@@ -1449,54 +1216,10 @@ export class Zero<
         });
       }
 
-      // 1009 = Message Too Big. The server rejected an oversized WebSocket
-      // message, most likely a mutation containing a large value (e.g. a
-      // base64-encoded image), but possibly a large changeDesiredQueries
-      // payload. Because mutations are persisted in IndexedDB, the client
-      // would otherwise reconnect and immediately re-send the message,
-      // causing an infinite reconnect loop. Disable the client group to
-      // abandon the stuck message and reload with a fresh client group.
-      //
-      // Using InvalidMessage as the error kind transitions the connection
-      // to Error state, making it observable via connection.state.subscribe().
-      // The reload is routed through onClientStateNotFound so customers can
-      // override it (e.g. to show UI, defer reload, or report to Sentry).
-      if (code === 1009) {
-        const recentMessagesInfo =
-          this.#recentSentMessages.length > 0
-            ? '\nRecent sent messages:\n' +
-              JSON.stringify(this.#recentSentMessages, null, 2)
-            : '';
-        const messageTooLargeError = new ClientError({
-          kind: ClientErrorKind.InvalidMessage,
-          message:
-            'A WebSocket message exceeded the server message size limit. ' +
-            "This is usually caused by a mutation's args containing a large " +
-            'value such as a base64-encoded image. Consider uploading ' +
-            'large files to object storage and storing only the URL in Zero.' +
-            recentMessagesInfo,
-        });
-        this.#disconnect(lc, messageTooLargeError);
-
-        await this.#rep.disableClientGroup();
-        this.#onClientStateNotFound(
-          ErrorKind.InvalidMessage,
-          messageTooLargeError.message,
-        );
-      } else {
-        const closeError = new ClientError(
-          wasClean
-            ? {
-                kind: ClientErrorKind.CleanClose,
-                message: 'WebSocket connection closed cleanly',
-              }
-            : {
-                kind: ClientErrorKind.AbruptClose,
-                message: 'WebSocket connection closed abruptly',
-              },
-        );
-        this.#disconnect(lc, closeError);
-      }
+      this.#disconnect(lc, new ClientError({
+        kind: wasClean ? ClientErrorKind.CleanClose : ClientErrorKind.AbruptClose,
+        message: reason || 'HTTP connection closed',
+      }));
     } catch (e) {
       lc.error?.('Unhandled error in onClose', e);
       const internalError = new ClientError(
@@ -1568,17 +1291,11 @@ export class Zero<
     );
     const now = Date.now();
     const [, connectBody] = connectedMessage;
-    lc = addWebSocketIDToLogContext(connectBody.wsid, lc);
+    lc = addConnectionIDToLogContext(connectBody.wsid, lc);
     this.#addConnectEvent(lc, attempt, 'processing the server acknowledgement');
 
-    if (this.#connectedCount === 0) {
-      this.#checkConnectivity('firstConnect');
-    } else if (this.#connectErrorCount > 0) {
-      this.#checkConnectivity('connectAfterError');
-    }
     this.#connectedCount++;
     this.#connectedAt = now;
-    this.#metrics.lastConnectError.clear();
     const proceedingConnectErrorCount = this.#connectErrorCount;
     this.#connectErrorCount = 0;
 
@@ -1588,7 +1305,6 @@ export class Zero<
       lc.error?.('Got connected message but connect start time is undefined.');
     } else {
       timeToConnectMs = now - this.#connectStart;
-      this.#metrics.timeToConnectMs.set(timeToConnectMs);
       connectMsgLatencyMs =
         connectBody.timestamp !== undefined
           ? now - connectBody.timestamp
@@ -1605,7 +1321,6 @@ export class Zero<
       this.#totalToConnectStart = undefined;
     }
 
-    this.#metrics.setConnected(timeToConnectMs ?? 0, totalTimeToConnectMs ?? 0);
 
     lc.info?.('Connected', {
       navigatorOnline: navigator?.onLine,
@@ -1623,19 +1338,7 @@ export class Zero<
       this.#queryManager.getQueriesPatch(tx, this.#initConnectionQueries),
     );
 
-    const hasDeletedClients = () =>
-      skipEmptyArray(this.#deletedClients?.clientIDs) ||
-      skipEmptyArray(this.#deletedClients?.clientGroupIDs);
-
-    const maybeSendDeletedClients = () => {
-      if (hasDeletedClients()) {
-        this.#send(['deleteClients', this.#deletedClients!]);
-        this.#deletedClients = undefined;
-      }
-    };
-
-    if (queriesPatch.size > 0 && this.#initConnectionQueries !== undefined) {
-      maybeSendDeletedClients();
+    if (queriesPatch.size > 0) {
       this.#send([
         'changeDesiredQueries',
         {
@@ -1643,38 +1346,15 @@ export class Zero<
           traceparent: this.#options.getTraceparent?.(),
         },
       ]);
-    } else if (this.#initConnectionQueries === undefined) {
-      // if #initConnectionQueries was undefined that means we never
-      // sent `initConnection` to the server inside the sec-protocol header.
-      const clientSchema = this.#clientSchema;
-      this.#send([
-        'initConnection',
-        {
-          desiredQueriesPatch: [...queriesPatch.values()],
-          deleted: skipEmptyDeletedClients(this.#deletedClients),
-          // The clientSchema only needs to be sent for the very first request.
-          // Henceforth it is stored with the CVR and verified automatically.
-          ...(this.#connectCookie === null ? {clientSchema} : {}),
-          userPushURL: this.#options.mutateURL,
-          userPushHeaders: this.#options.mutateHeaders,
-          userQueryURL: this.#options.queryURL ?? this.#options.getQueriesURL,
-          userQueryHeaders: this.#options.queryHeaders,
-          traceparent: this.#options.getTraceparent?.(),
-        },
-      ]);
-      this.#deletedClients = undefined;
     }
     this.#initConnectionQueries = undefined;
-
-    maybeSendDeletedClients();
 
     this.#connectionManager.connected();
     attempt.connected.resolve();
   }
 
   /**
-   * Starts a new connection. This will create the WebSocket that does the HTTP
-   * request to the server.
+   * Starts a new HTTP sync connection.
    *
    * {@link #connectAttempt} will throw an assertion error if the
    * {@link #connectionManager} status is not {@link ConnectionManagerState.Disconnected}
@@ -1687,7 +1367,6 @@ export class Zero<
    */
   async #connectAttempt(
     lc: LogContext,
-    additionalConnectParams: Record<string, string> | undefined,
     attempt: ConnectAttemptControl,
   ): Promise<void> {
     if (this.closed) {
@@ -1706,7 +1385,7 @@ export class Zero<
     );
 
     const wsid = nanoid();
-    lc = addWebSocketIDToLogContext(wsid, lc);
+    lc = addConnectionIDToLogContext(wsid, lc);
     lc.info?.('Connecting...', {navigatorOnline: navigator?.onLine});
 
     this.#connectionManager.connecting();
@@ -1739,54 +1418,40 @@ export class Zero<
       throw signal.reason;
     }
 
-    const [ws, initConnectionQueries, deletedClients] = await createSocket(
-      this.#rep,
-      this.#queryManager,
-      this.#deleteClientsManager,
-      this.#server,
-      connectCookie,
-      this.clientID,
+    const attemptStartedAt = performance.now();
+    this.#addConnectEvent(lc, attempt, 'reading desired queries and deleted clients');
+    const [initConnectionQueries, deletedClients] = await Promise.all([
+      this.#rep.query(tx => this.#queryManager.getQueriesPatch(tx)),
+      this.#deleteClientsManager.getDeletedClients(),
+    ]);
+    if (signal.aborted) throw signal.reason;
+    if (this.closed) return;
+
+    this.#addConnectEvent(lc, attempt, 'opening the HTTP connection');
+    const ws = openHttpConnection(this.#server, {
+      clientID: this.clientID,
       clientGroupID,
-      this.#clientSchema,
-      this.userID,
-      fromReplicacheAuthToken(this.#rep.auth),
-      this.#lastMutationIDReceived,
-      wsid,
-      this.#options.logLevel === 'debug',
-      lc,
-      this.#options.mutateURL,
-      this.#options.mutateHeaders,
-      this.#options.queryURL ?? this.#options.getQueriesURL,
-      this.#options.queryHeaders,
-      additionalConnectParams,
-      activeClientsManager,
-      this.#options.maxHeaderLength,
-      event => this.#addConnectEvent(lc, attempt, event),
-    );
-
-    // createSocket performs asynchronous preparation before constructing the
-    // WebSocket. If the attempt was canceled during that work, the late socket
-    // still belongs to this attempt and must be closed.
-    if (signal.aborted) {
-      ws.close();
-      throw signal.reason;
-    }
-
-    if (this.closed) {
-      ws.close();
-      return;
-    }
+      connectionID: wsid,
+      baseCookie: connectCookie,
+      attemptStartedAt,
+      authToken: fromReplicacheAuthToken(this.#rep.auth),
+      init: {
+        desiredQueriesPatch: [...initConnectionQueries.values()],
+        deleted: skipEmptyDeletedClients(
+          convertDeletedClientsToBody(deletedClients, clientGroupID),
+        ),
+        activeClients: [...activeClientsManager.activeClients],
+      },
+    });
 
     this.#connectCookie = connectCookie;
     this.#initConnectionQueries = initConnectionQueries;
-    this.#deletedClients = deletedClients;
     this.#socket = ws;
     this.#unlisten = ws.listen({
       open: this.#onOpen,
       close: this.#onClose,
       message: this.#onMessage,
     });
-    this.#socketResolver.resolve(ws);
 
     this.#addConnectEvent(
       lc,
@@ -1817,15 +1482,6 @@ export class Zero<
 
     if (shouldReportConnectError(reason)) {
       this.#connectErrorCount++;
-      this.#metrics.lastConnectError.set(getLastConnectErrorValue(reason));
-      this.#metrics.timeToConnectMs.set(DID_NOT_CONNECT_VALUE);
-      this.#metrics.setConnectError(reason);
-      if (
-        this.#connectErrorCount % CHECK_CONNECTIVITY_ON_ERROR_FREQUENCY ===
-        1
-      ) {
-        this.#checkConnectivity(`connectErrorCount=${this.#connectErrorCount}`);
-      }
     }
 
     lc.info?.('disconnecting', {
@@ -1867,7 +1523,6 @@ export class Zero<
         unreachable(connectionStatus);
     }
 
-    this.#socketResolver = resolver();
     this.#messageCount = 0;
     this.#connectStart = undefined; // don't reset this._totalToConnectStart
     this.#connectedAt = 0;
@@ -2058,7 +1713,7 @@ export class Zero<
     const getLogContext = () => {
       let lc = bareLogContext;
       if (this.#socket) {
-        lc = addWebSocketIDFromSocketToLogContext(this.#socket, lc);
+        lc = addConnectionIDFromSocketToLogContext(this.#socket, lc);
       }
       return lc.withContext('runLoopCounter', runLoopCounter);
     };
@@ -2068,7 +1723,6 @@ export class Zero<
     this.#setAuth(auth);
 
     let backoffMs: number | undefined;
-    let additionalConnectParams: Record<string, string> | undefined;
 
     while (this.#connectionManager.shouldContinueRunLoop()) {
       runLoopCounter++;
@@ -2082,7 +1736,6 @@ export class Zero<
           case ConnectionStatus.Connecting:
           case ConnectionStatus.Disconnected: {
             if (this.#visibilityWatcher.visibilityState === 'hidden') {
-              this.#metrics.setDisconnectedWaitingForVisible();
               // reset this._totalToConnectStart since this client
               // is no longer trying to connect due to being hidden.
               this.#totalToConnectStart = undefined;
@@ -2138,7 +1791,7 @@ export class Zero<
             try {
               try {
                 await Promise.race([
-                  this.#connectAttempt(lc, additionalConnectParams, attempt),
+                  this.#connectAttempt(lc, attempt),
                   canceled.promise,
                 ]);
               } catch (ex) {
@@ -2161,7 +1814,6 @@ export class Zero<
                 throw error;
               }
               ready.resolve();
-              additionalConnectParams = undefined;
             } finally {
               clearTimeout(timeoutID);
               attempt.controller.signal.removeEventListener(
@@ -2322,7 +1974,6 @@ export class Zero<
               if (backoffParams.maxBackoffMs !== undefined) {
                 backoffMs = Math.min(backoffMs, backoffParams.maxBackoffMs);
               }
-              additionalConnectParams = backoffParams.reconnectParams;
             }
 
             lc.debug?.(
@@ -2557,80 +2208,6 @@ export class Zero<
     }
   }
 
-  // Sends a set of metrics to the server. Throws unless the server
-  // returns 200.
-  // TODO: Reenable metrics reporting
-  async #reportMetrics(_allSeries: Series[]) {
-    // if (this.#server === null) {
-    //   this.#lc.info?.('Skipping metrics report, socketOrigin is null');
-    //   return;
-    // }
-    // const body = JSON.stringify({series: allSeries});
-    // const url = new URL('/api/metrics/v0/report', this.#server);
-    // url.searchParams.set('clientID', this.clientID);
-    // url.searchParams.set('clientGroupID', await this.clientGroupID);
-    // url.searchParams.set('userID', this.userID);
-    // url.searchParams.set('requestID', nanoid());
-    // const res = await fetch(url.toString(), {
-    //   method: 'POST',
-    //   body,
-    //   keepalive: true,
-    // });
-    // if (!res.ok) {
-    //   const maybeBody = await res.text();
-    //   throw new Error(
-    //     `unexpected response: ${res.status} ${res.statusText} body: ${maybeBody}`,
-    //   );
-    // }
-  }
-
-  #checkConnectivity(reason: string) {
-    this.#checkConnectivityAsync(reason);
-  }
-
-  #checkConnectivityAsync(_reason: string) {
-    // skipping connectivity checks for now - the server doesn't respond to
-    // them so it just creates noise.
-    // assert(this.#server);
-    // if (this.closed) {
-    //   return;
-    // }
-    // try {
-    //   await checkConnectivity(
-    //     reason,
-    //     this.#server,
-    //     this.#lc,
-    //     this.#closeAbortController.signal,
-    //     this.#enableAnalytics,
-    //   );
-    // } catch (e) {
-    //   this.#lc.info?.('Error checking connectivity for', reason, e);
-    // }
-  }
-
-  /**
-   * `inspector` is an object that can be used to inspect the state of the
-   * queries a Zero instance uses. It is intended for debugging purposes.
-   */
-  get inspector(): Inspector {
-    // We use esbuild dropLabels to strip this code when we build the code for the bundle size dashboard.
-    // https://esbuild.github.io/api/#ignore-annotations
-    // /packages/zero/tool/build.ts
-
-    // oxlint-disable-next-line no-unused-labels
-    BUNDLE_SIZE: {
-      return (this.#inspector ??= new Inspector(
-        this.#rep,
-        this.#queryManager,
-        this.#zeroContext,
-        async () => {
-          await this.#connectionReadyResolver.promise;
-          return must(this.#socket?.webSocket, 'Inspecting the server requires a WebSocket connection');
-        },
-      ));
-    }
-  }
-
   async delete(): Promise<{deleted: string[]; errors: unknown[]}> {
     await this.close();
 
@@ -2707,175 +2284,6 @@ export class OnlineManager extends Subscribable<boolean> {
   }
 }
 
-export async function createSocket(
-  rep: ReplicacheImpl,
-  queryManager: QueryManager,
-  deleteClientsManager: DeleteClientsManager,
-  server: HTTPString,
-  baseCookie: NullableVersion,
-  clientID: string,
-  clientGroupID: string,
-  clientSchema: ClientSchema,
-  userID: string | undefined,
-  auth: string | undefined,
-  lmid: number,
-  wsid: string,
-  debugPerf: boolean,
-  lc: LogContext,
-  userPushURL: string | undefined,
-  userPushHeaders: Record<string, string> | undefined,
-  userQueryURL: string | undefined,
-  userQueryHeaders: Record<string, string> | undefined,
-  additionalConnectParams: Record<string, string> | undefined,
-  activeClientsManager: Pick<ActiveClientsManager, 'activeClients'>,
-  maxHeaderLength = 1024 * 8,
-  onEvent?: (event: string) => void,
-): Promise<
-  [
-    SyncConnection,
-    Map<string, UpQueriesPatchOp> | undefined,
-    DeleteClientsBody | undefined,
-  ]
-> {
-  onEvent?.('reading the profile ID');
-  const connectHttp = httpConnectionFor(server);
-  const attemptStartedAt = performance.now();
-  const url = connectHttp ? undefined : await createConnectionURL(
-    toWSString(server),
-    clientID,
-    clientGroupID,
-    userID,
-    baseCookie,
-    lmid,
-    wsid,
-    rep,
-    debugPerf,
-    additionalConnectParams,
-    lc,
-  );
-
-  const queriesPatchP = rep.query(tx => queryManager.getQueriesPatch(tx));
-  onEvent?.('reading deleted clients');
-  const deletedClientsArray = await deleteClientsManager.getDeletedClients();
-  let deletedClients: DeleteClientsBody | undefined =
-    convertDeletedClientsToBody(deletedClientsArray, clientGroupID);
-  onEvent?.('reading desired queries');
-  let queriesPatch: Map<string, UpQueriesPatchOp> | undefined =
-    await queriesPatchP;
-  const {activeClients} = activeClientsManager;
-
-  const init: InitConnectionBody = {
-    desiredQueriesPatch: [...queriesPatch.values()],
-    deleted: skipEmptyDeletedClients(deletedClients),
-    ...(baseCookie === null ? {clientSchema} : {}),
-    userPushURL,
-    userPushHeaders,
-    userQueryURL,
-    userQueryHeaders,
-    activeClients: [...activeClients],
-  };
-  if (connectHttp) {
-    onEvent?.('opening the HTTP connection');
-    return [
-      connectHttp({
-        clientID,
-        clientGroupID,
-        connectionID: wsid,
-        baseCookie,
-        attemptStartedAt,
-        authToken: auth,
-        init,
-      }),
-      queriesPatch,
-      undefined,
-    ];
-  }
-
-  const WS = mustGetBrowserGlobal('WebSocket');
-  let secProtocol = encodeSecProtocols(['initConnection', init], auth);
-  if (secProtocol.length > maxHeaderLength) {
-    secProtocol = encodeSecProtocols(undefined, auth);
-    if (secProtocol.length > maxHeaderLength) {
-      lc.warn?.(
-        `Encoded auth token length (${secProtocol.length}) exceeds ` +
-          `ZeroOptions.maxHeaderLength (${maxHeaderLength}). This may ` +
-          `cause connection failures.`,
-      );
-    }
-    queriesPatch = undefined;
-  } else {
-    deletedClients = undefined;
-  }
-  onEvent?.('creating the WebSocket');
-  const webSocket = new WS(must(url).toString(), secProtocol);
-  const connection: SyncConnection = {
-    id: wsid,
-    webSocket,
-    listen(listener) {
-      const message = (e: MessageEvent<string>) => listener.message(e.data);
-      webSocket.addEventListener('open', listener.open);
-      webSocket.addEventListener('message', message);
-      webSocket.addEventListener('close', listener.close);
-      return () => {
-        webSocket.removeEventListener('open', listener.open);
-        webSocket.removeEventListener('message', message);
-        webSocket.removeEventListener('close', listener.close);
-      };
-    },
-    send(message, serialized) {
-      webSocket.send(serialized ?? JSON.stringify(message));
-    },
-    close(code, reason) {
-      webSocket.close(code, reason);
-    },
-  };
-  return [connection, queriesPatch, skipEmptyDeletedClients(deletedClients)];
-}
-
-export async function createConnectionURL(
-  socketOrigin: HTTPString | WSString,
-  clientID: string,
-  clientGroupID: string,
-  userID: string | undefined,
-  baseCookie: string | null,
-  lmid: number,
-  wsid: string,
-  rep: Pick<ReplicacheImpl<{}>, 'profileID'>,
-  debugPerf: boolean,
-  additionalConnectParams: Record<string, string> | undefined,
-  lc: LogContext<unknown[], unknown[], unknown[], unknown[]>,
-) {
-  const url = new URL(
-    appendPath(socketOrigin, `/sync/v${PROTOCOL_VERSION}/connect`),
-  );
-  const {searchParams} = url;
-  searchParams.set('clientID', clientID);
-  searchParams.set('clientGroupID', clientGroupID);
-  if (userID !== undefined) {
-    searchParams.set('userID', userID);
-  }
-  searchParams.set('baseCookie', baseCookie === null ? '' : String(baseCookie));
-  searchParams.set('ts', String(performance.now()));
-  searchParams.set('lmid', String(lmid));
-  searchParams.set('wsid', wsid);
-  searchParams.set('profileID', await rep.profileID);
-  if (debugPerf) {
-    searchParams.set('debugPerf', true.toString());
-  }
-  if (additionalConnectParams) {
-    for (const k in additionalConnectParams) {
-      if (searchParams.has(k)) {
-        lc.warn?.(`skipping conflicting parameter ${k}`);
-      } else {
-        searchParams.set(k, additionalConnectParams[k]);
-      }
-    }
-  }
-
-  lc.info?.('Connecting to', url.toString());
-  return url;
-}
-
 function skipEmptyArray<T>(
   arr: readonly T[] | undefined,
 ): readonly T[] | undefined {
@@ -2920,14 +2328,14 @@ function convertDeletedClientsToBody(
   return {clientIDs};
 }
 
-function addWebSocketIDFromSocketToLogContext(
+function addConnectionIDFromSocketToLogContext(
   {id}: SyncConnection,
   lc: LogContext,
 ): LogContext {
-  return addWebSocketIDToLogContext(id, lc);
+  return addConnectionIDToLogContext(id, lc);
 }
 
-function addWebSocketIDToLogContext(wsid: string, lc: LogContext): LogContext {
+function addConnectionIDToLogContext(wsid: string, lc: LogContext): LogContext {
   return lc.withContext('wsid', wsid);
 }
 

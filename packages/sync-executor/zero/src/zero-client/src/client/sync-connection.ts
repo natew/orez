@@ -1,4 +1,5 @@
-import type {InitConnectionBody} from '../../../zero-protocol/src/connect.ts';
+import type {DeleteClientsBody} from '../../../zero-protocol/src/delete-clients.ts';
+import type {UpQueriesPatchOp} from '../../../zero-protocol/src/queries-patch.ts';
 import type {Upstream} from '../../../zero-protocol/src/up.ts';
 
 export type HttpConnectOptions = {
@@ -8,7 +9,11 @@ export type HttpConnectOptions = {
   readonly baseCookie: string | null;
   readonly attemptStartedAt?: number | undefined;
   readonly authToken?: string | undefined;
-  readonly init?: InitConnectionBody | undefined;
+  readonly init?: {
+    readonly desiredQueriesPatch: readonly UpQueriesPatchOp[];
+    readonly deleted?: DeleteClientsBody | undefined;
+    readonly activeClients?: readonly string[] | undefined;
+  } | undefined;
 };
 
 export type SyncConnectionListener = {
@@ -19,9 +24,8 @@ export type SyncConnectionListener = {
 
 export type SyncConnection = {
   readonly id: string;
-  readonly webSocket?: WebSocket;
   listen(listener: SyncConnectionListener): () => void;
-  send(message: Upstream, serialized?: string): void;
+  send(message: Upstream): void;
   close(code?: number, reason?: string): void;
 };
 

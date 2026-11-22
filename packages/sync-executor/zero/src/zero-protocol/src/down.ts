@@ -3,7 +3,6 @@ import {connectedMessageSchema} from './connect.ts';
 import {transformErrorMessageSchema} from './custom-queries.ts';
 import {deleteClientsMessageSchema} from './delete-clients.ts';
 import {errorMessageSchema} from './error.ts';
-import {inspectDownMessageSchema} from './inspect-down.ts';
 import {
   pokeEndMessageSchema,
   pokePartMessageSchema,
@@ -23,7 +22,6 @@ export const downstreamSchema = v.union(
   pullResponseMessageSchema,
   deleteClientsMessageSchema,
   pushResponseMessageSchema,
-  inspectDownMessageSchema,
   transformErrorMessageSchema,
 );
 

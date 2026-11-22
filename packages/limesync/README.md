@@ -5,7 +5,7 @@
 - `limesync` provides the host-neutral mutation executor.
 - `limesync/zero` supplies the Zero client, schema and query builders.
 - `limesync/zero/react` supplies the React provider and hooks.
-- `limesync/zero/server` supplies the application query and mutation request handlers.
+- `limesync/zero/server` supplies the application query request handler.
 - `limesync/client` configures the pull, push, and wake endpoints for the client.
 - `limesync/browser` runs the engine with SQLite WASM in a browser worker.
 - `limesync/native` runs the prebuilt native engine from an application-owned
@@ -24,8 +24,9 @@ Import schema builders, query definitions and `Zero` from `limesync/zero`.
 Register generated schema types with `declare module 'limesync/zero'`. The client
 is based on Zero 1.9.0 and includes the maintained fork's database lifetime fixes.
 
-Configure the transport for the same server URL used by `Zero`. The client
-sends pulls and pushes over HTTP. An optional WebSocket carries wake signals.
+`Zero` sends pulls and pushes over HTTP at its server URL. Use
+`limesync/client` to supply separate endpoints, a wake subscription, or a
+payload codec. An optional WebSocket carries wake signals.
 
 The HTTP client reports rejected pull and push status codes through its lifecycle
 callback. A 401 or 403 emits Zero's `Unauthorized` frame and parks the client in

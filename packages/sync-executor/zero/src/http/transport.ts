@@ -1,0 +1,1846 @@
+import { httpConnectionFor, registerHttpConnection } from '../zero-client/src/client/sync-connection.ts'
+
+import { identityPayloadCodec } from './payload-codec.js'
+
+import type { PayloadCodec, PullResponse, PushRequest } from './payload-codec.js'
+import type {
+  HttpConnectOptions,
+  SyncConnection,
+  SyncConnectionListener,
+} from '../zero-client/src/client/sync-connection.ts'
+
+export type {
+  EncryptedColumnManifest,
+  EncryptedRowBatch,
+  EncryptionKeyring,
+  JSONObject,
+  JSONPrimitive,
+  JSONValue,
+  PayloadCodec,
+  PullResponse,
+  PushMutation,
+  PushRequest,
+} from './payload-codec.js'
+
+type DesiredQueryPatchOp =
+  | { op: 'clear' }
+  | { op: 'put' | 'del'; hash: string; [key: string]: unknown }
+
+type GotQueryPatchOp = { op: 'clear' } | { op: 'put' | 'del'; hash: string }
+
+// a shipped desired-query put carries an AST (client-resolved by a
+// queryTransform, or an ad-hoc query's inline ast) OR name+args for the server
+// to resolve. name+args is the auth-sensitive path: the permission transform
+// stays server-side, so a client cannot forge the AST.
+type QueryPatchOp =
+  | { op: 'put'; hash: string; ast: unknown }
+  | { op: 'put'; hash: string; name: string; args: readonly unknown[] }
+  | { op: 'del'; hash: string }
+  | { op: 'clear' }
+
+// transforms a named query's (name, args) into its Zero v51 AST, resolving
+// desired queries CLIENT-side (ship the AST). use for a native host with no
+// query registry, or a trusted harness. omit it to ship name+args and resolve
+// SERVER-side — the default, permission-safe path.
+export type QueryTransform = (name: string, args: readonly unknown[]) => unknown
+
+type PushBody = Record<string, unknown> & {
+  mutations: unknown[]
+}
+
+type PushBatch = {
+  body: unknown
+  frameCount: number
+  mutationCount: number
+}
+
+type TransportState = {
+  readonly appID: string
+  readonly pageID: string
+  readonly transportID: string
+  readonly originString: string
+  readonly pullOriginString: string
+  readonly pushOriginString: string
+  readonly fetch: typeof fetch
+  readonly nativeWebSocket: typeof WebSocket | undefined
+  readonly sockets: Set<HttpConnection>
+  readonly pullIntervalMs: number | undefined
+  readonly wake: HttpPullTransportOptions['wake']
+  readonly queryTransform: QueryTransform | undefined
+  readonly payloadCodec: PayloadCodec
+  readonly shardNum: number
+  nextPokeID: number
+  nextSocketGeneration: number
+  readonly activeSocketGenerationByClient: Map<string, number>
+  readonly activeSocketByClient: Map<string, HttpConnection>
+  readonly lifecycle: ((event: HttpPullLifecycleEvent) => void) | undefined
+  readonly lifecycleListeners: Set<(event: HttpPullLifecycleEvent) => void>
+}
+
+const COOKIE_WIDTH = 20
+// the stock zero-cache pusher drains queued frames into a single request once
+// its current request completes. keep the same backpressure relief here, but
+// cap the number of mutations so one response cannot monopolize the HTTP
+// transport indefinitely under a sustained producer.
+const MAX_PUSH_BATCH_MUTATIONS = 64
+// Mutation count alone does not bound memory or service-binding pressure: one
+// mutation can carry a wide document. Bound both the pre-codec batch and the
+// final encoded HTTP request.
+const MAX_PUSH_BATCH_BYTES = 768 * 1024
+const MAX_HTTP_REQUEST_BYTES = 1024 * 1024
+const MAX_HTTP_RESPONSE_BYTES = 32 * 1024 * 1024
+const MAX_DELETED_CLIENTS_PER_PULL = 64
+// @rocicorp/zero 1.6 starts this deadline before its async createSocket work.
+// the connect URL's `ts` is captured at the same attempt boundary.
+const ZERO_CONNECT_TIMEOUT_MS = 10_000
+const STANDARD_SAFETY_PULL_INTERVAL_MS = 5 * 60_000
+// every poke makes the stock zero client rebase: it replays each pending
+// (un-acked) mutation on top of the new snapshot, so main-thread cost is
+// pulls × pending-queue depth. back-to-back wake/ack pulls against a deep
+// queue measured 7,926 mutator invocations for 400 real mutations on one soot
+// board. space triggered pulls apart (first one immediate, the rest coalesce
+// into one trailing pull), and space them wider while the push pipeline is
+// still draining — the queue is deepest exactly then, and the drain's own
+// completion requests the ack pull anyway. direct pull()/flush() calls and
+// the safety interval stay immediate.
+const MIN_PULL_SPACING_MS = 250
+// while the push pipeline drains, every pull rebases the ENTIRE pending queue,
+// so pulls during a drain are almost pure replay cost. measured on one soot
+// board with the server's event loop under load: a 64-mutation push frame took
+// 44.4s (1.15s idle), and pulls at the old 1s spacing replayed a ~530-deep
+// queue into 11,028 mutator runs for 600 real mutations. wave w165 sustained a
+// 200-400 deep queue for minutes the same way (~100k replays). the drain's own
+// completion requests the ack pull immediately, so wider spacing here only
+// delays OTHER actors' rows while a drain is actually in flight.
+const MIN_PULL_SPACING_WHILE_PUSHING_MS = 5_000
+// a push or pull whose response headers never arrive would otherwise wait
+// forever: drainPushes serializes on the in-flight push, so one lost response
+// wedges the queue permanently with no failure logged anywhere (observed shape
+// of wave w165's unacked-for-minutes queue). headers and body each get this
+// deadline; the body also has a byte ceiling. firing routes through the
+// existing transient-failure path:
+// clean close, reconnect, re-push, with already-applied mutations answered as
+// alreadyProcessed by protocol design.
+const REQUEST_HEADER_DEADLINE_MS = 60_000
+// ceiling on a server-supplied Retry-After. a daily quota can report a reset
+// hours out; honoring that verbatim would leave the client dark until then.
+const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
+// the wake channel is advisory (the interval poll is what guarantees
+// convergence), so a server that never accepts it must not cost a retry per
+// half second forever. each attempt mints a fresh wake token and opens a
+// handshake, and a misrouted /wake billed 1.94M requests that way. back off to
+// a 30s ceiling, halved-plus-jitter so a fleet reconnecting after one outage
+// does not arrive in lockstep. a socket that reaches open resets the ladder.
+const PULL_SUPERSEDED = new Error('Orez HTTP pull superseded by a desired-query change')
+const WAKE_RECONNECT_BASE_MS = 500
+const WAKE_RECONNECT_MAX_MS = 30_000
+
+export type HttpPullTransport = {
+  pull(): Promise<void>
+  flush(): Promise<void>
+  subscribeLifecycle(listener: (event: HttpPullLifecycleEvent) => void): () => void
+  readonly connections: number
+  readonly pageID: string
+  readonly transportID: string
+  uninstall(): void
+}
+
+export type WakeTokenFetchInit = RequestInit | (() => RequestInit | Promise<RequestInit>)
+
+export function createWakeTokenFetcher(
+  tokenURL: string | URL,
+  init: WakeTokenFetchInit = {},
+  fetchImplementation: typeof fetch = globalThis.fetch
+): () => Promise<string> {
+  if (!fetchImplementation) {
+    throw new Error('createWakeTokenFetcher requires a fetch implementation')
+  }
+  const request = fetchImplementation.bind(globalThis)
+  return async () => {
+    const fetchInit = typeof init === 'function' ? await init() : init
+    const response = await request(tokenURL, { ...fetchInit, method: 'POST' })
+    if (!response.ok) {
+      throw new Error(`wake token request failed: ${response.status}`)
+    }
+    const body: unknown = await response.json().catch(() => null)
+    if (
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      !('token' in body) ||
+      typeof body.token !== 'string' ||
+      !body.token
+    ) {
+      throw new Error('wake token response is invalid')
+    }
+    return body.token
+  }
+}
+
+export type HttpPullTransportOptions = {
+  // zero app id; encoded into /push routing params as schema=<appID>_<shardNum>
+  // and appID=<appID> so a native host can address the right schema shard.
+  appID?: string
+  shardNum?: number
+  origin: string
+  // optional authoritative sync endpoint bases. transport registration and
+  // wake stay on origin, while pull/push POST to their configured bases.
+  pullOrigin?: string
+  pushOrigin?: string
+  fetch?: typeof fetch
+  // safety-poll interval. createZeroClientTransport defaults this to five
+  // minutes; wake notifications normally trigger pulls immediately.
+  pullIntervalMs?: number
+  /**
+   * opens a notification-only socket to <pullOrigin>/wake and pulls immediately on
+   * any wake, demoting interval polling to a safety net.
+   * createZeroClientTransport leaves this disabled unless the consumer opts in
+   * with true, which carries Zero's existing auth token in a WebSocket
+   * subprotocol. this keeps clients from retrying a route their host does not
+   * implement.
+   * custom capability deployments can pass getToken; each socket attempt calls
+   * it afresh and appends the result as wakeToken.
+   */
+  wake?: boolean | { getToken(): Promise<string> } | undefined
+  // when provided, named desired queries are resolved client-side to an AST
+  // before shipping (native host / trusted harness). when omitted, named
+  // queries ship as name+args for the SERVER to resolve with auth — the
+  // default, permission-safe path. either way the client always ships its
+  // desired queries and the server's got ack is authoritative, exactly like
+  // zero-cache over a websocket.
+  queryTransform?: QueryTransform
+  // transforms selected row payloads at the final serialized transport
+  // boundary. omitted options use the module-level identity codec.
+  payloadCodec?: PayloadCodec
+  // receives the structured connection lifecycle. when omitted, Orez logs
+  // failures so production errors retain their owners without logging routine
+  // connection and mutation traffic.
+  lifecycle?: (event: HttpPullLifecycleEvent) => void
+}
+
+export type HttpPullLifecycleEvent = {
+  type:
+    | 'created'
+    | 'listener'
+    | 'open'
+    | 'pull'
+    | 'pull-superseded'
+    | 'close'
+    | 'failure'
+    | 'superseded'
+    | 'aborted'
+    | 'push'
+  pageID: string
+  transportID: string
+  zeroInstanceID: string
+  clientGroupID: string
+  connectionAttemptID: string
+  socketID: string
+  generation: number
+  activeGeneration: number
+  clientID: string
+  wsid: string
+  timestamp: number
+  attemptStartedAt: number | undefined
+  attemptAgeMs: number | undefined
+  listener?: keyof SyncConnectionListener
+  code?: number
+  reason?: string
+  // HTTP status when the failure came from a pull/push response rather than a
+  // socket or transport-level error. a consumer routing 401/403 to its own auth
+  // or access-denied surface needs the status, not the formatted message.
+  httpStatus?: number | undefined
+  pushFrameCount?: number
+  mutationCount?: number
+  queryErrors?: Array<{ name: string; args: readonly unknown[]; message: string }> | undefined
+}
+
+type HttpPullPageRegistry = {
+  readonly pageID: string
+  nextTransportGeneration: number
+  readonly transportsByOrigin: Map<string, HttpPullTransportRegistration>
+}
+
+type HttpPullTransportRegistration = {
+  readonly transport: HttpPullTransport
+  readonly options: NormalizedHttpPullTransportOptions
+  readonly wakeTokenProvider:
+    | { current: Extract<HttpPullTransportOptions['wake'], object> }
+    | undefined
+}
+
+type NormalizedHttpPullTransportOptions = {
+  readonly appID: string
+  readonly shardNum: number
+  readonly origin: string
+  readonly pullOrigin: string
+  readonly pushOrigin: string
+  readonly fetch: typeof fetch | undefined
+  readonly pullIntervalMs: number | undefined
+  readonly wake: false | true | 'custom'
+  readonly queryTransform: QueryTransform | undefined
+  readonly payloadCodecID: string
+  readonly lifecycle: ((event: HttpPullLifecycleEvent) => void) | undefined
+}
+
+const HTTP_PULL_OPTION_FIELDS = [
+  'appID',
+  'shardNum',
+  'origin',
+  'pullOrigin',
+  'pushOrigin',
+  'fetch',
+  'pullIntervalMs',
+  'wake',
+  'queryTransform',
+  'payloadCodecID',
+  'lifecycle',
+] satisfies readonly (keyof NormalizedHttpPullTransportOptions)[]
+
+const HTTP_PULL_PAGE_REGISTRY = Symbol.for('on-zero.http-pull.page-registry')
+
+function isHttpPullPageRegistry(value: unknown): value is HttpPullPageRegistry {
+  const seen = value as HttpPullPageRegistry
+  return (
+    typeof seen === 'object' &&
+    seen !== null &&
+    typeof seen.pageID === 'string' &&
+    typeof seen.nextTransportGeneration === 'number' &&
+    seen.transportsByOrigin instanceof Map
+  )
+}
+
+function getHttpPullPageRegistry(): HttpPullPageRegistry {
+  const existing = Reflect.get(globalThis, HTTP_PULL_PAGE_REGISTRY)
+  if (isHttpPullPageRegistry(existing)) return existing
+  const registry: HttpPullPageRegistry = {
+    pageID: `page-${Date.now().toString(36)}`,
+    nextTransportGeneration: 0,
+    transportsByOrigin: new Map(),
+  }
+  Reflect.set(globalThis, HTTP_PULL_PAGE_REGISTRY, registry)
+  return registry
+}
+
+function normalizePayloadCodec(codec: PayloadCodec | undefined): PayloadCodec {
+  const resolved = codec ?? identityPayloadCodec
+  if (
+    typeof resolved.id !== 'string' ||
+    !resolved.id ||
+    typeof resolved.encodePush !== 'function' ||
+    typeof resolved.decodePull !== 'function'
+  ) {
+    throw new Error('Orez HTTP payload codec must have an id, encodePush, and decodePull')
+  }
+  return resolved
+}
+
+function logHttpPullLifecycle(event: HttpPullLifecycleEvent) {
+  const processValue = Reflect.get(globalThis, 'process') as
+    | { env?: { NODE_ENV?: string } }
+    | undefined
+  if (processValue?.env?.NODE_ENV === 'test' || event.type !== 'failure') return
+  console.error(`[orez:client] ${JSON.stringify(event)}`)
+}
+
+export function installHttpPullTransport(
+  opts: HttpPullTransportOptions
+): HttpPullTransport {
+  const pageRegistry = getHttpPullPageRegistry()
+  const transportID = `${pageRegistry.pageID}:transport:${++pageRegistry.nextTransportGeneration}`
+  const fetchImpl = opts.fetch ?? globalThis.fetch
+  if (!fetchImpl) {
+    throw new Error('installHttpPullTransport requires a fetch implementation')
+  }
+  const payloadCodec = normalizePayloadCodec(opts.payloadCodec)
+
+  const state: TransportState = {
+    appID: opts.appID ?? 'zero',
+    pageID: pageRegistry.pageID,
+    transportID,
+    originString: trimTrailingSlash(new URL(opts.origin).toString()),
+    pullOriginString: trimTrailingSlash(
+      new URL(opts.pullOrigin ?? opts.origin).toString()
+    ),
+    pushOriginString: trimTrailingSlash(
+      new URL(opts.pushOrigin ?? opts.origin).toString()
+    ),
+    // the transport invokes this as `state.fetch(...)` — without binding,
+    // window.fetch sees `state` as its receiver and browsers throw
+    // "Illegal invocation" (node's fetch doesn't care, so tests can't catch it)
+    fetch: fetchImpl.bind(globalThis),
+    nativeWebSocket: globalThis.WebSocket,
+    sockets: new Set(),
+    pullIntervalMs: opts.pullIntervalMs,
+    wake: opts.wake ?? false,
+    queryTransform: opts.queryTransform,
+    payloadCodec,
+    shardNum: opts.shardNum ?? 0,
+    nextPokeID: 0,
+    nextSocketGeneration: 0,
+    activeSocketGenerationByClient: new Map(),
+    activeSocketByClient: new Map(),
+    lifecycle: opts.lifecycle ?? logHttpPullLifecycle,
+    lifecycleListeners: new Set(),
+  }
+
+  const unregister = registerHttpConnection(
+    state.originString,
+    (options) => new HttpConnection(state, options)
+  )
+
+  const transport: HttpPullTransport = {
+    pull: async () => {
+      await Promise.all([...state.sockets].map((socket) => socket.pull()))
+    },
+    flush: async () => {
+      await Promise.resolve()
+      const generation = state.nextSocketGeneration
+      const sockets = [...state.sockets]
+      await Promise.all(sockets.map((socket) => socket.flush()))
+      if (
+        state.nextSocketGeneration !== generation ||
+        sockets.some((socket) => !state.sockets.has(socket))
+      ) {
+        throw new Error('transport changed during flush')
+      }
+    },
+    subscribeLifecycle: (listener) => {
+      state.lifecycleListeners.add(listener)
+      return () => state.lifecycleListeners.delete(listener)
+    },
+    get connections() {
+      return state.sockets.size
+    },
+    pageID: state.pageID,
+    transportID: state.transportID,
+    uninstall: () => {
+      unregister()
+      const registered = pageRegistry.transportsByOrigin.get(state.originString)
+      if (registered?.transport === transport) {
+        pageRegistry.transportsByOrigin.delete(state.originString)
+      }
+    },
+  }
+  return transport
+}
+
+// ProvideZero can rotate instances against the same server. Share one
+// installed transport per origin for the lifetime of the page.
+export function ensureHttpPullTransport(
+  opts: HttpPullTransportOptions
+): HttpPullTransport {
+  const pageRegistry = getHttpPullPageRegistry()
+  const key = trimTrailingSlash(new URL(opts.origin).toString())
+  const payloadCodec = normalizePayloadCodec(opts.payloadCodec)
+  const options: NormalizedHttpPullTransportOptions = {
+    appID: opts.appID ?? 'zero',
+    shardNum: opts.shardNum ?? 0,
+    origin: key,
+    pullOrigin: trimTrailingSlash(new URL(opts.pullOrigin ?? opts.origin).toString()),
+    pushOrigin: trimTrailingSlash(new URL(opts.pushOrigin ?? opts.origin).toString()),
+    fetch: opts.fetch,
+    pullIntervalMs: opts.pullIntervalMs,
+    wake: typeof opts.wake === 'object' ? 'custom' : (opts.wake ?? false),
+    queryTransform: opts.queryTransform,
+    payloadCodecID: payloadCodec.id,
+    lifecycle: opts.lifecycle,
+  }
+  const existing = pageRegistry.transportsByOrigin.get(key)
+  if (existing) {
+    const conflicts = HTTP_PULL_OPTION_FIELDS.filter(
+      (field) => !Object.is(existing.options[field], options[field])
+    )
+    if (conflicts.length > 0) {
+      throw new Error(
+        `HTTP pull transport for ${key} is already installed with different ${conflicts.join(', ')}`
+      )
+    }
+    if (existing.wakeTokenProvider && typeof opts.wake === 'object') {
+      existing.wakeTokenProvider.current = opts.wake
+    }
+    return existing.transport
+  }
+  // token minting belongs to the current caller; the transport keeps
+  // page lifetime ownership across module reloads and provider rotation.
+  const wakeTokenProvider =
+    typeof opts.wake === 'object' ? { current: opts.wake } : undefined
+  const transport = installHttpPullTransport({
+    ...opts,
+    payloadCodec,
+    wake: wakeTokenProvider
+      ? { getToken: () => wakeTokenProvider.current.getToken() }
+      : opts.wake,
+  })
+  pageRegistry.transportsByOrigin.set(key, { transport, options, wakeTokenProvider })
+  return transport
+}
+
+export type ZeroClientTransportPlugin = {
+  readonly type: 'orez-client'
+  install(origin: string): HttpPullTransport
+}
+
+export function createZeroClientTransport(
+  options: Omit<HttpPullTransportOptions, 'origin'> = {}
+): ZeroClientTransportPlugin {
+  return Object.freeze({
+    type: 'orez-client' as const,
+    install(origin: string) {
+      return ensureHttpPullTransport({
+        ...options,
+        origin,
+        pullIntervalMs: options.pullIntervalMs ?? STANDARD_SAFETY_PULL_INTERVAL_MS,
+        wake: options.wake ?? false,
+      })
+    },
+  })
+}
+
+export function openHttpConnection(origin: string, options: HttpConnectOptions) {
+  let connect = httpConnectionFor(origin)
+  if (!connect) {
+    ensureHttpPullTransport({ origin, pullIntervalMs: STANDARD_SAFETY_PULL_INTERVAL_MS })
+    connect = httpConnectionFor(origin)!
+  }
+  return connect(options)
+}
+
+export async function flushHttpPullTransports() {
+  const pageRegistry = getHttpPullPageRegistry()
+  await Promise.all(
+    [...pageRegistry.transportsByOrigin.values()].map(({ transport }) =>
+      transport.flush()
+    )
+  )
+}
+
+// a data-changed nudge for hosts that know the server advanced (e.g. a local
+// mutation applied elsewhere in the page): pull every installed transport now
+// instead of waiting out its pullIntervalMs.
+export async function pullHttpPullTransports() {
+  const pageRegistry = getHttpPullPageRegistry()
+  await Promise.all(
+    [...pageRegistry.transportsByOrigin.values()].map(({ transport }) => transport.pull())
+  )
+}
+
+class HttpConnection implements SyncConnection {
+  readonly id: string
+  private status: 'connecting' | 'open' | 'closed' = 'connecting'
+  private authToken: string | undefined
+  private listener: SyncConnectionListener | undefined
+  private readonly clientID: string
+  private readonly clientGroupID: string
+  private cookie: string | null
+  // the latest server cursor to pull from. advances on every pull response,
+  // even when the response carries nothing Zero has not seen and no poke is
+  // emitted. this.cookie stays the last cookie DELIVERED to zero so a real
+  // effect chains its poke from it; a reconnect resumes from that durable
+  // cookie.
+  private httpCookie: number | null = null
+  // every mutation id already delivered to zero on this socket. the server
+  // repeats the map on pulls that carry no new acknowledgements.
+  private readonly deliveredLastMutationIDs = new Map<string, number>()
+  // whether zero has received any poke on this socket yet. the first changed
+  // pull always pokes so initial hydration establishes a cookie.
+  private hasPoked = false
+  private pendingGotQueriesPatch: GotQueryPatchOp[] = []
+  // a snapshot clear removes both rows and got-query marks from Replicache.
+  // remember every delivered mark so a clear-bearing poke can restore them.
+  private ackedGotHashes = new Set<string>()
+  // the accumulated un-acked desired-query delta to ship, a client-side state
+  // version that bumps on each change, and the version/length of the delta the
+  // in-flight pull sent so the server's ack can clear that prefix.
+  private queryPatch: QueryPatchOp[] = []
+  private readonly queryNames = new Map<
+    string,
+    { name: string; args: readonly unknown[] }
+  >()
+  private queryVersion = 0
+  private ackVersion = 0
+  private sentVersion: number | undefined
+  private sentPatchLen = 0
+  private readonly pendingDeletedClientIDs = new Set<string>()
+  private pullInFlight: Promise<void> | undefined
+  private pullAfterCurrent = false
+  // a screen waits on a newly desired query, so its re-run skips the spacing
+  private queryPullAfterCurrent = false
+  // a change that drops a query the in-flight pull hydrates supersedes it
+  private pullAbort: AbortController | undefined
+  private inFlightPuts = new Set<string>()
+  private nextPullTimer: ReturnType<typeof setTimeout> | undefined
+  private lastPullEndedAt = Number.NEGATIVE_INFINITY
+  private lastWakePullAt = Number.NEGATIVE_INFINITY
+  private pendingPushes: unknown[] = []
+  private pushInFlight = false
+  private pushCompletion: Promise<void> = Promise.resolve()
+  private flushGeneration = 0
+  private readonly pendingUpstream = new Set<Promise<void>>()
+  private nextLocalCookieID: number
+  private openTimer: ReturnType<typeof setTimeout> | undefined
+  private pullTimer: ReturnType<typeof setInterval> | undefined
+  private wakeSocket: { close(): void } | undefined
+  private wakeConnecting = false
+  private wakeReconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private wakeKeepaliveTimer: ReturnType<typeof setInterval> | undefined
+  private wakeReconnectAttempts = 0
+  private readonly generation: number
+  private readonly zeroInstanceID: string
+  private readonly connectionAttemptID: string
+  private readonly socketID: string
+  private readonly attemptStartedAt: number | undefined
+  private readonly attemptAgeAtConstructionMs: number | undefined
+  private settled = false
+  private pendingActiveClients: readonly string[] | undefined
+
+  constructor(
+    private readonly state: TransportState,
+    options: HttpConnectOptions
+  ) {
+    this.clientID = options.clientID
+    this.clientGroupID = options.clientGroupID
+    this.id = options.connectionID
+    this.generation = ++this.state.nextSocketGeneration
+    this.zeroInstanceID = `${this.state.pageID}:zero:${this.clientID}`
+    this.connectionAttemptID = `${this.zeroInstanceID}:attempt:${this.id}`
+    this.socketID = `${this.state.transportID}:socket:${this.generation}`
+    this.attemptStartedAt = options.attemptStartedAt
+    const previousSocket = this.state.activeSocketByClient.get(this.clientID)
+    this.state.activeSocketGenerationByClient.set(this.clientID, this.generation)
+    this.state.activeSocketByClient.set(this.clientID, this)
+    previousSocket?.supersede()
+    this.emitLifecycle('created')
+    this.cookie = options.baseCookie
+    this.httpCookie = toHttpCookie(this.cookie)
+    this.hasPoked = this.cookie !== null
+    // the local cookie ID is encoded into the suffix of any cookie we
+    // already advanced past (toLocalWebSocketCookie). reconnects rehydrate
+    // this.cookie from the base cookie Replicache persisted, so we
+    // must resume the counter from its suffix — otherwise the first poke on
+    // the new socket re-emits an identical suffix and replicache trips
+    // "cookie did not change, but patch is not empty" and drops the patch.
+    const suffixMatch = this.cookie?.match(/#(\d+)$/)
+    this.nextLocalCookieID = suffixMatch ? Number(suffixMatch[1]) : 0
+
+    this.authToken = options.authToken
+    this.queueDesiredQueries(options.init)
+    this.queueDeletedClients(options.init?.deleted)
+
+    // an attempt Zero already timed out is measured HERE, at construction, not
+    // in open(). construction is the only async step orez controls, so it is
+    // the only one whose overrun means Zero abandoned the attempt. open() runs
+    // from a setTimeout(0), and on a single-threaded runtime a long stall (a
+    // mobile launch materializing its first queries takes seconds) makes that
+    // callback arbitrarily late through no fault of the connection. re-reading
+    // the clock there aborted sockets that were built on time, and because
+    // Zero's own connect deadline is a timer on the same blocked loop and is
+    // scheduled LATER, this abort always won the race and closed an attempt
+    // Zero had not abandoned — leaving that Zero instance with no socket and
+    // nothing to reconnect.
+    this.attemptAgeAtConstructionMs = this.getAttemptAgeMs()
+
+    this.state.sockets.add(this)
+    // open on the next task so Zero can attach its listeners. open() honors the
+    // construction-time verdict above, so async socket construction that
+    // outlived Zero's deadline closes without delivering an event to abandoned
+    // state.
+    this.openTimer = setTimeout(() => this.open(), 0)
+  }
+
+  listen(listener: SyncConnectionListener) {
+    this.listener = listener
+    for (const name of ['message', 'open', 'close'] as const) {
+      this.emitLifecycle('listener', { listener: name })
+    }
+    return () => {
+      if (this.listener === listener) this.listener = undefined
+    }
+  }
+
+  send(message: Parameters<SyncConnection['send']>[0]) {
+    if (this.status !== 'open') {
+      throw new Error('cannot send on an HTTP connection before it opens')
+    }
+    switch (message[0]) {
+      case 'changeDesiredQueries':
+        this.flushGeneration++
+        this.queueDesiredQueries(message[1])
+        if (this.dropsInFlightQuery(message[1])) this.supersedePull()
+        else if (this.addsQuery(message[1])) this.pullForQuery()
+        else this.requestPullAfterCurrent()
+        return
+      case 'updateAuth':
+        this.flushGeneration++
+        this.authToken = message[1].auth
+        if (this.state.wake === true) {
+          this.closeWakeChannel()
+          this.openWakeChannel()
+        }
+        return
+      case 'push':
+        this.enqueuePush(message[1])
+        return
+      case 'ping':
+        this.emitMessage(['pong', {}])
+        return
+      case 'pull': {
+        this.flushGeneration++
+        const recoveryPull = this.answerMutationRecoveryPull(message[1])
+        this.trackUpstream(recoveryPull)
+        this.run(recoveryPull)
+        return
+      }
+      case 'deleteClients':
+        this.flushGeneration++
+        if (this.queueDeletedClients(message[1])) this.requestPullAfterCurrent()
+        return
+      case 'ackMutationResponses':
+        return
+      default:
+        throw new Error(`unsupported Orez HTTP upstream message ${message[0]}`)
+    }
+  }
+
+  close(code = 1000, reason = '') {
+    if (!this.settle('close', { code, reason })) return
+    this.listener?.close({ code, reason, wasClean: code <= 1001 })
+  }
+
+  pull(): Promise<void> {
+    if (this.status !== 'open') return Promise.resolve()
+    // a pull requested while one is in flight cannot be answered by the one in
+    // flight: that request left with an older cookie, so a row committed after
+    // it went out is not in its response. joining it and stopping there drops
+    // the request silently and leaves convergence to pullIntervalMs, five
+    // minutes away. every caller wants "go get what is there now", so mark the
+    // re-run here rather than making each of them remember to.
+    if (this.pullInFlight) {
+      this.pullAfterCurrent = true
+      return this.pullInFlight
+    }
+    // a starting pull satisfies any pull the spacing timer was holding
+    clearTimeout(this.nextPullTimer)
+    this.nextPullTimer = undefined
+    const deletedClientIDs = [...this.pendingDeletedClientIDs].slice(
+      0,
+      MAX_DELETED_CLIENTS_PER_PULL
+    )
+    const abort = new AbortController()
+    this.pullAbort = abort
+    this.pullInFlight = this.fetchPull(
+      this.clientGroupID,
+      this.httpCookie,
+      true,
+      deletedClientIDs,
+      abort.signal
+    )
+      .then((response) => {
+        if (abort.signal.aborted) return
+        const queryErrors = this.decodeQueryErrors(response)
+        this.applyServerDeletedClients(response, deletedClientIDs)
+        this.applyServerGotQueries(response)
+        if (response.unchanged) {
+          this.emitGotQueriesPatch(response.cookie)
+        } else {
+          this.emitPokeIfEffective(response)
+        }
+        if (queryErrors.length > 0) this.emitMessage(['transformError', queryErrors])
+        this.emitLifecycle('pull', {
+          queryErrors: response.queryErrors?.map(({ hash, message }) => ({
+            name: this.queryNames.get(hash)?.name ?? 'legacy',
+            args: this.queryNames.get(hash)?.args ?? [],
+            message,
+          })),
+        })
+      })
+      .catch((error) => {
+        // superseded: nothing applied, so the replacement re-ships the same
+        // delta from the same cookie, the lost-response case the server handles
+        if (abort.signal.reason === PULL_SUPERSEDED) return
+        this.fail(error)
+        throw error
+      })
+      .finally(() => {
+        this.lastPullEndedAt = performance.now()
+        const superseded = abort.signal.reason === PULL_SUPERSEDED
+        const pullAgain = this.pullAfterCurrent
+        const queryWaiting = this.queryPullAfterCurrent
+        this.pullAfterCurrent = false
+        this.queryPullAfterCurrent = false
+        this.pullInFlight = undefined
+        this.pullAbort = undefined
+        this.inFlightPuts.clear()
+        if (this.status === 'closed') return
+        if (superseded || queryWaiting) this.run(this.pull())
+        else if (pullAgain) this.requestPullAfterCurrent()
+      })
+    return this.pullInFlight
+  }
+
+  private addsQuery(body: unknown) {
+    const patch = (body as { desiredQueriesPatch?: unknown })?.desiredQueriesPatch
+    return (
+      Array.isArray(patch) &&
+      (patch as DesiredQueryPatchOp[]).some((op) => op.op === 'put')
+    )
+  }
+
+  // the spacing coalesces wake and ack pulls nobody is looking at. a new query
+  // is a screen opening, and its rows are a 2-30ms pull away, so it goes now,
+  // or straight after the pull in flight, even while pushes drain.
+  private pullForQuery() {
+    if (this.pullInFlight) {
+      this.pullAfterCurrent = true
+      this.queryPullAfterCurrent = true
+      return
+    }
+    this.run(this.pull())
+  }
+
+  private dropsInFlightQuery(body: unknown) {
+    if (!this.pullInFlight || this.inFlightPuts.size === 0) return false
+    const patch = (body as { desiredQueriesPatch?: unknown })?.desiredQueriesPatch
+    if (!Array.isArray(patch)) return false
+    return (patch as DesiredQueryPatchOp[]).some(
+      (op) => op.op === 'clear' || (op.op === 'del' && this.inFlightPuts.has(op.hash))
+    )
+  }
+
+  private supersedePull() {
+    this.emitLifecycle('pull-superseded')
+    this.pullAbort?.abort(PULL_SUPERSEDED)
+  }
+
+  // settle every tracked upstream effect, then prove quiescence with two pull
+  // round trips. repeat if work arrived during that pass.
+  async flush(): Promise<void> {
+    for (;;) {
+      const generation = this.flushGeneration
+      await Promise.all([...this.pendingUpstream])
+      await this.pushCompletion
+      await this.pull()
+      await Promise.all([...this.pendingUpstream])
+      await this.pushCompletion
+      await this.pull()
+      await Promise.resolve()
+      if (this.flushGeneration === generation && this.pendingUpstream.size === 0) {
+        return
+      }
+    }
+  }
+
+  private open() {
+    if (this.status !== 'connecting') return
+    const attemptAgeMs = this.attemptAgeAtConstructionMs
+    if (attemptAgeMs !== undefined && attemptAgeMs >= ZERO_CONNECT_TIMEOUT_MS) {
+      const reason = `Orez HTTP connection attempt ${this.id} expired after ${Math.round(
+        attemptAgeMs
+      )}ms before socket construction completed`
+      if (!this.settle('aborted', { code: 1000, reason })) return
+      this.listener?.close({ code: 1000, reason, wasClean: true })
+      return
+    }
+    this.status = 'open'
+    this.emitLifecycle('open')
+    this.listener?.open()
+    this.emitMessage(['connected', { wsid: this.id, timestamp: Date.now() }])
+    setTimeout(() => this.run(this.pull()), 0)
+    if (this.state.pullIntervalMs) {
+      this.pullTimer = setInterval(() => {
+        this.run(this.pull())
+      }, this.state.pullIntervalMs)
+    }
+    if (this.state.wake) this.openWakeChannel()
+  }
+
+  // wake channel: a websocket to <pullOrigin>/wake, on the host that serves
+  // pulls, that sends keepalives. wake
+  // frames trigger an immediate (coalesced) pull without waiting on
+  // the poll interval. advisory only: if it drops we reconnect, and the
+  // interval poll remains the safety net that guarantees convergence.
+  private openWakeChannel() {
+    const Native = this.state.nativeWebSocket
+    if (!Native || this.wakeSocket || this.wakeConnecting || this.status !== 'open') {
+      return
+    }
+    this.wakeConnecting = true
+    const wsBase = this.state.pullOriginString.replace(/^http/, 'ws')
+    void (async () => {
+      let wakeToken: string | undefined
+      let socket: {
+        onopen: (() => void) | null
+        onmessage: ((event?: { data?: unknown }) => void) | null
+        onclose: (() => void) | null
+        onerror: (() => void) | null
+        close(): void
+        send(data: string): void
+      }
+      try {
+        if (typeof this.state.wake === 'object') {
+          wakeToken = await this.state.wake.getToken()
+        }
+        if (this.status !== 'open' || this.wakeSocket) return
+        const url =
+          `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}` +
+          (this.clientGroupID
+            ? `&clientGroupID=${encodeURIComponent(this.clientGroupID)}`
+            : '') +
+          (wakeToken === undefined ? '' : `&wakeToken=${encodeURIComponent(wakeToken)}`)
+        const protocol =
+          this.state.wake === true && this.authToken
+            ? `orez-auth.${encodeBase64URL(this.authToken)}`
+            : undefined
+        socket = new Native(url, protocol) as unknown as typeof socket
+      } catch {
+        this.scheduleWakeReconnect()
+        return
+      } finally {
+        this.wakeConnecting = false
+      }
+      this.wakeSocket = socket
+      const reconnect = () => {
+        if (this.wakeSocket !== socket) return
+        clearInterval(this.wakeKeepaliveTimer)
+        this.wakeSocket = undefined
+        this.scheduleWakeReconnect()
+      }
+      // a wake pulls at once; a storm still coalesces into one leading pull
+      // plus one spaced trailing pull.
+      //
+      // connecting is also a nudge. a commit can land after the initial pull
+      // reads its snapshot but before the server accepts this subscription. no
+      // historical frame exists for that interval, so catch up once the socket
+      // is actually open.
+      socket.onopen = () => {
+        if (this.wakeSocket !== socket) return
+        this.wakeReconnectAttempts = 0
+        this.wakeKeepaliveTimer = setInterval(() => socket.send('ping'), 60_000)
+        this.requestPullAfterCurrent()
+      }
+      socket.onmessage = (event) => {
+        // old hosts answer ping in the message handler; new hosts auto-respond.
+        if (event?.data !== 'pong') this.requestPullAfterCurrent(true)
+      }
+      socket.onclose = socket.onerror = reconnect
+    })()
+  }
+
+  private scheduleWakeReconnect() {
+    if (this.status !== 'open' || this.wakeReconnectTimer) return
+    const ceiling = Math.min(
+      WAKE_RECONNECT_BASE_MS * 2 ** this.wakeReconnectAttempts,
+      WAKE_RECONNECT_MAX_MS
+    )
+    this.wakeReconnectAttempts++
+    this.wakeReconnectTimer = setTimeout(
+      () => {
+        this.wakeReconnectTimer = undefined
+        this.openWakeChannel()
+      },
+      ceiling / 2 + Math.random() * (ceiling / 2)
+    )
+  }
+
+  private closeWakeChannel() {
+    clearInterval(this.wakeKeepaliveTimer)
+    clearTimeout(this.wakeReconnectTimer)
+    this.wakeReconnectTimer = undefined
+    this.wakeReconnectAttempts = 0
+    const socket = this.wakeSocket
+    this.wakeSocket = undefined
+    if (socket) {
+      try {
+        socket.close()
+      } catch {
+        // best effort: an already-closing wake socket is harmless
+      }
+    }
+  }
+
+  private queueDesiredQueries(body: unknown) {
+    const activeClients = (body as { activeClients?: unknown })?.activeClients
+    if (activeClients !== undefined) {
+      if (
+        !Array.isArray(activeClients) ||
+        !activeClients.every((id) => typeof id === 'string')
+      ) {
+        throw new Error('HTTP connection returned invalid activeClients')
+      }
+      this.pendingActiveClients = activeClients
+    }
+    const desiredQueriesPatch = (body as { desiredQueriesPatch?: unknown })
+      ?.desiredQueriesPatch
+    if (!Array.isArray(desiredQueriesPatch)) return
+    // accumulate the desired-query delta to ship to the server — always, like
+    // stock Zero against zero-cache. a named put ships name+args for the server
+    // to resolve with auth (or a client-resolved ast via queryTransform); an
+    // anonymous put ships its inline ast. the server owns the got-query ack.
+    const transform = this.state.queryTransform
+    for (const op of desiredQueriesPatch as DesiredQueryPatchOp[]) {
+      if (op.op === 'clear') {
+        this.queryNames.clear()
+        this.queryPatch.push({ op: 'clear' })
+      } else if (op.op === 'del') {
+        this.queryNames.delete(op.hash)
+        this.queryPatch.push({ op: 'del', hash: op.hash })
+      } else if (op.op === 'put') {
+        const inline = (op as { ast?: unknown }).ast
+        const name = (op as { name?: string }).name ?? ''
+        const args = ((op as { args?: readonly unknown[] }).args ??
+          []) as readonly unknown[]
+        this.queryNames.set(op.hash, { name: name || 'legacy', args })
+        if (name && transform) {
+          this.queryPatch.push({
+            op: 'put',
+            hash: op.hash,
+            ast: transform(name, args),
+          })
+        } else if (name) {
+          this.queryPatch.push({ op: 'put', hash: op.hash, name, args })
+        } else if (inline !== undefined) {
+          this.queryPatch.push({ op: 'put', hash: op.hash, ast: inline })
+        }
+      }
+    }
+    this.queryVersion++
+  }
+
+  private queueDeletedClients(body: unknown) {
+    const clientIDs = (body as { clientIDs?: unknown } | null)?.clientIDs
+    if (!Array.isArray(clientIDs)) return false
+    let added = false
+    for (const clientID of clientIDs) {
+      if (typeof clientID !== 'string' || clientID.length === 0) continue
+      if (clientID === this.clientID) {
+        throw new Error('Orez HTTP transport cannot delete its active client')
+      }
+      const size = this.pendingDeletedClientIDs.size
+      this.pendingDeletedClientIDs.add(clientID)
+      added ||= this.pendingDeletedClientIDs.size !== size
+    }
+    return added
+  }
+
+  private async push({ body, frameCount, mutationCount }: PushBatch) {
+    const encodedBody = await this.state.payloadCodec.encodePush(body as PushRequest)
+    const response = (await this.postJSON('/push', encodedBody)) as {
+      pushResponse?: unknown
+    }
+    this.emitLifecycle('push', {
+      pushFrameCount: frameCount,
+      mutationCount,
+    })
+    // mutation RECOVERY pushes carry a PREVIOUS client's pending mutations,
+    // and the server response echoes that old clientID. zero-cache's pusher
+    // groups results by clientID and only delivers a client its OWN results
+    // (recovered mutations settle via lastMutationIDChanges in pokes); the
+    // raw response would trip zero's "received mutation for the wrong
+    // client" assert and kill the connection. mirror the same filtering.
+    this.emitMessage([
+      'pushResponse',
+      filterMutationResultsToClient(
+        'pushResponse' in response ? response.pushResponse : response,
+        this.clientID
+      ),
+    ])
+  }
+
+  private enqueuePush(body: unknown) {
+    this.flushGeneration++
+    this.pendingPushes.push(body)
+    if (this.pushInFlight) return
+    const drain = this.drainPushes()
+    this.pushCompletion = drain
+    this.trackUpstream(drain)
+    this.run(drain)
+  }
+
+  private async drainPushes() {
+    this.pushInFlight = true
+    try {
+      while (this.status !== 'closed' && this.pendingPushes.length > 0) {
+        await this.push(this.takePushBatch())
+      }
+    } finally {
+      this.pushInFlight = false
+    }
+    // the ack pull runs once per DRAIN, not once per batch: the server's
+    // lastMutationIDChanges for the whole burst arrive in one poke, so the
+    // rebase replays an emptied queue instead of a deep one after every batch.
+    // reached only on success — a failed push propagates to fail() and must
+    // not pull a failing server (the 429/500 storm tests pin this).
+    clearTimeout(this.nextPullTimer)
+    this.nextPullTimer = undefined
+    this.requestPullAfterCurrent()
+  }
+
+  private takePushBatch(): PushBatch {
+    const first = this.pendingPushes.shift()
+    const firstBody = parsePushBody(first)
+    if (!firstBody) {
+      return { body: first, frameCount: 1, mutationCount: 0 }
+    }
+
+    const mutations = [...firstBody.mutations]
+    let frameCount = 1
+    while (this.pendingPushes.length > 0) {
+      const nextBody = parsePushBody(this.pendingPushes[0])
+      if (
+        !nextBody ||
+        !areCompatiblePushBodies(firstBody, nextBody) ||
+        mutations.length + nextBody.mutations.length > MAX_PUSH_BATCH_MUTATIONS ||
+        jsonByteLength({
+          ...firstBody,
+          mutations: [...mutations, ...nextBody.mutations],
+        }) > MAX_PUSH_BATCH_BYTES
+      ) {
+        break
+      }
+      this.pendingPushes.shift()
+      mutations.push(...nextBody.mutations)
+      frameCount++
+    }
+
+    return {
+      body: frameCount === 1 ? firstBody : { ...firstBody, mutations },
+      frameCount,
+      mutationCount: mutations.length,
+    }
+  }
+
+  private trackUpstream(promise: Promise<void>) {
+    this.pendingUpstream.add(promise)
+    const drop = () => this.pendingUpstream.delete(promise)
+    void promise.then(drop, drop)
+  }
+
+  // a wake is spaced only from the last wake that pulled at once, so a pull
+  // this client scheduled after its own push never holds another client's rows
+  private requestPullAfterCurrent(wake = false) {
+    if (this.pullInFlight) {
+      this.pullAfterCurrent = true
+      return
+    }
+    const pushing = this.pushInFlight || this.pendingPushes.length > 0
+    const now = performance.now()
+    if (wake && !pushing && now - this.lastWakePullAt >= MIN_PULL_SPACING_MS) {
+      this.lastWakePullAt = now
+      this.run(this.pull())
+      return
+    }
+    if (this.nextPullTimer !== undefined) return
+    const spacing = pushing ? MIN_PULL_SPACING_WHILE_PUSHING_MS : MIN_PULL_SPACING_MS
+    const wait = this.lastPullEndedAt + spacing - now
+    if (wait <= 0) {
+      this.run(this.pull())
+      return
+    }
+    // re-enter instead of pulling directly so the wait is recomputed against
+    // the push/pull state at fire time, not the state when it was scheduled
+    this.nextPullTimer = setTimeout(() => {
+      this.nextPullTimer = undefined
+      this.requestPullAfterCurrent()
+    }, wait)
+  }
+
+  // the got-query ack is authoritative from the server. take the server's
+  // gotQueries.patch as the got patch to emit, and clear the acked prefix of
+  // the shipped desired delta once the server acks that version. the ack never
+  // leads its row effects, so the client marks a query got only after its rows
+  // land.
+  private applyServerGotQueries(response: PullResponse) {
+    const got = response.gotQueries
+    this.pendingGotQueriesPatch = got ? [...got.patch] : []
+    if (got && this.sentVersion !== undefined && got.version >= this.sentVersion) {
+      this.queryPatch.splice(0, this.sentPatchLen)
+      this.ackVersion = got.version
+      this.sentVersion = undefined
+      // the ack spans sockets, so a new socket's counter must pass it
+      this.queryVersion = Math.max(
+        this.queryVersion,
+        got.version + (this.queryPatch.length ? 1 : 0)
+      )
+    }
+  }
+
+  private decodeQueryErrors(response: PullResponse) {
+    const errors = response.queryErrors
+    if (errors === undefined) return []
+    if (
+      !Array.isArray(errors) ||
+      errors.some(
+        (error) =>
+          !error ||
+          typeof error.hash !== 'string' ||
+          !error.hash ||
+          typeof error.message !== 'string'
+      )
+    )
+      throw new Error('Orez HTTP pull returned invalid queryErrors')
+    return errors.map(({ hash, message }) => ({
+      error: 'app',
+      id: hash,
+      name: this.queryNames.get(hash)?.name ?? 'legacy',
+      message,
+    }))
+  }
+
+  private applyServerDeletedClients(
+    response: PullResponse,
+    sentClientIDs: readonly string[]
+  ) {
+    const acknowledged = response.deletedClientIDs
+    if (acknowledged === undefined) return
+    if (!Array.isArray(acknowledged)) {
+      throw new Error('Orez HTTP pull returned invalid deletedClientIDs')
+    }
+    const sent = new Set(sentClientIDs)
+    const confirmed: string[] = []
+    for (const clientID of acknowledged) {
+      if (typeof clientID !== 'string' || !sent.has(clientID)) {
+        throw new Error('Orez HTTP pull acknowledged an unsent deleted client')
+      }
+      if (this.pendingDeletedClientIDs.delete(clientID)) confirmed.push(clientID)
+    }
+    if (confirmed.length > 0) {
+      this.emitMessage(['deleteClients', { clientIDs: confirmed }])
+    }
+    if (this.pendingDeletedClientIDs.size > 0) this.pullAfterCurrent = true
+  }
+
+  private async answerMutationRecoveryPull(body: {
+    clientGroupID: string
+    cookie: string | null
+    requestID: string
+  }) {
+    await this.pushCompletion
+    const response = await this.fetchPull(body.clientGroupID, body.cookie, false)
+    const cookie = toWebSocketCookie(response.cookie)
+    this.emitMessage([
+      'pull',
+      {
+        requestID: body.requestID,
+        cookie: cookie ?? this.cookie ?? '0',
+        lastMutationIDChanges: response.unchanged ? {} : response.lastMutationIDChanges,
+      },
+    ])
+  }
+
+  private async fetchPull(
+    clientGroupID: string,
+    cookie: string | number | null,
+    includeQueries: boolean,
+    deletedClientIDs: readonly string[] = [],
+    signal?: AbortSignal
+  ) {
+    const body: Record<string, unknown> = {
+      clientID: this.clientID,
+      clientGroupID,
+      cookie: typeof cookie === 'number' ? cookie : toHttpCookie(cookie),
+      ...(includeQueries ? { queryErrorMode: 'per-query-v1' } : {}),
+    }
+    // ship the un-acked desired-query delta with the pull; remember what we
+    // sent so the server ack can clear exactly that prefix. a recovery pull
+    // (includeQueries=false) never carries desires.
+    if (includeQueries && this.queryPatch.length > 0) {
+      this.sentVersion = this.queryVersion
+      this.sentPatchLen = this.queryPatch.length
+      for (const op of this.queryPatch) {
+        if (op.op === 'put') this.inFlightPuts.add(op.hash)
+      }
+      body.queries = {
+        version: this.queryVersion,
+        baseVersion: this.ackVersion,
+        patch: [...this.queryPatch],
+      }
+    } else {
+      this.sentVersion = undefined
+    }
+    if (includeQueries && deletedClientIDs.length > 0) {
+      body.deletedClientIDs = deletedClientIDs
+    }
+    const activeClients = includeQueries ? this.pendingActiveClients : undefined
+    if (activeClients !== undefined) body.activeClients = activeClients
+    const response = (await this.postJSON('/pull', body, signal)) as PullResponse
+    if (activeClients === this.pendingActiveClients) this.pendingActiveClients = undefined
+    return this.state.payloadCodec.decodePull(response)
+  }
+
+  private async postJSON(path: '/pull' | '/push', body: unknown, signal?: AbortSignal) {
+    const base =
+      path === '/push' ? this.state.pushOriginString : this.state.pullOriginString
+    const url = new URL(`${base}${path}`)
+    if (path === '/push') {
+      url.searchParams.set('schema', `${this.state.appID}_${this.state.shardNum}`)
+      url.searchParams.set('appID', this.state.appID)
+    }
+    const requestBody = JSON.stringify(body)
+    const requestBytes = new TextEncoder().encode(requestBody).byteLength
+    if (requestBytes > MAX_HTTP_REQUEST_BYTES) {
+      throw new Error(
+        `Orez HTTP ${path} request exceeded ${MAX_HTTP_REQUEST_BYTES} bytes (${requestBytes})`
+      )
+    }
+    const response = await fetchWithHeaderDeadline(
+      this.state.fetch,
+      path,
+      url,
+      {
+        method: 'POST',
+        headers: {
+          authorization: this.authToken ? `Bearer ${this.authToken}` : '',
+          'content-type': 'application/json',
+        },
+        body: requestBody,
+        signal: signal ?? null,
+      },
+      REQUEST_HEADER_DEADLINE_MS
+    )
+    let responseBody = ''
+    try {
+      responseBody = await readResponseTextWithDeadline(
+        response,
+        path,
+        REQUEST_HEADER_DEADLINE_MS,
+        MAX_HTTP_RESPONSE_BYTES
+      )
+    } catch (error) {
+      if (response.ok) throw error
+      // the status still owns an error response when its body is unreadable
+    }
+    if (!response.ok) {
+      throw new ZeroHttpResponseError(
+        path,
+        response.status,
+        responseBody.length > 512
+          ? `${responseBody.slice(0, 512)}...`
+          : responseBody || undefined,
+        retryAfterMsFromResponse(response, responseBody)
+      )
+    }
+    try {
+      return JSON.parse(responseBody)
+    } catch {
+      throw new Error(`Orez HTTP ${path} response body was not valid JSON`)
+    }
+  }
+
+  private run(promise: Promise<void>) {
+    void promise.catch((error) => this.fail(error))
+  }
+
+  private emitServerError(kind: string, message: string) {
+    this.emitMessage(['error', { kind, message, origin: 'server' }])
+  }
+
+  private fail(error: unknown) {
+    if (this.status === 'closed') return
+    this.emitLifecycle('failure', {
+      reason: errorMessage(error),
+      httpStatus: error instanceof ZeroHttpResponseError ? error.status : undefined,
+    })
+    if (isAuthHTTPError(error)) {
+      this.emitServerError('Unauthorized', error.message)
+      this.close(1000, error.message)
+      return
+    }
+    if (isStaleClientCookieError(error)) {
+      // the client's cookie is AHEAD of the server watermark — the server
+      // lost or reset its change-tracking state (replica reset / restore).
+      // mirror zero-cache's InvalidConnectionRequestBaseCookie error frame so
+      // the stock client drops its local db and rebuilds from scratch instead
+      // of reconnect-looping on 409 forever.
+      this.emitServerError('InvalidConnectionRequestBaseCookie', error.message)
+      this.close(1000, error.message)
+      return
+    }
+    if (
+      error instanceof ZeroHttpResponseError &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      error.status !== 408 &&
+      error.status !== 425 &&
+      error.status !== 429
+    ) {
+      this.emitServerError(
+        error.path === '/pull' ? 'InvalidConnectionRequest' : 'InvalidPush',
+        error.message
+      )
+      this.close(1000, error.message)
+      return
+    }
+    // everything left is transient: a rate limit (429), a throttled or failing
+    // server (5xx), or a network error. stock Zero skips its run-loop sleep for
+    // a non-clean socket close — AbruptClose is one of the four close reasons
+    // throwIfConnectionError deliberately swallows — so closing 1011 here
+    // reconnects with NO delay, and each reconnect re-pushes the same pending
+    // mutations. measured: 605 pushes/s against a 429 and 374 pulls/s against a
+    // 500, which turns one transient failure into a self-sustaining storm that
+    // rate-limits the client permanently. ServerOverloaded is the protocol's
+    // only backoff-bearing frame (MutationRateLimited is swallowed with no
+    // delay at all), so a transient failure closes cleanly and carries the
+    // server's own Retry-After as the run loop's minimum sleep.
+    const retryAfterMs =
+      error instanceof ZeroHttpResponseError ? error.retryAfterMs : undefined
+    this.emitMessage([
+      'error',
+      {
+        kind: 'ServerOverloaded',
+        message: errorMessage(error),
+        // the backoff frame is the sync backend's to send, and Zero only
+        // treats it as a server error when the origin says so.
+        origin: 'zeroCache',
+        // a server may hand back a window measured in hours (a daily quota).
+        // sleeping that long strands the client, so cap what it will honor.
+        ...(retryAfterMs === undefined
+          ? {}
+          : { minBackoffMs: retryAfterMs, maxBackoffMs: MAX_RETRY_AFTER_BACKOFF_MS }),
+      },
+    ])
+    this.close(1000, errorMessage(error))
+  }
+
+  // a changed pull pokes zero only when it carries something zero has not
+  // seen: rows, a new mutation id, or a new got-query mark. a bare namespace
+  // cursor advance (new cookie, empty rows, repeated mutation map and got
+  // patch) only moves the http cursor so the next pull resumes from it; the
+  // durable zero cookie stays until a real effect chains its poke from it.
+  // every poke makes the stock client rebase and commit to its local store,
+  // so these suppressed pokes are the phone's per-pull transaction and gc
+  // cost. initial hydration, clears, new rows, new mutation ids, new or
+  // removed marks, and server resets still poke. never throttles.
+  private emitPokeIfEffective(response: Exclude<PullResponse, { unchanged: true }>) {
+    if (this.httpCookie !== null && response.cookie < this.httpCookie) {
+      throw new Error(
+        `Orez HTTP pull returned stale cookie ${response.cookie} for ${this.cookie}`
+      )
+    }
+    const hasRowEffect = response.rowsPatch.length > 0
+    const hasMutationEffect = this.hasNewLastMutationIDs(response.lastMutationIDChanges)
+    const hasGotEffect = this.hasNewGotQueriesEffect(
+      dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
+    )
+    this.httpCookie = response.cookie
+    if (!this.hasPoked || hasRowEffect || hasMutationEffect || hasGotEffect) {
+      this.emitPoke(response)
+      return
+    }
+    this.pendingGotQueriesPatch = []
+  }
+
+  private hasNewLastMutationIDs(changes: Readonly<Record<string, number>>): boolean {
+    return Object.entries(changes).some(
+      ([clientID, id]) => this.deliveredLastMutationIDs.get(clientID) !== id
+    )
+  }
+
+  // a got patch carries a new effect when it clears, puts an undelivered
+  // hash, or deletes a delivered one. a clear resets the delivered set, so
+  // puts after it in the same patch still count even when their hashes were
+  // delivered before the clear.
+  private hasNewGotQueriesEffect(deduped: GotQueryPatchOp[]): boolean {
+    return deduped.some((op) =>
+      op.op === 'clear'
+        ? true
+        : op.op === 'put'
+          ? !this.ackedGotHashes.has(op.hash)
+          : this.ackedGotHashes.has(op.hash)
+    )
+  }
+
+  private emitPokeStart(pokeID: string) {
+    this.emitMessage([
+      'pokeStart',
+      {
+        pokeID,
+        baseCookie: this.cookie,
+        schemaVersions: { minSupportedVersion: 1, maxSupportedVersion: 1 },
+        timestamp: Date.now(),
+      },
+    ])
+  }
+
+  private emitPoke(response: Exclude<PullResponse, { unchanged: true }>) {
+    const currentServer = toHttpCookie(this.cookie)
+    let nextCookie: string
+    if (currentServer !== null && response.cookie < currentServer) {
+      // the server watermark is BEHIND the client: a real reset/restore. mirror
+      // the 409 stale path instead of poking the client backwards.
+      throw new Error(
+        `Orez HTTP pull returned stale cookie ${response.cookie} for ${this.cookie}`
+      )
+    } else if (currentServer !== null && response.cookie === currentServer) {
+      // same server watermark but a non-empty membership delta. a desired-query
+      // change recomputes rows without advancing the change log. bump a
+      // client-local cookie id so replicache sees a changed cookie, otherwise
+      // it trips "cookie did not change, but patch is not empty" and drops the
+      // patch.
+      nextCookie = toLocalWebSocketCookie(response.cookie, ++this.nextLocalCookieID)
+    } else {
+      nextCookie = toWebSocketCookie(response.cookie) as string
+    }
+
+    const pokeID = `orez-http-${++this.state.nextPokeID}`
+    let gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
+    this.pendingGotQueriesPatch = []
+    const rowsCleared = response.rowsPatch.some(
+      (op) => (op as { op?: string })?.op === 'clear'
+    )
+    if (rowsCleared && this.ackedGotHashes.size > 0) {
+      gotQueries = dedupeGotQueriesPatch([
+        ...[...this.ackedGotHashes].map((hash) => ({ op: 'put' as const, hash })),
+        ...gotQueries,
+      ])
+    }
+    this.recordAckedGotQueries(gotQueries)
+
+    this.emitPokeStart(pokeID)
+    this.emitMessage([
+      'pokePart',
+      {
+        pokeID,
+        lastMutationIDChanges: response.lastMutationIDChanges,
+        rowsPatch: response.rowsPatch,
+      },
+    ])
+    if (gotQueries.length > 0) {
+      this.emitMessage([
+        'pokePart',
+        {
+          pokeID,
+          gotQueriesPatch: gotQueries,
+        },
+      ])
+    }
+    this.emitMessage(['pokeEnd', { pokeID, cookie: nextCookie }])
+    this.cookie = nextCookie
+    this.httpCookie = response.cookie
+    for (const [clientID, id] of Object.entries(response.lastMutationIDChanges)) {
+      this.deliveredLastMutationIDs.set(clientID, id)
+    }
+    this.hasPoked = true
+  }
+
+  private emitGotQueriesPatch(cookie: number | null) {
+    if (this.pendingGotQueriesPatch.length === 0) return
+
+    const serverCookie = cookie ?? this.httpCookie ?? toHttpCookie(this.cookie)
+    if (serverCookie === null) return
+    const gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
+    if (!this.hasNewGotQueriesEffect(gotQueries)) {
+      this.pendingGotQueriesPatch = []
+      if (cookie !== null) this.httpCookie = cookie
+      return
+    }
+    if (cookie !== null) this.httpCookie = cookie
+    const nextCookie = toLocalWebSocketCookie(serverCookie, ++this.nextLocalCookieID)
+    const pokeID = `orez-http-${++this.state.nextPokeID}`
+    this.pendingGotQueriesPatch = []
+    this.recordAckedGotQueries(gotQueries)
+
+    this.emitPokeStart(pokeID)
+    this.emitMessage([
+      'pokePart',
+      {
+        pokeID,
+        gotQueriesPatch: gotQueries,
+      },
+    ])
+    this.emitMessage(['pokeEnd', { pokeID, cookie: nextCookie }])
+    this.cookie = nextCookie
+    this.hasPoked = true
+  }
+
+  private recordAckedGotQueries(patch: GotQueryPatchOp[]) {
+    for (const op of patch) {
+      if (op.op === 'clear') this.ackedGotHashes.clear()
+      else if (op.op === 'put') this.ackedGotHashes.add(op.hash)
+      else this.ackedGotHashes.delete(op.hash)
+    }
+  }
+
+  private emitMessage(message: unknown) {
+    if (this.status !== 'open') return
+    this.listener?.message(message)
+  }
+
+  private supersede() {
+    this.settle('superseded')
+  }
+
+  private settle(
+    type: Extract<HttpPullLifecycleEvent['type'], 'close' | 'superseded' | 'aborted'>,
+    detail: Pick<HttpPullLifecycleEvent, 'code' | 'reason'> = {}
+  ) {
+    if (this.settled) return false
+    this.settled = true
+    clearTimeout(this.openTimer)
+    clearInterval(this.pullTimer)
+    clearTimeout(this.nextPullTimer)
+    this.closeWakeChannel()
+    this.status = 'closed'
+    this.state.sockets.delete(this)
+    if (this.state.activeSocketByClient.get(this.clientID) === this) {
+      this.state.activeSocketByClient.delete(this.clientID)
+      this.state.activeSocketGenerationByClient.delete(this.clientID)
+    }
+    this.emitLifecycle(type, detail)
+    return true
+  }
+
+  private getAttemptAgeMs() {
+    return this.attemptStartedAt === undefined
+      ? undefined
+      : performance.now() - this.attemptStartedAt
+  }
+
+  private emitLifecycle(
+    type: HttpPullLifecycleEvent['type'],
+    detail: Pick<
+      HttpPullLifecycleEvent,
+      | 'listener'
+      | 'code'
+      | 'reason'
+      | 'httpStatus'
+      | 'pushFrameCount'
+      | 'mutationCount'
+      | 'queryErrors'
+    > = {}
+  ) {
+    const event: HttpPullLifecycleEvent = {
+      type,
+      pageID: this.state.pageID,
+      transportID: this.state.transportID,
+      zeroInstanceID: this.zeroInstanceID,
+      clientGroupID: this.clientGroupID,
+      connectionAttemptID: this.connectionAttemptID,
+      socketID: this.socketID,
+      generation: this.generation,
+      activeGeneration:
+        this.state.activeSocketGenerationByClient.get(this.clientID) ?? this.generation,
+      clientID: this.clientID,
+      wsid: this.id,
+      timestamp: Date.now(),
+      attemptStartedAt: this.attemptStartedAt,
+      attemptAgeMs: this.getAttemptAgeMs(),
+      ...detail,
+    }
+    this.state.lifecycle?.(event)
+    for (const listener of this.state.lifecycleListeners) listener(event)
+  }
+}
+
+// abort only when response HEADERS miss the deadline; once they arrive the
+// timer is cleared so a slow body (a large initial pull) streams unbounded.
+// exported for its own unit tests: the transport suites run real timers and a
+// real Zero client, where a 60s wait per case is not testable.
+export async function fetchWithHeaderDeadline(
+  fetchImpl: typeof fetch,
+  path: '/pull' | '/push',
+  url: URL,
+  init: RequestInit,
+  deadlineMs: number
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(
+      new Error(`Orez HTTP ${path} response headers missed ${deadlineMs}ms deadline`)
+    )
+  }, deadlineMs)
+  const callerSignal = init.signal
+  const forwardAbort = () => controller.abort(callerSignal?.reason)
+  if (callerSignal?.aborted) forwardAbort()
+  else callerSignal?.addEventListener('abort', forwardAbort, { once: true })
+  try {
+    return await fetchImpl(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    // surface the deadline as the failure instead of a generic AbortError so
+    // logs name what actually happened
+    if (controller.signal.aborted && controller.signal.reason instanceof Error) {
+      throw controller.signal.reason
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function readResponseTextWithDeadline(
+  response: Response,
+  path: '/pull' | '/push',
+  deadlineMs: number,
+  maxBytes: number
+): Promise<string> {
+  const declaredBytes = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+    await response.body?.cancel().catch(() => {})
+    throw new Error(`Orez HTTP ${path} response exceeded ${maxBytes} bytes`)
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const body = await Promise.race([
+    // React Native's fetch Response can expose a body reader that reports
+    // `done` before yielding its buffered bytes. The platform text reader is
+    // the only portable body source across browser, Node, and native fetch.
+    response.text(),
+    new Promise<string>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        void response.body?.cancel().catch(() => {})
+        reject(
+          new Error(`Orez HTTP ${path} response body missed ${deadlineMs}ms deadline`)
+        )
+      }, deadlineMs)
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer)
+  })
+  const bytes = new TextEncoder().encode(body).byteLength
+  if (bytes > maxBytes) {
+    throw new Error(`Orez HTTP ${path} response exceeded ${maxBytes} bytes`)
+  }
+  return body
+}
+
+function jsonByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength
+}
+
+function parsePushBody(value: unknown): PushBody | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return
+  if (!Array.isArray((value as PushBody).mutations)) return
+  // the runtime checks above establish the only fields batching reads.
+  return value as PushBody
+}
+
+function areCompatiblePushBodies(left: PushBody, right: PushBody) {
+  return (
+    left.clientGroupID === right.clientGroupID &&
+    left.pushVersion === right.pushVersion &&
+    left.schemaVersion === right.schemaVersion
+  )
+}
+
+function trimTrailingSlash(value: string) {
+  return value.endsWith('/') ? value.slice(0, -1) : value
+}
+
+function encodeBase64URL(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return globalThis
+    .btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '')
+}
+
+// initConnection and a racing changeDesiredQueries can acknowledge the same
+// hash in one poke. Zero's complete tracking requires one final op per hash.
+function dedupeGotQueriesPatch(patch: GotQueryPatchOp[]): GotQueryPatchOp[] {
+  let clear = false
+  const lastOpByHash = new Map<string, GotQueryPatchOp>()
+  for (const op of patch) {
+    if (op.op === 'clear') {
+      clear = true
+      lastOpByHash.clear()
+      continue
+    }
+    lastOpByHash.delete(op.hash)
+    lastOpByHash.set(op.hash, op)
+  }
+  const deduped: GotQueryPatchOp[] = clear ? [{ op: 'clear' }] : []
+  deduped.push(...lastOpByHash.values())
+  return deduped
+}
+
+function toHttpCookie(cookie: string | null): number | null {
+  if (cookie === null || cookie === '') return null
+  const parsed = Number(cookie.slice(0, COOKIE_WIDTH))
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Orez HTTP cookie is not numeric: ${cookie}`)
+  }
+  return parsed
+}
+
+function toWebSocketCookie(cookie: number | null): string | null {
+  return cookie === null ? null : String(cookie).padStart(COOKIE_WIDTH, '0')
+}
+
+function toLocalWebSocketCookie(cookie: number, localID: number): string {
+  return `${String(cookie).padStart(COOKIE_WIDTH, '0')}#${String(localID).padStart(
+    6,
+    '0'
+  )}`
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+class ZeroHttpResponseError extends Error {
+  constructor(
+    readonly path: '/pull' | '/push',
+    readonly status: number,
+    bodyPreview: string | undefined,
+    readonly retryAfterMs: number | undefined
+  ) {
+    super(
+      `Orez HTTP ${path} failed with ${status}${bodyPreview ? `: ${bodyPreview}` : ''}`
+    )
+  }
+}
+
+// a throttled server states its own wait, either as `retryAfterMs` in the JSON
+// error body or as the standard delta-seconds Retry-After header. an HTTP-date
+// Retry-After is ignored: the client clock cannot be trusted to compare with it.
+function retryAfterMsFromResponse(response: Response, body: string) {
+  const header = response.headers.get('retry-after')
+  const headerSeconds = header === null ? Number.NaN : Number(header)
+  const headerMs = Number.isFinite(headerSeconds)
+    ? Math.max(0, headerSeconds) * 1_000
+    : undefined
+  if (body) {
+    try {
+      const parsed: unknown = JSON.parse(body)
+      const value = (parsed as { retryAfterMs?: unknown } | null)?.retryAfterMs
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.max(0, value)
+      }
+    } catch {
+      // an unparseable or truncated body leaves the header as the only hint
+    }
+  }
+  return headerMs
+}
+
+function isAuthHTTPError(error: unknown): error is ZeroHttpResponseError {
+  return (
+    error instanceof ZeroHttpResponseError &&
+    (error.status === 401 || error.status === 403)
+  )
+}
+
+// keep only this client's own mutation results — zero-cache's pusher does the
+// same per-client fan-out (results for clients without a live connection are
+// dropped; their LMID advance arrives via the next pull's
+// lastMutationIDChanges, which is how recovered mutations settle).
+function filterMutationResultsToClient(pushResponse: unknown, clientID: string) {
+  if (!pushResponse || typeof pushResponse !== 'object') return pushResponse
+  const mutations = (pushResponse as { mutations?: unknown }).mutations
+  if (!Array.isArray(mutations)) return pushResponse
+  return {
+    ...pushResponse,
+    mutations: mutations.filter(
+      (m) => (m as { id?: { clientID?: string } })?.id?.clientID === clientID
+    ),
+  }
+}
+
+function isStaleClientCookieError(error: unknown): error is ZeroHttpResponseError {
+  return (
+    error instanceof ZeroHttpResponseError &&
+    error.path === '/pull' &&
+    error.status === 409
+  )
+}
