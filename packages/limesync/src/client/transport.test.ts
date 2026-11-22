@@ -2167,6 +2167,7 @@ describe('Orez HTTP transport', () => {
     openRawSocketWithMessages()
     await eventually(() => expect(wakeSockets).toHaveLength(1))
     expect(wakeSockets[0].url).toContain('wakeToken=wake-before-refresh')
+    wakeSockets[0].onopen?.()
 
     vi.resetModules()
     const reloaded = await import('./transport.js')
@@ -2186,6 +2187,7 @@ describe('Orez HTTP transport', () => {
     expect(wakeSockets[1].url).toContain('wakeToken=wake-after-refresh')
     expect(oldToken).toHaveBeenCalledTimes(1)
     expect(newToken).toHaveBeenCalledTimes(1)
+    wakeSockets[1].onopen?.()
     expect(() =>
       reloaded.createZeroClientTransport({ fetch, wake: true }).install(ORIGIN)
     ).toThrow('different wake')

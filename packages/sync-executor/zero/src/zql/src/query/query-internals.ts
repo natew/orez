@@ -6,7 +6,8 @@ import type {Format} from '../ivm/view.ts';
 import type {CustomQueryID} from './named.ts';
 import type {Query} from './query.ts';
 
-export const queryInternalsTag = Symbol();
+// vite and preview workers can load the query builder and executor in separate bundles.
+export const queryInternalsTag = Symbol.for('limesync.query-internals.v1');
 
 /**
  * Internal interface for query implementation details.

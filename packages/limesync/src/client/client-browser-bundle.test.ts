@@ -1,6 +1,7 @@
 import { build } from 'esbuild'
 import { expect, test } from 'vitest'
 
+import { asQueryInternals } from '../zero/bindings.js'
 import { installHttpPullTransport } from './transport.js'
 
 test('limesync/client stays a browser-only leaf package', async () => {
@@ -19,6 +20,26 @@ test('limesync/client stays a browser-only leaf package', async () => {
     'packages/sync-executor/dist/zero/http/payload-codec.js',
     'packages/sync-executor/dist/zero/http/transport.js',
   ])
+})
+
+test('Zero bindings can consume a query created in a separate bundle', async () => {
+  const bundle = await build({
+    stdin: {
+      contents: `
+        import { createBuilder, createSchema, string, table } from 'limesync/zero';
+        const messages = table('messages').columns({ id: string() }).primaryKey('id');
+        export const query = createBuilder(createSchema({ tables: [messages] })).messages;
+      `,
+      resolveDir: process.cwd(),
+    },
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    write: false,
+  })
+  const moduleURL = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`
+  const { query } = await import(/* @vite-ignore */ moduleURL)
+  expect(asQueryInternals(query).ast.table).toBe('messages')
 })
 
 test('separately bundled Zero opens the installed HTTP transport', async () => {
