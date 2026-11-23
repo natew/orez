@@ -39,9 +39,12 @@ type SyncSchema<S extends OneDataSchema> = {
   tables: { [K in PublicKeys<S>]: SyncTable<S['tables'][K]> }
   relationships: {
     [K in Extract<keyof S['relationships'], PublicKeys<S>>]: {
-      [R in keyof S['relationships'][K]]:
-        | readonly [S['relationships'][K][R][number]]
-        | readonly [OneDataConnection, S['relationships'][K][R][number]]
+      [R in keyof S['relationships'][K]]: S['relationships'][K][R] extends readonly [
+        infer First extends OneDataConnection,
+        infer Second extends OneDataConnection,
+      ]
+        ? readonly [First, Second]
+        : readonly [S['relationships'][K][R][number]]
     }
   }
 }
