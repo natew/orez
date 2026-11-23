@@ -20,7 +20,14 @@ struct Json {
     std::string text;
     bool operator==(const Serialized&) const = default;
   };
-  std::variant<std::nullptr_t, bool, double, std::string, Array, Object, Serialized> value = nullptr;
+  struct DeferredArray {
+    std::string_view text;
+    unsigned depth;
+    bool nonempty;
+    bool operator==(const DeferredArray&) const = default;
+  };
+  std::variant<std::nullptr_t, bool, double, std::string, Array, Object, Serialized, DeferredArray>
+      value = nullptr;
   Json() = default;
   Json(std::nullptr_t) {}
   Json(bool v) : value(v) {}
@@ -31,6 +38,7 @@ struct Json {
   Json(Array v) : value(std::move(v)) {}
   Json(Object v) : value(std::move(v)) {}
   Json(Serialized v) : value(std::move(v)) {}
+  Json(DeferredArray v) : value(v) {}
   bool null() const { return std::holds_alternative<std::nullptr_t>(value); }
   bool object() const { return std::holds_alternative<Object>(value); }
   bool array() const { return std::holds_alternative<Array>(value); }
@@ -73,18 +81,40 @@ struct Json {
   }
   bool flag(const std::string& key) const { return has(key) && at(key).boolean(); }
   bool operator==(const Json&) const = default;
+  bool hasItems() const {
+    if (const auto* deferred = std::get_if<DeferredArray>(&value)) return deferred->nonempty;
+    return !items().empty();
+  }
+  template <typename Visit>
+  void consumeItems(Visit&& visit) {
+    if (const auto* deferred = std::get_if<DeferredArray>(&value)) {
+      Parser parser{deferred->text.data(), deferred->text.data() + deferred->text.size()};
+      parser.elements([&] { visit(parser.value(deferred->depth + 1)); });
+    } else {
+      for (Json& item : items()) visit(std::move(item));
+    }
+  }
   // strict RFC 8259. later duplicate keys replace earlier ones.
   static Json parse(std::string_view text) {
+    return parse(text, ParseContext::ordinary);
+  }
+  // request stays alive while the row patches are applied, one at a time.
+  static Json parseRequest(std::string_view text) {
+    return parse(text, ParseContext::request);
+  }
+
+ private:
+  enum class ParseContext { ordinary, request, response };
+  static Json parse(std::string_view text, ParseContext context) {
     Parser parser{text.data(), text.data() + text.size()};
     parser.space();
     if (parser.at == parser.end) throw std::runtime_error("invalid JSON");
-    Json result = parser.value(0);
+    Json result = parser.value(0, context);
     parser.space();
     if (parser.at != parser.end) throw std::runtime_error("invalid JSON");
     return result;
   }
 
- private:
   struct Parser {
     const char* at;
     const char* end;
@@ -98,7 +128,29 @@ struct Json {
         invalid();
       at += word.size();
     }
-    Json value(unsigned depth) {
+    template <typename Element>
+    bool elements(Element&& element) {
+      ++at;
+      space();
+      if (at != end && *at == ']') {
+        ++at;
+        return false;
+      }
+      while (true) {
+        space();
+        element();
+        space();
+        if (at == end) invalid();
+        if (*at == ']') {
+          ++at;
+          return true;
+        }
+        if (*at != ',') invalid();
+        ++at;
+      }
+    }
+    template <bool retain = true>
+    Json value(unsigned depth, ParseContext context = ParseContext::ordinary) {
       if (depth > 128) throw std::runtime_error("JSON nesting exceeds 128 levels");
       if (at == end) invalid();
       switch (*at) {
@@ -113,12 +165,29 @@ struct Json {
           while (true) {
             space();
             if (at == end || *at != '"') invalid();
-            std::string key = string();
+            std::string key;
+            string(retain ? &key : nullptr);
             space();
             if (at == end || *at != ':') invalid();
             ++at;
             space();
-            object.insert_or_assign(std::move(key), value(depth + 1));
+            if constexpr (retain) {
+              Json member;
+              if (context == ParseContext::response && key == "rowsPatch" && at != end &&
+                  *at == '[') {
+                const char* start = at;
+                if (depth + 1 > 128) throw std::runtime_error("JSON nesting exceeds 128 levels");
+                bool nonempty = elements([&] { value<false>(depth + 2); });
+                member = DeferredArray{std::string_view(start, at), depth + 1, nonempty};
+              } else {
+                member = value(depth + 1, context == ParseContext::request && key == "response"
+                                              ? ParseContext::response
+                                              : ParseContext::ordinary);
+              }
+              object.insert_or_assign(std::move(key), std::move(member));
+            } else {
+              value<false>(depth + 1);
+            }
             space();
             if (at == end) invalid();
             if (*at == '}') {
@@ -130,28 +199,20 @@ struct Json {
           }
         }
         case '[': {
-          ++at;
           Array array;
-          space();
-          if (at != end && *at == ']') {
-            ++at;
-            return array;
-          }
-          while (true) {
-            space();
-            array.push_back(value(depth + 1));
-            space();
-            if (at == end) invalid();
-            if (*at == ']') {
-              ++at;
-              return array;
-            }
-            if (*at != ',') invalid();
-            ++at;
-          }
+          elements([&] {
+            if constexpr (retain)
+              array.push_back(value(depth + 1));
+            else
+              value<false>(depth + 1);
+          });
+          return array;
         }
-        case '"':
-          return string();
+        case '"': {
+          std::string text;
+          string(retain ? &text : nullptr);
+          return text;
+        }
         case 't':
           expect("true");
           return true;
@@ -199,26 +260,24 @@ struct Json {
         out += static_cast<char>(0x80 | (code & 0x3F));
       }
     }
-    std::string string() {
+    void string(std::string* out) {
       ++at;
-      std::string out;
       while (true) {
         const char* run = at;
         while (at != end && *at != '"' && *at != '\\' && static_cast<unsigned char>(*at) >= 0x20)
           ++at;
-        out.append(run, at);
+        if (out) out->append(run, at);
         if (at == end || static_cast<unsigned char>(*at) < 0x20) invalid();
-        if (*at++ == '"') return out;
+        if (*at++ == '"') return;
         if (at == end) invalid();
-        switch (*at++) {
-          case '"': out += '"'; break;
-          case '\\': out += '\\'; break;
-          case '/': out += '/'; break;
-          case 'b': out += '\b'; break;
-          case 'f': out += '\f'; break;
-          case 'n': out += '\n'; break;
-          case 'r': out += '\r'; break;
-          case 't': out += '\t'; break;
+        char escaped = *at++;
+        switch (escaped) {
+          case '"': case '\\': case '/': break;
+          case 'b': escaped = '\b'; break;
+          case 'f': escaped = '\f'; break;
+          case 'n': escaped = '\n'; break;
+          case 'r': escaped = '\r'; break;
+          case 't': escaped = '\t'; break;
           case 'u': {
             unsigned code = hex4();
             if (code >= 0xD800 && code < 0xDC00 && end - at >= 6 && at[0] == '\\' &&
@@ -231,12 +290,13 @@ struct Json {
               else
                 at = low;
             }
-            utf8(out, code);
-            break;
+            if (out) utf8(*out, code);
+            continue;
           }
           default:
             invalid();
         }
+        if (out) *out += escaped;
       }
     }
     Json number() {
@@ -347,6 +407,8 @@ struct Json {
       quote(out, *s);
     else if (const auto* serialized = std::get_if<Serialized>(&value))
       out += serialized->text;
+    else if (const auto* deferred = std::get_if<DeferredArray>(&value))
+      out += deferred->text;
     else if (const auto* a = std::get_if<Array>(&value)) {
       out += '[';
       for (size_t i = 0; i < a->size(); ++i) {

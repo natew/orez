@@ -50,7 +50,6 @@ namespace margelo::nitro::limesync {
     public:
       // Methods
       virtual std::shared_ptr<Promise<void>> open(const std::string& name, const std::string& schemaJson, const std::string& clientID) = 0;
-      virtual std::shared_ptr<Promise<std::string>> execute(const std::string& requestJson) = 0;
       virtual std::shared_ptr<Promise<void>> close() = 0;
 
     protected:

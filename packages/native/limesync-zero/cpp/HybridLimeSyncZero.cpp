@@ -1,10 +1,23 @@
 #include "HybridLimeSyncZero.hpp"
 #include "ZeroStorageDirectory.hpp"
+#include <NitroModules/JSIConverter.hpp>
 #include <filesystem>
 #include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
+
+namespace margelo::nitro {
+
+template <>
+struct JSIConverter<limesync::ZeroResponse> {
+  static jsi::Value toJSI(jsi::Runtime& runtime, const limesync::ZeroResponse& result) {
+    return JSIConverter<std::string>::toJSI(runtime, *result.text);
+  }
+};
+
+}  // namespace margelo::nitro
 
 namespace margelo::nitro::limesync {
 
@@ -77,11 +90,21 @@ std::shared_ptr<Promise<void>> HybridLimeSyncZero::open(const std::string& name,
   });
 }
 
-std::shared_ptr<Promise<std::string>> HybridLimeSyncZero::execute(const std::string& requestJson) {
-  return Promise<std::string>::async([state = state_, requestJson]() {
+void HybridLimeSyncZero::loadHybridMethods() {
+  HybridOneZeroSpec::loadHybridMethods();
+  registerHybrids(this, [](Prototype& prototype) {
+    prototype.registerHybridMethod("execute", &HybridLimeSyncZero::execute);
+  });
+}
+
+std::shared_ptr<Promise<ZeroResponse>> HybridLimeSyncZero::execute(std::string requestJson) {
+  return Promise<ZeroResponse>::async([state = state_, requestJson = std::move(requestJson)]() {
     std::lock_guard<std::mutex> guard(state->mutex);
     if (!state->client) throw std::runtime_error("native Zero client is closed");
-    return state->client->execute(requestJson);
+    // nitro copies promise results into the dispatcher.
+    auto text = std::make_shared<std::string>();
+    *text = state->client->execute(requestJson);
+    return ZeroResponse{std::move(text)};
   });
 }
 
