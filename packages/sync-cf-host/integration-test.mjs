@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { findPort } from '../../src/port.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const externalURL = process.env.M3_BASE_URL?.replace(/\/$/, '')
 const adminKey = process.env.M3_ADMIN_KEY ?? 'local-admin'
@@ -28,15 +29,7 @@ const server = externalURL
     )
 const baseURL = externalURL ?? `http://127.0.0.1:${port}`
 
-if (server) {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      if ((await fetch(baseURL)).ok) break
-    } catch {}
-    if (attempt >= 150) throw new Error('production workerd did not become ready')
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-}
+if (server) await waitForWorker(baseURL, { server, label: 'production workerd' })
 
 let assertions = 0
 const equal = (actual, expected, message) => {

@@ -1,4 +1,5 @@
 import { findPort } from '../../src/port.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const percentile = (values, p) => {
   const sorted = [...values].sort((a, b) => a - b)
@@ -29,18 +30,8 @@ const server = Bun.spawn(
 )
 const baseURL = `http://127.0.0.1:${port}`
 
-let readyAt
-for (let attempt = 0; ; attempt++) {
-  try {
-    const response = await fetch(baseURL)
-    if (response.ok) {
-      readyAt = performance.now()
-      break
-    }
-  } catch {}
-  if (attempt >= 150) throw new Error('wrangler workerd did not become ready')
-  await new Promise((resolve) => setTimeout(resolve, 100))
-}
+await waitForWorker(baseURL, { server, label: 'wrangler workerd' })
+const readyAt = performance.now()
 
 function workerdRssKiB() {
   const result = Bun.spawnSync(['ps', '-axo', 'pid=,ppid=,rss=,command='])

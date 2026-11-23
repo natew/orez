@@ -21,6 +21,7 @@ import {
 
 import { findPort } from '../../src/port.ts'
 import { installHttpPullTransport } from '../limesync/src/client/transport.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const cwd = new URL('.', import.meta.url).pathname
 const namespace = 'proj-rolling'
@@ -48,18 +49,15 @@ async function deployed(persistTo, versions, work) {
   )
   const base = `http://127.0.0.1:${port}`
   try {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const response = await fetch(`${base}/versions`)
-        if (response.ok) {
-          assert.deepEqual(await response.json(), versions)
-          break
-        }
-      } catch {}
-      if (server.exitCode !== null) throw new Error('rolling schema harness exited')
-      if (attempt >= 300) throw new Error('rolling schema harness did not become ready')
-      await Bun.sleep(100)
-    }
+    await waitForWorker(`${base}/versions`, {
+      server,
+      timeoutMs: 30_000,
+      label: 'rolling schema harness',
+      accept: async (response) => {
+        assert.deepEqual(await response.json(), versions)
+        return true
+      },
+    })
     return await work(base)
   } finally {
     server.kill()

@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 
 import { findPort } from '../../src/port.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const adminKey = process.env.M3_ADMIN_KEY ?? 'local-admin'
 const port = await findPort(0)
@@ -30,13 +31,7 @@ const server = Bun.spawn(
   }
 )
 const baseURL = `http://127.0.0.1:${port}`
-for (let attempt = 0; ; attempt++) {
-  try {
-    if ((await fetch(baseURL)).ok) break
-  } catch {}
-  if (attempt >= 150) throw new Error('workerd did not become ready')
-  await new Promise((resolve) => setTimeout(resolve, 100))
-}
+await waitForWorker(baseURL, { server })
 
 let assertions = 0
 const equal = (actual, expected, message) => {

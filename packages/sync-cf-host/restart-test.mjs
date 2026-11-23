@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { findPort } from '../../src/port.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const adminKey = 'local-admin'
 const port = await findPort(0)
@@ -40,15 +41,7 @@ function startWorkerd() {
   )
 }
 
-async function waitReady() {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      if ((await fetch(baseURL)).ok) return
-    } catch {}
-    if (attempt >= 300) throw new Error('workerd did not become ready')
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-}
+const waitReady = () => waitForWorker(baseURL, { server, timeoutMs: 30_000 })
 
 const admin = async (path, body) => {
   const response = await fetch(`${origin}${path}`, {

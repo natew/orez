@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { findPort } from '../../src/port.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const externalURL = process.env.M0_BASE_URL?.replace(/\/$/, '')
 const port = await findPort(0)
@@ -25,16 +26,7 @@ const server = externalURL
     )
 const baseURL = externalURL ?? `http://127.0.0.1:${port}`
 
-if (server) {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const response = await fetch(baseURL)
-      if (response.ok) break
-    } catch {}
-    if (attempt >= 150) throw new Error('wrangler workerd did not become ready')
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-}
+if (server) await waitForWorker(baseURL, { server, label: 'wrangler workerd' })
 
 let assertions = 0
 const check = (actual, expected, message) => {

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { findPort } from '../../src/port.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const port = await findPort(0)
 const persist = mkdtempSync(join(tmpdir(), 'sync-cf-init-guard-'))
@@ -29,15 +30,7 @@ function start() {
     { cwd: new URL('.', import.meta.url).pathname, stdout: 'inherit', stderr: 'inherit' }
   )
 }
-async function ready() {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      if ((await fetch(base)).ok) return
-    } catch {}
-    if (attempt >= 300) throw new Error('workerd did not become ready')
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-}
+const ready = () => waitForWorker(base, { server, timeoutMs: 30_000 })
 async function admin(path, body) {
   const response = await fetch(`${origin}${path}`, {
     method: body === undefined ? 'GET' : 'POST',

@@ -577,6 +577,10 @@ jobs:
       - name: sync-cf-host install
         run: cd packages/sync-cf-host && bun install
 
+      # the harness worker bundles harness/src, which resolves zero from here.
+      - name: harness install
+        run: cd harness && bun install --frozen-lockfile
+
       - name: build sync executor
         run: bun run --cwd packages/sync-executor build
 

@@ -15,6 +15,7 @@ import {
 
 import { findPort } from '../../src/port.ts'
 import { installHttpPullTransport } from '../limesync/src/client/transport.ts'
+import { waitForWorker } from './wait-for-worker.mjs'
 
 const port = await findPort(0)
 const server = Bun.spawn(
@@ -33,13 +34,7 @@ const server = Bun.spawn(
 const base = `http://127.0.0.1:${port}`
 
 try {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      if ((await fetch(base)).ok) break
-    } catch {}
-    if (attempt >= 200) throw new Error('ingest harness did not become ready')
-    await Bun.sleep(100)
-  }
+  await waitForWorker(base, { server, timeoutMs: 20_000, label: 'ingest harness' })
 
   const namespace = `ingest-${crypto.randomUUID()}`
   const origin = `${base}/${namespace}`
