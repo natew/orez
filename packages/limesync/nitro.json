@@ -1,0 +1,20 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["limesync"],
+  "ios": {
+    "iosModuleName": "LimeSyncZero"
+  },
+  "android": {
+    "androidNamespace": ["limesync"],
+    "androidCxxLibName": "LimeSyncZero"
+  },
+  "autolinking": {
+    "OneZero": {
+      "ios": {
+        "language": "c++",
+        "implementationClassName": "HybridLimeSyncZero"
+      }
+    }
+  },
+  "ignorePaths": ["**/node_modules"]
+}

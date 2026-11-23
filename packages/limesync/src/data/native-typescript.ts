@@ -98,7 +98,15 @@ function releaseCompiler(session: CompilerSession, releaseTurn: () => void) {
       compilerClose = null
     })
   }, 25)
-  compilerCloseTimer.unref?.()
+  const timer: unknown = compilerCloseTimer
+  if (
+    timer &&
+    typeof timer === 'object' &&
+    'unref' in timer &&
+    typeof timer.unref === 'function'
+  ) {
+    timer.unref()
+  }
 }
 
 export function collectTypeScriptSourcePaths(roots: string[]): string[] {

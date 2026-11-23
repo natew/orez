@@ -349,12 +349,14 @@ function armReloadLatchTimeout() {
     shared.reloadScheduled = false
   }, RELOAD_LATCH_TIMEOUT_MS)
   // don't hold the event loop open (node/native) waiting on this defense timer.
+  const timer: unknown = shared.reloadLatchTimer
   if (
-    shared.reloadLatchTimer &&
-    typeof shared.reloadLatchTimer === 'object' &&
-    'unref' in shared.reloadLatchTimer
+    timer &&
+    typeof timer === 'object' &&
+    'unref' in timer &&
+    typeof timer.unref === 'function'
   ) {
-    shared.reloadLatchTimer.unref()
+    timer.unref()
   }
 }
 
