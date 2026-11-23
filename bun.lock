@@ -248,10 +248,8 @@
         "@types/ws": "^8.18.1",
         "better-auth": "1.6.30",
         "jsdom": "29.1.1",
-        "nitrogen": "0.37.1",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
-        "react-native-nitro-modules": "0.37.1",
         "vitest": "^3.2.7",
         "wrangler": "^4.75.0",
       },
@@ -261,22 +259,28 @@
       "peerDependencies": {
         "better-auth": ">=1.6.0 <2",
         "react": "*",
-        "react-native-nitro-modules": "0.37.1",
         "vite": ">=5",
       },
       "optionalPeers": [
         "better-auth",
         "react",
-        "react-native-nitro-modules",
         "vite",
       ],
     },
     "packages/native": {
       "name": "@o/native",
       "version": "0.16.21",
+      "devDependencies": {
+        "nitrogen": "0.37.1",
+      },
       "peerDependencies": {
         "expo-crypto": "*",
+        "react-native-nitro-modules": "0.37.1",
       },
+      "optionalPeers": [
+        "expo-crypto",
+        "react-native-nitro-modules",
+      ],
     },
     "packages/native-hot-update": {
       "name": "@o/native-hot-update",
@@ -1620,8 +1624,6 @@
     "expo-clipboard": ["expo-clipboard@57.0.2", "", { "peerDependencies": { "expo": "*", "react": "*", "react-native": "*" } }, "sha512-VB4Au8X/RbvJKUtJk+87vdtveWSNEa5RzY3ooeO6VNF7Rd49RbQXZOu3/TfEW9p7mU8TCfyTvjyCiAUwSoSJ4w=="],
 
     "expo-constants": ["expo-constants@57.0.19", "", { "dependencies": { "@expo/env": "~2.4.3" }, "peerDependencies": { "expo": "*", "react-native": "*" } }, "sha512-3eK1kZRwCdMizQLlM/PPlPwjaPnB5qKvdRDMBMnB1ZxmvWJBf9TB4uEO4DMMfIPaFUxYFs29dsR5fPr1gh3FTQ=="],
-
-    "expo-crypto": ["expo-crypto@57.0.3", "", { "peerDependencies": { "expo": "*" } }, "sha512-SAWqEfF37nc8ot7bXsVmu9AFYwQdC2kGvH/eNAHiR3bmlcf1Vv8wu9AnGKT+a90r3T8YfwMpZP4QAYlo4vCn9w=="],
 
     "expo-file-system": ["expo-file-system@57.0.7", "", { "peerDependencies": { "expo": "*", "react-native": "*" } }, "sha512-1vkZRadOsIputFDBcclqBa1pO3iXOO6iIsdqJipQWw4V5TSnWgmRTuOF7ro8IzrVue+PHbum++KCG3Tawem4cg=="],
 

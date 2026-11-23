@@ -145,8 +145,6 @@
     },
     "./zero/native": {
       "types": "./dist/zero/native/plain.d.ts",
-      "one-native": "./dist/zero/native/plain.js",
-      "react-native": "./dist/zero/native/index.js",
       "default": "./dist/zero/native/plain.js"
     },
     "./zero/op-sqlite": {
@@ -248,8 +246,7 @@
   "peerDependencies": {
     "vite": ">=5",
     "react": "*",
-    "better-auth": ">=1.6.0 <2",
-    "react-native-nitro-modules": "0.37.1"
+    "better-auth": ">=1.6.0 <2"
   },
   "peerDependenciesMeta": {
     "vite": {
@@ -259,9 +256,6 @@
       "optional": true
     },
     "better-auth": {
-      "optional": true
-    },
-    "react-native-nitro-modules": {
       "optional": true
     }
   },
@@ -278,18 +272,10 @@
     "jsdom": "29.1.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "better-auth": "1.6.30",
-    "nitrogen": "0.37.1",
-    "react-native-nitro-modules": "0.37.1"
+    "better-auth": "1.6.30"
   },
   "files": [
     "dist",
-    "cpp",
-    "nitro.json",
-    "nitrogen/generated/ios",
-    "nitrogen/generated/shared",
-    "LimeSyncZero.podspec",
-    "react-native.config.cjs",
     "virtual-app.d.ts",
     "LICENSE",
     "README.md"

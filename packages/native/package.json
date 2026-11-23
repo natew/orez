@@ -9,7 +9,19 @@
     }
   },
   "peerDependencies": {
-    "expo-crypto": "*"
+    "expo-crypto": "*",
+    "react-native-nitro-modules": "0.37.1"
+  },
+  "peerDependenciesMeta": {
+    "expo-crypto": {
+      "optional": true
+    },
+    "react-native-nitro-modules": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "nitrogen": "0.37.1"
   },
   "publishConfig": {
     "access": "public"
@@ -20,6 +32,8 @@
     "directory": "packages/native"
   },
   "files": [
-    "src"
-  ]
+    "src",
+    "limesync-zero"
+  ],
+  "license": "MIT"
 }
