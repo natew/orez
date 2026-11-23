@@ -168,8 +168,8 @@
       "default": "./dist/data/index.js"
     },
     "./data/server": {
-      "types": "./dist/data/server.d.ts",
-      "default": "./dist/data/server.js"
+      "types": "./dist/data/server-routes.d.ts",
+      "default": "./dist/data/server-routes.js"
     },
     "./data/multi": {
       "types": "./dist/data/multi.d.ts",

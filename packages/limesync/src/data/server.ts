@@ -32,12 +32,6 @@ import type {
 // a host that runs these bindings off node supplies its own AsyncLocalStorage;
 // without one, every server mutator's authData and ambient context are null.
 export { setupAsyncLocalStorage }
-export {
-  createDataServer,
-  createSyncRoutes,
-  type DataServerApp,
-  type SyncRoutesOptions,
-} from './server-routes.js'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue =

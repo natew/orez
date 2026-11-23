@@ -9,6 +9,9 @@ import {
 import type { AnyQueryRegistry, Schema } from '../zero/zero.js'
 import type { AuthData, GenericModels } from './types.js'
 
+// the public `limesync/data/server` entry: the routes plus every binding export.
+export * from './server.js'
+
 type Identity = AuthData & { id: string }
 
 // the wake-token and wake-authorize routes must agree on this lifetime.
