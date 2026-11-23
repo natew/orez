@@ -155,7 +155,7 @@ function writeFileIfChanged(filePath: string, content: string): boolean {
   return true
 }
 
-// file-content emitters and valibot helpers are imported from ./generate-helpers
+// file-content emitters and validator helpers are imported from ./generate-helpers
 // so they can be shared with the browser-safe generate-lite entry point.
 
 function createTypeResolver(project: Project) {
@@ -168,8 +168,8 @@ function createTypeResolver(project: Project) {
         return null
       }
     },
-    async typeToValibot(type: Type): Promise<string> {
-      return tsTypeToValibot(project, type)
+    async typeToValidator(type: Type): Promise<string> {
+      return tsTypeToValidator(project, type)
     },
   }
 }
@@ -308,8 +308,8 @@ function extractMutationsFromModel(
   content: string,
   fileName: string,
   silent: boolean,
-  typeToValibot: (typeString: string) => string | null,
-  resolvedValibot?: Map<string, string>
+  typeToValidator: (typeString: string) => string | null,
+  resolvedValidators?: Map<string, string>
 ): ModelMutations | null {
   let mutateNode: ts.CallExpression | null = null
 
@@ -377,7 +377,7 @@ function extractMutationsFromModel(
 
       // second param is the mutation data (first is ctx)
       if (params.length < 2) {
-        custom.push({ name, paramType: 'void', valibotCode: '' })
+        custom.push({ name, paramType: 'void', validatorCode: '' })
         continue
       }
 
@@ -385,21 +385,21 @@ function extractMutationsFromModel(
       const paramType = secondParam.type?.getText(sourceFile) || 'unknown'
 
       if (paramType === 'unknown') {
-        custom.push({ name, paramType: 'unknown', valibotCode: '' })
+        custom.push({ name, paramType: 'unknown', validatorCode: '' })
         continue
       }
 
-      let valibotCode = typeToValibot(paramType)
+      let validatorCode = typeToValidator(paramType)
 
       // if direct parse failed (unresolved reference), use checker-resolved types
-      if (!valibotCode && resolvedValibot) {
-        valibotCode = resolvedValibot.get(name) ?? null
+      if (!validatorCode && resolvedValidators) {
+        validatorCode = resolvedValidators.get(name) ?? null
       }
 
       custom.push({
         name,
         paramType,
-        valibotCode: valibotCode || '',
+        validatorCode: validatorCode || '',
       })
     }
   }
@@ -453,8 +453,8 @@ function extractSchemaColumns(
   visit(sourceFile)
 }
 
-// convert a ts.Type to valibot code by walking the type checker AST
-async function tsTypeToValibot(
+// convert a ts.Type to validator code by walking the type checker AST
+async function tsTypeToValidator(
   project: Project,
   type: Type,
   seen = new Set<number>()
@@ -470,7 +470,7 @@ async function tsTypeToValibot(
     path = new Set(seen).add(type.id)
   }
 
-  const recurse = (value: Type) => tsTypeToValibot(project, value, path)
+  const recurse = (value: Type) => tsTypeToValidator(project, value, path)
 
   // primitives
   if (flags & TypeFlags.String) return 'v.string()'
@@ -543,7 +543,7 @@ async function tsTypeToValibot(
     return checker.getDeclaredTypeOfSymbol(property)
   }
 
-  const objectToValibot = async (props: readonly Symbol[]) => {
+  const objectToValidator = async (props: readonly Symbol[]) => {
     if (props.length === 0) return 'v.object({})'
     const entries: string[] = []
     for (const prop of props) {
@@ -563,7 +563,7 @@ async function tsTypeToValibot(
 
   // intersection - use checker's merged properties directly
   if (type.isIntersectionType()) {
-    return objectToValibot(await checker.getPropertiesOfType(type))
+    return objectToValidator(await checker.getPropertiesOfType(type))
   }
 
   if (type.isTupleType()) {
@@ -583,7 +583,7 @@ async function tsTypeToValibot(
       }
     }
     const props = await checker.getPropertiesOfType(type)
-    if (props.length > 0) return objectToValibot(props)
+    if (props.length > 0) return objectToValidator(props)
   }
 
   // index signature / Record type
@@ -1277,7 +1277,7 @@ async function emitModules({
   // lightweight string-based parser for inline type annotations from source text
   // handles simple cases: primitives, inline objects, arrays
   // returns null for type references that need the checker to resolve
-  const typeToValibot = (paramType: string): string | null => {
+  const typeToValidator = (paramType: string): string | null => {
     try {
       return parseTypeString(paramType.trim())
     } catch {
@@ -1288,7 +1288,7 @@ async function emitModules({
   const allQueries: Array<{
     name: string
     params: string
-    valibotCode: string
+    validatorCode: string
     sourceFile: string
     importPath: string
   }> = []
@@ -1335,21 +1335,21 @@ async function emitModules({
 
       const resolver = createTypeResolver(project.projectForFile(filePath))
       for (const candidate of candidates) {
-        let valibotCode = typeToValibot(candidate.paramType)
-        if (!valibotCode && candidate.typeNode) {
+        let validatorCode = typeToValidator(candidate.paramType)
+        if (!validatorCode && candidate.typeNode) {
           const resolvedType = await resolveParamType(
             resolver,
             sourceFile,
             candidate.name,
             0
           )
-          if (resolvedType) valibotCode = await resolver.typeToValibot(resolvedType)
+          if (resolvedType) validatorCode = await resolver.typeToValidator(resolvedType)
         }
-        if (valibotCode) {
+        if (validatorCode) {
           allQueries.push({
             name: candidate.name,
             params: candidate.paramType,
-            valibotCode,
+            validatorCode,
             sourceFile: namespace.name,
             importPath: namespaceImportPath(baseDir, filePath),
           })
@@ -1431,7 +1431,7 @@ async function emitModules({
         content,
         filePath,
         !!silent,
-        typeToValibot
+        typeToValidator
       )
 
       if (result) {
@@ -1440,7 +1440,7 @@ async function emitModules({
 
         // check if any custom mutations have unresolved types
         const hasUnresolved = result.custom.some(
-          (m) => m.paramType !== 'void' && m.paramType !== 'unknown' && !m.valibotCode
+          (m) => m.paramType !== 'void' && m.paramType !== 'unknown' && !m.validatorCode
         )
         if (hasUnresolved) {
           unresolvedModels.push({ baseName: fileBaseName, filePath })
@@ -1458,9 +1458,9 @@ async function emitModules({
       const modelResolver = createTypeResolver(project.projectForFile(filePath))
       const resolvedTypes = await resolveMutationParamTypes(modelResolver, sourceFile)
       if (resolvedTypes.size === 0) continue
-      const resolvedValibot = new Map<string, string>()
+      const resolvedValidators = new Map<string, string>()
       for (const [name, type] of resolvedTypes) {
-        resolvedValibot.set(name, await modelResolver.typeToValibot(type))
+        resolvedValidators.set(name, await modelResolver.typeToValidator(type))
       }
 
       // re-extract with resolved types
@@ -1470,8 +1470,8 @@ async function emitModules({
         content,
         filePath,
         !!silent,
-        typeToValibot,
-        resolvedValibot
+        typeToValidator,
+        resolvedValidators
       )
 
       if (result) {

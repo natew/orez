@@ -193,6 +193,10 @@
       "types": "./dist/data/generate-lite.d.ts",
       "default": "./dist/data/generate-lite.js"
     },
+    "./data/validate": {
+      "types": "./dist/data/validate.d.ts",
+      "default": "./dist/data/validate.js"
+    },
     "./data/bun": {
       "types": "./dist/data/bun-plugin.d.ts",
       "default": "./dist/data/bun-plugin.js"
@@ -240,7 +244,6 @@
     "orez-sync-cf-host": "workspace:*",
     "orez-sync-executor": "workspace:*",
     "typescript": "7.0.2",
-    "valibot": "^1.1.0",
     "ws": "^8.19.0"
   },
   "peerDependencies": {

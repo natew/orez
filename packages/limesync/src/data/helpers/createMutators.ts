@@ -1,5 +1,6 @@
 import { withOptimisticAggregates } from '../../aggregate.js'
 import { getAuthData } from '../state.js'
+import { parse, type Check } from '../validate.js'
 import { mapObject } from './mapObject.js'
 import { runWithContext } from './mutatorContext.js'
 import { time } from './time.js'
@@ -44,8 +45,8 @@ export function createMutators<Models extends GenericModels>({
   enqueueAction?: NonNullable<MutatorContext['server']>['enqueueAction']
   createServerActions?: () => Record<string, any>
   validateMutation?: ValidateMutationFn
-  /** valibot schemas keyed by model.mutationName, auto-validates args before running */
-  mutationValidators?: Record<string, Record<string, any>>
+  /** generated arg checks keyed by model.mutationName, run before each mutation */
+  mutationValidators?: Record<string, Record<string, Check<unknown>>>
   resolveAuthData?: () => AuthData | null
   aggregates?: AggregateSet
 }): GetZeroMutators<Models> {
@@ -177,7 +178,7 @@ export function createMutators<Models extends GenericModels>({
 
     return async (...args: Args): Promise<void> => {
       // args[0] is tx, args[1] is the mutation args
-      // auto-validate with generated valibot schema first.
+      // auto-validate with the generated arg check first.
       //
       // the skip is keyed on the SCHEMA, never on the value. skipping whenever
       // args were null keyed the only shape check at this boundary on something
@@ -187,13 +188,9 @@ export function createMutators<Models extends GenericModels>({
       // args at all, which zero calls with null, so ask whether the validator
       // declares anything instead: a void schema, or an object with no entries.
       const declaresNothing =
-        (validator as { type?: string } | undefined)?.type === 'void' ||
-        ((validator as { type?: string } | undefined)?.type === 'object' &&
-          Object.keys((validator as { entries?: object }).entries ?? {}).length === 0)
-      if (validator && !declaresNothing) {
-        const valibot = await import('valibot')
-        valibot.parse(validator, args[1])
-      }
+        validator?.kind === 'void' ||
+        (validator?.kind === 'object' && Object.keys(validator.entries ?? {}).length === 0)
+      if (validator && !declaresNothing) parse(validator, args[1])
       // then run user-provided validation hook as escape hatch
       if (validateMutation) {
         await validateMutation({

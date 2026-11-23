@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 
-import * as v from 'valibot'
+import * as v from './validate'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import * as zero from '../zero/zero.js'
@@ -149,20 +149,20 @@ export const mutate = mutations(schema, permission, {
     }
 
     await generate({ dir: dataDir, silent: true })
-    expect(v.safeParse(validator(), { kind: 'send' }).success).toBe(true)
-    expect(v.safeParse(validator(), { kind: 'throttle' }).success).toBe(false)
+    expect(() => v.parse(validator(), { kind: 'send' })).not.toThrow()
+    expect(() => v.parse(validator(), { kind: 'throttle' })).toThrow()
     expect((await generate({ dir: dataDir, silent: true })).filesChanged).toBe(0)
 
     writeFileSync(kindsPath, `export type Kind = 'send' | 'throttle'`)
     await generate({ dir: dataDir, silent: true })
-    expect(v.safeParse(validator(), { kind: 'throttle' }).success).toBe(true)
-    expect(v.safeParse(validator(), { kind: 'unknown' }).success).toBe(false)
+    expect(() => v.parse(validator(), { kind: 'throttle' })).not.toThrow()
+    expect(() => v.parse(validator(), { kind: 'unknown' })).toThrow()
     expect((await generate({ dir: dataDir, silent: true })).filesChanged).toBe(0)
 
     writeFileSync(kindsPath, `export type Kind = 'throttle'`)
     await generate({ dir: dataDir, silent: true })
-    expect(v.safeParse(validator(), { kind: 'send' }).success).toBe(false)
-    expect(v.safeParse(validator(), { kind: 'throttle' }).success).toBe(true)
+    expect(() => v.parse(validator(), { kind: 'send' })).toThrow()
+    expect(() => v.parse(validator(), { kind: 'throttle' })).not.toThrow()
   })
 
   test('validates a type reused by siblings and stops at a cycle', async () => {
@@ -186,9 +186,9 @@ export const mutate = mutations(schema, permission, {
     const validator = context.exports.mutationValidators!.command.dispatch
     const tree = { name: 'root', children: [{ name: 'leaf', children: [] }] }
     const valid = { a: ['x'], b: ['y'], nested: { c: ['z'] }, tree }
-    expect(v.safeParse(validator, valid).success).toBe(true)
-    expect(v.safeParse(validator, { ...valid, b: [1] }).success).toBe(false)
-    expect(v.safeParse(validator, { ...valid, nested: { c: [1] } }).success).toBe(false)
+    expect(() => v.parse(validator, valid)).not.toThrow()
+    expect(() => v.parse(validator, { ...valid, b: [1] })).toThrow()
+    expect(() => v.parse(validator, { ...valid, nested: { c: [1] } })).toThrow()
   })
 
   test('force regenerates without source changes', async () => {

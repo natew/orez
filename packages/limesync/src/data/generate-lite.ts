@@ -548,29 +548,29 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     const custom = (mutationExport?.handlers ?? []).map((h) => {
       // null or empty annotation → void (no second param) → v.void_()
       if (h.paramTypeText == null) {
-        return { name: h.name, paramType: 'void', valibotCode: '' }
+        return { name: h.name, paramType: 'void', validatorCode: '' }
       }
 
       const paramType = h.paramTypeText.trim()
 
       // unknown explicitly → permissive validator
       if (paramType === 'unknown') {
-        return { name: h.name, paramType: 'unknown', valibotCode: '' }
+        return { name: h.name, paramType: 'unknown', validatorCode: '' }
       }
 
       // try the pure string parser. if it fails, fall back to v.unknown()
       // (no cross-file type resolution in lite mode).
-      let valibotCode: string | null = null
+      let validatorCode: string | null = null
       try {
-        valibotCode = parseTypeString(paramType)
+        validatorCode = parseTypeString(paramType)
       } catch {
-        valibotCode = null
+        validatorCode = null
       }
 
       return {
         name: h.name,
         paramType,
-        valibotCode: valibotCode ?? 'v.unknown()',
+        validatorCode: validatorCode ?? 'v.unknown()',
       }
     })
 
@@ -587,7 +587,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   const allQueries: Array<{
     name: string
     params: string
-    valibotCode: string
+    validatorCode: string
     sourceFile: string
     importPath: string
   }> = []
@@ -624,7 +624,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         allQueries.push({
           name: q.name,
           params: 'void',
-          valibotCode: '',
+          validatorCode: '',
           sourceFile: fileBaseName,
           importPath: `../${relativePath(baseDir, filePath).replace(/\.ts$/, '')}`,
         })
@@ -638,17 +638,17 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
       // mutations). the existing node generator silently drops queries
       // whose types can't be resolved; in lite mode we emit them with a
       // permissive validator rather than losing them.
-      let valibotCode: string | null = null
+      let validatorCode: string | null = null
       try {
-        valibotCode = parseTypeString(paramType)
+        validatorCode = parseTypeString(paramType)
       } catch {
-        valibotCode = null
+        validatorCode = null
       }
 
       allQueries.push({
         name: q.name,
         params: paramType,
-        valibotCode: valibotCode ?? 'v.unknown()',
+        validatorCode: validatorCode ?? 'v.unknown()',
         sourceFile: fileBaseName,
         importPath: `../${relativePath(baseDir, filePath).replace(/\.ts$/, '')}`,
       })

@@ -1,4 +1,4 @@
-import * as v from 'valibot'
+import * as v from './validate'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createSchema, defineQueries, defineQuery, string, table } from '../zero/zero.js'

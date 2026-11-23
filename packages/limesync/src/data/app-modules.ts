@@ -3,7 +3,6 @@ import { statSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 import { init, parse } from 'es-module-lexer'
 
@@ -57,9 +56,7 @@ export async function renderAppModule(
   for (const { n, ss, se, s, e, d } of [...imports].reverse()) {
     if (d !== -1 || !n) continue
     let specifier: string
-    if (n === 'valibot') {
-      specifier = sourceImport(fileURLToPath(import.meta.resolve('valibot')))
-    } else if (n === 'limesync/zero') {
+    if (n === 'limesync/zero' || n === 'limesync/data/validate') {
       specifier = sourceImport(createRequire(resolve(dir, 'schema.ts')).resolve(n))
     } else if (n.startsWith('.')) {
       const sibling = `${n.slice(2)}.ts`

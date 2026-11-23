@@ -1,6 +1,6 @@
 import { runInNewContext } from 'node:vm'
 
-import * as v from 'valibot'
+import * as v from './validate'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -58,12 +58,12 @@ describe('generated mutation validators', () => {
           {
             name: 'update',
             paramType: '{ id: string }',
-            valibotCode: 'v.object({\n    id: v.string(),\n  })',
+            validatorCode: 'v.object({\n    id: v.string(),\n  })',
           },
           {
             name: 'publish',
             paramType: '{ id: string }',
-            valibotCode: 'v.object({\n    id: v.string(),\n  })',
+            validatorCode: 'v.object({\n    id: v.string(),\n  })',
           },
         ],
       },
@@ -114,7 +114,7 @@ describe('generated mutation validators', () => {
           {
             name: 'upsert',
             paramType: '{ id: string; draft: boolean }',
-            valibotCode: 'v.object({\n    id: v.string(),\n    draft: v.boolean(),\n  })',
+            validatorCode: 'v.object({\n    id: v.string(),\n    draft: v.boolean(),\n  })',
           },
         ],
       },
@@ -135,12 +135,12 @@ describe('generated mutation validators', () => {
         hasCRUD: true,
         columns: { id: { type: 'string', optional: false, customType: undefined } },
         primaryKeys: ['id'],
-        custom: [{ name: 'upsert', paramType: 'unknown', valibotCode: '' }],
+        custom: [{ name: 'upsert', paramType: 'unknown', validatorCode: '' }],
       },
     ])
     const validators = runInNewContext(
       source
-        .replace("import * as v from 'valibot'", '')
+        .replace("import * as v from 'limesync/data/validate'", '')
         .replace('export const mutationValidators', 'const mutationValidators') +
         '\nmutationValidators',
       { v }
@@ -164,7 +164,7 @@ describe('generated mutation validators', () => {
           {
             name: 'markRead',
             paramType: '{ id: string }',
-            valibotCode: 'v.object({\n    id: v.string(),\n  })',
+            validatorCode: 'v.object({\n    id: v.string(),\n  })',
           },
         ],
       },
@@ -187,7 +187,7 @@ describe('generated mutation validators', () => {
           {
             name: 'insert',
             paramType: '{ id: string }',
-            valibotCode: 'v.object({\n    id: v.string(),\n  })',
+            validatorCode: 'v.object({\n    id: v.string(),\n  })',
           },
         ],
       },
