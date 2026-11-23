@@ -28,6 +28,13 @@ Import schema builders, query definitions and `Zero` from `limesync/zero`.
 Register generated schema types with `declare module 'limesync/zero'`. The client
 is based on Zero 1.9.0 and includes the maintained fork's database lifetime fixes.
 
+For One apps, export the `one/data` schema from `data/schema.ts` and add
+`limesync()` from `limesync/data/bun` to the Bun plugins. The virtual modules
+expose the Zero projection of the tables declared with `.public()`. For Better
+Auth, use `betterAuthAdapter(db, schema)` from `limesync/better-auth` with the
+original One schema and the host's application SQLite client. The adapter
+uses that client's read and write transactions and requires private auth tables.
+
 `Zero` sends pulls and pushes over HTTP at its server URL. Use
 `limesync/client` to supply separate endpoints, a wake subscription, or a
 payload codec. An optional WebSocket carries wake signals.

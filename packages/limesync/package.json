@@ -199,6 +199,10 @@
     "./data/vite": {
       "types": "./dist/data/vite-plugin.d.ts",
       "default": "./dist/data/vite-plugin.js"
+    },
+    "./better-auth": {
+      "types": "./dist/better-auth.d.ts",
+      "default": "./dist/better-auth.js"
     }
   },
   "bin": {
@@ -237,13 +241,17 @@
   },
   "peerDependencies": {
     "vite": ">=5",
-    "react": "*"
+    "react": "*",
+    "better-auth": ">=1.6.0 <2"
   },
   "peerDependenciesMeta": {
     "vite": {
       "optional": true
     },
     "react": {
+      "optional": true
+    },
+    "better-auth": {
       "optional": true
     }
   },
@@ -259,7 +267,8 @@
     "@types/react": "^19.0.0",
     "jsdom": "29.1.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "better-auth": "1.6.30"
   },
   "files": [
     "dist",

@@ -21,8 +21,9 @@ export async function generateAppModules(root: string, options: DataAppOptions) 
   const generated = await generateModules({ dir, tsconfig })
   const { files, watchFiles, sourceRoots } = generated
   if (statSync(schema, { throwIfNoEntry: false })?.isFile()) {
-    files['schema.ts'] = `import * as source from ${JSON.stringify(schema)}
-export const schema = source.schema
+    files['schema.ts'] = `import { createSchema } from "limesync/zero"
+import * as source from ${JSON.stringify(schema)}
+export const schema = createSchema(source.schema)
 `
     watchFiles.push(schema)
   } else if (options.schema || !files['schema.ts']) {

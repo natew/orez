@@ -246,6 +246,7 @@
         "@types/node": "^22.0.0",
         "@types/react": "^19.0.0",
         "@types/ws": "^8.18.1",
+        "better-auth": "1.6.30",
         "jsdom": "29.1.1",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
@@ -256,10 +257,12 @@
         "orez-sync-native": "workspace:*",
       },
       "peerDependencies": {
+        "better-auth": ">=1.6.0 <2",
         "react": "*",
         "vite": ">=5",
       },
       "optionalPeers": [
+        "better-auth",
         "react",
         "vite",
       ],
