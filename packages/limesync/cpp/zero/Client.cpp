@@ -1,27 +1,72 @@
 #include "Client.hpp"
 #include "Json.hpp"
 
+#include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <limits>
 #include <mutex>
-#include <optional>
 #include <set>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace limesync::zero {
 namespace {
 std::atomic<uint64_t> nextTransaction{0};
 
+// prepared statements are reused across requests. a statement still stepping (an
+// outer relationship query) is checked out, so a nested use of the same text
+// prepares another.
+class Statements {
+ public:
+  explicit Statements(sqlite3* db) : db_(db) {}
+  ~Statements() { clear(); }
+  Statements(const Statements&) = delete;
+  sqlite3* db() const { return db_; }
+  sqlite3_stmt* take(const std::string& sql) {
+    auto found = idle_.find(sql);
+    if (found != idle_.end() && !found->second.empty()) {
+      sqlite3_stmt* stmt = found->second.back();
+      found->second.pop_back();
+      --count_;
+      return stmt;
+    }
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v3(db_, sql.c_str(), -1, SQLITE_PREPARE_PERSISTENT, &stmt, nullptr) !=
+        SQLITE_OK)
+      throw std::runtime_error(sqlite3_errmsg(db_));
+    return stmt;
+  }
+  void give(const std::string& sql, sqlite3_stmt* stmt) {
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    if (count_ >= 256) {
+      sqlite3_finalize(stmt);
+      return;
+    }
+    idle_[sql].push_back(stmt);
+    ++count_;
+  }
+  void clear() {
+    for (auto& [unused, stmts] : idle_)
+      for (sqlite3_stmt* stmt : stmts) sqlite3_finalize(stmt);
+    idle_.clear();
+    count_ = 0;
+  }
+
+ private:
+  sqlite3* db_;
+  std::unordered_map<std::string, std::vector<sqlite3_stmt*>> idle_;
+  size_t count_ = 0;
+};
+
 class Statement {
  public:
-  Statement(sqlite3* db, const std::string& sql) : db_(db) {
-    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt_, nullptr) != SQLITE_OK)
-      throw std::runtime_error(sqlite3_errmsg(db));
-  }
-  ~Statement() { sqlite3_finalize(stmt_); }
+  Statement(Statements& cache, std::string sql)
+      : cache_(cache), db_(cache.db()), sql_(std::move(sql)), stmt_(cache.take(sql_)) {}
+  ~Statement() { cache_.give(sql_, stmt_); }
   Statement(const Statement&) = delete;
   sqlite3_stmt* get() const { return stmt_; }
   void bind(int index, const Json& v) {
@@ -45,81 +90,27 @@ class Statement {
     if (code != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db_));
     return false;
   }
-  std::string text(int col) const {
+  bool null(int col) const { return sqlite3_column_type(stmt_, col) == SQLITE_NULL; }
+  std::string text(int col) const { return std::string(view(col)); }
+  std::string_view view(int col) const {
     auto* value = sqlite3_column_text(stmt_, col);
-    return value
-               ? std::string(reinterpret_cast<const char*>(value), sqlite3_column_bytes(stmt_, col))
-               : "";
+    return value ? std::string_view(reinterpret_cast<const char*>(value),
+                                    sqlite3_column_bytes(stmt_, col))
+                 : std::string_view();
   }
 
  private:
+  Statements& cache_;
   sqlite3* db_;
-  sqlite3_stmt* stmt_ = nullptr;
+  std::string sql_;
+  sqlite3_stmt* stmt_;
 };
 
-void sql(sqlite3* db, const std::string& text, const std::vector<Json>& args = {}) {
+void sql(Statements& db, const std::string& text, const std::vector<Json>& args = {}) {
   Statement statement(db, text);
   for (size_t i = 0; i < args.size(); ++i) statement.bind(static_cast<int>(i + 1), args[i]);
   while (statement.step()) {
   }
-}
-
-Json parse(sqlite3* db, const std::string& input) {
-  Statement valid(db, "SELECT json_valid(?)");
-  valid.bind(1, input);
-  valid.step();
-  if (!sqlite3_column_int(valid.get(), 0)) throw std::runtime_error("invalid JSON");
-  Statement tree(db, "SELECT id,parent,key,type,atom FROM json_tree(?)");
-  tree.bind(1, input);
-  struct Node {
-    Json value;
-    int64_t parent;
-    std::string key;
-    std::vector<int64_t> children;
-  };
-  std::map<int64_t, Node> nodes;
-  int64_t root = -1;
-  while (tree.step()) {
-    int64_t id = sqlite3_column_int64(tree.get(), 0);
-    bool isRoot = sqlite3_column_type(tree.get(), 1) == SQLITE_NULL;
-    int64_t parent = isRoot ? -1 : sqlite3_column_int64(tree.get(), 1);
-    std::string type = tree.text(3);
-    Json value;
-    if (type == "object")
-      value = Json::Object{};
-    else if (type == "array")
-      value = Json::Array{};
-    else if (type == "text")
-      value = tree.text(4);
-    else if (type == "true" || type == "false")
-      value = type == "true";
-    else if (type == "integer" || type == "real") {
-      double number = sqlite3_column_double(tree.get(), 4);
-      if (!std::isfinite(number))
-        throw std::runtime_error("JSON number is outside the finite range");
-      value = number;
-    }
-    nodes.emplace(id, Node{std::move(value), parent, tree.text(2), {}});
-    if (isRoot)
-      root = id;
-    else
-      nodes.at(parent).children.push_back(id);
-  }
-  std::function<Json(int64_t, unsigned)> assemble = [&](int64_t id, unsigned depth) -> Json {
-    if (depth > 128) throw std::runtime_error("JSON nesting exceeds 128 levels");
-    auto& node = nodes.at(id);
-    for (int64_t child : node.children) {
-      Json value = assemble(child, depth + 1);
-      if (node.value.array())
-        std::get<Json::Array>(node.value.value).push_back(std::move(value));
-      else
-        std::get<Json::Object>(node.value.value)
-            .insert_or_assign(nodes.at(child).key, std::move(value));
-    }
-    return std::move(node.value);
-  };
-  if (root < 0) throw std::runtime_error("expected a JSON value");
-  return assemble(root, 0);
 }
 
 std::string quoted(const std::string& s) {
@@ -193,11 +184,29 @@ struct Compiled {
   std::vector<Json> args;
 };
 
+struct Watch {
+  std::string request;
+  Json ast;
+  Json format;
+  std::string hash;
+  std::set<std::string> tables;
+  bool published = false;
+  size_t digest = 0;
+  size_t size = 0;
+  std::string resultType;
+  std::string error;
+};
+
 }  // namespace
 
 struct Client::Impl {
   sqlite3* db = nullptr;
+  std::unique_ptr<Statements> statements;
   std::mutex mutex;
+  std::map<int64_t, Watch> watches;
+  // tables whose view rows may have changed since the last publish.
+  std::set<std::string> changedTables;
+  bool allTablesChanged = false;
   std::map<std::string, Table> tables;
   std::map<std::string, std::string> serverTables;
   std::string clientID;
@@ -217,11 +226,12 @@ struct Client::Impl {
       db = nullptr;
       throw std::runtime_error(reason);
     }
+    statements = std::make_unique<Statements>(db);
     try {
       sqlite3_busy_timeout(db, 5000);
       sqlite3_create_function_v2(db, "one_zero_like", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                  nullptr, like, nullptr, nullptr, nullptr);
-      Json schema = parse(db, schemaText);
+      Json schema = Json::parse(schemaText);
       for (const auto& [name, description] : schema.at("tables").fields()) {
         if (name.empty() || name.find('\0') != std::string::npos)
           throw std::runtime_error("invalid table name");
@@ -251,33 +261,48 @@ struct Client::Impl {
           throw std::runtime_error("duplicate server table name");
         tables.emplace(name, std::move(table));
       }
-      sql(db, "PRAGMA journal_mode=WAL");
-      sql(db, "PRAGMA synchronous=FULL");
-      sql(db, "BEGIN IMMEDIATE");
-      sql(db,
+      sql(*statements, "PRAGMA journal_mode=WAL");
+      sql(*statements, "PRAGMA synchronous=FULL");
+      sql(*statements, "BEGIN IMMEDIATE");
+      sql(*statements,
           "CREATE TABLE IF NOT EXISTS one_zero_meta(key TEXT PRIMARY "
           "KEY,value TEXT NOT NULL)");
-      sql(db,
-          "CREATE TABLE IF NOT EXISTS one_zero_base(table_name TEXT NOT "
-          "NULL,key TEXT NOT "
-          "NULL,value TEXT NOT NULL,PRIMARY KEY(table_name,key))");
-      sql(db,
+      sql(*statements,
           "CREATE TABLE IF NOT EXISTS one_zero_view(table_name TEXT NOT "
           "NULL,key TEXT NOT "
           "NULL,value TEXT NOT NULL,PRIMARY KEY(table_name,key))");
-      sql(db,
+      sql(*statements,
           "CREATE TABLE IF NOT EXISTS one_zero_mutations(id INTEGER "
           "PRIMARY KEY,name TEXT NOT "
           "NULL,args TEXT NOT NULL,timestamp REAL NOT NULL)");
+      // the server's row (NULL when absent) for each key a pending local write changed in
+      // one_zero_view; every other view row is the server's row.
+      sql(*statements,
+          "CREATE TABLE IF NOT EXISTS one_zero_shadow(table_name TEXT NOT NULL,key TEXT NOT "
+          "NULL,value TEXT,PRIMARY KEY(table_name,key))");
       std::string canonical = schema.dump();
-      if (!meta("formatVersion").null() && meta("formatVersion") != Json(1))
+      const Json format = meta("formatVersion");
+      if (!format.null() && format != Json(1) && format != Json(2))
         throw std::runtime_error("unsupported native Zero store format");
+      if (format == Json(1)) {
+        // format 1 kept a full server copy in one_zero_base; keep only the rows it shadows.
+        sql(*statements,
+            "INSERT INTO one_zero_shadow SELECT b.table_name,b.key,b.value FROM one_zero_base b "
+            "LEFT JOIN one_zero_view v ON v.table_name=b.table_name AND v.key=b.key WHERE "
+            "v.value IS NOT b.value");
+        sql(*statements,
+            "INSERT INTO one_zero_shadow SELECT v.table_name,v.key,NULL FROM one_zero_view v "
+            "WHERE NOT EXISTS (SELECT 1 FROM one_zero_base b WHERE b.table_name=v.table_name AND "
+            "b.key=v.key)");
+        sql(*statements, "DROP TABLE one_zero_base");
+        sql(*statements, "DROP TABLE IF EXISTS one_zero_view_dirty");
+      }
       auto existing = meta("schema");
       if (clientID.empty()) {
         if (!meta("clientID").null())
           clientID = meta("clientID").string();
         else {
-          Statement random(db, "SELECT lower(hex(randomblob(16)))");
+          Statement random(*statements, "SELECT lower(hex(randomblob(16)))");
           random.step();
           clientID = random.text(0);
         }
@@ -285,24 +310,27 @@ struct Client::Impl {
       if (!meta("clientID").null() && meta("clientID") != Json(clientID))
         throw std::runtime_error("native Zero client identity differs from the persisted store");
       if (!existing.null() && existing != Json(canonical)) {
-        sql(db, "DELETE FROM one_zero_base");
-        sql(db, "DELETE FROM one_zero_view");
+        sql(*statements, "DELETE FROM one_zero_view");
+        sql(*statements, "DELETE FROM one_zero_shadow");
         setMeta("cookie", Json());
         setMeta("queries", Json::Array{});
         setMeta("needsRebase", true);
         setMeta("completedQueries", Json::Array{});
         setMeta("queryErrors", Json::Object{});
       }
-      std::set<std::string> indexExpressions;
+      // one partial index per table keeps each row's index work to its own table's columns.
+      std::map<std::string, std::string> indexes;
       const auto indexFields = [&](const std::string& name, const Json::Array& fields) {
         std::string expressions;
         for (const auto& field : fields) {
           if (!table(name).columns.contains(field.string()))
             throw std::runtime_error("unknown relationship index column");
-          expressions += ",json_extract(value," + quoted("$." + Json(field.string()).dump()) +
-                         ") COLLATE BINARY";
+          expressions += (expressions.empty() ? "" : ",") + std::string("json_extract(value,") +
+                         quoted("$." + Json(field.string()).dump()) + ") COLLATE BINARY";
         }
-        if (!expressions.empty()) indexExpressions.insert(expressions);
+        if (expressions.empty()) return;
+        indexes.emplace("one_zero_index:" + name + ":" + expressions,
+                        "(" + expressions + ") WHERE table_name=" + quoted(name));
       };
       for (const auto& [name, definition] : tables) {
         Json::Array fields;
@@ -314,11 +342,21 @@ struct Client::Impl {
           for (const auto& [unusedName, chain] : relationships.fields())
             for (const auto& part : chain.items())
               indexFields(part.at("destSchema").string(), part.at("destField").items());
-      for (const auto& expressions : indexExpressions)
-        sql(db, "CREATE INDEX IF NOT EXISTS " + quoted("one_zero_index" + expressions) +
-                    " ON one_zero_view(table_name" + expressions + ")");
+      std::vector<std::string> staleIndexes;
+      {
+        Statement existingIndexes(*statements,
+                                  "SELECT name FROM sqlite_master WHERE type='index' AND "
+                                  "tbl_name='one_zero_view' AND name LIKE 'one_zero_index%'");
+        while (existingIndexes.step())
+          if (!indexes.contains(existingIndexes.text(0)))
+            staleIndexes.push_back(existingIndexes.text(0));
+      }
+      for (const auto& name : staleIndexes) sql(*statements, "DROP INDEX " + quoted(name));
+      for (const auto& [name, definition] : indexes)
+        sql(*statements,
+            "CREATE INDEX IF NOT EXISTS " + quoted(name) + " ON one_zero_view" + definition);
       setMeta("schema", canonical);
-      setMeta("formatVersion", 1);
+      setMeta("formatVersion", 2);
       setMeta("clientID", clientID);
       if (meta("nextMutationID").null()) setMeta("nextMutationID", 1);
       if (meta("lastMutationID").null()) setMeta("lastMutationID", 0);
@@ -327,24 +365,26 @@ struct Client::Impl {
       if (meta("queries").null()) setMeta("queries", Json::Array{});
       if (meta("completedQueries").null()) setMeta("completedQueries", Json::Array{});
       if (meta("queryErrors").null()) setMeta("queryErrors", Json::Object{});
-      sql(db, "COMMIT");
+      sql(*statements, "COMMIT");
     } catch (...) {
+      statements.reset();
       sqlite3_close_v2(db);
       db = nullptr;
       throw;
     }
   }
   ~Impl() {
+    statements.reset();
     if (db) sqlite3_close_v2(db);
   }
 
   Json meta(const std::string& name) {
-    Statement statement(db, "SELECT value FROM one_zero_meta WHERE key=?");
+    Statement statement(*statements, "SELECT value FROM one_zero_meta WHERE key=?");
     statement.bind(1, name);
-    return statement.step() ? parse(db, statement.text(0)) : Json();
+    return statement.step() ? Json::parse(statement.text(0)) : Json();
   }
   void setMeta(const std::string& name, const Json& value) {
-    sql(db,
+    sql(*statements,
         "INSERT INTO one_zero_meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET "
         "value=excluded.value",
         {name, value.dump()});
@@ -390,29 +430,30 @@ struct Client::Impl {
   }
   void store(const std::string& target, const std::string& name, const std::string& rowKey,
              const Json& row) {
-    sql(db,
+    sql(*statements,
         "INSERT INTO " + target +
             " VALUES(?,?,?) ON CONFLICT(table_name,key) DO UPDATE SET "
             "value=excluded.value",
         {name, rowKey, row.dump()});
   }
-  void write(const std::string& target, const std::string& kind, const std::string& name,
-             Json value) {
+  void write(const std::string& kind, const std::string& name, Json value) {
+    const std::string target = "one_zero_view";
     std::string rowKey = key(name, value);
     if (kind == "delete") {
-      sql(db, "DELETE FROM " + target + " WHERE table_name=? AND key=?", {name, rowKey});
+      shadow(name, rowKey);
+      sql(*statements, "DELETE FROM " + target + " WHERE table_name=? AND key=?", {name, rowKey});
       return;
     }
     if (kind != "insert" && kind != "upsert" && kind != "update")
       throw std::runtime_error("unsupported write kind: " + kind);
     {
-      Statement existing(db, "SELECT value FROM " + target + " WHERE table_name=? AND key=?");
+      Statement existing(*statements, "SELECT value FROM " + target + " WHERE table_name=? AND key=?");
       existing.bind(1, name);
       existing.bind(2, rowKey);
       if (existing.step()) {
         if (kind == "insert") return;
         validate(name, value, false);
-        Json old = parse(db, existing.text(0));
+        Json old = Json::parse(existing.text(0));
         for (const auto& [column, field] : value.fields())
           std::get<Json::Object>(old.value).insert_or_assign(column, field);
         value = std::move(old);
@@ -421,7 +462,29 @@ struct Client::Impl {
         validate(name, value, true);
       }
     }
+    shadow(name, rowKey);
     store(target, name, rowKey, value);
+  }
+  void shadow(const std::string& name, const std::string& rowKey) {
+    sql(*statements,
+        "INSERT OR IGNORE INTO one_zero_shadow SELECT ?1,?2,(SELECT value FROM one_zero_view "
+        "WHERE table_name=?1 AND key=?2)",
+        {name, rowKey});
+    changedTables.insert(name);
+  }
+  // server patches land in the view unless a pending local write shadows the key.
+  void serverStore(bool shadowed, const std::string& name, const std::string& rowKey,
+                   const Json* row) {
+    changedTables.insert(name);
+    if (shadowed) {
+      sql(*statements, "UPDATE one_zero_shadow SET value=? WHERE table_name=? AND key=?",
+          {row ? Json(row->dump()) : Json(), name, rowKey});
+      if (sqlite3_changes(db)) return;
+    }
+    if (row)
+      store("one_zero_view", name, rowKey, *row);
+    else
+      sql(*statements, "DELETE FROM one_zero_view WHERE table_name=? AND key=?", {name, rowKey});
   }
   std::pair<std::string, Json> mapServerRow(const std::string& serverName, const Json& row) {
     auto found = serverTables.find(serverName);
@@ -516,9 +579,10 @@ struct Client::Impl {
     const auto& definition = table(name);
     if (ast.has("schema"))
       throw std::runtime_error("schema-qualified native queries are not supported");
+    // a literal table name lets SQLite match the table's partial index.
     Compiled out{"SELECT " + alias + ".value FROM one_zero_view " + alias + " WHERE " + alias +
-                     ".table_name=?",
-                 {name}};
+                     ".table_name=" + quoted(name),
+                 {}};
     if (correlation) {
       const auto& parent = correlation->at("parentField").items();
       const auto& child = correlation->at("childField").items();
@@ -653,13 +717,13 @@ struct Client::Impl {
              const Json* parent = nullptr, unsigned depth = 0) {
     if (depth > 32) throw std::runtime_error("relationship nesting exceeds 32 levels");
     auto compiled = compile(ast, "r", correlation, "", "", parent);
-    Statement statement(db, compiled.sql);
+    Statement statement(*statements, compiled.sql);
     for (size_t i = 0; i < compiled.args.size(); ++i)
       statement.bind(static_cast<int>(i + 1), compiled.args[i]);
     Json::Array rows;
     while (statement.step()) {
       // stored rows already passed JSON validation; only parents need field access.
-      Json row = ast.has("related") ? parse(db, statement.text(0))
+      Json row = ast.has("related") ? Json::parse(statement.view(0))
                                     : Json(Json::Serialized{statement.text(0)});
       if (ast.has("related")) {
         for (const Json& related : ast.at("related").items()) {
@@ -678,16 +742,99 @@ struct Client::Impl {
     return rows;
   }
 
+  void watchedTables(const Json& ast, std::set<std::string>& out, unsigned depth) {
+    if (depth > 32) throw std::runtime_error("query nesting exceeds 32 levels");
+    out.insert(ast.at("table").string());
+    if (ast.has("related"))
+      for (const Json& related : ast.at("related").items())
+        watchedTables(related.at("subquery"), out, depth + 1);
+    if (ast.has("where")) conditionTables(ast.at("where"), out, depth + 1);
+  }
+  void conditionTables(const Json& condition, std::set<std::string>& out, unsigned depth) {
+    if (depth > 32) throw std::runtime_error("query nesting exceeds 32 levels");
+    const std::string& type = condition.at("type").string();
+    if (type == "and" || type == "or")
+      for (const Json& item : condition.at("conditions").items())
+        conditionTables(item, out, depth + 1);
+    else if (type == "correlatedSubquery")
+      watchedTables(condition.at("related").at("subquery"), out, depth + 1);
+  }
+  // answers the watches whose result, result type or error changed. one watch
+  // when only is set: its first answer.
+  Json publish(const int64_t* only) {
+    bool hashed = false;
+    for (const auto& [id, watch] : watches)
+      if (!watch.hash.empty() && (!only || id == *only)) hashed = true;
+    std::set<std::string> completed;
+    Json errors = Json::Object{};
+    if (hashed) {
+      const Json completedQueries = meta("completedQueries");
+      for (const Json& hash : completedQueries.items()) completed.insert(hash.string());
+      errors = meta("queryErrors");
+    }
+    std::unordered_map<std::string_view, std::pair<bool, std::string>> results;
+    Json::Array changed;
+    for (auto& [id, watch] : watches) {
+      if (only && id != *only) continue;
+      const bool failed = !watch.hash.empty() && errors.has(watch.hash);
+      const std::string error = failed ? errors.at(watch.hash).string() : "";
+      const std::string resultType = failed                            ? "error"
+                                     : completed.contains(watch.hash) ? "complete"
+                                                                      : "unknown";
+      bool dirty = allTablesChanged || std::any_of(watch.tables.begin(), watch.tables.end(),
+                                                   [&](const std::string& table) {
+                                                     return changedTables.contains(table);
+                                                   });
+      if (watch.published && !dirty && resultType == watch.resultType && error == watch.error)
+        continue;
+      auto found = results.find(watch.request);
+      if (found == results.end()) {
+        std::pair<bool, std::string> result;
+        try {
+          result = {true, query(watch.ast, watch.format).dump()};
+        } catch (const std::exception& failure) {
+          result = {false, failure.what()};
+        }
+        found = results.emplace(watch.request, std::move(result)).first;
+      }
+      const auto& [succeeded, text] = found->second;
+      if (!succeeded) {
+        watch.published = false;
+        changed.emplace_back(Json::Object{{"id", static_cast<double>(id)}, {"failure", text}});
+        continue;
+      }
+      size_t digest = std::hash<std::string_view>{}(text);
+      if (watch.published && digest == watch.digest && text.size() == watch.size &&
+          resultType == watch.resultType && error == watch.error)
+        continue;
+      watch.published = true;
+      watch.digest = digest;
+      watch.size = text.size();
+      watch.resultType = resultType;
+      watch.error = error;
+      Json::Object entry{{"id", static_cast<double>(id)},
+                         {"value", Json::Serialized{text}},
+                         {"resultType", resultType}};
+      if (resultType == "error") entry.emplace("error", error);
+      changed.emplace_back(std::move(entry));
+    }
+    if (!only) {
+      changedTables.clear();
+      allTablesChanged = false;
+    }
+    return Json::Object{{"results", std::move(changed)}};
+  }
   Json pending() {
-    Statement statement(db, "SELECT id,name,args,timestamp FROM one_zero_mutations ORDER BY id");
+    Statement statement(*statements, "SELECT id,name,args,timestamp FROM one_zero_mutations ORDER BY id");
     Json::Array result;
     while (statement.step()) {
       Json::Object mutation{{"id", static_cast<double>(sqlite3_column_int64(statement.get(), 0))},
                             {"name", statement.text(1)},
                             {"timestamp", sqlite3_column_double(statement.get(), 3)},
                             {"clientID", clientID}};
-      const auto args = statement.text(2);
-      if (!args.empty()) mutation.emplace("args", parse(db, args));
+      // the journal stores args as dumped JSON; empty text means omitted args.
+      auto args = statement.text(2);
+      if (!args.empty()) mutation.emplace("args", Json::Serialized{std::move(args)});
       result.emplace_back(std::move(mutation));
     }
     return result;
@@ -706,7 +853,7 @@ struct Client::Impl {
   }
   void begin(const std::string& kind) {
     if (!transaction.empty()) throw std::runtime_error("a native transaction is already active");
-    sql(db, "BEGIN IMMEDIATE");
+    sql(*statements, "BEGIN IMMEDIATE");
     transaction = std::to_string(++nextTransaction);
     transactionKind = kind;
   }
@@ -719,10 +866,10 @@ struct Client::Impl {
   void rollback() {
     transaction.clear();
     transactionKind.clear();
-    if (!sqlite3_get_autocommit(db)) sql(db, "ROLLBACK");
+    if (!sqlite3_get_autocommit(db)) sql(*statements, "ROLLBACK");
   }
   void commit() {
-    sql(db, "COMMIT");
+    sql(*statements, "COMMIT");
     transaction.clear();
     transactionKind.clear();
   }
@@ -745,7 +892,7 @@ struct Client::Impl {
                               {"clientID", clientID}};
         // empty text cannot be JSON; it preserves omitted arguments in existing journals.
         if (request.has("args")) mutation.emplace("args", request.at("args"));
-        sql(db, "INSERT INTO one_zero_mutations VALUES(?,?,?,?)",
+        sql(*statements, "INSERT INTO one_zero_mutations VALUES(?,?,?,?)",
             {static_cast<double>(id), name,
              request.has("args") ? request.at("args").dump() : "", timestamp});
         setMeta("nextMutationID", static_cast<double>(id + 1));
@@ -787,7 +934,12 @@ struct Client::Impl {
             throw std::runtime_error("mutation acknowledgement is outside the client journal");
           ack = incoming;
         }
-        sql(db, "DELETE FROM one_zero_mutations WHERE id<=?", {static_cast<double>(ack)});
+        sql(*statements, "DELETE FROM one_zero_mutations WHERE id<=?", {static_cast<double>(ack)});
+        bool shadowed;
+        {
+          Statement any(*statements, "SELECT 1 FROM one_zero_shadow LIMIT 1");
+          shadowed = any.step();
+        }
         bool changed = ack != previousAck ||
                        (response.has("rowsPatch") && !response.at("rowsPatch").items().empty()) ||
                        meta("needsRebase") == Json(true);
@@ -800,28 +952,30 @@ struct Client::Impl {
           for (const Json& patch : response.at("rowsPatch").items()) {
             std::string kind = patch.at("op").string();
             if (kind == "clear") {
-              sql(db, "DELETE FROM one_zero_base");
+              sql(*statements, "DELETE FROM one_zero_view");
+              sql(*statements, "DELETE FROM one_zero_shadow");
+              shadowed = false;
+              allTablesChanged = true;
               completed.clear();
               errors.clear();
             } else if (kind == "put" || kind == "del") {
               if (!serverTables.contains(patch.at("tableName").string())) continue;
               auto [name, row] = mapServerRow(patch.at("tableName").string(),
                                               patch.at(kind == "put" ? "value" : "id"));
-              const std::string rowKey = key(name, row);
-              if (kind == "del")
-                sql(db, "DELETE FROM one_zero_base WHERE table_name=? AND key=?", {name, rowKey});
-              else
-                store("one_zero_base", name, rowKey, row);
+              serverStore(shadowed, name, key(name, row), kind == "put" ? &row : nullptr);
             } else if (kind == "update") {
               if (!serverTables.contains(patch.at("tableName").string())) continue;
               auto [name, id] = mapServerRow(patch.at("tableName").string(), patch.at("id"));
-              Statement existing(db,
-                                 "SELECT value FROM one_zero_base WHERE "
-                                 "table_name=? AND key=?");
+              Statement existing(*statements,
+                                 "SELECT value FROM one_zero_shadow WHERE table_name=?1 AND "
+                                 "key=?2 UNION ALL SELECT value FROM one_zero_view WHERE "
+                                 "table_name=?1 AND key=?2 AND NOT EXISTS (SELECT 1 FROM "
+                                 "one_zero_shadow WHERE table_name=?1 AND key=?2)");
               existing.bind(1, name);
               existing.bind(2, key(name, id));
-              if (!existing.step()) throw std::runtime_error("row patch updates an absent row");
-              Json row = parse(db, existing.text(0));
+              if (!existing.step() || existing.null(0))
+                throw std::runtime_error("row patch updates an absent row");
+              Json row = Json::parse(existing.text(0));
               if (patch.has("merge")) {
                 auto [unused, merge] =
                     mapServerRow(patch.at("tableName").string(), patch.at("merge"));
@@ -843,14 +997,18 @@ struct Client::Impl {
                     ++it;
                 }
               }
-              const std::string rowKey = key(name, row);
-              store("one_zero_base", name, rowKey, row);
+              serverStore(shadowed, name, key(name, row), &row);
             } else
               throw std::runtime_error("unsupported row patch: " + kind);
           }
         }
-        if (response.has("gotQueriesPatch")) {
-          for (const auto& patch : response.at("gotQueriesPatch").items()) {
+        // orez answers gotQueries {version,patch}; other servers send the patch.
+        const Json& gotQueries = response.get("gotQueries");
+        if (!gotQueries.null()) integer(gotQueries.at("version"), "completed query version");
+        const Json& gotPatch =
+            gotQueries.null() ? response.get("gotQueriesPatch") : gotQueries.at("patch");
+        if (!gotPatch.null()) {
+          for (const auto& patch : gotPatch.items()) {
             const std::string kind = patch.at("op").string();
             if (kind == "clear") {
               completed.clear();
@@ -878,14 +1036,25 @@ struct Client::Impl {
         setMeta("completedQueries", nextCompleted);
         Json nextErrors(std::move(errors));
         setMeta("queryErrors", nextErrors);
-        if (changed) {
-          sql(db, "DELETE FROM one_zero_view");
-          sql(db, "INSERT INTO one_zero_view SELECT * FROM one_zero_base");
+        if (changed && shadowed) {
+          // restore the server rows; the caller replays pending writes over them.
+          {
+            Statement restored(*statements, "SELECT DISTINCT table_name FROM one_zero_shadow");
+            while (restored.step()) changedTables.insert(restored.text(0));
+          }
+          sql(*statements,
+              "DELETE FROM one_zero_view WHERE (table_name,key) IN (SELECT table_name,key FROM "
+              "one_zero_shadow)");
+          sql(*statements,
+              "INSERT INTO one_zero_view SELECT table_name,key,value FROM one_zero_shadow WHERE "
+              "value IS NOT NULL");
+          sql(*statements, "DELETE FROM one_zero_shadow");
         }
         setMeta("cookie", cookie);
         setMeta("lastMutationID", static_cast<double>(ack));
         setMeta("needsRebase", false);
         return Json::Object{{"transaction", transaction},
+                            {"lastMutationID", static_cast<double>(ack)},
                             {"pending", changed ? pending() : Json(Json::Array{})},
                             {"changed", changed || nextCompleted != previousCompleted ||
                                             nextErrors != previousErrors}};
@@ -901,16 +1070,17 @@ struct Client::Impl {
         bool recovery = !meta("recoveryRequired").null() ||
                         (request.has("dropPending") && request.at("dropPending").boolean());
         if (recovery) {
-          sql(db, "DELETE FROM one_zero_mutations");
+          sql(*statements, "DELETE FROM one_zero_mutations");
         } else {
-          Statement pending(db, "SELECT 1 FROM one_zero_mutations LIMIT 1");
+          Statement pending(*statements, "SELECT 1 FROM one_zero_mutations LIMIT 1");
           if (pending.step())
             throw std::runtime_error("native Zero cannot delete a store with pending mutations");
         }
-        sql(db, "DELETE FROM one_zero_base");
-        sql(db, "DELETE FROM one_zero_view");
-        sql(db, "DELETE FROM one_zero_meta");
+        sql(*statements, "DELETE FROM one_zero_view");
+        sql(*statements, "DELETE FROM one_zero_shadow");
+        sql(*statements, "DELETE FROM one_zero_meta");
         commit();
+        allTablesChanged = true;
         deleted = true;
         return Json();
       } catch (...) {
@@ -949,6 +1119,23 @@ struct Client::Impl {
       }
     }
     if (op == "query") return query(request.at("ast"), request.get("format"));
+    if (op == "watch") {
+      int64_t id = integer(request.at("id"), "watch id");
+      Watch watch;
+      watch.ast = request.at("ast");
+      watch.format = request.get("format");
+      if (request.has("hash")) watch.hash = request.at("hash").string();
+      watch.request = Json(Json::Object{{"ast", watch.ast}, {"format", watch.format}}).dump();
+      watchedTables(watch.ast, watch.tables, 0);
+      if (!watches.emplace(id, std::move(watch)).second)
+        throw std::runtime_error("watch id is already registered");
+      return publish(&id);
+    }
+    if (op == "unwatch") {
+      watches.erase(integer(request.at("id"), "watch id"));
+      return Json();
+    }
+    if (op == "publish") return publish(nullptr);
     if (op == "state") return state();
     if (op == "pending") return pending();
     if (op == "rollback") {
@@ -958,8 +1145,7 @@ struct Client::Impl {
     if (op == "write") {
       if (transaction.empty())
         throw std::runtime_error("writes require an active native transaction");
-      write("one_zero_view", request.at("kind").string(), request.at("table").string(),
-            request.at("value"));
+      write(request.at("kind").string(), request.at("table").string(), request.at("value"));
       return Json();
     }
     if (op == "commitMutation" || op == "commitPull") {
@@ -978,12 +1164,13 @@ Client::~Client() = default;
 std::string Client::execute(const std::string& request) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (!impl_->db) throw std::runtime_error("native Zero client is closed");
-  return impl_->execute(parse(impl_->db, request)).dump();
+  return impl_->execute(Json::parse(request)).dump();
 }
 void Client::close() {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (!impl_->db) return;
   impl_->rollback();
+  impl_->statements.reset();
   sqlite3* db = impl_->db;
   impl_->db = nullptr;
   int result = sqlite3_close_v2(db);

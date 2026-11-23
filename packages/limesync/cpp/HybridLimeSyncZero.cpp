@@ -57,10 +57,9 @@ std::shared_ptr<Promise<void>> HybridLimeSyncZero::open(const std::string& name,
         "native Zero name must contain 1-128 letters, "
         "digits, hyphens or underscores");
   }
-  std::string rawPath = zeroStorageDirectory() + "/zero-" + name + ".sqlite";
-  std::string canonicalPath = canonicalizePath(rawPath);
-
-  return Promise<void>::async([state = state_, canonicalPath, schemaJson, clientID]() {
+  return Promise<void>::async([state = state_, name, schemaJson, clientID]() {
+    std::string canonicalPath =
+        canonicalizePath(zeroStorageDirectory() + "/zero-" + name + ".sqlite");
     std::lock_guard<std::mutex> guard(state->mutex);
     if (state->client) throw std::runtime_error("native Zero client is already open");
     if (!tryRegisterOpenPath(canonicalPath)) {

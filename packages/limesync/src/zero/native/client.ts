@@ -1,4 +1,3 @@
-import { getRawPullJson } from './orez.js'
 import { NativeSync, type SyncOptions } from './sync.js'
 import { NativeView, queryTTL } from './view.js'
 
@@ -40,16 +39,19 @@ export type NativeZeroOptions<M extends Mutators = Mutators> = {
 }
 
 type Subscription = {
-  query: Query
-  queryRequest: string
+  format?: Format
+  watchRequest: string
   listener: (value: unknown, resultType: QueryResultType, error?: QueryError) => void
-  hash?: string
   onError?: (error: QueryError) => void
-  previousRaw?: string
-  previousResultType?: QueryResultType
-  previousErrorMessage?: string
-  published?: boolean
   active: boolean
+}
+
+// the engine answers only watches whose result, result type or error changed
+type Published = {
+  results: (
+    | { id: number; failure: string }
+    | { id: number; value: JSONValue; resultType: QueryResultType; error?: string }
+  )[]
 }
 
 function assertFinite(value: unknown): void {
@@ -127,7 +129,8 @@ export class NativeZero<M extends Mutators = Mutators> {
   private closing?: Promise<void>
   private deleting?: Promise<void>
   private abort = new AbortController()
-  private subscriptions = new Set<Subscription>()
+  private subscriptions = new Map<number, Subscription>()
+  private nextWatchID = 0
   private mutators = new Map<
     string,
     (tx: Transaction, args: JSONValue | undefined) => unknown
@@ -440,21 +443,22 @@ export class NativeZero<M extends Mutators = Mutators> {
     })
   }
 
-  private async applyPull(response: PullResponse, state: ClientState) {
-    const rawPull = getRawPullJson(response)
+  private async applyPull(response: PullResponse | string, state: ClientState) {
+    // op comes last so keys inside a raw body cannot replace it.
     const pullPayload =
-      rawPull !== undefined
-        ? `{"op":"beginPull","response":${rawPull},"baseCookie":${serialize(state.cookie)},"queryVersion":${state.queryVersion}}`
+      typeof response === 'string'
+        ? `{"response":${response},"baseCookie":${serialize(state.cookie)},"queryVersion":${state.queryVersion},"op":"beginPull"}`
         : serialize({
             op: 'beginPull',
             response,
             baseCookie: state.cookie,
             queryVersion: state.queryVersion,
           })
-    const { transaction, pending, changed } = await this.dispatch<{
+    const { transaction, pending, changed, lastMutationID } = await this.dispatch<{
       transaction: string
       pending: Mutation[]
       changed: boolean
+      lastMutationID: number
     }>(pullPayload)
     try {
       for (const mutation of pending) await this.invoke(mutation, transaction, 'rebase')
@@ -463,13 +467,10 @@ export class NativeZero<M extends Mutators = Mutators> {
       await this.request({ op: 'rollback', transaction })
       throw error
     }
-    const acknowledged = response.lastMutationIDChanges?.[state.clientID]
-    if (acknowledged !== undefined) {
-      for (const [id, settle] of this.serverResults) {
-        if (id <= acknowledged) {
-          settle({ type: 'success' })
-          this.serverResults.delete(id)
-        }
+    for (const [id, settle] of this.serverResults) {
+      if (id <= lastMutationID) {
+        settle({ type: 'success' })
+        this.serverResults.delete(id)
       }
     }
     if (changed) await this.publish()
@@ -541,20 +542,32 @@ export class NativeZero<M extends Mutators = Mutators> {
 
   subscribe(query: Query, listener: (value: unknown) => void): () => void {
     if (this.closed) throw new Error('Native Zero client is closed')
-    const queryRequest = serialize({
-      op: 'query',
-      ast: query.ast,
+    const id = ++this.nextWatchID
+    this.watch(id, {
       format: query.format,
+      watchRequest: serialize({ op: 'watch', id, ast: query.ast, format: query.format }),
+      listener,
+      active: true,
     })
-    const subscription: Subscription = { query, queryRequest, listener, active: true }
-    this.subscriptions.add(subscription)
-    void this.enqueue(() => this.publish([subscription])).catch((error) =>
-      this.report(error)
-    )
-    return () => {
-      subscription.active = false
-      this.subscriptions.delete(subscription)
-    }
+    return () => this.unwatch(id)
+  }
+
+  private watch(id: number, subscription: Subscription) {
+    this.subscriptions.set(id, subscription)
+    void this.enqueue(async () =>
+      this.deliver(await this.dispatch<Published>(subscription.watchRequest))
+    ).catch((error) => this.report(error))
+  }
+
+  private unwatch(id: number) {
+    const subscription = this.subscriptions.get(id)
+    if (!subscription) return
+    subscription.active = false
+    this.subscriptions.delete(id)
+    if (!this.closed)
+      void this.enqueue(() => this.request({ op: 'unwatch', id })).catch((error) =>
+        this.report(error)
+      )
   }
 
   materialize<T = unknown>(
@@ -584,15 +597,16 @@ export class NativeZero<M extends Mutators = Mutators> {
       count: (existing?.count ?? 0) + 1,
       ttl: existing && existing.count > 0 ? existing.ttl : 0,
     })
-    const queryRequest = serialize({
-      op: 'query',
-      ast: captured.ast,
-      format: captured.format,
-    })
+    const id = ++this.nextWatchID
     const subscription: Subscription = {
-      query: captured,
-      queryRequest,
-      hash,
+      format: captured.format,
+      watchRequest: serialize({
+        op: 'watch',
+        id,
+        ast: captured.ast,
+        format: captured.format,
+        hash,
+      }),
       active: true,
       listener: (data, resultType, error) => view.update(data, resultType, error),
       onError: (error) => view.update(view.data, 'error', error),
@@ -600,8 +614,7 @@ export class NativeZero<M extends Mutators = Mutators> {
     const view = new NativeView<unknown>(
       captured.format?.singular ? undefined : [],
       () => {
-        subscription.active = false
-        this.subscriptions.delete(subscription)
+        this.unwatch(id)
         this.views.delete(view)
         const registered = this.desiredViews.get(hash)!
         registered.ttl = Math.max(registered.ttl, ttl)
@@ -623,10 +636,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       }
     )
     this.views.add(view)
-    this.subscriptions.add(subscription)
-    void this.enqueue(() => this.publish([subscription])).catch((error) =>
-      this.report(error)
-    )
+    this.watch(id, subscription)
     if (!existing) this.refreshQueries()
     return view
   }
@@ -651,40 +661,24 @@ export class NativeZero<M extends Mutators = Mutators> {
     })
   }
 
-  private async publish(subscriptions: Iterable<Subscription> = this.subscriptions) {
-    const entries = [...subscriptions]
-    const state = entries.some((subscription) => subscription.hash)
-      ? await this.request<ClientState>({ op: 'state' })
-      : undefined
-    const complete = new Set(state?.completedQueries)
-    const errors = new Map(Object.entries(state?.queryErrors ?? {}))
-    for (const subscription of entries) {
-      if (!subscription.active || this.closed) continue
+  private async publish() {
+    if (this.subscriptions.size)
+      this.deliver(await this.dispatch<Published>('{"op":"publish"}'))
+  }
+
+  private deliver({ results }: Published) {
+    for (const result of results) {
+      const subscription = this.subscriptions.get(result.id)
+      if (!subscription?.active || this.closed) continue
       try {
-        const raw = await this.options.engine.execute(subscription.queryRequest)
-        if (!subscription.active || this.closed) continue
-        const message = subscription.hash ? errors.get(subscription.hash) : undefined
+        if ('failure' in result) throw new Error(result.failure)
         const error: QueryError | undefined =
-          message === undefined ? undefined : { error: 'app', message }
-        const resultType: QueryResultType = error
-          ? 'error'
-          : subscription.hash && complete.has(subscription.hash)
-            ? 'complete'
-            : 'unknown'
-        // compare raw engine JSON before parsing/transforming so unchanged subscriptions skip JSON.parse & JSON.stringify
-        if (
-          subscription.published &&
-          raw === subscription.previousRaw &&
-          resultType === subscription.previousResultType &&
-          message === subscription.previousErrorMessage
+          result.error === undefined ? undefined : { error: 'app', message: result.error }
+        subscription.listener(
+          queryResult(result.value, subscription.format),
+          result.resultType,
+          error
         )
-          continue
-        const value = queryResult(JSON.parse(raw), subscription.query.format)
-        subscription.previousRaw = raw
-        subscription.previousResultType = resultType
-        subscription.previousErrorMessage = message
-        subscription.published = true
-        subscription.listener(value, resultType, error)
       } catch (error) {
         if (subscription.onError)
           subscription.onError({

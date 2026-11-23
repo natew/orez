@@ -126,11 +126,12 @@ export type DesiredQuery =
   | { hash: string; ast: unknown }
   | { hash: string; name: string; args: readonly JSONValue[] }
 export interface Transport {
+  // a string is the raw JSON response body, parsed and validated by the engine
   pull(
     state: ClientState,
     queries: readonly DesiredQuery[],
     signal: AbortSignal
-  ): Promise<PullResponse>
+  ): Promise<PullResponse | string>
   push(
     state: ClientState,
     mutations: readonly Mutation[],

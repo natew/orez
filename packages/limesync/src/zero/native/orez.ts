@@ -10,13 +10,6 @@ import type {
   Transport,
 } from './types.js'
 
-export const RAW_PULL_JSON = Symbol('one.nativeZero.rawPullJson')
-
-export function getRawPullJson(response: PullResponse): string | undefined {
-  const value: unknown = Reflect.get(response, RAW_PULL_JSON)
-  return typeof value === 'string' ? value : undefined
-}
-
 export type OrezTransportOptions = {
   server: string
   appID: string
@@ -48,12 +41,12 @@ function jsonValue(value: unknown): value is JSONValue {
   )
 }
 
-function pullResponse(value: unknown, fromParsedJson: boolean): value is PullResponse {
+function pullResponse(value: unknown): value is PullResponse {
   if (
     !value ||
     typeof value !== 'object' ||
     !('cookie' in value) ||
-    (!fromParsedJson && !jsonValue(value.cookie))
+    !jsonValue(value.cookie)
   )
     return false
   if (!('lastMutationIDChanges' in value) || value.lastMutationIDChanges === undefined)
@@ -71,12 +64,7 @@ export function createOrezTransport(options: OrezTransportOptions): OrezTranspor
   const server = options.server.replace(/\/$/, '')
   const request = options.fetch ?? globalThis.fetch.bind(globalThis)
 
-  const post = async (
-    path: 'pull' | 'push',
-    body: unknown,
-    signal: AbortSignal,
-    retainRawText = false
-  ): Promise<{ value: unknown; rawText?: string }> => {
+  const send = async (path: 'pull' | 'push', body: unknown, signal: AbortSignal) => {
     const url = new URL(`${server}/${path}`)
     if (path === 'push') {
       url.searchParams.set('appID', options.appID)
@@ -90,18 +78,14 @@ export function createOrezTransport(options: OrezTransportOptions): OrezTranspor
       signal,
     })
     if (!response.ok) throw new Error(`Orez ${path} failed: ${response.status}`)
-    let rawText: string | undefined
-    let result: unknown
-    if (retainRawText) {
-      rawText = await response.text()
-      result = JSON.parse(rawText)
-    } else {
-      result = await response.json()
-    }
+    return response
+  }
+  const post = async (path: 'pull' | 'push', body: unknown, signal: AbortSignal) => {
+    const result: unknown = await (await send(path, body, signal)).json()
     if (result && typeof result === 'object' && 'error' in result) {
-      throw new Error(`Orez ${path} failed: ${rawText ?? JSON.stringify(result)}`)
+      throw new Error(`Orez ${path} failed: ${JSON.stringify(result)}`)
     }
-    return { value: result, rawText }
+    return result
   }
 
   return {
@@ -115,60 +99,24 @@ export function createOrezTransport(options: OrezTransportOptions): OrezTranspor
       queries: readonly DesiredQuery[],
       signal: AbortSignal
     ) {
-      const hasCodec = Boolean(options.payloadCodec)
-      const { value: received, rawText } = await post(
-        'pull',
-        {
-          clientID: state.clientID,
-          clientGroupID: state.clientGroupID,
-          cookie: state.cookie,
-          queries: {
-            version: state.queryVersion,
-            patch: [
-              { op: 'clear' },
-              ...queries.map((query) => ({ op: 'put', ...query })),
-            ],
-          },
+      const body = {
+        clientID: state.clientID,
+        clientGroupID: state.clientGroupID,
+        cookie: state.cookie,
+        queries: {
+          version: state.queryVersion,
+          patch: [{ op: 'clear' }, ...queries.map((query) => ({ op: 'put', ...query }))],
         },
-        signal,
-        !hasCodec
+      }
+      // the engine parses and validates the raw body off the JavaScript thread;
+      // only a payload codec needs the body as values here.
+      if (!options.payloadCodec) return (await send('pull', body, signal)).text()
+      const response = await options.payloadCodec.decodePull(
+        await post('pull', body, signal)
       )
-      const response = options.payloadCodec
-        ? await options.payloadCodec.decodePull(received)
-        : received
-      const fromParsedJson = !hasCodec
-      if (!pullResponse(response, fromParsedJson)) {
+      if (!pullResponse(response))
         throw new Error('Orez pull returned an invalid response')
-      }
-      let normalized = response
-      let engineJSON = rawText
-      if ('gotQueries' in response && response.gotQueries !== undefined) {
-        const got = response.gotQueries
-        if (
-          !got ||
-          typeof got !== 'object' ||
-          !('version' in got) ||
-          !Number.isSafeInteger(got.version) ||
-          !('patch' in got) ||
-          !Array.isArray(got.patch) ||
-          (!fromParsedJson && !got.patch.every(jsonValue))
-        )
-          throw new Error('Orez pull returned invalid gotQueries')
-        normalized = { ...response, gotQueriesPatch: got.patch }
-        // the body is already parsed as an object. append only the small ack
-        // patch so passing it to the engine never re-encodes the row patch.
-        engineJSON =
-          rawText !== undefined && !('gotQueriesPatch' in response)
-            ? `${rawText.trimEnd().slice(0, -1)},"gotQueriesPatch":${JSON.stringify(got.patch)}}`
-            : undefined
-      }
-      if (engineJSON !== undefined) {
-        Object.defineProperty(normalized, RAW_PULL_JSON, {
-          value: engineJSON,
-          enumerable: false,
-        })
-      }
-      return normalized
+      return response
     },
     async push(state: ClientState, mutations: readonly Mutation[], signal: AbortSignal) {
       const body = {
@@ -183,7 +131,7 @@ export function createOrezTransport(options: OrezTransportOptions): OrezTranspor
           args: mutation.args === undefined ? [] : [mutation.args],
         })),
       }
-      const { value: received } = await post(
+      const received = await post(
         'push',
         options.payloadCodec ? await options.payloadCodec.encodePush(body) : body,
         signal
