@@ -66,9 +66,9 @@ addToLibrary({
     var path = UTF8ToString(filePath)
     var exclusive = flags & SQLITE_OPEN_EXCLUSIVE
 
-    if (exclusive && _memfs.files[path]) return -1
+    var exists = !!_memfs.files[path]
+    if (exists ? exclusive : !(flags & SQLITE_OPEN_CREATE)) return -1
 
-    // always create in memfs — no persistent storage to check
     _memfsGetOrCreate(path)
     var fd = _memfs.nextFd++
     _memfs.fds[fd] = { path: path, pos: 0 }
