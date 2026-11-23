@@ -215,8 +215,20 @@ struct Watch {
   bool published = false;
   size_t digest = 0;
   size_t size = 0;
+  // the serialized rows of the last published list result, which a patch indexes
+  std::vector<std::string> rows;
+  bool list = false;
   std::string resultType;
   std::string error;
+};
+
+// one query's answer: a list result keeps each serialized row so a watch can
+// publish only the rows that changed since its last answer
+struct Answer {
+  bool succeeded = true;
+  bool list = false;
+  std::vector<std::string> rows;
+  std::string text;
 };
 
 }  // namespace
@@ -821,7 +833,10 @@ struct Client::Impl {
       watchedTables(condition.at("related").at("subquery"), out, depth + 1);
   }
   // answers the watches whose result, result type or error changed. one watch
-  // when only is set: its first answer.
+  // when only is set: its first answer. a list result already published answers
+  // with a patch: each row is the index of an identical row in the previous
+  // answer or the new row itself, so the client parses and rebuilds only rows
+  // that changed.
   Json publish(const int64_t* only) {
     bool hashed = false;
     for (const auto& [id, watch] : watches)
@@ -833,7 +848,7 @@ struct Client::Impl {
       for (const Json& hash : completedQueries.items()) completed.insert(hash.string());
       errors = meta("queryErrors");
     }
-    std::unordered_map<std::string_view, std::pair<bool, std::string>> results;
+    std::unordered_map<std::string_view, Answer> results;
     Json::Array changed;
     for (auto& [id, watch] : watches) {
       if (only && id != *only) continue;
@@ -850,32 +865,70 @@ struct Client::Impl {
         continue;
       auto found = results.find(watch.request);
       if (found == results.end()) {
-        std::pair<bool, std::string> result;
+        Answer answer;
         try {
-          result = {true, query(watch.ast, watch.format).dump()};
+          Json value = query(watch.ast, watch.format);
+          if (value.array()) {
+            answer.list = true;
+            answer.rows.reserve(value.items().size());
+            for (const Json& row : value.items()) answer.rows.push_back(row.dump());
+          } else {
+            answer.text = value.dump();
+          }
         } catch (const std::exception& failure) {
-          result = {false, failure.what()};
+          answer = {false, false, {}, failure.what()};
         }
-        found = results.emplace(watch.request, std::move(result)).first;
+        found = results.emplace(watch.request, std::move(answer)).first;
       }
-      const auto& [succeeded, text] = found->second;
-      if (!succeeded) {
+      const Answer& answer = found->second;
+      if (!answer.succeeded) {
         watch.published = false;
-        changed.emplace_back(Json::Object{{"id", static_cast<double>(id)}, {"failure", text}});
+        changed.emplace_back(Json::Object{{"id", static_cast<double>(id)}, {"failure", answer.text}});
         continue;
       }
-      size_t digest = std::hash<std::string_view>{}(text);
-      if (watch.published && digest == watch.digest && text.size() == watch.size &&
-          resultType == watch.resultType && error == watch.error)
-        continue;
+      const bool sameState = resultType == watch.resultType && error == watch.error;
+      Json::Object entry{{"id", static_cast<double>(id)}, {"resultType", resultType}};
+      if (answer.list) {
+        if (watch.published && watch.list && sameState && answer.rows == watch.rows) continue;
+        if (watch.published && watch.list) {
+          std::unordered_map<std::string_view, size_t> previous;
+          previous.reserve(watch.rows.size());
+          for (size_t i = 0; i < watch.rows.size(); ++i) previous.emplace(watch.rows[i], i);
+          Json::Array patch;
+          patch.reserve(answer.rows.size());
+          for (const std::string& row : answer.rows) {
+            auto same = previous.find(row);
+            if (same != previous.end())
+              patch.emplace_back(static_cast<double>(same->second));
+            else
+              patch.emplace_back(Json::Serialized{row});
+          }
+          entry.emplace("patch", std::move(patch));
+        } else {
+          std::string text = "[";
+          for (size_t i = 0; i < answer.rows.size(); ++i) {
+            if (i) text += ',';
+            text += answer.rows[i];
+          }
+          text += ']';
+          entry.emplace("value", Json::Serialized{std::move(text)});
+        }
+        watch.rows = answer.rows;
+        watch.list = true;
+      } else {
+        size_t digest = std::hash<std::string_view>{}(answer.text);
+        if (watch.published && !watch.list && digest == watch.digest &&
+            answer.text.size() == watch.size && sameState)
+          continue;
+        watch.digest = digest;
+        watch.size = answer.text.size();
+        watch.rows.clear();
+        watch.list = false;
+        entry.emplace("value", Json::Serialized{answer.text});
+      }
       watch.published = true;
-      watch.digest = digest;
-      watch.size = text.size();
       watch.resultType = resultType;
       watch.error = error;
-      Json::Object entry{{"id", static_cast<double>(id)},
-                         {"value", Json::Serialized{text}},
-                         {"resultType", resultType}};
       if (resultType == "error") entry.emplace("error", error);
       changed.emplace_back(std::move(entry));
     }

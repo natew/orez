@@ -44,13 +44,18 @@ type Subscription = {
   listener: (value: unknown, resultType: QueryResultType, error?: QueryError) => void
   onError?: (error: QueryError) => void
   active: boolean
+  // the rows of the last list result delivered, which the next patch indexes
+  rows?: unknown[]
 }
 
-// the engine answers only watches whose result, result type or error changed
+// the engine answers only watches whose result, result type or error changed. a
+// list result already delivered comes as a patch: each entry is the index of an
+// unchanged row in the previous result or the new row itself.
 type Published = {
   results: (
     | { id: number; failure: string }
     | { id: number; value: JSONValue; resultType: QueryResultType; error?: string }
+    | { id: number; patch: (number | JSONValue)[]; resultType: QueryResultType; error?: string }
   )[]
 }
 
@@ -120,6 +125,26 @@ function queryResult(value: JSONValue, format?: Format): unknown {
     return result
   }
   return value
+}
+
+// keeps each unchanged row object, so consumers can skip unchanged rows by identity
+function patchResult(
+  patch: (number | JSONValue)[],
+  previous: unknown[] | undefined,
+  format?: Format
+): unknown[] {
+  if (!previous) throw new Error('Native Zero patch arrived before its first result')
+  const rowFormat: Format | undefined = format?.relationships && hasRelationships(format)
+    ? { relationships: format.relationships }
+    : undefined
+  const out = new Array<unknown>(patch.length)
+  for (let i = 0; i < patch.length; i++) {
+    const entry = patch[i]!
+    if (typeof entry !== 'number') out[i] = queryResult(entry, rowFormat)
+    else if (entry < previous.length) out[i] = previous[entry]
+    else throw new Error('Native Zero patch references a missing row')
+  }
+  return out
 }
 
 export class NativeZero<M extends Mutators = Mutators> {
@@ -696,11 +721,12 @@ export class NativeZero<M extends Mutators = Mutators> {
         if ('failure' in result) throw new Error(result.failure)
         const error: QueryError | undefined =
           result.error === undefined ? undefined : { error: 'app', message: result.error }
-        subscription.listener(
-          queryResult(result.value, subscription.format),
-          result.resultType,
-          error
-        )
+        const value =
+          'patch' in result
+            ? patchResult(result.patch, subscription.rows, subscription.format)
+            : queryResult(result.value, subscription.format)
+        subscription.rows = Array.isArray(value) ? value : undefined
+        subscription.listener(value, result.resultType, error)
       } catch (error) {
         if (subscription.onError)
           subscription.onError({
