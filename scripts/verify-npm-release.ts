@@ -72,7 +72,15 @@ export async function verifyNpmRelease(
           pending.delete(pkg)
           console.info(`Verified ${id}`)
         } catch (error) {
-          pending.set(pkg, error instanceof Error ? error.message : String(error))
+          // a request the release deadline cut off says nothing new, so the
+          // registry's last real answer stays the reported reason.
+          const cutOff =
+            error instanceof Error &&
+            error.name === 'TimeoutError' &&
+            Date.now() >= deadline
+          if (!cutOff || pending.get(pkg) === 'not checked') {
+            pending.set(pkg, error instanceof Error ? error.message : String(error))
+          }
         }
       })
     )
