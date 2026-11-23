@@ -1,3 +1,5 @@
+import { dequal } from 'dequal'
+
 import type { ClientState, DesiredQuery } from './types.js'
 
 export const pullQueryPatch = Symbol('native Zero desired query patch')
@@ -24,8 +26,7 @@ export function diffPullQueries(
   for (const query of state.queries) {
     const old = retained.get(query.hash)
     retained.delete(query.hash)
-    if (!old || JSON.stringify(old) !== JSON.stringify(query))
-      patch.push({ op: 'put', ...query })
+    if (!old || !dequal(old, query)) patch.push({ op: 'put', ...query })
   }
   for (const hash of retained.keys()) patch.push({ op: 'del', hash })
   return patch.length

@@ -8,6 +8,7 @@
 #include <functional>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <set>
 #include <string_view>
 #include <unordered_map>
@@ -233,12 +234,32 @@ struct Watch {
   std::string error;
 };
 
+void materializeStoredValues(Json& value) {
+  if (const auto* stored = std::get_if<Json::Serialized>(&value.value)) {
+    value = Json::parse(stored->text);
+  } else if (auto* array = std::get_if<Json::Array>(&value.value)) {
+    for (auto& item : *array) materializeStoredValues(item);
+  } else if (auto* object = std::get_if<Json::Object>(&value.value)) {
+    for (auto& [key, item] : *object) materializeStoredValues(item);
+  }
+}
+
 // one query's answer: a list result keeps each serialized row so a watch can
 // publish only the rows that changed since its last answer
 struct Answer {
   bool succeeded = true;
   std::shared_ptr<const std::vector<std::string>> rows;
   std::string text;
+  Json value;
+
+  Json row(size_t index) const {
+    const auto& item = value.items()[index];
+    if (std::holds_alternative<Json::Serialized>(item.value))
+      return Json::parse((*rows)[index]);
+    Json result = item;
+    materializeStoredValues(result);
+    return result;
+  }
 };
 
 }  // namespace
@@ -260,7 +281,7 @@ struct Client::Impl {
   std::string transactionKind;
   bool deleted = false;
 
-  Impl(const std::string& path, const std::string& schemaText, const std::string& identity)
+  Impl(const std::string& path, const Json& schema, const std::string& identity)
       : clientID(identity) {
     if (path.empty() || path.find('\0') != std::string::npos)
       throw std::runtime_error("database path is required");
@@ -277,7 +298,6 @@ struct Client::Impl {
       sqlite3_busy_timeout(db, 5000);
       sqlite3_create_function_v2(db, "one_zero_like", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                  nullptr, like, nullptr, nullptr, nullptr);
-      Json schema = Json::parse(schemaText);
       for (const auto& [name, description] : schema.at("tables").fields()) {
         if (name.empty() || name.find('\0') != std::string::npos)
           throw std::runtime_error("invalid table name");
@@ -847,7 +867,7 @@ struct Client::Impl {
   // with a patch: each row is the index of an identical row in the previous
   // answer or the new row itself, so the client parses and rebuilds only rows
   // that changed.
-  std::string publish(const int64_t* only) {
+  Json publish(const int64_t* only) {
     bool hashed = false;
     for (const auto& [id, watch] : watches)
       if (!watch.hash.empty() && (!only || id == *only)) hashed = true;
@@ -868,7 +888,6 @@ struct Client::Impl {
       size_t digest;
     };
     std::vector<Publication> changed;
-    size_t fullBytes = 0;
     for (auto& [id, watch] : watches) {
       if (only && id != *only) continue;
       const bool failed = !watch.hash.empty() && errors.has(watch.hash);
@@ -898,10 +917,11 @@ struct Client::Impl {
           } else {
             answer.text = value.dump();
           }
+          answer.value = std::move(value);
         } catch (const std::bad_alloc&) {
           throw;
         } catch (const std::exception& failure) {
-          answer = {false, {}, failure.what()};
+          answer = {false, {}, failure.what(), {}};
         }
         found = results.emplace(watch.request, std::move(answer)).first;
       }
@@ -911,77 +931,55 @@ struct Client::Impl {
       if (answer.rows) {
         if (watch.published && watch.rows) {
           if (sameState && *answer.rows == *watch.rows) continue;
-        } else {
-          for (const auto& row : *answer.rows) fullBytes += row.size() + 1;
         }
       } else if (answer.succeeded) {
         digest = std::hash<std::string_view>{}(answer.text);
         if (watch.published && !watch.rows && digest == watch.digest &&
             answer.text.size() == watch.size && sameState)
           continue;
-        fullBytes += answer.text.size();
       }
       changed.push_back({watch, answer, id, std::move(resultType), std::move(error), digest});
     }
 
-    std::string out;
-    out.reserve(fullBytes + changed.size() * 64 + 14);
-    out += "{\"results\":[";
-    bool firstResult = true;
+    Json::Array output;
+    output.reserve(changed.size());
     for (const auto& [watch, answer, id, resultType, error, digest] : changed) {
-      if (!firstResult) out += ',';
-      firstResult = false;
-      out += '{';
+      Json::Object entry{{"id", static_cast<double>(id)}};
       if (!answer.succeeded) {
-        out += "\"failure\":";
-        Json::quote(out, answer.text);
-        out += ',';
-      } else if (resultType == "error") {
-        out += "\"error\":";
-        Json::quote(out, error);
-        out += ',';
-      }
-      out += "\"id\":";
-      Json(static_cast<double>(id)).append(out);
-      if (answer.succeeded) {
-        const bool patch = answer.rows && watch.published && watch.rows;
-        if (patch) {
+        entry.emplace("failure", answer.text);
+      } else {
+        entry.emplace("resultType", resultType);
+        if (resultType == "error") entry.emplace("error", error);
+        if (!answer.rows) {
+          Json value = answer.value;
+          materializeStoredValues(value);
+          entry.emplace("value", std::move(value));
+        } else if (watch.published && watch.rows) {
           std::unordered_map<std::string_view, size_t> previous;
           previous.reserve(watch.rows->size());
           for (size_t i = 0; i < watch.rows->size(); ++i) previous.emplace((*watch.rows)[i], i);
-          out += ",\"patch\":[";
-          bool first = true;
-          for (const auto& row : *answer.rows) {
-            if (!first) out += ',';
-            first = false;
-            auto same = previous.find(row);
+          Json::Array patch;
+          patch.reserve(answer.rows->size());
+          for (size_t i = 0; i < answer.rows->size(); ++i) {
+            auto same = previous.find((*answer.rows)[i]);
             if (same != previous.end())
-              Json(static_cast<double>(same->second)).append(out);
+              patch.emplace_back(static_cast<double>(same->second));
             else
-              out += row;
+              patch.push_back(answer.row(i));
           }
-          out += ']';
-        }
-        out += ",\"resultType\":";
-        Json::quote(out, resultType);
-        if (!patch) {
-          out += ",\"value\":";
-          if (answer.rows) {
-            out += '[';
-            for (size_t i = 0; i < answer.rows->size(); ++i) {
-              if (i) out += ',';
-              out += (*answer.rows)[i];
-            }
-            out += ']';
-          } else {
-            out += answer.text;
-          }
+          entry.emplace("patch", std::move(patch));
+        } else {
+          Json::Array rows;
+          rows.reserve(answer.rows->size());
+          for (size_t i = 0; i < answer.rows->size(); ++i) rows.push_back(answer.row(i));
+          entry.emplace("value", std::move(rows));
         }
       }
-      out += '}';
+      output.emplace_back(std::move(entry));
     }
-    out += "]}";
 
+    Json::Object result;
+    result.emplace("results", std::move(output));
     for (auto& [watch, answer, id, resultType, error, digest] : changed) {
       watch.published = answer.succeeded;
       watch.rows = answer.rows;
@@ -995,7 +993,7 @@ struct Client::Impl {
       allTablesChanged = false;
       publishedInTransaction = !transaction.empty();
     }
-    return out;
+    return result;
   }
   Json pending() {
     Statement statement(*statements, "SELECT id,name,args,timestamp FROM one_zero_mutations ORDER BY id");
@@ -1007,7 +1005,7 @@ struct Client::Impl {
                             {"clientID", clientID}};
       // the journal stores args as dumped JSON; empty text means omitted args.
       auto args = statement.text(2);
-      if (!args.empty()) mutation.emplace("args", Json::Serialized{std::move(args)});
+      if (!args.empty()) mutation.emplace("args", Json::parse(args));
       result.emplace_back(std::move(mutation));
     }
     return result;
@@ -1081,7 +1079,11 @@ struct Client::Impl {
       }
     }
     if (op == "beginPull") {
-      Json& response = request.at("response");
+      const auto& input = request.at("response");
+      std::optional<Json> parsed;
+      if (const auto* body = std::get_if<std::string>(&input.value))
+        parsed.emplace(Json::parsePullResponse(*body));
+      Json& response = parsed ? *parsed : request.at("response");
       if (response.has("error"))
         throw std::runtime_error("server rejected pull: " + response.at("error").dump());
       const Json& cookie = response.at("cookie");
@@ -1303,7 +1305,11 @@ struct Client::Impl {
         throw;
       }
     }
-    if (op == "query") return query(request.at("ast"), request.get("format"));
+    if (op == "query") {
+      Json response = query(request.at("ast"), request.get("format"));
+      materializeStoredValues(response);
+      return response;
+    }
     if (op == "watch") {
       int64_t id = integer(request.at("id"), "watch id");
       Watch watch;
@@ -1314,13 +1320,13 @@ struct Client::Impl {
       watchedTables(watch.ast, watch.tables, 0);
       if (!watches.emplace(id, std::move(watch)).second)
         throw std::runtime_error("watch id is already registered");
-      return Json::Serialized{publish(&id)};
+      return publish(&id);
     }
     if (op == "unwatch") {
       watches.erase(integer(request.at("id"), "watch id"));
       return Json();
     }
-    if (op == "publish") return Json::Serialized{publish(nullptr)};
+    if (op == "publish") return publish(nullptr);
     if (op == "state") return state();
     if (op == "pending") return pending();
     if (op == "rollback") {
@@ -1343,17 +1349,14 @@ struct Client::Impl {
   }
 };
 
-Client::Client(const std::string& path, const std::string& schema, const std::string& clientID)
+Client::Client(const std::string& path, const Json& schema,
+               const std::string& clientID)
     : impl_(std::make_unique<Impl>(path, schema, clientID)) {}
 Client::~Client() = default;
-std::string Client::execute(const std::string& request) {
+Json Client::executeValue(Json& request) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (!impl_->db) throw std::runtime_error("native Zero client is closed");
-  Json parsed = Json::parseRequest(request);
-  Json response = impl_->execute(parsed);
-  if (auto* serialized = std::get_if<Json::Serialized>(&response.value))
-    return std::move(serialized->text);
-  return response.dump();
+  return impl_->execute(request);
 }
 void Client::close() {
   std::lock_guard<std::mutex> lock(impl_->mutex);

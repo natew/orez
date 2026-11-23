@@ -15,6 +15,7 @@ namespace margelo::nitro::limesync {
     // load custom methods/properties
     registerHybrids(this, [](Prototype& prototype) {
       prototype.registerHybridMethod("open", &HybridOneZeroSpec::open);
+      prototype.registerHybridMethod("execute", &HybridOneZeroSpec::execute);
       prototype.registerHybridMethod("close", &HybridOneZeroSpec::close);
     });
   }

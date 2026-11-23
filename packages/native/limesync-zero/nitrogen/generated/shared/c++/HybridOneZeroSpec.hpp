@@ -17,6 +17,9 @@
 
 #include <NitroModules/Promise.hpp>
 #include <string>
+#include "ZeroValue.hpp"
+#include <NitroModules/Null.hpp>
+#include <variant>
 
 namespace margelo::nitro::limesync {
 
@@ -45,11 +48,12 @@ namespace margelo::nitro::limesync {
 
     public:
       // Properties
-      
+
 
     public:
       // Methods
-      virtual std::shared_ptr<Promise<void>> open(const std::string& name, const std::string& schemaJson, const std::string& clientID) = 0;
+      virtual std::shared_ptr<Promise<void>> open(const std::string& name, ZeroValue schema, const std::string& clientID) = 0;
+      virtual std::shared_ptr<Promise<std::variant<nitro::NullType, bool, std::string, double, ZeroValue>>> execute(ZeroValue request) = 0;
       virtual std::shared_ptr<Promise<void>> close() = 0;
 
     protected:

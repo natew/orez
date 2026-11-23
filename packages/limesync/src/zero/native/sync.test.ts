@@ -35,22 +35,22 @@ test('native pulls send only query changes after the replica commits them', asyn
     schema: { tables: {} },
     mutators: {},
     engine: {
-      async execute(request) {
-        const input = JSON.parse(request)
+      async execute(input) {
         switch (input.op) {
           case 'setQueries':
-            state.queries = input.queries
+            state.queries = Array.isArray(input.queries) ? input.queries : state.queries
             state.queryVersion++
-            return JSON.stringify(state)
+            return state
           case 'beginPull':
-            return JSON.stringify({
+            expect(input.response).toBe(JSON.stringify({ cookie: state.cookie }))
+            return {
               transaction: 'pull',
               pending: [],
               changed: false,
               lastMutationID: 0,
-            })
+            }
           case 'commitPull':
-            return JSON.stringify(state)
+            return state
           default:
             throw new Error('unexpected engine operation ' + input.op)
         }
@@ -89,7 +89,7 @@ test('native pulls send only query changes after the replica commits them', asyn
 
 test('native allocation failures back off across wakes and reconnects', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
-  const allocationError = new Error('std::bad_alloc (op=beginPull, requestBytes=1024)')
+  const allocationError = new Error('std::bad_alloc (op=beginPull)')
   const push = vi
     .fn()
     .mockResolvedValue(undefined)

@@ -1,3 +1,5 @@
+import { dequal } from 'dequal'
+
 import { diffPullQueries, pullQueryPatch, type PullState } from './pullQueries.js'
 import { EMPTY_ROWS, RowTable, type Held } from './rows.js'
 import { NativeSync, type SyncOptions } from './sync.js'
@@ -7,6 +9,7 @@ import type {
   ClientState,
   DesiredQuery,
   Engine,
+  EngineRequest,
   Format,
   JSONValue,
   MaterializedView,
@@ -42,7 +45,6 @@ export type NativeZeroOptions<M extends Mutators = Mutators> = {
 
 type Subscription = {
   format?: Format
-  watchRequest: string
   listener: (value: unknown, resultType: QueryResultType, error?: QueryError) => void
   onError?: (error: QueryError) => void
   active: boolean
@@ -67,44 +69,23 @@ type Published = {
   )[]
 }
 
-function assertFinite(value: unknown): void {
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value))
-      throw new TypeError('Native Zero values must contain finite numbers')
-    return
+// capture inputs before a queued operation can observe a caller's edits.
+function snapshot<T>(value: T): T
+function snapshot(value: unknown, depth?: number): unknown
+function snapshot(value: unknown, depth = 0): unknown {
+  if (depth > 128) throw new TypeError('JSON nesting exceeds 128 levels')
+  if (typeof value === 'number' && !Number.isFinite(value))
+    throw new TypeError('Native Zero values must contain finite numbers')
+  if (Array.isArray(value))
+    return Array.from(value, (item) => snapshot(item ?? null, depth + 1))
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .map(([key, item]) => [key, snapshot(item, depth + 1)])
+    )
   }
-  if (!value || typeof value !== 'object') return
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) assertFinite(value[i])
-    return
-  }
-  for (const key in value) {
-    if (Object.hasOwn(value, key)) assertFinite(Reflect.get(value, key))
-  }
-}
-
-// validate finite numbers then call native JSON.stringify without a replacer so JSC stays on its C++ fast path
-function serialize(request: unknown): string {
-  assertFinite(request)
-  return JSON.stringify(request)
-}
-
-function utf8ByteLength(value: string): number {
-  let bytes = value.length
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i)
-    if (code <= 0x7f) continue
-    if (code <= 0x7ff) {
-      bytes++
-      continue
-    }
-    bytes += 2
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(i + 1)
-      if (next >= 0xdc00 && next <= 0xdfff) i++
-    }
-  }
-  return bytes
+  return value
 }
 
 type RegisteredCreator = MutatorRequestCreator & {
@@ -181,7 +162,6 @@ export class NativeZero<M extends Mutators = Mutators> {
     string,
     {
       desired: DesiredQuery
-      desiredJson: string
       count: number
       ttl: number
       timer?: ReturnType<typeof setTimeout>
@@ -258,14 +238,9 @@ export class NativeZero<M extends Mutators = Mutators> {
     return result
   }
 
-  private async request<T>(request: { op: string; [key: string]: unknown }): Promise<T> {
-    return this.dispatch(request.op, serialize(request))
-  }
-
-  private async dispatch<T>(op: string, requestJson: string): Promise<T> {
-    let response: string
+  private async request<T>(request: EngineRequest): Promise<T> {
     try {
-      response = await this.options.engine.execute(requestJson)
+      return (await this.options.engine.execute(request)) as T
     } catch (error) {
       let activeQueries = this.desiredViews.size
       for (const query of this.manualQueries ?? []) {
@@ -273,11 +248,10 @@ export class NativeZero<M extends Mutators = Mutators> {
       }
       const message = error instanceof Error ? error.message : String(error)
       throw new Error(
-        `${message} (op=${op}, requestBytes=${utf8ByteLength(requestJson)}, activeWatches=${this.subscriptions.size}, activeQueries=${activeQueries})`,
+        `${message} (op=${request.op}, activeWatches=${this.subscriptions.size}, activeQueries=${activeQueries})`,
         { cause: error }
       )
     }
-    return JSON.parse(response)
   }
 
   private query<T>(query: Query, transaction?: string): Promise<T>
@@ -474,14 +448,19 @@ export class NativeZero<M extends Mutators = Mutators> {
     args: JSONValue | undefined,
     committed: (mutation: Mutation) => void
   ): Promise<unknown> {
-    const request = serialize({ op: 'beginMutation', name, args, timestamp: Date.now() })
+    const request = {
+      op: 'beginMutation',
+      name,
+      args: snapshot(args),
+      timestamp: Date.now(),
+    }
     return this.enqueue(async () => {
       if (!this.mutators.has(name))
         throw new Error(`Unknown native Zero mutator: ${name}`)
-      const { transaction, mutation } = await this.dispatch<{
+      const { transaction, mutation } = await this.request<{
         transaction: string
         mutation: Mutation
-      }>('beginMutation', request)
+      }>(request)
       let result: unknown
       await this.publishThenCommit(
         transaction,
@@ -497,22 +476,17 @@ export class NativeZero<M extends Mutators = Mutators> {
   }
 
   private async applyPull(response: PullResponse | string, state: ClientState) {
-    // op comes last so keys inside a raw body cannot replace it.
-    const pullPayload =
-      typeof response === 'string'
-        ? `{"response":${response},"baseCookie":${serialize(state.cookie)},"queryVersion":${state.queryVersion},"op":"beginPull"}`
-        : serialize({
-            op: 'beginPull',
-            response,
-            baseCookie: state.cookie,
-            queryVersion: state.queryVersion,
-          })
-    const { transaction, pending, changed, lastMutationID } = await this.dispatch<{
+    const { transaction, pending, changed, lastMutationID } = await this.request<{
       transaction: string
       pending: Mutation[]
       changed: boolean
       lastMutationID: number
-    }>('beginPull', pullPayload)
+    }>({
+      op: 'beginPull',
+      response,
+      baseCookie: state.cookie,
+      queryVersion: state.queryVersion,
+    })
     const committed = await this.publishThenCommit(
       transaction,
       async () => {
@@ -554,8 +528,7 @@ export class NativeZero<M extends Mutators = Mutators> {
   }
 
   pull(queries?: readonly DesiredQuery[], signal?: AbortSignal): Promise<void> {
-    const captured: readonly DesiredQuery[] | undefined =
-      queries === undefined ? undefined : JSON.parse(serialize({ queries })).queries
+    const captured = snapshot(queries)
     return this.synchronize(async () => {
       const transport = this.options.transport
       if (!transport) throw new Error('Native Zero transport is not configured')
@@ -571,7 +544,7 @@ export class NativeZero<M extends Mutators = Mutators> {
           : undefined
         for (const [hash, view] of this.desiredViews) {
           const manual = desired!.get(hash)
-          if (manual && serialize(manual) !== view.desiredJson)
+          if (manual && !dequal(manual, view.desired))
             throw new Error('Native Zero query hash refers to different queries')
           desired!.set(hash, view.desired)
         }
@@ -648,20 +621,19 @@ export class NativeZero<M extends Mutators = Mutators> {
   subscribe(query: Query, listener: (value: unknown) => void): () => void {
     if (this.closed) throw new Error('Native Zero client is closed')
     const id = ++this.nextWatchID
-    this.watch(id, {
-      format: query.format,
-      watchRequest: serialize({ op: 'watch', id, ast: query.ast, format: query.format }),
-      listener,
-      active: true,
-      held: [],
-    })
+    const { ast, format } = snapshot({ ast: query.ast, format: query.format })
+    this.watch(
+      id,
+      { format, listener, active: true, held: [] },
+      { op: 'watch', id, ast, format }
+    )
     return () => this.unwatch(id)
   }
 
-  private watch(id: number, subscription: Subscription) {
+  private watch(id: number, subscription: Subscription, request: EngineRequest) {
     this.subscriptions.set(id, subscription)
     void this.enqueue(async () =>
-      this.deliver(await this.dispatch<Published>('watch', subscription.watchRequest))
+      this.deliver(await this.request<Published>(request))
     ).catch((error) => this.report(error))
   }
 
@@ -690,31 +662,21 @@ export class NativeZero<M extends Mutators = Mutators> {
     const hash = options.hash ?? query.hash?.()
     if (!hash) throw new Error('Native Zero materialization requires a query hash')
     let ttl = queryTTL(options.ttl)
-    const capturedJson = serialize({ ast: query.ast, format: query.format })
-    const captured: Query = JSON.parse(capturedJson)
+    const captured = snapshot({ ast: query.ast, format: query.format })
     const desired: DesiredQuery = { hash, ast: captured.ast }
-    const desiredJson = serialize(desired)
     const existing = this.desiredViews.get(hash)
-    if (existing && existing.desiredJson !== desiredJson)
+    if (existing && !dequal(existing.desired, desired))
       throw new Error('Native Zero query hash refers to different queries')
     this.managesQueries = true
     if (existing?.timer !== undefined) clearTimeout(existing.timer)
     this.desiredViews.set(hash, {
       desired,
-      desiredJson,
       count: (existing?.count ?? 0) + 1,
       ttl: existing && existing.count > 0 ? existing.ttl : 0,
     })
     const id = ++this.nextWatchID
     const subscription: Subscription = {
       format: captured.format,
-      watchRequest: serialize({
-        op: 'watch',
-        id,
-        ast: captured.ast,
-        format: captured.format,
-        hash,
-      }),
       active: true,
       held: [],
       listener: (data, resultType, error) => view.update(data, resultType, error),
@@ -745,7 +707,13 @@ export class NativeZero<M extends Mutators = Mutators> {
       }
     )
     this.views.add(view)
-    this.watch(id, subscription)
+    this.watch(id, subscription, {
+      op: 'watch',
+      id,
+      ast: captured.ast,
+      format: captured.format,
+      hash,
+    })
     if (!existing) this.refreshQueries()
     return view
   }

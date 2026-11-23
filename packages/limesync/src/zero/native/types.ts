@@ -57,8 +57,9 @@ export type PullResponse = {
   queryErrors?: readonly { hash: string; message: string }[]
   [key: string]: JSONValue | undefined
 }
+export type EngineRequest = { op: string; [key: string]: unknown }
 export interface Engine {
-  execute(request: string): Promise<string>
+  execute(request: EngineRequest): Promise<unknown>
   close(): Promise<void>
 }
 export type Schema = {

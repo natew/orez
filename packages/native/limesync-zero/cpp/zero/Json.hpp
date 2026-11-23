@@ -98,14 +98,15 @@ struct Json {
   static Json parse(std::string_view text) {
     return parse(text, ParseContext::ordinary);
   }
-  // request stays alive while the row patches are applied, one at a time.
-  static Json parseRequest(std::string_view text) {
-    return parse(text, ParseContext::request);
+  // the HTTP body stays alive while row patches are applied one at a time.
+  static Json parsePullResponse(std::string_view text) {
+    return parse(text, ParseContext::response);
   }
 
  private:
-  enum class ParseContext { ordinary, request, response };
+  enum class ParseContext { ordinary, response };
   static Json parse(std::string_view text, ParseContext context) {
+    if (text.empty()) throw std::runtime_error("invalid JSON");
     Parser parser{text.data(), text.data() + text.size()};
     parser.space();
     if (parser.at == parser.end) throw std::runtime_error("invalid JSON");
@@ -180,9 +181,7 @@ struct Json {
                 bool nonempty = elements([&] { value<false>(depth + 2); });
                 member = DeferredArray{std::string_view(start, at), depth + 1, nonempty};
               } else {
-                member = value(depth + 1, context == ParseContext::request && key == "response"
-                                              ? ParseContext::response
-                                              : ParseContext::ordinary);
+                member = value(depth + 1);
               }
               object.insert_or_assign(std::move(key), std::move(member));
             } else {

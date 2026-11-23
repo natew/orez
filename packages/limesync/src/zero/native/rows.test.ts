@@ -21,11 +21,10 @@ test('every watch reading an unchanged row gets the same frozen object', async (
     schema: { tables: {} },
     mutators: { touch: async () => {} },
     engine: {
-      async execute(request) {
-        const input = JSON.parse(request)
+      async execute(input) {
         switch (input.op) {
           case 'watch':
-            return JSON.stringify({
+            return {
               results: [
                 {
                   id: input.id,
@@ -42,20 +41,20 @@ test('every watch reading an unchanged row gets the same frozen object', async (
                         ],
                 },
               ],
-            })
+            }
           case 'beginMutation':
-            return JSON.stringify({
+            return {
               transaction: 'tx',
               mutation: { id: 1, clientID: 'client', name: 'touch', timestamp: 0 },
-            })
+            }
           case 'publish':
-            return JSON.stringify({ results: published.shift() ?? [] })
+            return { results: published.shift() ?? [] }
           case 'commitMutation':
-            return JSON.stringify({ clientID: 'client' })
+            return { clientID: 'client' }
           case 'unwatch':
-            return 'null'
+            return null
           case 'pending':
-            return '[]'
+            return []
           default:
             throw new Error('unexpected engine operation ' + input.op)
         }
