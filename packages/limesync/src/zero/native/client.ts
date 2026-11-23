@@ -55,7 +55,12 @@ type Published = {
   results: (
     | { id: number; failure: string }
     | { id: number; value: JSONValue; resultType: QueryResultType; error?: string }
-    | { id: number; patch: (number | JSONValue)[]; resultType: QueryResultType; error?: string }
+    | {
+        id: number
+        patch: (number | JSONValue)[]
+        resultType: QueryResultType
+        error?: string
+      }
   )[]
 }
 
@@ -79,6 +84,24 @@ function assertFinite(value: unknown): void {
 function serialize(request: unknown): string {
   assertFinite(request)
   return JSON.stringify(request)
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = value.length
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x7f) continue
+    if (code <= 0x7ff) {
+      bytes++
+      continue
+    }
+    bytes += 2
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) i++
+    }
+  }
+  return bytes
 }
 
 type RegisteredCreator = MutatorRequestCreator & {
@@ -134,9 +157,10 @@ function patchResult(
   format?: Format
 ): unknown[] {
   if (!previous) throw new Error('Native Zero patch arrived before its first result')
-  const rowFormat: Format | undefined = format?.relationships && hasRelationships(format)
-    ? { relationships: format.relationships }
-    : undefined
+  const rowFormat: Format | undefined =
+    format?.relationships && hasRelationships(format)
+      ? { relationships: format.relationships }
+      : undefined
   const out = new Array<unknown>(patch.length)
   for (let i = 0; i < patch.length; i++) {
     const entry = patch[i]!
@@ -243,12 +267,26 @@ export class NativeZero<M extends Mutators = Mutators> {
     return result
   }
 
-  private async request<T>(request: object): Promise<T> {
-    return this.dispatch(serialize(request))
+  private async request<T>(request: { op: string; [key: string]: unknown }): Promise<T> {
+    return this.dispatch(request.op, serialize(request))
   }
 
-  private async dispatch<T>(request: string): Promise<T> {
-    return JSON.parse(await this.options.engine.execute(request))
+  private async dispatch<T>(op: string, requestJson: string): Promise<T> {
+    let response: string
+    try {
+      response = await this.options.engine.execute(requestJson)
+    } catch (error) {
+      let activeQueries = this.desiredViews.size
+      for (const query of this.manualQueries ?? []) {
+        if (!this.desiredViews.has(query.hash)) activeQueries++
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(
+        `${message} (op=${op}, requestBytes=${utf8ByteLength(requestJson)}, activeWatches=${this.subscriptions.size}, activeQueries=${activeQueries})`,
+        { cause: error }
+      )
+    }
+    return JSON.parse(response)
   }
 
   private query<T>(query: Query, transaction?: string): Promise<T>
@@ -452,7 +490,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       const { transaction, mutation } = await this.dispatch<{
         transaction: string
         mutation: Mutation
-      }>(request)
+      }>('beginMutation', request)
       let result: unknown
       await this.publishThenCommit(
         transaction,
@@ -483,7 +521,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       pending: Mutation[]
       changed: boolean
       lastMutationID: number
-    }>(pullPayload)
+    }>('beginPull', pullPayload)
     await this.publishThenCommit(
       transaction,
       async () => {
@@ -602,7 +640,7 @@ export class NativeZero<M extends Mutators = Mutators> {
   private watch(id: number, subscription: Subscription) {
     this.subscriptions.set(id, subscription)
     void this.enqueue(async () =>
-      this.deliver(await this.dispatch<Published>(subscription.watchRequest))
+      this.deliver(await this.dispatch<Published>('watch', subscription.watchRequest))
     ).catch((error) => this.report(error))
   }
 
