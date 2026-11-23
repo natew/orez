@@ -1,4 +1,4 @@
-import { useContext, useMemo, useRef, useSyncExternalStore, type Context } from 'react'
+import { useCallback, useContext, useMemo, useRef, type Context } from 'react'
 
 import {
   addContextToQuery,
@@ -22,6 +22,7 @@ import {
 } from './queryErrorRecovery.js'
 import { serializeQueryParams } from './queryJson.js'
 import { resolveQuery } from './resolveQuery.js'
+import { selectSnapshotHook, type SnapshotDelivery } from './snapshot.js'
 
 import type {
   AnyQueryRegistry,
@@ -66,6 +67,7 @@ export type CreateUseQueryDirect<Schema extends ZeroSchema> = (props: {
   getZero: () => MaterializableZero | null
   zeroVersion: Emitter<number>
   getQueryFaults: (zero: object) => QueryFaults | undefined
+  snapshotDelivery?: SnapshotDelivery
 }) => UseQueryHook<Schema>
 
 type DirectResultType = 'unknown' | 'complete' | 'error'
@@ -282,6 +284,7 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
   getZero,
   zeroVersion,
   getQueryFaults,
+  snapshotDelivery,
 }: Parameters<CreateUseQueryDirect<Schema>>[0]): UseQueryHook<Schema> {
   // SSG: return an inert hook — see createUseQuery for the rationale. resolve
   // each call's query shape so singular queries get [undefined, info] and
@@ -298,6 +301,7 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
   }
 
   const directViewStore = new DirectViewStore()
+  const useSnapshot = selectSnapshotHook(snapshotDelivery)
 
   function useQueryDirect(...args: any[]): any {
     const disableMode = useContext(DisabledContext)
@@ -356,8 +360,8 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
       return directViewStore.getView(zeroInstance, queryRequest, effectiveEnabled, ttl)
     }, [queryRequest, enabled, ttl, zeroInstance])
 
-    const getEmpty = () => emptyForQuery as DirectSnapshot
-    const rawOut = useSyncExternalStore(
+    const getEmpty = useCallback(() => emptyForQuery, [emptyForQuery])
+    const rawOut = useSnapshot(
       view ? view.subscribe : DISABLED_SUBSCRIBE,
       view ? view.getSnapshot : getEmpty,
       view ? view.getSnapshot : getEmpty
@@ -365,7 +369,8 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
     const out = useQueryFault(
       zeroInstance && enabled && !disableMode ? getQueryFaults(zeroInstance) : undefined,
       queryRequest,
-      rawOut
+      rawOut,
+      useSnapshot
     )
 
     if (!disableMode) {

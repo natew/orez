@@ -67,6 +67,7 @@ import type {
   ZeroOptions,
   Schema as ZeroSchema,
 } from '../zero/zero.js'
+import type { SnapshotDelivery } from './snapshot.js'
 import type {
   AuthData,
   GenericModels,
@@ -125,6 +126,7 @@ export type CreateZeroClientOptions<
   // repeated server acknowledgement timeouts reconnect with the existing local
   // state. one timeout remains a normal slow-server failure.
   serverAckTimeoutRecoveryThreshold?: number
+  snapshotDelivery?: SnapshotDelivery
   // names this client instance so multiple instances can coexist on one page.
   // each query/mutator namespace is claimed by exactly one instance, and the
   // ambient run() + the combineZeroClients facade dispatch by that claim.
@@ -137,6 +139,7 @@ export type DirectQueryAdapter<Schema extends ZeroSchema> = (props: {
   getZero: () => any
   zeroVersion: Emitter<number>
   getQueryFaults: (zero: object) => QueryFaults | undefined
+  snapshotDelivery?: SnapshotDelivery
 }) => UseQueryHook<Schema>
 
 function getZeroProxyValue(instance: object, key: PropertyKey) {
@@ -185,6 +188,7 @@ export function createZeroClientInternal<
   permissionStrategy = 'optimistic',
   instanceName = 'default',
   serverAckTimeoutRecoveryThreshold = 2,
+  snapshotDelivery,
   createDirectUseQuery,
 }: CreateZeroClientOptions<Schema, Models> & {
   createDirectUseQuery?: DirectQueryAdapter<Schema>
@@ -617,6 +621,7 @@ export function createZeroClientInternal<
     customQueries,
     getQueryFaults: (zero) => queryFaults.get(zero),
     getQueryScope: (zero) => externalInstances.keys.get(zero),
+    snapshotDelivery,
   })
 
   const useQueryDirect = createDirectUseQuery
@@ -625,6 +630,7 @@ export function createZeroClientInternal<
         customQueries,
         getZero: () => zeroRuntime.zero,
         zeroVersion: zeroInstanceVersion!,
+        snapshotDelivery,
         getQueryFaults: (zero) => queryFaults.get(zero),
       })
     : createUnavailableDirectUseQuery<Schema>()

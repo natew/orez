@@ -11,6 +11,7 @@ import {
 } from './queryErrorRecovery.js'
 import { serializeQueryParams } from './queryJson.js'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery.js'
+import { selectSnapshotHook, type SnapshotDelivery } from './snapshot.js'
 
 import type {
   AnyQueryRegistry,
@@ -97,12 +98,15 @@ export function createUseQuery<Schema extends ZeroSchema>({
   customQueries,
   getQueryFaults,
   getQueryScope,
+  snapshotDelivery,
 }: {
   DisabledContext: Context<QueryControlMode>
   customQueries: AnyQueryRegistry
   getQueryFaults: (zero: object) => QueryFaults | undefined
   getQueryScope?: (zero: object) => number | undefined
+  snapshotDelivery?: SnapshotDelivery
 }): UseQueryHook<Schema> {
+  const useSnapshot = selectSnapshotHook(snapshotDelivery)
   // SSG: return an inert hook. limesync's bundled React copy isn't the same
   // one the SSG build's renderer initialises, so hook dispatch returns null.
   // an empty response matches how the wrapper behaves under DisabledContext
@@ -182,7 +186,8 @@ export function createUseQuery<Schema extends ZeroSchema>({
     const faultOut = useQueryFault(
       effectiveEnabled === false ? undefined : getQueryFaults(zero),
       queryRequest,
-      rawOut
+      rawOut,
+      useSnapshot
     )
     const recovery = useMemo(() => new QueryErrorRecovery(), [queryRequest])
     useEffect(() => {

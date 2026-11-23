@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
+
+import { selectSnapshotHook } from './snapshot.js'
 
 // zero's ArrayView settles its result status once. A changed row can repair an
 // errored query, but the existing view must be rematerialized to become complete.
@@ -26,7 +28,7 @@ type QueryFault = { name: string; args: readonly unknown[]; message: string }
 // Zero's already-complete ArrayView cannot observe a later transform error.
 export class QueryFaults {
   private faults = new Map<string, QueryFault>()
-  private listeners = new Set<() => void>()
+  private listeners = new Map<string, Set<() => void>>()
 
   constructor(readonly retry: () => void) {}
 
@@ -37,22 +39,33 @@ export class QueryFaults {
       const old = this.faults.get(key)
       next.set(key, old?.message === fault.message ? old : fault)
     }
-    if (
-      next.size === this.faults.size &&
-      [...next].every(([key, fault]) => this.faults.get(key) === fault)
-    )
-      return
+    const previous = this.faults
     this.faults = next
-    for (const listener of this.listeners) listener()
+    for (const [key, fault] of next) {
+      if (previous.get(key) !== fault) this.notify(key)
+    }
+    for (const key of previous.keys()) {
+      if (!next.has(key)) this.notify(key)
+    }
   }
 
   get(key: string) {
     return this.faults.get(key)
   }
 
-  subscribe = (listener: () => void) => {
-    this.listeners.add(listener)
-    return () => this.listeners.delete(listener)
+  subscribe(key: string, listener: () => void) {
+    let listeners = this.listeners.get(key)
+    if (!listeners) this.listeners.set(key, (listeners = new Set()))
+    listeners.add(listener)
+    return () => {
+      listeners.delete(listener)
+      if (listeners.size === 0) this.listeners.delete(key)
+    }
+  }
+
+  private notify(key: string) {
+    const listeners = this.listeners.get(key)
+    if (listeners) for (const listener of listeners) listener()
   }
 }
 
@@ -62,18 +75,20 @@ const noSnapshot = () => undefined
 export function useQueryFault(
   faults: QueryFaults | undefined,
   request: { query: { queryName: string }; args?: unknown },
-  out: readonly [unknown, { type: string; retry?: () => void }]
+  out: readonly [unknown, { type: string; retry?: () => void }],
+  useSnapshot: ReturnType<typeof selectSnapshotHook>
 ) {
   const key = JSON.stringify([
     request.query.queryName,
     request.args === undefined ? [] : [request.args],
   ])
   const getSnapshot = useMemo(() => () => faults?.get(key), [faults, key])
-  const fault = useSyncExternalStore(
-    faults?.subscribe ?? noSubscribe,
-    getSnapshot,
-    noSnapshot
+  const subscribe = useMemo(
+    () =>
+      faults ? (listener: () => void) => faults.subscribe(key, listener) : noSubscribe,
+    [faults, key]
   )
+  const fault = useSnapshot(subscribe, getSnapshot, noSnapshot)
   const previous = useRef(false)
   useEffect(() => {
     if (previous.current && !fault && out[1].type === 'error') out[1].retry?.()

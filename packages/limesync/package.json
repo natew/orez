@@ -153,6 +153,11 @@
       "import": "./dist/zero/sqlite.js",
       "default": "./dist/zero/sqlite.js"
     },
+    "./data/snapshot": {
+      "types": "./dist/data/snapshot.d.ts",
+      "react-native": "./dist/data/snapshot.native.js",
+      "default": "./dist/data/snapshot.js"
+    },
     "./data": {
       "types": "./dist/data/index.d.ts",
       "react-native": "./dist/data/index.native.js",

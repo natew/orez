@@ -17,9 +17,10 @@
 // is the property an app hand-rolls otherwise, usually as a global emitter plus
 // a deep-equal projection to undo the over-broadcasting.
 
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useCallback, useMemo, useRef } from 'react'
 
 import { canonicalTopic } from '../realtime.js'
+import { selectSnapshotHook, type SnapshotDelivery } from './snapshot.js'
 
 import type {
   RealtimeStore,
@@ -57,8 +58,10 @@ export type UseStreamingFields = <Value>(
 // created against whichever store the application installed rather than
 // reaching for a module-level singleton.
 export function createUseStreamingField(
-  getStore: () => RealtimeStore | undefined
+  getStore: () => RealtimeStore | undefined,
+  snapshotDelivery?: SnapshotDelivery
 ): UseStreamingField {
+  const useSnapshot = selectSnapshotHook(snapshotDelivery)
   return function useStreamingField<Value>(
     handle: StreamingFieldHandle | null | undefined,
     base: Value
@@ -95,7 +98,7 @@ export function createUseStreamingField(
       return next
     }, [store, id, base])
 
-    return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+    return useSnapshot(subscribe, getSnapshot, getSnapshot)
   }
 }
 
@@ -107,8 +110,10 @@ export function createUseStreamingField(
 // `requests`, so a value for a row outside the list cannot wake it. There is no
 // projection to write and no deep-equal comparator to get right.
 export function createUseStreamingFields(
-  getStore: () => RealtimeStore | undefined
+  getStore: () => RealtimeStore | undefined,
+  snapshotDelivery?: SnapshotDelivery
 ): UseStreamingFields {
+  const useSnapshot = selectSnapshotHook(snapshotDelivery)
   return function useStreamingFields<Value>(
     requests: readonly StreamingFieldRequest<Value>[]
   ): Readonly<Record<string, StreamingFieldState<Value>>> {
@@ -172,7 +177,7 @@ export function createUseStreamingFields(
       return next
     }, [store, topicsKey, cache, requests])
 
-    return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+    return useSnapshot(subscribe, getSnapshot, getSnapshot)
   }
 }
 

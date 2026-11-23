@@ -678,6 +678,7 @@ class ChunksCache {
           this.#deleteEntryByHash(hash);
         }
       }
+      this.#suspendedDeletes.length = 0;
       this.#ensureCacheSizeLimit();
     }
   }

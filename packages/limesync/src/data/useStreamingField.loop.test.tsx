@@ -13,7 +13,7 @@
 // description looped React until the whole pane tree unmounted. The hooks now
 // carry their own per-hook stabilization, which this file locks in.
 
-import { act } from 'react'
+import { act, Suspense, use } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
@@ -108,4 +108,43 @@ test('multi-field hook is snapshot-stable while topics are unsubscribed', () => 
   })
 
   expect(uncachedSnapshotWarnings()).toEqual([])
+})
+
+test('a streamed replacement can suspend without hiding the committed description', async () => {
+  const realtime = createLocalRealtime({ manifest: streaming.manifest })
+  const useStreamingField = createUseStreamingField(() => realtime.store, 'transition')
+  const topic = streaming.sootTask.description({ id: 't1' })
+  const replacement = Promise.withResolvers<string>()
+
+  function Description() {
+    const { value } = useStreamingField(topic, 'Saved description')
+    return <div>{value === 'Draft' ? use(replacement.promise) : value}</div>
+  }
+
+  try {
+    await act(async () => {
+      root.render(
+        <Suspense fallback={<div>Loading</div>}>
+          <Description />
+        </Suspense>
+      )
+    })
+    await act(async () => {
+      const draft = await realtime.publisher.begin<string>('sootTask', 'description', {
+        namespace: 'local',
+        key: { id: 't1' },
+      })
+      draft.set('Draft')
+      await draft.flush()
+    })
+    expect(realtime.store.read(topic, 'Saved description').value).toBe('Draft')
+    expect(container.textContent).toBe('Saved description')
+
+    await act(async () => {
+      replacement.resolve('Parsed draft')
+    })
+    expect(container.textContent).toBe('Parsed draft')
+  } finally {
+    await act(async () => realtime.close())
+  }
 })

@@ -20,5 +20,4 @@ const isBrowser =
     typeof location !== 'undefined')
 
 export const IS_SERVER: boolean =
-  process.env.VITE_ENVIRONMENT === 'ssr' ||
-  (!isClientEnvironment && !isBrowser)
+  process.env.VITE_ENVIRONMENT === 'ssr' || (!isClientEnvironment && !isBrowser)
