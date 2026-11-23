@@ -111,41 +111,42 @@ export class RowTable {
   }
 
   private row(value: JSONValue, format?: Format): Entry {
-    if (!isRow(value))
-      return this.take(JSON.stringify(value), [], () =>
-        Array.isArray(value) ? deepFreeze(value) : value
-      )
-    if (!hasRelationships(format))
-      return this.take(JSON.stringify(value) + '\0', [], () => deepFreeze(value))
-    const relationships = format.relationships
+    if (!isRow(value)) return this.json(value)
+    const relationships = hasRelationships(format) ? format.relationships : undefined
     const columns: Record<string, JSONValue> = {}
     const children: Entry[] = []
-    const related: [string, unknown][] = []
-    let relatedKey = ''
+    const shared: [string, unknown][] = []
+    let sharedKey = ''
     for (const name in value) {
       if (!Object.hasOwn(value, name)) continue
       const field = value[name]!
-      if (!Object.hasOwn(relationships, name)) {
-        columns[name] = field
-        continue
-      }
-      const child = this.relation(field, relationships[name]!)
-      relatedKey += JSON.stringify(name)
-      if (child) {
+      if (relationships && Object.hasOwn(relationships, name)) {
+        const child = this.relation(field, relationships[name]!)
+        sharedKey += 'r' + JSON.stringify(name) + (child ? child.id : '-')
+        if (child) children.push(child)
+        shared.push([name, child?.value])
+      } else if (field !== null && typeof field === 'object') {
+        const child = this.json(field)
+        sharedKey += 'j' + JSON.stringify(name) + child.id
         children.push(child)
-        related.push([name, child.value])
-        relatedKey += child.id
-      } else {
-        related.push([name, undefined])
-        relatedKey += '-'
-      }
+        shared.push([name, child.value])
+      } else columns[name] = field
     }
     // json escapes control characters, so the separator cannot occur in columns
-    return this.take(JSON.stringify(columns) + '\0' + relatedKey, children, () => {
+    return this.take(JSON.stringify(columns) + '\0' + sharedKey, children, () => {
+      if (!shared.length) return Object.freeze(value)
       const row: Record<string, unknown> = { ...value }
-      for (const [name, child] of related) row[name] = child
-      return deepFreeze(row)
+      for (const [name, field] of shared) row[name] = field
+      return Object.freeze(row)
     })
+  }
+
+  // json values are shared by content, so a new row version keeps its unchanged
+  // json columns
+  private json(value: JSONValue): Entry {
+    return this.take('j' + JSON.stringify(value), [], () =>
+      value !== null && typeof value === 'object' ? deepFreeze(value) : value
+    )
   }
 
   // a singular relationship to no row reads undefined, like a singular query
@@ -162,7 +163,6 @@ export class RowTable {
   }
 }
 
-// json columns are shared with every reader of the row, so they freeze too
 function deepFreeze<T extends object>(value: T): T {
   Object.freeze(value)
   for (const key in value) {

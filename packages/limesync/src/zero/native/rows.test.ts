@@ -93,6 +93,7 @@ test('every watch reading an unchanged row gets the same frozen object', async (
   const [renamed, twoAgain] = a[1]!
   expect(renamed).not.toBe(one)
   expect(renamed!.comments).toBe(one!.comments)
+  expect(renamed!.meta).toBe(one!.meta)
   expect(twoAgain).toBe(two)
   expect(b[1]).toEqual([one, two])
   expect(b[1]![0]).toBe(one)
@@ -121,8 +122,8 @@ test('the row table holds only rows some watch still reads', () => {
     table.release(held)
     held = next.held
   }
-  // the row, its comment list and the comment
-  expect(table.size).toBe(3)
+  // the row, its json column, its comment list and the comment
+  expect(table.size).toBe(4)
   const other = table.result(
     [{ ...issue(0, 'v10000'), comments: [comment(10_000)] }] satisfies JSONValue,
     format
@@ -130,7 +131,7 @@ test('the row table holds only rows some watch still reads', () => {
   const patched = table.patch([0], held, format)
   expect(other.value).not.toBe(patched.value)
   expect(rows(other.value)[0]).toBe(rows(patched.value)[0])
-  expect(table.size).toBe(3)
+  expect(table.size).toBe(4)
   table.release(other.held)
   table.release(patched.held)
   table.release(held)
