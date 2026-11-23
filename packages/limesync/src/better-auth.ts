@@ -7,13 +7,13 @@ import {
 } from 'better-auth/adapters'
 
 import type {
-  ApplicationSqlClient,
-  ApplicationSqlTransaction,
-} from './cf-do/application-sql.js'
+  LocalApplicationSqlClient,
+  LocalApplicationSqlTransaction,
+} from './local-application-sql.js'
 import type { OneDataSchema, OneDataTable } from './data/one-schema.js'
 import type { BetterAuthOptions } from 'better-auth'
 
-type Database = Pick<ApplicationSqlClient, 'transaction' | 'readTransaction'>
+type Database = LocalApplicationSqlClient
 type Row = Record<string, unknown>
 
 function quote(name: string) {
@@ -164,17 +164,17 @@ function assignments(table: OneDataTable, update: unknown, params: unknown[]) {
 function customAdapter(
   db: Database,
   schema: OneDataSchema,
-  bound: ApplicationSqlTransaction | undefined
+  bound: LocalApplicationSqlTransaction | undefined
 ): CustomAdapter {
   const noAst = () => {
     throw new Error('Better Auth uses SQLite statements')
   }
-  const read = <T>(work: (tx: ApplicationSqlTransaction) => Promise<T>) =>
+  const read = <T>(work: (tx: LocalApplicationSqlTransaction) => Promise<T>) =>
     bound ? work(bound) : db.readTransaction(noAst, work)
-  const write = <T>(work: (tx: ApplicationSqlTransaction) => Promise<T>) =>
+  const write = <T>(work: (tx: LocalApplicationSqlTransaction) => Promise<T>) =>
     bound ? work(bound) : db.transaction(noAst, work)
   const readJoins = async <T>(
-    tx: ApplicationSqlTransaction,
+    tx: LocalApplicationSqlTransaction,
     base: OneDataTable,
     row: Row,
     joins?: JoinConfig
@@ -317,7 +317,7 @@ function customAdapter(
 
 export function betterAuthAdapter(db: Database, schema: OneDataSchema) {
   return (options: BetterAuthOptions) => {
-    const configure = (bound?: ApplicationSqlTransaction): DBAdapter<BetterAuthOptions> =>
+    const configure = (bound?: LocalApplicationSqlTransaction): DBAdapter<BetterAuthOptions> =>
       createAdapterFactory({
         config: {
           adapterId: 'limesync-sqlite',
