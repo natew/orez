@@ -1,4 +1,5 @@
 import { subscribeOrezWake, type OrezWakeOptions } from './orez-wake.js'
+import { diffPullQueries, pullQueryPatch, type PullState } from './pullQueries.js'
 
 import type {
   ClientState,
@@ -94,19 +95,16 @@ export function createOrezTransport(options: OrezTransportOptions): OrezTranspor
         ? subscribeOrezWake(server, identity, options.wake, request)
         : () => {}
     },
-    async pull(
-      state: ClientState,
-      queries: readonly DesiredQuery[],
-      signal: AbortSignal
-    ) {
+    async pull(state: PullState, queries: readonly DesiredQuery[], signal: AbortSignal) {
+      const queryPatch =
+        state[pullQueryPatch] === undefined
+          ? diffPullQueries({ queryVersion: state.queryVersion, queries })
+          : state[pullQueryPatch]
       const body = {
         clientID: state.clientID,
         clientGroupID: state.clientGroupID,
         cookie: state.cookie,
-        queries: {
-          version: state.queryVersion,
-          patch: [{ op: 'clear' }, ...queries.map((query) => ({ op: 'put', ...query }))],
-        },
+        queries: queryPatch ?? undefined,
       }
       // the engine parses and validates the raw body off the JavaScript thread;
       // only a payload codec needs the body as values here.

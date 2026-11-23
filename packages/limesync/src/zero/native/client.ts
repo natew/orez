@@ -1,3 +1,4 @@
+import { diffPullQueries, pullQueryPatch, type PullState } from './pullQueries.js'
 import { NativeSync, type SyncOptions } from './sync.js'
 import { NativeView, queryTTL } from './view.js'
 
@@ -198,6 +199,7 @@ export class NativeZero<M extends Mutators = Mutators> {
     }
   >()
   private manualQueries?: readonly DesiredQuery[]
+  private appliedQueries?: Pick<ClientState, 'queries' | 'queryVersion'>
   private managesQueries = false
   private queryRefreshQueued = false
   private sync?: NativeSync
@@ -522,7 +524,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       changed: boolean
       lastMutationID: number
     }>('beginPull', pullPayload)
-    await this.publishThenCommit(
+    const committed = await this.publishThenCommit(
       transaction,
       async () => {
         for (const mutation of pending) await this.invoke(mutation, transaction, 'rebase')
@@ -536,6 +538,7 @@ export class NativeZero<M extends Mutators = Mutators> {
         this.serverResults.delete(id)
       }
     }
+    return committed
   }
 
   // listeners get the transaction's rows before its commit writes them out; a failed
@@ -553,7 +556,7 @@ export class NativeZero<M extends Mutators = Mutators> {
         published = true
         await this.publish(transaction)
       }
-      await this.request({ op: commit, transaction })
+      return await this.request<ClientState>({ op: commit, transaction })
     } catch (error) {
       await this.request({ op: 'rollback', transaction })
       if (published) await this.publish().catch((failure) => this.report(failure))
@@ -588,13 +591,41 @@ export class NativeZero<M extends Mutators = Mutators> {
           queries: desired ? [...desired.values()] : undefined,
         })
       })
-      const response = await this.withSignal(signal, (linked) =>
-        transport.pull(state, state.queries, linked)
-      )
-      await this.enqueue(() => {
-        if (signal?.aborted) throw new Error('Native Zero sync stopped')
-        return this.applyPull(response, state)
-      })
+      const patch = diffPullQueries(state, this.appliedQueries)
+      const pullState: PullState = { ...state, [pullQueryPatch]: patch }
+      try {
+        const response = await this.withSignal(signal, (linked) =>
+          transport.pull(pullState, state.queries, linked)
+        )
+        const committed = await this.enqueue(() => {
+          if (signal?.aborted) throw new Error('Native Zero sync stopped')
+          return this.applyPull(response, state)
+        })
+        const completed = new Set(committed.completedQueries)
+        const previouslyCompleted = new Set(state.completedQueries)
+        // a server authorization change can retire registrations during a pull.
+        // register them again after the cleared replica has committed.
+        const invalidated = state.queries.some(
+          ({ hash }) =>
+            (previouslyCompleted.has(hash) || Object.hasOwn(state.queryErrors, hash)) &&
+            !completed.has(hash) &&
+            !Object.hasOwn(committed.queryErrors, hash)
+        )
+        if (invalidated) {
+          this.appliedQueries = undefined
+          this.refreshQueries()
+        } else if (patch) {
+          this.appliedQueries = {
+            queries: state.queries,
+            queryVersion: state.queryVersion,
+          }
+        }
+      } catch (error) {
+        // the server may have applied an uncommitted response's query patch.
+        // reconcile the complete desired set on the next pull.
+        this.appliedQueries = undefined
+        throw error
+      }
     })
   }
 

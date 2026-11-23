@@ -1,6 +1,91 @@
 import { expect, test, vi } from 'vitest'
 
+import { NativeZero } from './client.js'
+import { createOrezTransport } from './orez.js'
 import { NativeSync } from './sync.js'
+
+import type { ClientState } from './types.js'
+
+test('native pulls send only query changes after the replica commits them', async () => {
+  const state: ClientState = {
+    clientID: 'client',
+    clientGroupID: 'group',
+    cookie: '0',
+    nextMutationID: 1,
+    lastMutationID: 0,
+    queryVersion: 0,
+    queries: [],
+    recoveryRequired: null,
+    completedQueries: [],
+    queryErrors: {},
+  }
+  const requests: unknown[] = []
+  let loseResponse = false
+  const transport = createOrezTransport({
+    server: 'https://zero.test',
+    appID: 'zero',
+    schemaVersion: '1',
+    async fetch(_url, init) {
+      requests.push(JSON.parse(String(init?.body)).queries)
+      if (loseResponse) throw new Error('response lost')
+      return Response.json({ cookie: state.cookie })
+    },
+  })
+  const zero = new NativeZero({
+    schema: { tables: {} },
+    mutators: {},
+    engine: {
+      async execute(request) {
+        const input = JSON.parse(request)
+        switch (input.op) {
+          case 'setQueries':
+            state.queries = input.queries
+            state.queryVersion++
+            return JSON.stringify(state)
+          case 'beginPull':
+            return JSON.stringify({
+              transaction: 'pull',
+              pending: [],
+              changed: false,
+              lastMutationID: 0,
+            })
+          case 'commitPull':
+            return JSON.stringify(state)
+          default:
+            throw new Error('unexpected engine operation ' + input.op)
+        }
+      },
+      async close() {},
+    },
+    transport,
+  })
+  const first = { hash: 'first', ast: { table: 'issue' } }
+  const second = { hash: 'second', ast: { table: 'comment' } }
+  try {
+    await zero.pull([first])
+    await zero.pull([first])
+    await zero.pull([first, second])
+    loseResponse = true
+    await expect(zero.pull([second])).rejects.toThrow('response lost')
+    loseResponse = false
+    await zero.pull([first, second])
+    await zero.pull([first, second])
+    expect(requests).toEqual([
+      { version: 1, baseVersion: 0, patch: [{ op: 'clear' }, { op: 'put', ...first }] },
+      undefined,
+      { version: 3, baseVersion: 1, patch: [{ op: 'put', ...second }] },
+      { version: 4, baseVersion: 3, patch: [{ op: 'del', hash: first.hash }] },
+      {
+        version: 5,
+        baseVersion: 0,
+        patch: [{ op: 'clear' }, { op: 'put', ...first }, { op: 'put', ...second }],
+      },
+      undefined,
+    ])
+  } finally {
+    await zero.close()
+  }
+})
 
 test('native allocation failures back off across wakes and reconnects', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
