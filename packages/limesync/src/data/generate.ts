@@ -960,13 +960,13 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 }
 
 export async function generateModules(
-  options: Pick<GenerateOptions, 'dir' | 'config' | 'tsconfig'>
+  options: Pick<GenerateOptions, 'dir' | 'config' | 'tsconfig'> & { oneSchema?: string }
 ) {
   const baseDir = resolve(options.dir)
   const config = options.config ? resolve(options.config) : undefined
   const project = await loadGeneratorProject(baseDir, false, options.tsconfig)
   try {
-    const layout = discoverDataLayout(project, baseDir, config)
+    const layout = discoverDataLayout(project, baseDir, config, options.oneSchema)
     const files: Record<string, string> = {}
     const { needsDrizzleSchema, needsSqliteZeroSchema } = schemaSources(baseDir)
     await emitModules({

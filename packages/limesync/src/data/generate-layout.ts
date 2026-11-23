@@ -502,6 +502,74 @@ function relationTargets(
   return relations
 }
 
+function oneRelationTargets(source: ts.SourceFile) {
+  const tables = new Map<string, string>()
+  const visitTable = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      let init = node.initializer
+      while (init && ts.isCallExpression(init)) {
+        const [name] = init.arguments
+        if (
+          ts.isIdentifier(init.expression) &&
+          init.expression.text === 'table' &&
+          name &&
+          ts.isStringLiteral(name)
+        ) {
+          tables.set(node.name.text, name.text)
+          break
+        }
+        init = ts.isPropertyAccessExpression(init.expression)
+          ? init.expression.expression
+          : undefined
+      }
+    }
+    node.forEachChild(visitTable)
+  }
+  visitTable(source)
+  const relations = new Map<string, Map<string, string>>()
+  const readRelation = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'relationships'
+    ) {
+      const [table, configure] = node.arguments
+      const sourceTable = table && tables.get(table.getText(source))
+      if (sourceTable && configure && ts.isArrowFunction(configure)) {
+        const body = ts.isParenthesizedExpression(configure.body)
+          ? configure.body.expression
+          : configure.body
+        if (ts.isObjectLiteralExpression(body)) {
+          const edges = new Map<string, string>()
+          for (const field of body.properties) {
+            if (
+              !ts.isPropertyAssignment(field) ||
+              !ts.isCallExpression(field.initializer)
+            )
+              continue
+            const [connection] = field.initializer.arguments
+            if (!connection || !ts.isObjectLiteralExpression(connection)) continue
+            for (const option of connection.properties) {
+              if (
+                !ts.isPropertyAssignment(option) ||
+                option.name.getText(source) !== 'destSchema'
+              )
+                continue
+              const target = tables.get(option.initializer.getText(source))
+              if (target)
+                edges.set(field.name.getText(source).replace(/^['"]|['"]$/g, ''), target)
+            }
+          }
+          relations.set(sourceTable, edges)
+        }
+      }
+    }
+    node.forEachChild(readRelation)
+  }
+  readRelation(source)
+  return relations
+}
+
 function tableColumns(
   project: NativeTypeScriptProject,
   paths: Iterable<string>,
@@ -857,7 +925,8 @@ function assertNoUnclaimedNamespaces(
 export function discoverDataLayout(
   project: NativeTypeScriptProject,
   baseDir: string,
-  configPath?: string
+  configPath?: string,
+  oneSchema?: string
 ): DataLayout {
   const config = readDataConfig(project, baseDir, configPath)
   const configured =
@@ -888,7 +957,7 @@ export function discoverDataLayout(
     declaredSupportTables: instance.supportTables,
   }))
   const instanceDirs = new Set(instances.map((instance) => instance.dir))
-  const metadata = metadataPaths(baseDir)
+  const metadata = oneSchema ? [oneSchema] : metadataPaths(baseDir)
   const columns = tableColumns(project, metadata)
 
   for (const instance of instances) {
@@ -923,7 +992,9 @@ export function discoverDataLayout(
     tableOwners.set(namespace.table, namespace.instance)
   }
 
-  const relations = relationTargets(project, metadata)
+  const relations = oneSchema
+    ? oneRelationTargets(project.sourceFile(oneSchema))
+    : relationTargets(project, metadata)
   tableColumns(
     project,
     new Set(namespaces.flatMap((namespace) => namespace.sourcePaths)),

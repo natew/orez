@@ -14,6 +14,7 @@
 // this makes the generator runnable inside web workers and other browser
 // contexts without pulling in ~10mb of typescript.
 
+import { addAppRegistryModules } from './app-registry-source.js'
 import {
   CRUD_MUTATION_NAMES,
   generateAggregatesFile,
@@ -147,6 +148,7 @@ export type LiteGenerateOptions = {
   dir: string
   // explicit data.config.ts path. auto-discovered in `dir` when omitted.
   config?: string
+  oneSchema?: string
   parse: LiteParseFn
 }
 
@@ -453,7 +455,9 @@ function discoverLiteLayout(
 export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   const { files, parse } = opts
   const baseDir = resolvePath(stripTrailingSlash(opts.dir))
-  const instances = discoverLiteLayout(files, baseDir, parse, opts.config)
+  const layoutFiles = opts.oneSchema ? { ...files } : files
+  if (opts.oneSchema) delete layoutFiles[opts.oneSchema]
+  const instances = discoverLiteLayout(layoutFiles, baseDir, parse, opts.config)
   const sourceRoots = [baseDir, ...instances.map((instance) => instance.dir)]
   const namespaces = instances.flatMap((instance) => instance.namespaces)
   const modelNamespaces = namespaces.filter(
@@ -474,12 +478,16 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   const relations = new Map<string, Map<string, string>>()
   const drizzleRelations: LiteRelationInfo[] = []
   const tableColumns = new Map<string, Set<string>>()
-  for (const path of Object.keys(files).filter(
-    (path) =>
-      path.endsWith('/relations.ts') ||
-      /\/database\/(?:schema[^/]*|zeroSchemaInput)\.ts$/.test(path)
-  )) {
+  const metadata = opts.oneSchema
+    ? [opts.oneSchema]
+    : Object.keys(files).filter(
+        (path) =>
+          path.endsWith('/relations.ts') ||
+          /\/database\/(?:schema[^/]*|zeroSchemaInput)\.ts$/.test(path)
+      )
+  for (const path of metadata) {
     const parsed = parse(files[path]!, path)
+    if (opts.oneSchema && parsed.parseError) throw new Error(parsed.parseError)
     for (const relation of parsed.relations ?? []) {
       const tableRelations = relations.get(relation.sourceTable) ?? new Map()
       tableRelations.set(relation.name, relation.targetTable)
@@ -845,7 +853,9 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   const hasDatabaseSchema = Object.keys(files).some((path) =>
     /\/database\/schema\.ts$/.test(path)
   )
-  if (hasDatabaseSchema && allTables.length > 0) {
+  if (opts.oneSchema) {
+    addAppRegistryModules(out, `../${relativePath(baseDir, opts.oneSchema)}`)
+  } else if (hasDatabaseSchema && allTables.length > 0) {
     const included = new Set(allTables)
     const relationTables = new Map<string, string[]>()
     for (const relation of drizzleRelations) {

@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { init, parse } from 'es-module-lexer'
 
+import { addAppRegistryModules } from './app-registry-source.js'
 import { generateModules } from './generate.js'
 
 export type DataAppOptions = {
@@ -18,38 +20,25 @@ export async function generateAppModules(root: string, options: DataAppOptions) 
   const dir = resolve(root, options.dir ?? 'data')
   const tsconfig = options.tsconfig && resolve(root, options.tsconfig)
   const schema = resolve(root, options.schema ?? resolve(dir, 'schema.ts'))
-  const generated = await generateModules({ dir, tsconfig })
+  const hasSchema = statSync(schema, { throwIfNoEntry: false })?.isFile()
+  const generated = await generateModules({
+    dir,
+    tsconfig,
+    oneSchema:
+      hasSchema && /\bfrom\s*['"]one\/data['"]/.test(await readFile(schema, 'utf8'))
+        ? schema
+        : undefined,
+  })
   const { files, watchFiles, sourceRoots } = generated
-  if (statSync(schema, { throwIfNoEntry: false })?.isFile()) {
-    files['schema.ts'] = `import { createSchema } from "limesync/zero"
-import * as source from ${JSON.stringify(schema)}
-export const schema = createSchema(source.schema)
-`
+  if (hasSchema) {
+    addAppRegistryModules(files, schema)
     watchFiles.push(schema)
   } else if (options.schema || !files['schema.ts']) {
     throw new Error(`missing limesync schema: ${schema}`)
+  } else {
+    addAppRegistryModules(files)
   }
   if (tsconfig) watchFiles.push(tsconfig)
-  const aggregates = files['aggregates.ts']
-    ? 'import { aggregates } from "./aggregates"\n'
-    : ''
-  files['app.ts'] = `import { createDataApp } from 'limesync/data'
-import { schema } from './schema'
-import { models } from './models'
-import * as groupedQueries from './groupedQueries'
-${aggregates}export const app = createDataApp({ schema, models, groupedQueries${aggregates ? ', aggregates' : ''} })
-export { schema, models, groupedQueries }
-export { instances } from './instances'
-`
-  const validators = files['syncedMutations.ts']
-    ? 'import { mutationValidators } from "./syncedMutations"\n'
-    : 'const mutationValidators = {}\n'
-  files['app-server.ts'] = `import { schema } from './schema'
-import { models } from './models'
-import { queries } from './syncedQueries'
-${validators}export const app = { schema, models, queries, mutationValidators }
-export { queries, mutationValidators }
-`
   return { files, watchFiles: [...new Set(watchFiles)], sourceRoots }
 }
 
@@ -70,6 +59,8 @@ export async function renderAppModule(
     let specifier: string
     if (n === 'valibot') {
       specifier = sourceImport(fileURLToPath(import.meta.resolve('valibot')))
+    } else if (n === 'limesync/zero') {
+      specifier = sourceImport(createRequire(resolve(dir, 'schema.ts')).resolve(n))
     } else if (n.startsWith('.')) {
       const sibling = `${n.slice(2)}.ts`
       specifier =
