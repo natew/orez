@@ -1,4 +1,5 @@
 import { diffPullQueries, pullQueryPatch, type PullState } from './pullQueries.js'
+import { EMPTY_ROWS, RowTable, type Held } from './rows.js'
 import { NativeSync, type SyncOptions } from './sync.js'
 import { NativeView, queryTTL } from './view.js'
 
@@ -45,8 +46,9 @@ type Subscription = {
   listener: (value: unknown, resultType: QueryResultType, error?: QueryError) => void
   onError?: (error: QueryError) => void
   active: boolean
-  // the rows of the last list result delivered, which the next patch indexes
-  rows?: unknown[]
+  // the last result delivered and its interned rows, which the next patch indexes
+  value?: unknown
+  held: Held
 }
 
 // the engine answers only watches whose result, result type or error changed. a
@@ -151,25 +153,11 @@ function queryResult(value: JSONValue, format?: Format): unknown {
   return value
 }
 
-// keeps each unchanged row object, so consumers can skip unchanged rows by identity
-function patchResult(
-  patch: (number | JSONValue)[],
-  previous: unknown[] | undefined,
-  format?: Format
-): unknown[] {
-  if (!previous) throw new Error('Native Zero patch arrived before its first result')
-  const rowFormat: Format | undefined =
-    format?.relationships && hasRelationships(format)
-      ? { relationships: format.relationships }
-      : undefined
-  const out = new Array<unknown>(patch.length)
-  for (let i = 0; i < patch.length; i++) {
-    const entry = patch[i]!
-    if (typeof entry !== 'number') out[i] = queryResult(entry, rowFormat)
-    else if (entry < previous.length) out[i] = previous[entry]
-    else throw new Error('Native Zero patch references a missing row')
-  }
-  return out
+function sameRows(previous: unknown, next: unknown): boolean {
+  if (!Array.isArray(previous) || !Array.isArray(next)) return false
+  if (previous.length !== next.length) return false
+  for (let i = 0; i < next.length; i++) if (previous[i] !== next[i]) return false
+  return true
 }
 
 export class NativeZero<M extends Mutators = Mutators> {
@@ -187,6 +175,7 @@ export class NativeZero<M extends Mutators = Mutators> {
   >()
   private registeredCreators = new WeakSet<object>()
   private views = new Set<NativeView<unknown>>()
+  private rows = new RowTable()
   private identity?: string
   private desiredViews = new Map<
     string,
@@ -664,6 +653,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       watchRequest: serialize({ op: 'watch', id, ast: query.ast, format: query.format }),
       listener,
       active: true,
+      held: [],
     })
     return () => this.unwatch(id)
   }
@@ -680,6 +670,8 @@ export class NativeZero<M extends Mutators = Mutators> {
     if (!subscription) return
     subscription.active = false
     this.subscriptions.delete(id)
+    this.rows.release(subscription.held)
+    subscription.held = []
     if (!this.closed)
       void this.enqueue(() => this.request({ op: 'unwatch', id })).catch((error) =>
         this.report(error)
@@ -724,11 +716,12 @@ export class NativeZero<M extends Mutators = Mutators> {
         hash,
       }),
       active: true,
+      held: [],
       listener: (data, resultType, error) => view.update(data, resultType, error),
       onError: (error) => view.update(view.data, 'error', error),
     }
     const view = new NativeView<unknown>(
-      captured.format?.singular ? undefined : [],
+      captured.format?.singular ? undefined : EMPTY_ROWS,
       () => {
         this.unwatch(id)
         this.views.delete(view)
@@ -790,12 +783,19 @@ export class NativeZero<M extends Mutators = Mutators> {
         if ('failure' in result) throw new Error(result.failure)
         const error: QueryError | undefined =
           result.error === undefined ? undefined : { error: 'app', message: result.error }
-        const value =
+        const next =
           'patch' in result
-            ? patchResult(result.patch, subscription.rows, subscription.format)
-            : queryResult(result.value, subscription.format)
-        subscription.rows = Array.isArray(value) ? value : undefined
-        subscription.listener(value, result.resultType, error)
+            ? this.rows.patch(
+                result.patch,
+                Array.isArray(subscription.value) ? subscription.held : undefined,
+                subscription.format
+              )
+            : this.rows.result(result.value, subscription.format)
+        this.rows.release(subscription.held)
+        subscription.held = next.held
+        // a result whose rows are all unchanged keeps its list
+        if (!sameRows(subscription.value, next.value)) subscription.value = next.value
+        subscription.listener(subscription.value, result.resultType, error)
       } catch (error) {
         if (subscription.onError)
           subscription.onError({
@@ -835,6 +835,7 @@ export class NativeZero<M extends Mutators = Mutators> {
     }
     this.desiredViews.clear()
     this.subscriptions.clear()
+    this.rows.clear()
     const operation = this.tail.then(async () => {
       if (remove) await this.request({ op: 'delete' })
     })
