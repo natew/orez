@@ -16,6 +16,11 @@ type SyncClient = {
   pull(queries: undefined, signal?: AbortSignal): Promise<void>
 }
 
+function isAllocationFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : error
+  return typeof message === 'string' && /\b(?:bad_alloc|out of memory)\b/i.test(message)
+}
+
 export class NativeSync {
   private stopped = false
   private active = true
@@ -24,6 +29,7 @@ export class NativeSync {
   private queued = false
   private requested = false
   private failures = 0
+  private retryNotBefore = 0
   private timer?: ReturnType<typeof setTimeout>
   private attempt?: AbortController
   private unsubscribeWake?: () => void
@@ -72,16 +78,31 @@ export class NativeSync {
   request() {
     if (this.stopped) return
     this.requested = true
-    if (this.timer !== undefined) {
-      clearTimeout(this.timer)
-      this.timer = undefined
-    }
     if (!this.active || !this.online || this.running || this.queued) return
+    const cooldown = this.retryNotBefore - performance.now()
+    if (cooldown > 0) {
+      if (this.timer === undefined) this.schedule(Math.ceil(cooldown))
+      return
+    }
+    this.clearTimer()
     this.queued = true
     queueMicrotask(() => {
       this.queued = false
       void this.run()
     })
+  }
+
+  private schedule(delay: number) {
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      this.request()
+    }, delay)
+  }
+
+  private clearTimer() {
+    if (this.timer === undefined) return
+    clearTimeout(this.timer)
+    this.timer = undefined
   }
 
   setActive(active: boolean) {
@@ -113,10 +134,7 @@ export class NativeSync {
   private changedAvailability() {
     if (!this.active || !this.online) {
       this.disconnectWake()
-      if (this.timer !== undefined) {
-        clearTimeout(this.timer)
-        this.timer = undefined
-      }
+      this.clearTimer()
       this.attempt?.abort()
       this.setState({ name: 'disconnected' })
     } else {
@@ -132,14 +150,14 @@ export class NativeSync {
     const attempt = new AbortController()
     this.attempt = attempt
     if (this.current.name !== 'connected') this.setState({ name: 'connecting' })
-    let failed = false
+    let failureDelay = 0
     try {
       let pushFailed = false
       let pushError: unknown
       try {
         await this.client.push(attempt.signal)
       } catch (error) {
-        if (attempt.signal.aborted) throw error
+        if (attempt.signal.aborted || isAllocationFailure(error)) throw error
         pushFailed = true
         pushError = error
       }
@@ -147,29 +165,30 @@ export class NativeSync {
       if (pushFailed) throw pushError
       if (!attempt.signal.aborted && !this.stopped) {
         this.failures = 0
+        this.retryNotBefore = 0
         this.setState({ name: 'connected' })
       }
     } catch (error) {
-      if (!attempt.signal.aborted && !this.stopped) {
-        failed = true
+      const allocationFailure = isAllocationFailure(error)
+      if (!this.stopped && (!attempt.signal.aborted || allocationFailure)) {
         this.failures++
-        this.setState({ name: 'error', error })
+        failureDelay = Math.min(
+          this.retryMax,
+          this.retryMin * 2 ** Math.min(this.failures - 1, 30)
+        )
+        if (allocationFailure) {
+          // wake notifications and reconnects must respect the allocation backoff.
+          this.retryNotBefore = performance.now() + failureDelay
+        }
+        if (!attempt.signal.aborted) this.setState({ name: 'error', error })
         this.report(error)
       }
     } finally {
       this.running = false
       this.attempt = undefined
       if (!this.stopped && this.active && this.online) {
-        if (this.requested && !failed) this.request()
-        else {
-          const delay = failed
-            ? Math.min(
-                this.retryMax,
-                this.retryMin * 2 ** Math.min(this.failures - 1, 30)
-              )
-            : this.pullInterval
-          this.timer = setTimeout(() => this.request(), delay)
-        }
+        if (this.requested && !failureDelay) this.request()
+        else this.schedule(failureDelay || this.pullInterval)
       }
     }
   }
@@ -177,7 +196,7 @@ export class NativeSync {
   stop() {
     if (this.stopped) return
     this.stopped = true
-    if (this.timer !== undefined) clearTimeout(this.timer)
+    this.clearTimer()
     this.attempt?.abort()
     this.disconnectWake()
     this.setState({ name: 'closed' })
