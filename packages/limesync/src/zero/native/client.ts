@@ -429,15 +429,14 @@ export class NativeZero<M extends Mutators = Mutators> {
         mutation: Mutation
       }>(request)
       let result: unknown
-      try {
-        result = await this.invoke(mutation, transaction, 'optimistic')
-        await this.request({ op: 'commitMutation', transaction })
-      } catch (error) {
-        await this.request({ op: 'rollback', transaction })
-        throw error
-      }
+      await this.publishThenCommit(
+        transaction,
+        async () => {
+          result = await this.invoke(mutation, transaction, 'optimistic')
+        },
+        'commitMutation'
+      )
       committed(mutation)
-      await this.publish()
       this.sync?.request()
       return result
     })
@@ -460,20 +459,43 @@ export class NativeZero<M extends Mutators = Mutators> {
       changed: boolean
       lastMutationID: number
     }>(pullPayload)
-    try {
-      for (const mutation of pending) await this.invoke(mutation, transaction, 'rebase')
-      await this.request({ op: 'commitPull', transaction })
-    } catch (error) {
-      await this.request({ op: 'rollback', transaction })
-      throw error
-    }
+    await this.publishThenCommit(
+      transaction,
+      async () => {
+        for (const mutation of pending) await this.invoke(mutation, transaction, 'rebase')
+      },
+      'commitPull',
+      changed
+    )
     for (const [id, settle] of this.serverResults) {
       if (id <= lastMutationID) {
         settle({ type: 'success' })
         this.serverResults.delete(id)
       }
     }
-    if (changed) await this.publish()
+  }
+
+  // listeners get the transaction's rows before its commit writes them out; a failed
+  // commit rolls back and republishes the rows that remain.
+  private async publishThenCommit(
+    transaction: string,
+    operation: () => Promise<void>,
+    commit: 'commitMutation' | 'commitPull',
+    changed = true
+  ) {
+    let published = false
+    try {
+      await operation()
+      if (changed) {
+        published = true
+        await this.publish(transaction)
+      }
+      await this.request({ op: commit, transaction })
+    } catch (error) {
+      await this.request({ op: 'rollback', transaction })
+      if (published) await this.publish().catch((failure) => this.report(failure))
+      throw error
+    }
   }
 
   pull(queries?: readonly DesiredQuery[], signal?: AbortSignal): Promise<void> {
@@ -661,9 +683,9 @@ export class NativeZero<M extends Mutators = Mutators> {
     })
   }
 
-  private async publish() {
+  private async publish(transaction?: string) {
     if (this.subscriptions.size)
-      this.deliver(await this.dispatch<Published>('{"op":"publish"}'))
+      this.deliver(await this.request<Published>({ op: 'publish', transaction }))
   }
 
   private deliver({ results }: Published) {

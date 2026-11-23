@@ -43,6 +43,9 @@ struct Json {
     if (found == std::get<Object>(value).end()) throw std::runtime_error("missing field: " + key);
     return found->second;
   }
+  Json& at(const std::string& key) {
+    return const_cast<Json&>(static_cast<const Json&>(*this).at(key));
+  }
   const Json& get(const std::string& key) const {
     static const Json absent;
     return has(key) ? at(key) : absent;
@@ -55,6 +58,7 @@ struct Json {
     if (!array()) throw std::runtime_error("expected an array");
     return std::get<Array>(value);
   }
+  Array& items() { return const_cast<Array&>(static_cast<const Json&>(*this).items()); }
   const Object& fields() const {
     if (!object()) throw std::runtime_error("expected an object");
     return std::get<Object>(value);
