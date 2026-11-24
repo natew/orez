@@ -182,6 +182,7 @@
     },
     "./data/kv-store": {
       "types": "./dist/data/kvStore.d.ts",
+      "one-native": "./dist/data/kvStore.one.js",
       "react-native": "./dist/data/kvStore.native.js",
       "default": "./dist/data/kvStore.js"
     },
@@ -249,7 +250,8 @@
   "peerDependencies": {
     "vite": ">=5",
     "react": "*",
-    "better-auth": ">=1.6.0 <2"
+    "better-auth": ">=1.6.0 <2",
+    "one": "*"
   },
   "peerDependenciesMeta": {
     "vite": {
@@ -259,6 +261,9 @@
       "optional": true
     },
     "better-auth": {
+      "optional": true
+    },
+    "one": {
       "optional": true
     }
   },
