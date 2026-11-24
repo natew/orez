@@ -1,4 +1,3 @@
-import * as v from './validate'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createSchema, defineQueries, defineQuery, string, table } from '../zero/zero.js'
@@ -10,6 +9,7 @@ import {
   type ZeroServerMutatorRegistry,
   type ZeroServerTransaction,
 } from './server.js'
+import * as v from './validate'
 import { zql } from './zql.js'
 
 import type { AuthData, MutatorContext } from './types.js'

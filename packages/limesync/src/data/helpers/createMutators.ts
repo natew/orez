@@ -189,7 +189,8 @@ export function createMutators<Models extends GenericModels>({
       // declares anything instead: a void schema, or an object with no entries.
       const declaresNothing =
         validator?.kind === 'void' ||
-        (validator?.kind === 'object' && Object.keys(validator.entries ?? {}).length === 0)
+        (validator?.kind === 'object' &&
+          Object.keys(validator.entries ?? {}).length === 0)
       if (validator && !declaresNothing) parse(validator, args[1])
       // then run user-provided validation hook as escape hatch
       if (validateMutation) {

@@ -1,6 +1,5 @@
 import { runInNewContext } from 'node:vm'
 
-import * as v from './validate'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -9,6 +8,7 @@ import {
   generateSyncedMutationsFile,
   generateTablesFile,
 } from './generate-helpers.js'
+import * as v from './validate'
 
 // the emitted files are modules, so every identifier they declare has to be
 // unique. these cases all come from namespace names that are individually legal
@@ -114,7 +114,8 @@ describe('generated mutation validators', () => {
           {
             name: 'upsert',
             paramType: '{ id: string; draft: boolean }',
-            validatorCode: 'v.object({\n    id: v.string(),\n    draft: v.boolean(),\n  })',
+            validatorCode:
+              'v.object({\n    id: v.string(),\n    draft: v.boolean(),\n  })',
           },
         ],
       },

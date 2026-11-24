@@ -11,7 +11,6 @@ import { getZQL, setEnvironment, setSchema } from './state.js'
 import { setEvaluatingPermission } from './where.js'
 import { setRunner } from './zeroRunner.js'
 
-import type { Check } from './validate.js'
 import type { handleQueryRequest as zeroHandleQueryRequest } from '../zero/server.js'
 import type {
   AnyQueryRegistry,
@@ -29,6 +28,7 @@ import type {
   QueryBuilder,
   Transaction,
 } from './types.js'
+import type { Check } from './validate.js'
 
 // a host that runs these bindings off node supplies its own AsyncLocalStorage;
 // without one, every server mutator's authData and ambient context are null.

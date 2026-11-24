@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 
-import * as v from './validate'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import * as zero from '../zero/zero.js'
@@ -22,6 +21,7 @@ import {
   generateModules,
 } from './generate.js'
 import { createNativeTypeScriptProject } from './native-typescript.js'
+import * as v from './validate'
 
 const testDir = join(tmpdir(), 'limesync-data-test-' + Date.now())
 

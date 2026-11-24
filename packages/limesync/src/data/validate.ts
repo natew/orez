@@ -51,7 +51,8 @@ export const number = () =>
   )
 export const boolean = () => check<boolean>('boolean', typeOf('boolean'))
 export const unknown = () => check<unknown>('unknown', () => undefined)
-export const never = () => check<never>('never', (_, path) => ({ message: 'unexpected value', path }))
+export const never = () =>
+  check<never>('never', (_, path) => ({ message: 'unexpected value', path }))
 export const void_ = () => check<void>('void', typeOf('undefined'))
 export const null_ = () =>
   check<null>('null', (value, path) =>
@@ -60,7 +61,9 @@ export const null_ = () =>
 
 export const literal = <const T extends string | number | boolean>(expected: T) =>
   check<T>('literal', (value, path) =>
-    value === expected ? undefined : { message: `expected ${JSON.stringify(expected)}`, path }
+    value === expected
+      ? undefined
+      : { message: `expected ${JSON.stringify(expected)}`, path }
   )
 
 export const optional = <T>(inner: Check<T>) =>

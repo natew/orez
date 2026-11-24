@@ -6,11 +6,11 @@ import {
   type JoinConfig,
 } from 'better-auth/adapters'
 
+import type { OneDataSchema, OneDataTable } from './data/one-schema.js'
 import type {
   LocalApplicationSqlClient,
   LocalApplicationSqlTransaction,
 } from './local-application-sql.js'
-import type { OneDataSchema, OneDataTable } from './data/one-schema.js'
 import type { BetterAuthOptions } from 'better-auth'
 
 type Database = LocalApplicationSqlClient
@@ -317,7 +317,9 @@ function customAdapter(
 
 export function betterAuthAdapter(db: Database, schema: OneDataSchema) {
   return (options: BetterAuthOptions) => {
-    const configure = (bound?: LocalApplicationSqlTransaction): DBAdapter<BetterAuthOptions> =>
+    const configure = (
+      bound?: LocalApplicationSqlTransaction
+    ): DBAdapter<BetterAuthOptions> =>
       createAdapterFactory({
         config: {
           adapterId: 'limesync-sqlite',
