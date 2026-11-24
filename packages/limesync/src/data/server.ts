@@ -11,6 +11,7 @@ import { getZQL, setEnvironment, setSchema } from './state.js'
 import { setEvaluatingPermission } from './where.js'
 import { setRunner } from './zeroRunner.js'
 
+import type { Check } from './validate.js'
 import type { handleQueryRequest as zeroHandleQueryRequest } from '../zero/server.js'
 import type {
   AnyQueryRegistry,
@@ -160,7 +161,7 @@ export type CreateZeroServerBindingsOptions<
   createServerActions: () => ServerActions
   actions?: ZeroServerActionsConfig<Action>
   queries?: AnyQueryRegistry
-  mutations?: Record<string, Record<string, unknown>>
+  mutations?: Record<string, Record<string, Check<unknown>>>
   validateQuery?: ValidateQueryFn
   validateMutation?: ValidateMutationFn
   defaultAllowAdminRole?: AdminRoleMode
