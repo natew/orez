@@ -1,5 +1,6 @@
-import { dropStore, SQLiteStore, type StoreProvider } from '../zero/sqlite.js'
 import { Database, FileSystem, platform } from 'one'
+
+import { dropStore, SQLiteStore, type StoreProvider } from '../zero/sqlite.js'
 
 // a One app without React Native keeps the zero local cache in One's own
 // platform SQLite, in the directory the OS backs up with app data.
@@ -12,7 +13,9 @@ export function createZeroKvStore(): StoreProvider {
   directory.create({ idempotent: true })
 
   const open = (filename: string) => {
-    const db = new Database(decodeURIComponent(new URL(new File(directory, filename).uri).pathname))
+    const db = new Database(
+      decodeURIComponent(new URL(new File(directory, filename).uri).pathname)
+    )
     return {
       close: () => db.close(),
       destroy() {
