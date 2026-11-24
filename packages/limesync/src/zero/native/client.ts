@@ -566,15 +566,17 @@ export class NativeZero<M extends Mutators = Mutators> {
             throw new Error('Native Zero query hash refers to different queries')
           desired!.set(hash, view.desired)
         }
-        const queries = desired ? [...desired.values()] : undefined
+        const applied = this.appliedQueries?.queries
         if (
-          this.appliedQueries &&
-          (!queries || dequal(queries, this.appliedQueries.queries))
+          applied &&
+          (!desired ||
+            (desired.size === applied.length &&
+              applied.every((query) => dequal(query, desired.get(query.hash)))))
         )
           return this.requestState({ op: 'state' })
         return this.request<ClientState>({
           op: 'setQueries',
-          queries,
+          queries: desired ? [...desired.values()] : undefined,
         })
       })
       const patch = diffPullQueries(state, this.appliedQueries)

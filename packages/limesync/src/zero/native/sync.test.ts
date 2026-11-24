@@ -81,7 +81,7 @@ test('native pulls send only query changes after the replica commits them', asyn
     await expect(zero.pull([second])).rejects.toThrow('response lost')
     loseResponse = false
     await zero.pull([first, second])
-    await zero.pull([first, second])
+    await zero.pull([second, first])
     await zero.push()
     expect(requests).toEqual([
       { version: 1, baseVersion: 0, patch: [{ op: 'clear' }, { op: 'put', ...first }] },
