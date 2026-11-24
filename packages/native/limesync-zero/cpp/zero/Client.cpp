@@ -1010,17 +1010,19 @@ struct Client::Impl {
     }
     return result;
   }
-  Json state() {
-    return Json::Object{{"clientID", clientID},
+  Json state(const Json& knownQueryVersion = Json()) {
+    const Json queryVersion = meta("queryVersion");
+    Json::Object result{{"clientID", clientID},
                         {"clientGroupID", clientID},
                         {"cookie", meta("cookie")},
                         {"nextMutationID", meta("nextMutationID")},
                         {"lastMutationID", meta("lastMutationID")},
-                        {"queryVersion", meta("queryVersion")},
-                        {"queries", meta("queries")},
+                        {"queryVersion", queryVersion},
                         {"recoveryRequired", meta("recoveryRequired")},
                         {"completedQueries", meta("completedQueries")},
                         {"queryErrors", meta("queryErrors")}};
+    if (knownQueryVersion != queryVersion) result.emplace("queries", meta("queries"));
+    return result;
   }
   void begin(const std::string& kind) {
     if (!transaction.empty()) throw std::runtime_error("a native transaction is already active");
@@ -1327,7 +1329,7 @@ struct Client::Impl {
       return Json();
     }
     if (op == "publish") return publish(nullptr);
-    if (op == "state") return state();
+    if (op == "state") return state(request.get("queryVersion"));
     if (op == "pending") return pending();
     if (op == "rollback") {
       rollback();
@@ -1343,7 +1345,7 @@ struct Client::Impl {
       if (transaction.empty() || transactionKind != (op == "commitMutation" ? "mutation" : "pull"))
         throw std::runtime_error("wrong native transaction kind");
       commit();
-      return state();
+      return state(request.get("queryVersion"));
     }
     throw std::runtime_error("unsupported native Zero operation: " + op);
   }

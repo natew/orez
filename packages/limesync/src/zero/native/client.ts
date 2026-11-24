@@ -254,6 +254,19 @@ export class NativeZero<M extends Mutators = Mutators> {
     }
   }
 
+  private async requestState(
+    request: EngineRequest,
+    known = this.appliedQueries
+  ): Promise<ClientState> {
+    const { queries, ...state } = await this.request<
+      Omit<ClientState, 'queries'> & Partial<Pick<ClientState, 'queries'>>
+    >({ ...request, queryVersion: known?.queryVersion })
+    if (queries !== undefined) return { ...state, queries }
+    if (!known || known.queryVersion !== state.queryVersion)
+      throw new Error('Native Zero omitted queries for an unknown version')
+    return { ...state, queries: known.queries }
+  }
+
   private query<T>(query: Query, transaction?: string): Promise<T>
   private async query(query: Query, transaction?: string): Promise<unknown> {
     return queryResult(
@@ -467,7 +480,12 @@ export class NativeZero<M extends Mutators = Mutators> {
         async () => {
           result = await this.invoke(mutation, transaction, 'optimistic')
         },
-        'commitMutation'
+        () =>
+          this.request({
+            op: 'commitMutation',
+            transaction,
+            queryVersion: this.appliedQueries?.queryVersion,
+          })
       )
       committed(mutation)
       this.sync?.request()
@@ -492,7 +510,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       async () => {
         for (const mutation of pending) await this.invoke(mutation, transaction, 'rebase')
       },
-      'commitPull',
+      () => this.requestState({ op: 'commitPull', transaction }, state),
       changed
     )
     for (const [id, settle] of this.serverResults) {
@@ -506,10 +524,10 @@ export class NativeZero<M extends Mutators = Mutators> {
 
   // listeners get the transaction's rows before its commit writes them out; a failed
   // commit rolls back and republishes the rows that remain.
-  private async publishThenCommit(
+  private async publishThenCommit<T>(
     transaction: string,
     operation: () => Promise<void>,
-    commit: 'commitMutation' | 'commitPull',
+    commit: () => Promise<T>,
     changed = true
   ) {
     let published = false
@@ -519,7 +537,7 @@ export class NativeZero<M extends Mutators = Mutators> {
         published = true
         await this.publish(transaction)
       }
-      return await this.request<ClientState>({ op: commit, transaction })
+      return await commit()
     } catch (error) {
       await this.request({ op: 'rollback', transaction })
       if (published) await this.publish().catch((failure) => this.report(failure))
@@ -548,9 +566,15 @@ export class NativeZero<M extends Mutators = Mutators> {
             throw new Error('Native Zero query hash refers to different queries')
           desired!.set(hash, view.desired)
         }
+        const queries = desired ? [...desired.values()] : undefined
+        if (
+          this.appliedQueries &&
+          (!queries || dequal(queries, this.appliedQueries.queries))
+        )
+          return this.requestState({ op: 'state' })
         return this.request<ClientState>({
           op: 'setQueries',
-          queries: desired ? [...desired.values()] : undefined,
+          queries,
         })
       })
       const patch = diffPullQueries(state, this.appliedQueries)
@@ -596,7 +620,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       const transport = this.options.transport
       if (!transport) throw new Error('Native Zero transport is not configured')
       const { state, pending } = await this.enqueue(async () => ({
-        state: await this.request<ClientState>({ op: 'state' }),
+        state: await this.requestState({ op: 'state' }),
         pending: await this.request<Mutation[]>({ op: 'pending' }),
       }))
       if (state.recoveryRequired !== null)

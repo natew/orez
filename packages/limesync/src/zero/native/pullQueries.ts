@@ -20,6 +20,7 @@ export function diffPullQueries(
   state: Pick<ClientState, 'queries' | 'queryVersion'>,
   previous?: Pick<ClientState, 'queries' | 'queryVersion'>
 ): QueryPatch | null {
+  if (previous?.queryVersion === state.queryVersion) return null
   const patch: QueryPatch['patch'] = []
   if (!previous) patch.push({ op: 'clear' })
   const retained = new Map(previous?.queries.map((query) => [query.hash, query]))

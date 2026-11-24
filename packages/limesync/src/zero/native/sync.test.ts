@@ -20,6 +20,8 @@ test('native pulls send only query changes after the replica commits them', asyn
     queryErrors: {},
   }
   const requests: unknown[] = []
+  const configured: unknown[] = []
+  const compactReads: string[] = []
   let loseResponse = false
   const transport = createOrezTransport({
     server: 'https://zero.test',
@@ -38,9 +40,10 @@ test('native pulls send only query changes after the replica commits them', asyn
       async execute(input) {
         switch (input.op) {
           case 'setQueries':
+            configured.push(input.queries)
             state.queries = Array.isArray(input.queries) ? input.queries : state.queries
             state.queryVersion++
-            return state
+            return { ...state }
           case 'beginPull':
             expect(input.response).toBe(JSON.stringify({ cookie: state.cookie }))
             return {
@@ -49,8 +52,17 @@ test('native pulls send only query changes after the replica commits them', asyn
               changed: false,
               lastMutationID: 0,
             }
-          case 'commitPull':
-            return state
+          case 'state':
+          case 'commitPull': {
+            if (input.queryVersion === state.queryVersion) {
+              compactReads.push(input.op)
+              const { queries, ...rest } = state
+              return rest
+            }
+            return { ...state }
+          }
+          case 'pending':
+            return []
           default:
             throw new Error('unexpected engine operation ' + input.op)
         }
@@ -70,17 +82,29 @@ test('native pulls send only query changes after the replica commits them', asyn
     loseResponse = false
     await zero.pull([first, second])
     await zero.pull([first, second])
+    await zero.push()
     expect(requests).toEqual([
       { version: 1, baseVersion: 0, patch: [{ op: 'clear' }, { op: 'put', ...first }] },
       undefined,
-      { version: 3, baseVersion: 1, patch: [{ op: 'put', ...second }] },
-      { version: 4, baseVersion: 3, patch: [{ op: 'del', hash: first.hash }] },
+      { version: 2, baseVersion: 1, patch: [{ op: 'put', ...second }] },
+      { version: 3, baseVersion: 2, patch: [{ op: 'del', hash: first.hash }] },
       {
-        version: 5,
+        version: 4,
         baseVersion: 0,
         patch: [{ op: 'clear' }, { op: 'put', ...first }, { op: 'put', ...second }],
       },
       undefined,
+    ])
+    expect(configured).toEqual([[first], [first, second], [second], [first, second]])
+    expect(compactReads).toEqual([
+      'commitPull',
+      'state',
+      'commitPull',
+      'commitPull',
+      'commitPull',
+      'state',
+      'commitPull',
+      'state',
     ])
   } finally {
     await zero.close()
