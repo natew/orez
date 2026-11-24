@@ -159,11 +159,13 @@
     },
     "./data/snapshot": {
       "types": "./dist/data/snapshot.d.ts",
+      "one-native": "./dist/data/snapshot.native.js",
       "react-native": "./dist/data/snapshot.native.js",
       "default": "./dist/data/snapshot.js"
     },
     "./data": {
       "types": "./dist/data/index.d.ts",
+      "one-native": "./dist/data/index.native.js",
       "react-native": "./dist/data/index.native.js",
       "default": "./dist/data/index.js"
     },
@@ -173,6 +175,7 @@
     },
     "./data/multi": {
       "types": "./dist/data/multi.d.ts",
+      "one-native": "./dist/data/multi.native.js",
       "react-native": "./dist/data/multi.native.js",
       "default": "./dist/data/multi.js"
     },

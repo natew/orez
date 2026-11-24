@@ -17,6 +17,7 @@
     "./package.json": "./package.json",
     ".": {
       "types": "./dist/index.d.ts",
+      "one-native": "./dist/index.native.js",
       "react-native": "./dist/index.native.js",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
