@@ -24,30 +24,41 @@ std::atomic<uint64_t> nextTransaction{0};
 // prepares another.
 class Statements {
  public:
+  struct Lease {
+    sqlite3_stmt* statement;
+    // rehashing preserves cache entries until their owner is destroyed.
+    std::vector<sqlite3_stmt*>* idle;
+    std::string newKey;
+  };
+
   explicit Statements(sqlite3* db) : db_(db) {}
   ~Statements() { clear(); }
   Statements(const Statements&) = delete;
   sqlite3* db() const { return db_; }
-  sqlite3_stmt* take(const std::string& sql) {
+  Lease take(std::string_view sql) {
     auto found = idle_.find(sql);
     if (found != idle_.end() && !found->second.empty()) {
       sqlite3_stmt* stmt = found->second.back();
       found->second.pop_back();
       --count_;
-      return stmt;
+      return {stmt, &found->second, {}};
     }
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v3(db_, sql.c_str(), -1, SQLITE_PREPARE_PERSISTENT, &stmt, nullptr) !=
-        SQLITE_OK)
+    Lease lease{nullptr, found != idle_.end() ? &found->second : nullptr, {}};
+    if (!lease.idle) lease.newKey = sql;
+    const auto& text = lease.idle ? found->first : lease.newKey;
+    if (sqlite3_prepare_v3(db_, text.c_str(), -1, SQLITE_PREPARE_PERSISTENT, &lease.statement,
+                          nullptr) != SQLITE_OK)
       throw std::runtime_error(sqlite3_errmsg(db_));
-    return stmt;
+    return lease;
   }
-  void give(const std::string& sql, sqlite3_stmt* stmt) noexcept {
+  void give(Lease& lease) noexcept {
+    sqlite3_stmt* stmt = lease.statement;
     sqlite3_reset(stmt);
     sqlite3_clear_bindings(stmt);
     if (count_ < 256) {
       try {
-        idle_[sql].push_back(stmt);
+        auto& idle = lease.idle ? *lease.idle : idle_[std::move(lease.newKey)];
+        idle.push_back(stmt);
         ++count_;
         return;
       } catch (const std::bad_alloc&) {
@@ -56,6 +67,7 @@ class Statements {
     }
     sqlite3_finalize(stmt);
   }
+ private:
   void clear() {
     for (auto& [unused, stmts] : idle_)
       for (sqlite3_stmt* stmt : stmts) sqlite3_finalize(stmt);
@@ -63,61 +75,65 @@ class Statements {
     count_ = 0;
   }
 
- private:
+  struct SqlHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view sql) const noexcept {
+      return std::hash<std::string_view>{}(sql);
+    }
+  };
   sqlite3* db_;
-  std::unordered_map<std::string, std::vector<sqlite3_stmt*>> idle_;
+  std::unordered_map<std::string, std::vector<sqlite3_stmt*>, SqlHash, std::equal_to<>> idle_;
   size_t count_ = 0;
 };
 
 class Statement {
  public:
-  Statement(Statements& cache, std::string sql)
-      : cache_(cache), db_(cache.db()), sql_(std::move(sql)), stmt_(cache.take(sql_)) {}
-  ~Statement() { cache_.give(sql_, stmt_); }
+  Statement(Statements& cache, std::string_view sql)
+      : cache_(cache), db_(cache.db()), lease_(cache.take(sql)) {}
+  ~Statement() { cache_.give(lease_); }
   Statement(const Statement&) = delete;
-  sqlite3_stmt* get() const { return stmt_; }
+  sqlite3_stmt* get() const { return lease_.statement; }
   void bind(int index, const Json& v) {
     int code;
     if (v.null())
-      code = sqlite3_bind_null(stmt_, index);
+      code = sqlite3_bind_null(get(), index);
     else if (const auto* s = std::get_if<std::string>(&v.value))
       code =
-          sqlite3_bind_text(stmt_, index, s->data(), static_cast<int>(s->size()), SQLITE_TRANSIENT);
+          sqlite3_bind_text(get(), index, s->data(), static_cast<int>(s->size()), SQLITE_TRANSIENT);
     else if (const auto* n = std::get_if<double>(&v.value))
-      code = sqlite3_bind_double(stmt_, index, *n);
+      code = sqlite3_bind_double(get(), index, *n);
     else if (const auto* b = std::get_if<bool>(&v.value))
-      code = sqlite3_bind_int(stmt_, index, *b);
+      code = sqlite3_bind_int(get(), index, *b);
     else
       throw std::runtime_error("expected a scalar SQL parameter");
     if (code != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db_));
   }
   // the text must outlive the step that reads it.
   void bindText(int index, std::string_view text) {
-    if (sqlite3_bind_text(stmt_, index, text.data(), static_cast<int>(text.size()), SQLITE_STATIC) !=
+    if (sqlite3_bind_text(get(), index, text.data(), static_cast<int>(text.size()), SQLITE_STATIC) !=
         SQLITE_OK)
       throw std::runtime_error(sqlite3_errmsg(db_));
   }
   bool step() {
-    int code = sqlite3_step(stmt_);
+    int code = sqlite3_step(get());
     if (code == SQLITE_ROW) return true;
     if (code == SQLITE_NOMEM) throw std::bad_alloc();
     if (code != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db_));
     return false;
   }
-  bool null(int col) const { return sqlite3_column_type(stmt_, col) == SQLITE_NULL; }
+  bool null(int col) const { return sqlite3_column_type(get(), col) == SQLITE_NULL; }
   std::string text(int col) const { return std::string(view(col)); }
   std::string_view view(int col) const {
-    auto* value = sqlite3_column_text(stmt_, col);
+    auto* value = sqlite3_column_text(get(), col);
     return value ? std::string_view(reinterpret_cast<const char*>(value),
-                                    sqlite3_column_bytes(stmt_, col))
+                                    sqlite3_column_bytes(get(), col))
                  : std::string_view();
   }
 
  private:
   Statements& cache_;
   sqlite3* db_;
-  std::string sql_;
-  sqlite3_stmt* stmt_;
+  Statements::Lease lease_;
 };
 
 void sql(Statements& db, const std::string& text, const std::vector<Json>& args = {}) {
