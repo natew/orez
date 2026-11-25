@@ -267,10 +267,8 @@ struct Answer {
   Json value;
 
   Json row(size_t index) const {
-    const auto& item = value.items()[index];
-    if (std::holds_alternative<Json::Serialized>(item.value))
-      return Json::Serialized{(*rows)[index]};
-    return item;
+    if (value.array()) return value.items()[index];
+    return Json::Serialized{(*rows)[index]};
   }
 };
 
@@ -828,11 +826,8 @@ struct Client::Impl {
     return nested;
   }
 
-  Json query(const Json& ast, const Json& format, const Json* correlation = nullptr,
-             const Json* parent = nullptr, unsigned depth = 0, PreparedQuery* prepared = nullptr) {
-    if (depth > 32) throw std::runtime_error("relationship nesting exceeds 32 levels");
-    PreparedQuery local;
-    auto& plan = prepared ? *prepared : local;
+  void readQueryRows(const Json& ast, const Json* correlation, const Json* parent,
+                     PreparedQuery& plan, auto&& read) {
     if (!plan.compiled) plan.compiled.emplace(compile(ast, "r", correlation, "", "", parent != nullptr));
     const auto& compiled = *plan.compiled;
     Statement statement(*statements, compiled.sql);
@@ -840,13 +835,21 @@ struct Client::Impl {
     if (parent)
       for (auto field : compiled.parentFields) statement.bind(parameter++, parent->at(field));
     for (const auto& arg : compiled.args) statement.bind(parameter++, arg);
+    while (statement.step())
+      if (!read(statement.view(0))) break;
+  }
+
+  Json query(const Json& ast, const Json& format, const Json* correlation = nullptr,
+             const Json* parent = nullptr, unsigned depth = 0, PreparedQuery* prepared = nullptr) {
+    if (depth > 32) throw std::runtime_error("relationship nesting exceeds 32 levels");
+    PreparedQuery local;
+    auto& plan = prepared ? *prepared : local;
     const bool hasRelated = ast.has("related");
     const bool singular = format.flag("singular");
     Json::Array rows;
-    while (statement.step()) {
+    readQueryRows(ast, correlation, parent, plan, [&](std::string_view stored) {
       // stored rows already passed JSON validation; only parents need field access.
-      Json row = hasRelated ? Json::parse(statement.view(0))
-                            : Json(Json::Serialized{statement.text(0)});
+      Json row = hasRelated ? Json::parse(stored) : Json(Json::Serialized{std::string(stored)});
       if (hasRelated) {
         const auto& relationships = ast.at("related").items();
         if (plan.related.empty()) plan.related.resize(relationships.size());
@@ -861,8 +864,8 @@ struct Client::Impl {
         }
       }
       rows.push_back(std::move(row));
-      if (singular) break;
-    }
+      return !singular;
+    });
     if (singular) return rows.empty() ? Json() : std::move(rows.front());
     return rows;
   }
@@ -935,19 +938,25 @@ struct Client::Impl {
       if (found == results.end()) {
         Answer answer;
         try {
-          Json value = query(watch.ast, watch.format, nullptr, nullptr, 0, &watch.plan);
-          if (value.array()) {
+          if (!watch.ast.has("related") && !watch.format.flag("singular")) {
             auto rows = std::make_shared<std::vector<std::string>>();
-            rows->reserve(value.items().size());
-            for (Json& row : value.items()) {
-              auto* serialized = std::get_if<Json::Serialized>(&row.value);
-              rows->push_back(serialized ? std::move(serialized->text) : row.dump());
-            }
+            readQueryRows(watch.ast, nullptr, nullptr, watch.plan, [&](std::string_view stored) {
+              rows->emplace_back(stored);
+              return true;
+            });
             answer.rows = std::move(rows);
           } else {
-            answer.text = value.dump();
+            Json value = query(watch.ast, watch.format, nullptr, nullptr, 0, &watch.plan);
+            if (value.array()) {
+              auto rows = std::make_shared<std::vector<std::string>>();
+              rows->reserve(value.items().size());
+              for (const Json& row : value.items()) rows->push_back(row.dump());
+              answer.rows = std::move(rows);
+            } else {
+              answer.text = value.dump();
+            }
+            answer.value = std::move(value);
           }
-          answer.value = std::move(value);
         } catch (const std::bad_alloc&) {
           throw;
         } catch (const std::exception& failure) {
