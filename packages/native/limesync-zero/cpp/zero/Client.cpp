@@ -242,12 +242,19 @@ struct PreparedQuery {
   std::vector<PreparedQuery> related;
 };
 
-struct Watch {
-  std::string request;
+struct WatchDefinition {
   Json ast;
   Json format;
-  std::string hash;
   std::set<std::string> tables;
+  PreparedQuery plan;
+  size_t observers = 0;
+};
+
+using WatchDefinitions = std::map<std::string, WatchDefinition>;
+
+struct Watch {
+  WatchDefinitions::iterator definition;
+  std::string hash;
   bool published = false;
   size_t digest = 0;
   size_t size = 0;
@@ -255,7 +262,6 @@ struct Watch {
   std::shared_ptr<const std::vector<std::string>> rows;
   std::string resultType;
   std::string error;
-  PreparedQuery plan;
 };
 
 // one query's answer: a list result keeps each serialized row so a watch can
@@ -278,6 +284,7 @@ struct Client::Impl {
   sqlite3* db = nullptr;
   std::unique_ptr<Statements> statements;
   std::mutex mutex;
+  WatchDefinitions watchDefinitions;
   std::map<int64_t, Watch> watches;
   // tables whose view rows may have changed since the last publish.
   std::set<std::string> changedTables;
@@ -905,7 +912,7 @@ struct Client::Impl {
       for (const Json& hash : completedQueries.items()) completed.insert(hash.string());
       errors = meta("queryErrors");
     }
-    std::unordered_map<std::string_view, Answer> results;
+    std::unordered_map<const WatchDefinition*, Answer> results;
     struct Publication {
       Watch& watch;
       const Answer* answer;
@@ -917,12 +924,13 @@ struct Client::Impl {
     std::vector<Publication> changed;
     for (auto it = first; it != end; ++it) {
       auto& [id, watch] = *it;
+      auto& definition = watch.definition->second;
       const bool failed = !watch.hash.empty() && errors.has(watch.hash);
       std::string error = failed ? errors.at(watch.hash).string() : "";
       std::string resultType = failed                            ? "error"
                                : completed.contains(watch.hash) ? "complete"
                                                                 : "unknown";
-      bool dirty = allTablesChanged || std::any_of(watch.tables.begin(), watch.tables.end(),
+      bool dirty = allTablesChanged || std::any_of(definition.tables.begin(), definition.tables.end(),
                                                    [&](const std::string& table) {
                                                      return changedTables.contains(table);
                                                    });
@@ -934,19 +942,19 @@ struct Client::Impl {
           continue;
         }
       }
-      auto found = results.find(watch.request);
+      auto found = results.find(&definition);
       if (found == results.end()) {
         Answer answer;
         try {
-          if (!watch.ast.has("related") && !watch.format.flag("singular")) {
+          if (!definition.ast.has("related") && !definition.format.flag("singular")) {
             auto rows = std::make_shared<std::vector<std::string>>();
-            readQueryRows(watch.ast, nullptr, nullptr, watch.plan, [&](std::string_view stored) {
+            readQueryRows(definition.ast, nullptr, nullptr, definition.plan, [&](std::string_view stored) {
               rows->emplace_back(stored);
               return true;
             });
             answer.rows = std::move(rows);
           } else {
-            Json value = query(watch.ast, watch.format, nullptr, nullptr, 0, &watch.plan);
+            Json value = query(definition.ast, definition.format, nullptr, nullptr, 0, &definition.plan);
             if (value.array()) {
               auto rows = std::make_shared<std::vector<std::string>>();
               rows->reserve(value.items().size());
@@ -962,7 +970,7 @@ struct Client::Impl {
         } catch (const std::exception& failure) {
           answer = {false, {}, failure.what(), {}};
         }
-        found = results.emplace(watch.request, std::move(answer)).first;
+        found = results.emplace(&definition, std::move(answer)).first;
       }
       const Answer& answer = found->second;
       size_t digest = 0;
@@ -996,7 +1004,7 @@ struct Client::Impl {
           Json::Array patch(current.size());
           size_t aligned = 0;
           // relationship projections can overwrite a primary key and produce duplicate rows.
-          if (!watch.ast.has("related")) {
+          if (!watch.definition->second.ast.has("related")) {
             const auto shared = std::min(previous.size(), current.size());
             for (size_t i = 0; i < shared; ++i) {
               if (!answer || previous[i] == current[i]) {
@@ -1372,22 +1380,37 @@ struct Client::Impl {
     }
     if (op == "watch") {
       int64_t id = integer(request.at("id"), "watch id");
-      Watch watch;
-      watch.ast = request.at("ast");
-      watch.format = request.get("format");
-      if (request.has("hash")) watch.hash = request.at("hash").string();
-      watch.request = "{\"ast\":";
-      watch.ast.append(watch.request);
-      watch.request += ",\"format\":";
-      watch.format.append(watch.request);
-      watch.request += '}';
-      watchedTables(watch.ast, watch.tables, 0);
-      if (!watches.emplace(id, std::move(watch)).second)
-        throw std::runtime_error("watch id is already registered");
+      const auto& ast = request.at("ast");
+      const auto& format = request.get("format");
+      std::string hash = request.has("hash") ? request.at("hash").string() : "";
+      std::string key = "{\"ast\":";
+      ast.append(key);
+      key += ",\"format\":";
+      format.append(key);
+      key += '}';
+      auto definition = watchDefinitions.find(key);
+      if (definition == watchDefinitions.end()) {
+        WatchDefinition value{ast, format};
+        watchedTables(value.ast, value.tables, 0);
+        definition = watchDefinitions.emplace(std::move(key), std::move(value)).first;
+      }
+      try {
+        if (!watches.emplace(id, Watch{definition, std::move(hash)}).second)
+          throw std::runtime_error("watch id is already registered");
+      } catch (...) {
+        if (!definition->second.observers) watchDefinitions.erase(definition);
+        throw;
+      }
+      ++definition->second.observers;
       return publish(&id);
     }
     if (op == "unwatch") {
-      watches.erase(integer(request.at("id"), "watch id"));
+      const auto watch = watches.find(integer(request.at("id"), "watch id"));
+      if (watch != watches.end()) {
+        const auto definition = watch->second.definition;
+        watches.erase(watch);
+        if (--definition->second.observers == 0) watchDefinitions.erase(definition);
+      }
       return Json();
     }
     if (op == "publish") return publish(nullptr);
