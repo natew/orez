@@ -273,7 +273,6 @@ struct Answer {
   Json value;
 
   Json row(size_t index) const {
-    if (value.array()) return value.items()[index];
     return Json::Serialized{(*rows)[index]};
   }
 };
@@ -958,12 +957,12 @@ struct Client::Impl {
             if (value.array()) {
               auto rows = std::make_shared<std::vector<std::string>>();
               rows->reserve(value.items().size());
-              for (const Json& row : value.items()) rows->push_back(row.dump());
+              for (const Json& row : value.items()) rows->push_back(row.dump(true));
               answer.rows = std::move(rows);
             } else {
               answer.text = value.dump();
+              answer.value = std::move(value);
             }
-            answer.value = std::move(value);
           }
         } catch (const std::bad_alloc&) {
           throw;
