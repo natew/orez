@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -15,7 +16,7 @@ namespace limesync::zero {
 
 struct Json {
   using Array = std::vector<Json>;
-  using Object = std::map<std::string, Json>;
+  using Object = std::map<std::string, Json, std::less<>>;
   struct Serialized {
     std::string text;
     bool operator==(const Serialized&) const = default;
@@ -42,21 +43,19 @@ struct Json {
   bool null() const { return std::holds_alternative<std::nullptr_t>(value); }
   bool object() const { return std::holds_alternative<Object>(value); }
   bool array() const { return std::holds_alternative<Array>(value); }
-  bool has(const std::string& key) const {
-    return object() && std::get<Object>(value).contains(key);
-  }
-  const Json& at(const std::string& key) const {
+  bool has(std::string_view key) const { return findMember(key) != nullptr; }
+  const Json& at(std::string_view key) const {
+    if (auto found = findMember(key)) return *found;
     if (!object()) throw std::runtime_error("expected a JSON object");
-    auto found = std::get<Object>(value).find(key);
-    if (found == std::get<Object>(value).end()) throw std::runtime_error("missing field: " + key);
-    return found->second;
+    throw std::runtime_error("missing field: " + std::string(key));
   }
-  Json& at(const std::string& key) {
+  Json& at(std::string_view key) {
     return const_cast<Json&>(static_cast<const Json&>(*this).at(key));
   }
-  const Json& get(const std::string& key) const {
+  const Json& get(std::string_view key) const {
+    if (auto found = findMember(key)) return *found;
     static const Json absent;
-    return has(key) ? at(key) : absent;
+    return absent;
   }
   const std::string& string() const {
     if (!std::holds_alternative<std::string>(value)) throw std::runtime_error("expected a string");
@@ -79,7 +78,10 @@ struct Json {
     if (!std::holds_alternative<bool>(value)) throw std::runtime_error("expected a boolean");
     return std::get<bool>(value);
   }
-  bool flag(const std::string& key) const { return has(key) && at(key).boolean(); }
+  bool flag(std::string_view key) const {
+    const auto* found = findMember(key);
+    return found && found->boolean();
+  }
   bool operator==(const Json&) const = default;
   bool hasItems() const {
     if (const auto* deferred = std::get_if<DeferredArray>(&value)) return deferred->nonempty;
@@ -428,6 +430,14 @@ struct Json {
       }
       out += '}';
     }
+  }
+
+ private:
+  const Json* findMember(std::string_view key) const {
+    const auto* members = std::get_if<Object>(&value);
+    if (!members) return nullptr;
+    const auto found = members->find(key);
+    return found == members->end() ? nullptr : &found->second;
   }
 };
 
