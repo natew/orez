@@ -100,6 +100,11 @@ limesync::ZeroValue JSIConverter<limesync::ZeroValue>::fromJSI(jsi::Runtime& run
 }
 
 jsi::Value JSIConverter<limesync::ZeroValue>::toJSI(jsi::Runtime& runtime, const limesync::ZeroValue& value) {
+  if (const auto* serialized = std::get_if<Json::Serialized>(&value->value)) {
+    const auto& json = serialized->text;
+    return jsi::Value::createFromJsonUtf8(
+        runtime, reinterpret_cast<const uint8_t*>(json.data()), json.size());
+  }
   FieldNames names;
   return encode(runtime, *value, names);
 }
@@ -178,9 +183,12 @@ std::shared_ptr<Promise<void>> HybridLimeSyncZero::open(const std::string& name,
 
 std::shared_ptr<Promise<ZeroResult>> HybridLimeSyncZero::execute(ZeroValue request) {
   return Promise<ZeroResult>::async([state = state_, request = std::move(request)]() -> ZeroResult {
-    std::lock_guard<std::mutex> guard(state->mutex);
+    std::unique_lock<std::mutex> guard(state->mutex);
     if (!state->client) throw std::runtime_error("native Zero client is closed");
-    return std::make_shared<Json>(state->client->executeValue(*request));
+    auto result = state->client->executeValue(*request);
+    guard.unlock();
+    if (result.object() || result.array()) result.value = Json::Serialized{result.dump(true)};
+    return std::make_shared<Json>(std::move(result));
   });
 }
 

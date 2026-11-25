@@ -383,21 +383,22 @@ struct Json {
     }
     out += '"';
   }
-  std::string dump() const {
+  std::string dump(bool preserveSignedZero = false) const {
     std::string out;
-    append(out);
+    append(out, preserveSignedZero);
     return out;
   }
-  void append(std::string& out) const {
+  void append(std::string& out, bool preserveSignedZero = false) const {
     if (null())
       out += "null";
     else if (const auto* b = std::get_if<bool>(&value))
       out += *b ? "true" : "false";
     else if (const auto* n = std::get_if<double>(&value)) {
       if (!std::isfinite(*n)) throw std::runtime_error("JSON numbers must be finite");
-      if (*n == 0)
+      if (*n == 0) {
+        if (preserveSignedZero && std::signbit(*n)) out += '-';
         out += '0';
-      else {
+      } else {
         char buf[64];
         auto r = std::to_chars(buf, buf + sizeof(buf), *n);
         out.append(buf, r.ptr);
@@ -412,7 +413,7 @@ struct Json {
       out += '[';
       for (size_t i = 0; i < a->size(); ++i) {
         if (i) out += ',';
-        (*a)[i].append(out);
+        (*a)[i].append(out, preserveSignedZero);
       }
       out += ']';
     } else {
@@ -423,7 +424,7 @@ struct Json {
         first = false;
         quote(out, key);
         out += ':';
-        v.append(out);
+        v.append(out, preserveSignedZero);
       }
       out += '}';
     }
