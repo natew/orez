@@ -1,6 +1,7 @@
 #include "HybridLimeSyncZero.hpp"
 #include "ZeroStorageDirectory.hpp"
 #include "zero/Json.hpp"
+#include <algorithm>
 #include <filesystem>
 #include <mutex>
 #include <set>
@@ -13,6 +14,7 @@
 namespace margelo::nitro {
 namespace {
 using ::limesync::zero::Json;
+using ::limesync::zero::PackedObject;
 
 Json decode(jsi::Runtime& runtime, auto&& value, const jsi::Function& keys,
              unsigned depth) {
@@ -39,18 +41,32 @@ Json decode(jsi::Runtime& runtime, auto&& value, const jsi::Function& keys,
     }
     if (!object.isFunction(runtime)) {
       auto names = keys.call(runtime, object).getObject(runtime).getArray(runtime);
-      Json::Object result;
+      PackedObject result;
       auto size = names.size(runtime);
+      result.fields.reserve(std::min(size, size_t{64}));
       for (size_t i = 0; i < size; ++i) {
         auto key = names.getValueAtIndex(runtime, i).getString(runtime);
         auto member = object.getProperty(runtime, key);
         if (!member.isUndefined())
-          result.emplace(key.utf8(runtime), decode(runtime, std::move(member), keys, depth + 1));
+          result.fields.emplace_back(key.utf8(runtime), decode(runtime, std::move(member), keys, depth + 1));
       }
       return result;
     }
   }
   throw std::invalid_argument("Native Zero requires JSON values");
+}
+
+void materializeRequest(Json& request) {
+  if (auto* packed = std::get_if<PackedObject>(&request.value)) {
+    Json::Object fields;
+    for (auto& [key, member] : packed->fields) {
+      auto [field, inserted] = fields.try_emplace(std::move(key), std::move(member));
+      if (inserted) materializeRequest(field->second);
+    }
+    request.value = std::move(fields);
+  } else if (auto* items = std::get_if<Json::Array>(&request.value)) {
+    for (auto& item : *items) materializeRequest(item);
+  }
 }
 
 using FieldNames = std::unordered_map<std::string_view, jsi::PropNameID>;
@@ -170,6 +186,7 @@ std::shared_ptr<Promise<void>> HybridLimeSyncZero::open(const std::string& name,
       throw std::runtime_error("native Zero store is already open: " + canonicalPath);
     }
     try {
+      materializeRequest(*schema);
       state->client = std::make_unique<::limesync::zero::Client>(canonicalPath, *schema, clientID);
       state->canonicalPath = canonicalPath;
     } catch (...) {
@@ -185,6 +202,7 @@ std::shared_ptr<Promise<ZeroResult>> HybridLimeSyncZero::execute(ZeroValue reque
   return Promise<ZeroResult>::async([state = state_, request = std::move(request)]() -> ZeroResult {
     std::unique_lock<std::mutex> guard(state->mutex);
     if (!state->client) throw std::runtime_error("native Zero client is closed");
+    materializeRequest(*request);
     auto result = state->client->executeValue(*request);
     guard.unlock();
     if (result.object() || result.array()) result.value = Json::Serialized{result.dump(true)};

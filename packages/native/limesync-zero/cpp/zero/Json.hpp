@@ -10,10 +10,24 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace limesync::zero {
+
+struct PackedField;
+// jsi captures fields on its own thread; the worker builds the ordered object.
+struct PackedObject {
+  std::vector<PackedField> fields;
+  PackedObject();
+  PackedObject(const PackedObject&);
+  PackedObject(PackedObject&&) noexcept;
+  PackedObject& operator=(const PackedObject&);
+  PackedObject& operator=(PackedObject&&) noexcept;
+  ~PackedObject();
+  bool operator==(const PackedObject&) const;
+};
 
 struct Json {
   using Array = std::vector<Json>;
@@ -28,7 +42,8 @@ struct Json {
     bool nonempty;
     bool operator==(const DeferredArray&) const = default;
   };
-  std::variant<std::nullptr_t, bool, double, std::string, Array, Object, Serialized, DeferredArray>
+  std::variant<std::nullptr_t, bool, double, std::string, Array, Object, Serialized, DeferredArray,
+               PackedObject>
       value = nullptr;
   Json() = default;
   Json(std::nullptr_t) {}
@@ -41,6 +56,7 @@ struct Json {
   Json(Object v) : value(std::move(v)) {}
   Json(Serialized v) : value(std::move(v)) {}
   Json(DeferredArray v) : value(v) {}
+  Json(PackedObject v);
   bool null() const { return std::holds_alternative<std::nullptr_t>(value); }
   bool object() const { return std::holds_alternative<Object>(value); }
   bool array() const { return std::holds_alternative<Array>(value); }
@@ -461,5 +477,21 @@ struct Json {
     return found == members->end() ? nullptr : &found->second;
   }
 };
+
+struct PackedField {
+  std::string key;
+  Json member;
+  bool operator==(const PackedField&) const = default;
+};
+
+inline Json::Json(PackedObject v) : value(std::move(v)) {}
+
+inline PackedObject::PackedObject() = default;
+inline PackedObject::PackedObject(const PackedObject&) = default;
+inline PackedObject::PackedObject(PackedObject&&) noexcept = default;
+inline PackedObject& PackedObject::operator=(const PackedObject&) = default;
+inline PackedObject& PackedObject::operator=(PackedObject&&) noexcept = default;
+inline PackedObject::~PackedObject() = default;
+inline bool PackedObject::operator==(const PackedObject&) const = default;
 
 }
