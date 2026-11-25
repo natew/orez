@@ -6,6 +6,8 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace margelo::nitro {
@@ -51,7 +53,9 @@ Json decode(jsi::Runtime& runtime, const jsi::Value& value, const jsi::Function&
   throw std::invalid_argument("Native Zero requires JSON values");
 }
 
-jsi::Value encode(jsi::Runtime& runtime, const Json& value) {
+using FieldNames = std::unordered_map<std::string_view, jsi::PropNameID>;
+
+jsi::Value encode(jsi::Runtime& runtime, const Json& value, FieldNames& names) {
   if (value.null()) return jsi::Value::null();
   if (auto boolean = std::get_if<bool>(&value.value)) return jsi::Value(*boolean);
   if (auto number = std::get_if<double>(&value.value)) return jsi::Value(*number);
@@ -60,7 +64,7 @@ jsi::Value encode(jsi::Runtime& runtime, const Json& value) {
   if (auto items = std::get_if<Json::Array>(&value.value)) {
     auto result = jsi::Array(runtime, items->size());
     for (size_t i = 0; i < items->size(); ++i)
-      result.setValueAtIndex(runtime, i, encode(runtime, (*items)[i]));
+      result.setValueAtIndex(runtime, i, encode(runtime, (*items)[i], names));
     return result;
   }
   const auto& fields = value.fields();
@@ -72,8 +76,17 @@ jsi::Value encode(jsi::Runtime& runtime, const Json& value) {
     prototype = result.getPrototype(runtime);
     result.setPrototype(runtime, jsi::Value::null());
   }
-  for (const auto& [key, field] : fields)
-    result.setProperty(runtime, jsi::PropNameID::forUtf8(runtime, key), encode(runtime, field));
+  for (const auto& [key, field] : fields) {
+    auto member = encode(runtime, field, names);
+    const auto name = names.find(key);
+    if (name != names.end()) {
+      result.setProperty(runtime, name->second, member);
+    } else {
+      auto property = jsi::PropNameID::forUtf8(runtime, key);
+      result.setProperty(runtime, property, member);
+      if (names.size() < 64) names.emplace(key, std::move(property));
+    }
+  }
   if (hasPrototypeField) result.setPrototype(runtime, prototype);
   return result;
 }
@@ -87,7 +100,8 @@ limesync::ZeroValue JSIConverter<limesync::ZeroValue>::fromJSI(jsi::Runtime& run
 }
 
 jsi::Value JSIConverter<limesync::ZeroValue>::toJSI(jsi::Runtime& runtime, const limesync::ZeroValue& value) {
-  return encode(runtime, *value);
+  FieldNames names;
+  return encode(runtime, *value, names);
 }
 }
 
