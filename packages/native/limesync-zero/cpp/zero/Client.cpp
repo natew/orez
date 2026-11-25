@@ -271,6 +271,16 @@ struct Answer {
   std::shared_ptr<const std::vector<std::string>> rows;
   std::string text;
   Json value;
+  const std::vector<std::string>* comparedRows = nullptr;
+  bool rowsMatch = false;
+
+  bool matchesRows(const std::vector<std::string>& previous) {
+    if (comparedRows != &previous) {
+      comparedRows = &previous;
+      rowsMatch = *rows == previous;
+    }
+    return rowsMatch;
+  }
 
   Json row(size_t index) const {
     return Json::Serialized{(*rows)[index]};
@@ -971,12 +981,11 @@ struct Client::Impl {
         }
         found = results.emplace(&definition, std::move(answer)).first;
       }
-      const Answer& answer = found->second;
+      Answer& answer = found->second;
       size_t digest = 0;
       if (answer.rows) {
-        if (watch.published && watch.rows) {
-          if (sameState && *answer.rows == *watch.rows) continue;
-        }
+        if (watch.published && watch.rows && sameState && answer.matchesRows(*watch.rows))
+          continue;
       } else if (answer.succeeded) {
         digest = std::hash<std::string_view>{}(answer.text);
         if (watch.published && !watch.rows && digest == watch.digest &&
