@@ -1313,7 +1313,11 @@ struct Client::Impl {
       watch.ast = request.at("ast");
       watch.format = request.get("format");
       if (request.has("hash")) watch.hash = request.at("hash").string();
-      watch.request = Json(Json::Object{{"ast", watch.ast}, {"format", watch.format}}).dump();
+      watch.request = "{\"ast\":";
+      watch.ast.append(watch.request);
+      watch.request += ",\"format\":";
+      watch.format.append(watch.request);
+      watch.request += '}';
       watchedTables(watch.ast, watch.tables, 0);
       if (!watches.emplace(id, std::move(watch)).second)
         throw std::runtime_error("watch id is already registered");
