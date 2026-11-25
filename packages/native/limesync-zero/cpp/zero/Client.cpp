@@ -234,16 +234,6 @@ struct Watch {
   std::string error;
 };
 
-void materializeStoredValues(Json& value) {
-  if (const auto* stored = std::get_if<Json::Serialized>(&value.value)) {
-    value = Json::parse(stored->text);
-  } else if (auto* array = std::get_if<Json::Array>(&value.value)) {
-    for (auto& item : *array) materializeStoredValues(item);
-  } else if (auto* object = std::get_if<Json::Object>(&value.value)) {
-    for (auto& [key, item] : *object) materializeStoredValues(item);
-  }
-}
-
 // one query's answer: a list result keeps each serialized row so a watch can
 // publish only the rows that changed since its last answer
 struct Answer {
@@ -255,10 +245,8 @@ struct Answer {
   Json row(size_t index) const {
     const auto& item = value.items()[index];
     if (std::holds_alternative<Json::Serialized>(item.value))
-      return Json::parse((*rows)[index]);
-    Json result = item;
-    materializeStoredValues(result);
-    return result;
+      return Json::Serialized{(*rows)[index]};
+    return item;
   }
 };
 
@@ -951,9 +939,7 @@ struct Client::Impl {
         entry.emplace("resultType", resultType);
         if (resultType == "error") entry.emplace("error", error);
         if (!answer.rows) {
-          Json value = answer.value;
-          materializeStoredValues(value);
-          entry.emplace("value", std::move(value));
+          entry.emplace("value", answer.value);
         } else if (watch.published && watch.rows) {
           std::unordered_map<std::string_view, size_t> previous;
           previous.reserve(watch.rows->size());
@@ -1308,9 +1294,7 @@ struct Client::Impl {
       }
     }
     if (op == "query") {
-      Json response = query(request.at("ast"), request.get("format"));
-      materializeStoredValues(response);
-      return response;
+      return query(request.at("ast"), request.get("format"));
     }
     if (op == "watch") {
       int64_t id = integer(request.at("id"), "watch id");
