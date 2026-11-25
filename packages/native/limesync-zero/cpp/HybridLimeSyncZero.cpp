@@ -14,7 +14,7 @@ namespace margelo::nitro {
 namespace {
 using ::limesync::zero::Json;
 
-Json decode(jsi::Runtime& runtime, const jsi::Value& value, const jsi::Function& keys,
+Json decode(jsi::Runtime& runtime, auto&& value, const jsi::Function& keys,
              unsigned depth) {
   if (depth > 128) throw std::invalid_argument("JSON nesting exceeds 128 levels");
   if (value.isUndefined() || value.isNull()) return nullptr;
@@ -25,11 +25,11 @@ Json decode(jsi::Runtime& runtime, const jsi::Value& value, const jsi::Function&
       throw std::invalid_argument("Native Zero values must contain finite numbers");
     return number == 0 ? 0 : number;
   }
-  if (value.isString()) return value.getString(runtime).utf8(runtime);
+  if (value.isString()) return std::forward<decltype(value)>(value).getString(runtime).utf8(runtime);
   if (value.isObject()) {
-    auto object = value.getObject(runtime);
+    auto object = std::forward<decltype(value)>(value).getObject(runtime);
     if (object.isArray(runtime)) {
-      auto array = object.getArray(runtime);
+      auto array = std::move(object).getArray(runtime);
       auto size = array.size(runtime);
       Json::Array result;
       result.reserve(size);
@@ -45,7 +45,7 @@ Json decode(jsi::Runtime& runtime, const jsi::Value& value, const jsi::Function&
         auto key = names.getValueAtIndex(runtime, i).getString(runtime);
         auto member = object.getProperty(runtime, key);
         if (!member.isUndefined())
-          result.emplace(key.utf8(runtime), decode(runtime, member, keys, depth + 1));
+          result.emplace(key.utf8(runtime), decode(runtime, std::move(member), keys, depth + 1));
       }
       return result;
     }
