@@ -967,32 +967,38 @@ struct Client::Impl {
           entry.emplace("value", answer->value);
         } else if (watch.published && watch.rows) {
           const auto& previous = *watch.rows;
-          std::vector<size_t> indices(std::bit_ceil(previous.size() * 2 + 1));
-          const size_t mask = indices.size() - 1;
-          const auto findRow = [&](std::string_view row) -> size_t& {
-            size_t bucket = std::hash<std::string_view>{}(row) & mask;
-            while (indices[bucket] && previous[indices[bucket] - 1] != row)
-              bucket = (bucket + 1) & mask;
-            return indices[bucket];
-          };
-          for (size_t i = 0; i < previous.size(); ++i) {
-            auto& index = findRow(previous[i]);
-            if (!index) index = i + 1;
-          }
-          Json::Array patch;
-          if (answer) {
-            patch.reserve(answer->rows->size());
-            for (size_t i = 0; i < answer->rows->size(); ++i) {
-              const auto same = findRow((*answer->rows)[i]);
-              if (same)
-                patch.emplace_back(static_cast<double>(same - 1));
-              else
-                patch.push_back(answer->row(i));
+          const auto& current = answer ? *answer->rows : previous;
+          Json::Array patch(current.size());
+          size_t aligned = 0;
+          // relationship projections can overwrite a primary key and produce duplicate rows.
+          if (!watch.ast.has("related")) {
+            const auto shared = std::min(previous.size(), current.size());
+            for (size_t i = 0; i < shared; ++i) {
+              if (!answer || previous[i] == current[i]) {
+                patch[i] = static_cast<double>(i);
+                ++aligned;
+              }
             }
-          } else {
-            patch.reserve(previous.size());
-            for (const auto& row : previous)
-              patch.emplace_back(static_cast<double>(findRow(row) - 1));
+          }
+          if (aligned != current.size()) {
+            std::vector<size_t> indices(std::bit_ceil((previous.size() - aligned) * 2 + 1));
+            const size_t mask = indices.size() - 1;
+            const auto findRow = [&](std::string_view row) -> size_t& {
+              size_t bucket = std::hash<std::string_view>{}(row) & mask;
+              while (indices[bucket] && previous[indices[bucket] - 1] != row)
+                bucket = (bucket + 1) & mask;
+              return indices[bucket];
+            };
+            for (size_t i = 0; i < previous.size(); ++i) {
+              if (i < patch.size() && !patch[i].null()) continue;
+              auto& index = findRow(previous[i]);
+              if (!index) index = i + 1;
+            }
+            for (size_t i = 0; i < current.size(); ++i) {
+              if (!patch[i].null()) continue;
+              const auto same = findRow(current[i]);
+              patch[i] = same ? Json(static_cast<double>(same - 1)) : answer->row(i);
+            }
           }
           entry.emplace("patch", std::move(patch));
         } else {
