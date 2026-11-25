@@ -90,6 +90,11 @@ jobs:
           fi
           git fetch origin main --no-tags
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            if [ "$GITHUB_EVENT_NAME" = 'push' ]; then
+              echo 'A newer main commit superseded this native release.'
+              echo 'publish=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo 'sync-native releases must use the current main commit' >&2
             exit 1
           fi
