@@ -218,6 +218,12 @@ struct Table {
 struct Compiled {
   std::string sql;
   std::vector<Json> args;
+  std::vector<std::string_view> parentFields;
+};
+
+struct PreparedQuery {
+  std::optional<Compiled> compiled;
+  std::vector<PreparedQuery> related;
 };
 
 struct Watch {
@@ -623,7 +629,7 @@ struct Client::Impl {
       const Json& related = value.at("related");
       std::string child = alias + "c";
       auto query = compile(related.at("subquery"), child, &related.at("correlation"), name, alias,
-                           nullptr, depth + 1);
+                           false, depth + 1);
       args.insert(args.end(), query.args.begin(), query.args.end());
       return op + "(" + query.sql + ")";
     }
@@ -659,13 +665,13 @@ struct Client::Impl {
 
   Compiled compile(const Json& ast, const std::string& alias, const Json* correlation = nullptr,
                    const std::string& parentTable = "", const std::string& parentAlias = "",
-                   const Json* parentRow = nullptr, unsigned depth = 0) {
+                   bool bindParent = false, unsigned depth = 0) {
     if (depth > 32) throw std::runtime_error("query nesting exceeds 32 levels");
     std::string name = ast.at("table").string();
     const auto& definition = table(name);
     if (ast.has("schema"))
       throw std::runtime_error("schema-qualified native queries are not supported");
-    Compiled out{"SELECT " + alias + ".value FROM " + definition.rows + " " + alias, {}};
+    Compiled out{"SELECT " + alias + ".value FROM " + definition.rows + " " + alias, {}, {}};
     bool filtered = false;
     const auto conjoin = [&] {
       out.sql += filtered ? " AND " : " WHERE ";
@@ -679,9 +685,9 @@ struct Client::Impl {
       for (size_t i = 0; i < parent.size(); ++i) {
         conjoin();
         out.sql += column(name, child[i].string(), alias) + "=";
-        if (parentRow) {
+        if (bindParent) {
           out.sql += '?';
-          out.args.push_back(parentRow->at(parent[i].string()));
+          out.parentFields.push_back(parent[i].string());
         } else
           out.sql += column(parentTable, parent[i].string(), parentAlias);
       }
@@ -751,10 +757,10 @@ struct Client::Impl {
   }
 
   Json queryRelationship(const Json& related, const Json& childFormat, const Json& parent,
-                         unsigned depth) {
+                         unsigned depth, PreparedQuery& plan) {
     const Json& child = related.at("subquery");
     if (!related.flag("hidden"))
-      return query(child, childFormat, &related.at("correlation"), &parent, depth);
+      return query(child, childFormat, &related.at("correlation"), &parent, depth, &plan);
     std::string name = child.has("alias") ? child.at("alias").string() : child.at("table").string();
     Json nested;
     const auto& links = child.at("related").items();
@@ -806,31 +812,41 @@ struct Client::Impl {
   }
 
   Json query(const Json& ast, const Json& format, const Json* correlation = nullptr,
-             const Json* parent = nullptr, unsigned depth = 0) {
+             const Json* parent = nullptr, unsigned depth = 0, PreparedQuery* prepared = nullptr) {
     if (depth > 32) throw std::runtime_error("relationship nesting exceeds 32 levels");
-    auto compiled = compile(ast, "r", correlation, "", "", parent);
+    PreparedQuery local;
+    auto& plan = prepared ? *prepared : local;
+    if (!plan.compiled) plan.compiled.emplace(compile(ast, "r", correlation, "", "", parent != nullptr));
+    const auto& compiled = *plan.compiled;
     Statement statement(*statements, compiled.sql);
-    for (size_t i = 0; i < compiled.args.size(); ++i)
-      statement.bind(static_cast<int>(i + 1), compiled.args[i]);
+    int parameter = 1;
+    if (parent)
+      for (auto field : compiled.parentFields) statement.bind(parameter++, parent->at(field));
+    for (const auto& arg : compiled.args) statement.bind(parameter++, arg);
+    const bool hasRelated = ast.has("related");
+    const bool singular = format.flag("singular");
     Json::Array rows;
     while (statement.step()) {
       // stored rows already passed JSON validation; only parents need field access.
-      Json row = ast.has("related") ? Json::parse(statement.view(0))
-                                    : Json(Json::Serialized{statement.text(0)});
-      if (ast.has("related")) {
-        for (const Json& related : ast.at("related").items()) {
+      Json row = hasRelated ? Json::parse(statement.view(0))
+                            : Json(Json::Serialized{statement.text(0)});
+      if (hasRelated) {
+        const auto& relationships = ast.at("related").items();
+        if (plan.related.empty()) plan.related.resize(relationships.size());
+        for (size_t i = 0; i < relationships.size(); ++i) {
+          const auto& related = relationships[i];
           const Json& child = related.at("subquery");
           std::string name =
               child.has("alias") ? child.at("alias").string() : child.at("table").string();
           const Json& childFormat = format.get("relationships").get(name);
-          Json nested = queryRelationship(related, childFormat, row, depth + 1);
+          Json nested = queryRelationship(related, childFormat, row, depth + 1, plan.related[i]);
           std::get<Json::Object>(row.value).insert_or_assign(name, std::move(nested));
         }
       }
       rows.push_back(std::move(row));
-      if (format.flag("singular")) break;
+      if (singular) break;
     }
-    if (format.flag("singular")) return rows.empty() ? Json() : std::move(rows.front());
+    if (singular) return rows.empty() ? Json() : std::move(rows.front());
     return rows;
   }
 
