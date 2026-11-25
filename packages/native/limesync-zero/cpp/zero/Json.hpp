@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <stdexcept>
@@ -265,8 +266,7 @@ struct Json {
       ++at;
       while (true) {
         const char* run = at;
-        while (at != end && *at != '"' && *at != '\\' && static_cast<unsigned char>(*at) >= 0x20)
-          ++at;
+        at = unescapedEnd(at, end);
         if (out) out->append(run, at);
         if (at == end || static_cast<unsigned char>(*at) < 0x20) invalid();
         if (*at++ == '"') return;
@@ -370,7 +370,7 @@ struct Json {
     const char* end = at + str.size();
     while (at != end) {
       const char* run = at;
-      while (at != end && *at != '"' && *at != '\\' && static_cast<unsigned char>(*at) >= 32) ++at;
+      at = unescapedEnd(at, end);
       out.append(run, at);
       if (at == end) break;
       unsigned char c = static_cast<unsigned char>(*at++);
@@ -433,6 +433,27 @@ struct Json {
   }
 
  private:
+  static const char* unescapedEnd(const char* at, const char* end) {
+    constexpr uint64_t ones = 0x0101010101010101ULL;
+    constexpr uint64_t high = 0x8080808080808080ULL;
+    const auto hasZeroByte = [&](uint64_t word) { return ((word - ones) & ~word & high) != 0; };
+    const auto ordinary = [](char byte) {
+      return byte != '"' && byte != '\\' && static_cast<unsigned char>(byte) >= 0x20;
+    };
+    for (unsigned i = 0; i < 8 && at != end; ++i, ++at)
+      if (!ordinary(*at)) return at;
+    while (end - at >= 8) {
+      uint64_t word;
+      std::memcpy(&word, at, sizeof(word));
+      // subtraction marks a lane below the limit, including zero for either escape byte.
+      const bool hasControl = ((word - ones * 0x20) & ~word & high) != 0;
+      if (hasControl || hasZeroByte(word ^ (ones * '"')) || hasZeroByte(word ^ (ones * '\\'))) break;
+      at += sizeof(word);
+    }
+    while (at != end && ordinary(*at)) ++at;
+    return at;
+  }
+
   const Json* findMember(std::string_view key) const {
     const auto* members = std::get_if<Object>(&value);
     if (!members) return nullptr;
