@@ -874,9 +874,11 @@ struct Client::Impl {
   // answer or the new row itself, so the client parses and rebuilds only rows
   // that changed.
   Json publish(const int64_t* only) {
-    bool hashed = false;
-    for (const auto& [id, watch] : watches)
-      if (!watch.hash.empty() && (!only || id == *only)) hashed = true;
+    const auto [first, end] =
+        only ? watches.equal_range(*only) : std::pair{watches.begin(), watches.end()};
+    const bool hashed = std::any_of(first, end, [](const auto& entry) {
+      return !entry.second.hash.empty();
+    });
     std::set<std::string> completed;
     Json errors = Json::Object{};
     if (hashed) {
@@ -894,8 +896,8 @@ struct Client::Impl {
       size_t digest;
     };
     std::vector<Publication> changed;
-    for (auto& [id, watch] : watches) {
-      if (only && id != *only) continue;
+    for (auto it = first; it != end; ++it) {
+      auto& [id, watch] = *it;
       const bool failed = !watch.hash.empty() && errors.has(watch.hash);
       std::string error = failed ? errors.at(watch.hash).string() : "";
       std::string resultType = failed                            ? "error"
