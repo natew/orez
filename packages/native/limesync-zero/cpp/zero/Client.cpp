@@ -239,6 +239,7 @@ struct Watch {
   std::shared_ptr<const std::vector<std::string>> rows;
   std::string resultType;
   std::string error;
+  PreparedQuery plan;
 };
 
 // one query's answer: a list result keeps each serialized row so a watch can
@@ -916,7 +917,7 @@ struct Client::Impl {
       if (found == results.end()) {
         Answer answer;
         try {
-          Json value = query(watch.ast, watch.format);
+          Json value = query(watch.ast, watch.format, nullptr, nullptr, 0, &watch.plan);
           if (value.array()) {
             auto rows = std::make_shared<std::vector<std::string>>();
             rows->reserve(value.items().size());
