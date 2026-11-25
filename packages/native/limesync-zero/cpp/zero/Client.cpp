@@ -870,7 +870,7 @@ struct Client::Impl {
     std::unordered_map<std::string_view, Answer> results;
     struct Publication {
       Watch& watch;
-      const Answer& answer;
+      const Answer* answer;
       int64_t id;
       std::string resultType;
       std::string error;
@@ -888,8 +888,14 @@ struct Client::Impl {
                                                    [&](const std::string& table) {
                                                      return changedTables.contains(table);
                                                    });
-      if (watch.published && !dirty && resultType == watch.resultType && error == watch.error)
-        continue;
+      const bool sameState = resultType == watch.resultType && error == watch.error;
+      if (watch.published && !dirty) {
+        if (sameState) continue;
+        if (watch.rows) {
+          changed.push_back({watch, nullptr, id, std::move(resultType), std::move(error), 0});
+          continue;
+        }
+      }
       auto found = results.find(watch.request);
       if (found == results.end()) {
         Answer answer;
@@ -915,7 +921,6 @@ struct Client::Impl {
         found = results.emplace(watch.request, std::move(answer)).first;
       }
       const Answer& answer = found->second;
-      const bool sameState = resultType == watch.resultType && error == watch.error;
       size_t digest = 0;
       if (answer.rows) {
         if (watch.published && watch.rows) {
@@ -927,20 +932,20 @@ struct Client::Impl {
             answer.text.size() == watch.size && sameState)
           continue;
       }
-      changed.push_back({watch, answer, id, std::move(resultType), std::move(error), digest});
+      changed.push_back({watch, &answer, id, std::move(resultType), std::move(error), digest});
     }
 
     Json::Array output;
     output.reserve(changed.size());
     for (const auto& [watch, answer, id, resultType, error, digest] : changed) {
       Json::Object entry{{"id", static_cast<double>(id)}};
-      if (!answer.succeeded) {
-        entry.emplace("failure", answer.text);
+      if (answer && !answer->succeeded) {
+        entry.emplace("failure", answer->text);
       } else {
         entry.emplace("resultType", resultType);
         if (resultType == "error") entry.emplace("error", error);
-        if (!answer.rows) {
-          entry.emplace("value", answer.value);
+        if (answer && !answer->rows) {
+          entry.emplace("value", answer->value);
         } else if (watch.published && watch.rows) {
           const auto& previous = *watch.rows;
           std::vector<size_t> indices(std::bit_ceil(previous.size() * 2 + 1));
@@ -956,19 +961,25 @@ struct Client::Impl {
             if (!index) index = i + 1;
           }
           Json::Array patch;
-          patch.reserve(answer.rows->size());
-          for (size_t i = 0; i < answer.rows->size(); ++i) {
-            const auto same = findRow((*answer.rows)[i]);
-            if (same)
-              patch.emplace_back(static_cast<double>(same - 1));
-            else
-              patch.push_back(answer.row(i));
+          if (answer) {
+            patch.reserve(answer->rows->size());
+            for (size_t i = 0; i < answer->rows->size(); ++i) {
+              const auto same = findRow((*answer->rows)[i]);
+              if (same)
+                patch.emplace_back(static_cast<double>(same - 1));
+              else
+                patch.push_back(answer->row(i));
+            }
+          } else {
+            patch.reserve(previous.size());
+            for (const auto& row : previous)
+              patch.emplace_back(static_cast<double>(findRow(row) - 1));
           }
           entry.emplace("patch", std::move(patch));
         } else {
           Json::Array rows;
-          rows.reserve(answer.rows->size());
-          for (size_t i = 0; i < answer.rows->size(); ++i) rows.push_back(answer.row(i));
+          rows.reserve(answer->rows->size());
+          for (size_t i = 0; i < answer->rows->size(); ++i) rows.push_back(answer->row(i));
           entry.emplace("value", std::move(rows));
         }
       }
@@ -978,10 +989,12 @@ struct Client::Impl {
     Json::Object result;
     result.emplace("results", std::move(output));
     for (auto& [watch, answer, id, resultType, error, digest] : changed) {
-      watch.published = answer.succeeded;
-      watch.rows = answer.rows;
-      watch.digest = digest;
-      watch.size = answer.text.size();
+      if (answer) {
+        watch.published = answer->succeeded;
+        watch.rows = answer->rows;
+        watch.digest = digest;
+        watch.size = answer->text.size();
+      }
       watch.resultType = std::move(resultType);
       watch.error = std::move(error);
     }
