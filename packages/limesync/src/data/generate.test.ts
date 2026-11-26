@@ -8,8 +8,10 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 
+import { transformSync } from 'esbuild'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import * as zero from '../zero/zero.js'
@@ -28,6 +30,14 @@ const testDir = join(tmpdir(), 'limesync-data-test-' + Date.now())
 function writeFileSync(path: string, content: string) {
   mkdirSync(dirname(path), { recursive: true })
   writeFile(path, content)
+}
+
+function linkDrizzleDependencies() {
+  const adapter = fileURLToPath(new URL('../../../drizzle-zero-sqlite', import.meta.url))
+  const nodeModules = join(testDir, 'node_modules')
+  mkdirSync(nodeModules)
+  symlinkSync(adapter, join(nodeModules, 'drizzle-zero-sqlite'))
+  symlinkSync(join(adapter, 'node_modules/drizzle-orm'), join(nodeModules, 'drizzle-orm'))
 }
 
 beforeEach(() => {
@@ -229,35 +239,103 @@ export const mutate = mutations(schema, permission, {
     expect(readFileSync(modelsPath, 'utf-8')).toBe(generated)
   })
 
-  test('writes drizzle-zero sqlite schema from database/schema.ts', async () => {
+  test('generates a static Zero schema from membership-filtered Drizzle tables', async () => {
+    linkDrizzleDependencies()
     const dataDir = join(testDir, 'src/data')
-    writeFileSync(join(dataDir, 'post.ts'), `export const posts = () => zql.post`)
+    const schemaPath = join(testDir, 'src/database/schema.ts')
     writeFileSync(
-      join(testDir, 'src/database/schema.ts'),
-      `
-import { sqliteTable, text } from 'drizzle-orm/sqlite-core'
-export const post = sqliteTable('post', { id: text('id').primaryKey() })
-`
+      join(dataDir, 'post.ts'),
+      `export const posts = () => zql.post.related('comments')`
     )
+    const drizzleSource = `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core'
+export const post = sqliteTable('posts', {
+  id: text('id').primaryKey(),
+  metadata: text('metadata', { mode: 'json' }).$type<{ title: string }>(),
+})
+export const comment = sqliteTable('comments', {
+  id: text('id').primaryKey(),
+  postId: text('post_id').notNull(),
+})
+export const privateTable = sqliteTable('private', { id: text('id').primaryKey() })
+`
+    writeFileSync(schemaPath, drizzleSource)
     writeFileSync(
       join(testDir, 'src/database/relations.ts'),
       `
 export const relations = defineRelations(schema, (r) => ({
-  post: { comments: r.many.comment({}) },
+  post: { comments: r.many.comment({ from: r.post.id, to: r.comment.postId }) },
 }))
 `
     )
 
+    const virtual = await generateModules({ dir: dataDir })
+    expect(existsSync(join(dataDir, 'generated'))).toBe(false)
+
     await generate({ dir: dataDir, silent: true })
 
     expect(readFileSync(join(dataDir, 'generated/drizzleSchema.ts'), 'utf8')).toContain(
-      'export { post } from "../../database/schema"'
+      'export { comment, post } from "../../database/schema"'
     )
+    const schema = readFileSync(join(dataDir, 'generated/schema.ts'), 'utf8')
+    expect(schema).toBe(virtual.files['schema.ts'])
+    expect(schema).toContain('import type * as drizzleSchema from "./drizzleSchema"')
+    expect(schema).toContain('ReturnType<typeof drizzleZeroConfig<typeof drizzleSchema>>')
+
+    const module = { exports: { schema: null } }
+    runInNewContext(transformSync(schema, { loader: 'ts', format: 'cjs' }).code, {
+      module,
+      require(specifier: string) {
+        expect(specifier).toBe('limesync/zero')
+        return zero
+      },
+    })
+    expect(module.exports.schema).toEqual({
+      tables: {
+        comment: {
+          name: 'comment',
+          serverName: 'comments',
+          primaryKey: ['id'],
+          columns: {
+            id: { type: 'string', optional: false, customType: null },
+            postId: {
+              type: 'string',
+              optional: false,
+              customType: null,
+              serverName: 'post_id',
+            },
+          },
+        },
+        post: {
+          name: 'post',
+          serverName: 'posts',
+          primaryKey: ['id'],
+          columns: {
+            id: { type: 'string', optional: false, customType: null },
+            metadata: { type: 'json', optional: true, customType: null },
+          },
+        },
+      },
+      relationships: {
+        post: {
+          comments: [
+            {
+              sourceField: ['id'],
+              destField: ['postId'],
+              destSchema: 'comment',
+              cardinality: 'many',
+            },
+          ],
+        },
+      },
+      enableLegacyQueries: undefined,
+      enableLegacyMutators: undefined,
+    })
+
+    writeFileSync(schemaPath, drizzleSource.replace("'posts'", "'blog_posts'"))
+    await generate({ dir: dataDir, silent: true })
     expect(readFileSync(join(dataDir, 'generated/schema.ts'), 'utf8')).toContain(
-      'import * as drizzleSchema from "./drizzleSchema"'
-    )
-    expect(readFileSync(join(dataDir, 'generated/schema.ts'), 'utf8')).toContain(
-      'export type Post ='
+      '"serverName": "blog_posts"'
     )
   })
 
@@ -517,10 +595,12 @@ export async function writeAudit(tx: Transaction) {
   })
 
   test('generates action namespaces without adding their names to the schema', async () => {
+    linkDrizzleDependencies()
     const dir = dataDir()
     writeFileSync(
       join(dir, '../database/schema.ts'),
-      `export const post = sqliteTable('post', (t) => ({ id: t.text() }))`
+      `import { sqliteTable } from 'drizzle-orm/sqlite-core'
+export const post = sqliteTable('post', (t) => ({ id: t.text().primaryKey() }))`
     )
     writeFileSync(join(dir, 'post/mutations.ts'), `export const mutate = mutations({})`)
     writeFileSync(

@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { basename, dirname, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
+import { build } from 'esbuild'
 import * as ts from 'typescript/unstable/ast'
 import {
   ObjectFlags,
@@ -36,6 +39,7 @@ import {
   type NativeTypeScriptProject,
 } from './native-typescript.js'
 
+import type { Schema } from '../zero/zero.js'
 import type {
   ExtractedMutation,
   ModelMutations,
@@ -44,7 +48,7 @@ import type {
 import type { DataLayout } from './generate-layout.js'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
-const GENERATOR_CACHE_VERSION = '10'
+const GENERATOR_CACHE_VERSION = '11'
 
 const isGeneratorSourceFile = (name: string) =>
   name.endsWith('.ts') &&
@@ -859,22 +863,25 @@ export async function generateDrizzleSchemaInputFile(options: {
   const baseDir = resolve(options.dir)
   const project = await loadGeneratorProject(baseDir, false, options.tsconfig)
   try {
-    return generateDrizzleSchemaInputFileWithProject(options, project)
+    const layout = discoverDataLayout(
+      project,
+      baseDir,
+      options.config ? resolve(options.config) : undefined
+    )
+    return renderDrizzleSchemaInput(
+      getDrizzleSchemaInput(baseDir, layout, project),
+      options.schemaImportPath
+    )
   } finally {
     await project.close()
   }
 }
 
-async function generateDrizzleSchemaInputFileWithProject(
-  options: { dir: string; schemaImportPath: string; config?: string },
+function getDrizzleSchemaInput(
+  baseDir: string,
+  layout: DataLayout,
   project: NativeTypeScriptProject
-): Promise<string> {
-  const baseDir = resolve(options.dir)
-  const layout = discoverDataLayout(
-    project,
-    baseDir,
-    options.config ? resolve(options.config) : undefined
-  )
+) {
   const tableNames = dataMembershipFromLayout(layout).allTables
   const relationsPath =
     layout.metadataPaths.find(
@@ -936,7 +943,14 @@ async function generateDrizzleSchemaInputFileWithProject(
     visit(source)
   }
 
-  const schemaImportPath = JSON.stringify(options.schemaImportPath)
+  return { tableNames, relationEntries }
+}
+
+function renderDrizzleSchemaInput(
+  { tableNames, relationEntries }: ReturnType<typeof getDrizzleSchemaInput>,
+  importPath: string
+) {
+  const schemaImportPath = JSON.stringify(importPath)
   return [
     '// auto-generated from the limesync data layout',
     `import { defineRelations } from 'drizzle-orm'`,
@@ -971,7 +985,7 @@ export async function generateModules(
     const { needsDrizzleSchema, needsSqliteZeroSchema } = schemaSources(baseDir)
     await emitModules({
       baseDir,
-      config,
+      tsconfig: options.tsconfig,
       project,
       layout,
       needsDrizzleSchema,
@@ -1125,7 +1139,7 @@ async function generateWithProject(
     mutationCount,
   } = await emitModules({
     baseDir,
-    config,
+    tsconfig: options.tsconfig,
     project,
     layout,
     needsDrizzleSchema,
@@ -1194,9 +1208,44 @@ async function generateWithProject(
   }
 }
 
+async function compileDrizzleSchema(
+  baseDir: string,
+  contents: string,
+  tsconfig?: string
+): Promise<Schema> {
+  const generatedDir = resolve(baseDir, 'generated')
+  const require = createRequire(resolve(generatedDir, 'drizzleSchema.ts'))
+  const { outputFiles } = await build({
+    stdin: {
+      contents,
+      loader: 'ts',
+      resolveDir: baseDir,
+      sourcefile: 'drizzleSchema.ts',
+    },
+    tsconfig: tsconfig && resolve(tsconfig),
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'cjs',
+    packages: 'external',
+  })
+  // evaluate the current source without caching the app's schema modules
+  const module = { exports: {} }
+  new Function('require', 'module', outputFiles[0]!.text)(require, module)
+  const {
+    drizzleZeroConfig,
+  }: {
+    drizzleZeroConfig(
+      input: object,
+      options: { suppressDefaultsWarning: boolean }
+    ): Schema
+  } = await import(pathToFileURL(require.resolve('drizzle-zero-sqlite')).href)
+  return drizzleZeroConfig(module.exports, { suppressDefaultsWarning: true })
+}
+
 async function emitModules({
   baseDir,
-  config,
+  tsconfig,
   project,
   layout,
   needsDrizzleSchema,
@@ -1206,7 +1255,7 @@ async function emitModules({
   onSourceError,
 }: {
   baseDir: string
-  config?: string
+  tsconfig?: string
   project: NativeTypeScriptProject
   layout: DataLayout
   needsDrizzleSchema: boolean
@@ -1248,27 +1297,25 @@ async function emitModules({
 
   let filesChanged = writeResults.filter(Boolean).length
   if (needsDrizzleSchema) {
-    const membership = dataMembershipFromLayout(layout)
-    const drizzleSchema = await generateDrizzleSchemaInputFileWithProject(
-      {
-        dir: baseDir,
-        schemaImportPath: '../../database/schema',
-        config,
-      },
-      project
-    )
+    const input = getDrizzleSchemaInput(baseDir, layout, project)
+    const drizzleSchema = renderDrizzleSchemaInput(input, '../../database/schema')
+    // drizzle-zero owns its output when the app declares its configuration.
+    const sqliteSchema = needsSqliteZeroSchema
+      ? renderDrizzleZeroSqliteSchemaModule({
+          importPath: './drizzleSchema',
+          tableNames: input.tableNames,
+          schema: await compileDrizzleSchema(
+            baseDir,
+            renderDrizzleSchemaInput(input, '../database/schema'),
+            tsconfig
+          ),
+        })
+      : null
     if (write('drizzleSchema.ts', drizzleSchema)) {
       filesChanged++
     }
-    // drizzle-zero owns its output when the app declares its configuration.
-    if (needsSqliteZeroSchema) {
-      const sqliteSchema = renderDrizzleZeroSqliteSchemaModule({
-        importPath: './drizzleSchema',
-        tableNames: membership.allTables,
-      })
-      if (write('schema.ts', sqliteSchema)) {
-        filesChanged++
-      }
+    if (sqliteSchema !== null && write('schema.ts', sqliteSchema)) {
+      filesChanged++
     }
   }
   let queryCount = 0
