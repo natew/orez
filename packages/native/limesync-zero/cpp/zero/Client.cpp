@@ -13,6 +13,7 @@
 #include <set>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace limesync::zero {
@@ -246,6 +247,7 @@ struct WatchDefinition {
   Json ast;
   Json format;
   std::set<std::string> tables;
+  std::optional<std::string> pointKey;
   PreparedQuery plan;
   size_t observers = 0;
 };
@@ -295,8 +297,8 @@ struct Client::Impl {
   std::mutex mutex;
   WatchDefinitions watchDefinitions;
   std::map<int64_t, Watch> watches;
-  // tables whose view rows may have changed since the last publish.
-  std::set<std::string> changedTables;
+  // a missing key set invalidates every watch on that table.
+  std::unordered_map<std::string, std::optional<std::unordered_set<std::string>>> changedRows;
   bool allTablesChanged = false;
   // a publish answered from the open transaction; rolling it back must republish everything.
   bool publishedInTransaction = false;
@@ -586,12 +588,19 @@ struct Client::Impl {
         "INSERT OR IGNORE INTO one_zero_shadow SELECT ?1,?2,(SELECT value FROM " + table(name).rows +
             " WHERE key=?2)",
         {name, rowKey});
-    changedTables.insert(name);
+    markChanged(name, rowKey);
+  }
+  void markChanged(const std::string& name, const std::string& rowKey) {
+    if (allTablesChanged || watches.empty()) return;
+    auto& keys = changedRows.try_emplace(name, std::in_place).first->second;
+    // sqlite's json text extraction can truncate a string at an embedded nul.
+    if (rowKey.find("\\u0000") != std::string::npos) keys.reset();
+    if (keys) keys->insert(rowKey);
   }
   // server patches land in the stored rows unless a pending local write shadows the key.
   void serverStore(bool shadowed, const std::string& name, const std::string& rowKey,
                    const Json* row) {
-    changedTables.insert(name);
+    markChanged(name, rowKey);
     if (shadowed) {
       sql(*statements, "UPDATE one_zero_shadow SET value=? WHERE table_name=? AND key=?",
           {row ? Json(row->dump()) : Json(), name, rowKey});
@@ -903,6 +912,23 @@ struct Client::Impl {
     else if (type == "correlatedSubquery")
       watchedTables(condition.at("related").at("subquery"), out, depth + 1);
   }
+  std::optional<std::string> pointWatchKey(const Json& ast) const {
+    const auto& where = ast.get("where");
+    if (ast.has("related") || where.get("type") != Json("simple") || where.get("op") != Json("="))
+      return std::nullopt;
+    const auto& left = where.get("left");
+    const auto& right = where.get("right");
+    if (left.get("type") != Json("column") || right.get("type") != Json("literal"))
+      return std::nullopt;
+    const auto* id = std::get_if<std::string>(&right.get("value").value);
+    if (!id || id->find('\0') != std::string::npos) return std::nullopt;
+    const auto found = tables.find(ast.at("table").string());
+    if (found == tables.end()) return std::nullopt;
+    const auto& primaryKey = found->second.primaryKey;
+    if (primaryKey.size() != 1 || left.get("name") != Json(primaryKey.front()))
+      return std::nullopt;
+    return "[" + right.at("value").dump() + "]";
+  }
   // answers the watches whose result, result type or error changed. one watch
   // when only is set: its first answer. a list result already published answers
   // with a patch: each row is the index of an identical row in the previous
@@ -939,10 +965,13 @@ struct Client::Impl {
       std::string resultType = failed                            ? "error"
                                : completed.contains(watch.hash) ? "complete"
                                                                 : "unknown";
-      bool dirty = allTablesChanged || std::any_of(definition.tables.begin(), definition.tables.end(),
-                                                   [&](const std::string& table) {
-                                                     return changedTables.contains(table);
-                                                   });
+      const bool dirty = allTablesChanged || std::any_of(
+          definition.tables.begin(), definition.tables.end(), [&](const std::string& table) {
+            const auto found = changedRows.find(table);
+            if (found == changedRows.end()) return false;
+            const auto& keys = found->second;
+            return !definition.pointKey || !keys || keys->contains(*definition.pointKey);
+          });
       const bool sameState = resultType == watch.resultType && error == watch.error;
       if (watch.published && !dirty) {
         if (sameState) continue;
@@ -1065,7 +1094,7 @@ struct Client::Impl {
       watch.error = std::move(error);
     }
     if (!only) {
-      changedTables.clear();
+      changedRows.clear();
       allTablesChanged = false;
       publishedInTransaction = !transaction.empty();
     }
@@ -1302,7 +1331,7 @@ struct Client::Impl {
             while (names.step()) restored.push_back(names.text(0));
           }
           for (const auto& name : restored) {
-            changedTables.insert(name);
+            changedRows[name].reset();
             const auto& rows = table(name).rows;
             sql(*statements,
                 "DELETE FROM " + rows +
@@ -1400,6 +1429,7 @@ struct Client::Impl {
       if (definition == watchDefinitions.end()) {
         WatchDefinition value{ast, format};
         watchedTables(value.ast, value.tables, 0);
+        value.pointKey = pointWatchKey(value.ast);
         definition = watchDefinitions.emplace(std::move(key), std::move(value)).first;
       }
       try {
