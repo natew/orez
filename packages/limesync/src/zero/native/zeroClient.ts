@@ -1,6 +1,6 @@
 import { addContextToQuery, asQueryInternals } from '../bindings.js'
 
-import type { ConnectionState } from '../zero.js'
+import type { ConnectionState, CustomMutatorDefs, Schema, Zero } from '../zero.js'
 import type { NativeZero } from './client.js'
 import type { OrezTransport } from './orez.js'
 import type { SyncState } from './sync.js'
@@ -32,12 +32,15 @@ function hasWake(transport: Transport | undefined): transport is OrezTransport {
 
 // the provider-facing client: the same surface the JavaScript Zero client gives
 // a limesync provider's `zero` prop, answered by the native engine.
-export async function nativeZeroClient<M extends Mutators>(
+export async function nativeZeroClient<
+  S extends Schema,
+  M extends Mutators & CustomMutatorDefs,
+>(
   client: NativeZero<M>,
-  schema: unknown,
-  transport: Transport | undefined,
+  store: { name: string; schema: S; transport: Transport | undefined },
   options: NativeZeroClientOptions
-) {
+): Promise<NativeZeroClient<S, M>> {
+  const { schema, transport } = store
   let closed = false
   let online = true
   let needsAuth = false
@@ -120,7 +123,7 @@ export async function nativeZeroClient<M extends Mutators>(
     listeners.clear()
   }
 
-  return {
+  const provider = {
     clientID: client.clientID,
     clientGroupID: Promise.resolve(identity.clientGroupID),
     context: client.context,
@@ -188,13 +191,27 @@ export async function nativeZeroClient<M extends Mutators>(
       dispose()
       return client.close()
     },
-    delete() {
+    // the same report Zero.delete gives, for the one store this client owns
+    async delete() {
       dispose()
-      return client.delete()
+      try {
+        await client.delete()
+        return { deleted: [store.name], errors: [], kept: [] }
+      } catch (error) {
+        return { deleted: [], errors: [error], kept: [store.name] }
+      }
     },
   }
+  // Zero's private fields make the class nominal. a provider reads only its
+  // public surface, which this object answers, so this is the one place the
+  // native client becomes the type a `zero` prop takes.
+  return provider as unknown as NativeZeroClient<S, M>
 }
 
-export type NativeZeroClient<M extends Mutators = Mutators> = Awaited<
-  ReturnType<typeof nativeZeroClient<M>>
->
+export type NativeZeroClient<
+  S extends Schema = Schema,
+  M extends Mutators & CustomMutatorDefs = Mutators & CustomMutatorDefs,
+> = Zero<S, M, unknown> & {
+  setActive(active: boolean): void
+  setOnline(available: boolean): void
+}

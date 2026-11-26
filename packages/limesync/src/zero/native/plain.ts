@@ -3,9 +3,14 @@ import {
   type NativeZeroEngine,
   type OpenNativeZeroOptions,
 } from './open.js'
-import { nativeZeroClient, type NativeZeroClientOptions } from './zeroClient.js'
+import {
+  nativeZeroClient,
+  type NativeZeroClient,
+  type NativeZeroClientOptions,
+} from './zeroClient.js'
 
-import type { Mutators } from './types.js'
+import type { CustomMutatorDefs, Schema as ZeroSchema } from '../zero.js'
+import type { Mutators, Schema } from './types.js'
 
 export * from './clientExports.js'
 
@@ -22,9 +27,12 @@ function isZeroEngine(value: unknown): value is NativeZeroEngine {
   )
 }
 
-export async function createNativeZero<M extends Mutators>(
-  options: OpenNativeZeroOptions<M> & NativeZeroClientOptions
-) {
+export async function createNativeZero<
+  S extends ZeroSchema & Schema,
+  M extends Mutators & CustomMutatorDefs,
+>(
+  options: OpenNativeZeroOptions<M> & NativeZeroClientOptions & { schema: S }
+): Promise<NativeZeroClient<S, M>> {
   const proxy: unknown = Reflect.get(globalThis, 'NitroModulesProxy')
   if (
     !proxy ||
@@ -38,5 +46,9 @@ export async function createNativeZero<M extends Mutators>(
   if (!isZeroEngine(engine))
     throw new Error('Lime Sync native Zero has an invalid driver')
   const client = await openNativeZero(options, engine)
-  return nativeZeroClient(client, options.schema, options.transport, options)
+  return nativeZeroClient(
+    client,
+    { name: options.name, schema: options.schema, transport: options.transport },
+    options
+  )
 }
