@@ -230,6 +230,7 @@ struct Table {
   std::string upsert;
   std::string select;
   std::string remove;
+  std::set<std::string> watchIndexes;
 };
 
 struct Compiled {
@@ -240,6 +241,7 @@ struct Compiled {
 
 struct PreparedQuery {
   std::optional<Compiled> compiled;
+  bool indexWatch = false;
   std::vector<PreparedQuery> related;
 };
 
@@ -308,6 +310,8 @@ struct Client::Impl {
   std::string transaction;
   std::string transactionKind;
   bool deleted = false;
+  bool wal = false;
+  bool cacheSync = false;
 
   Impl(const std::string& path, const Json& schema, const std::string& identity)
       : clientID(identity) {
@@ -361,7 +365,10 @@ struct Client::Impl {
         table.remove = "DELETE FROM " + table.rows + " WHERE key=?";
         tables.emplace(name, std::move(table));
       }
-      sql(*statements, "PRAGMA journal_mode=WAL");
+      {
+        Statement mode(*statements, "PRAGMA journal_mode=WAL");
+        wal = mode.step() && mode.view(0) == "wal";
+      }
       sql(*statements, "PRAGMA synchronous=FULL");
       sql(*statements, "BEGIN IMMEDIATE");
       sql(*statements,
@@ -417,7 +424,8 @@ struct Client::Impl {
             staleTables.push_back(existingTables.text(0));
       }
       for (const auto& name : staleTables) sql(*statements, "DROP TABLE " + identifier(name));
-      auto existing = meta("schema");
+      const Json existing = meta("schema");
+      const bool sameSchema = existing == Json(canonical);
       if (clientID.empty()) {
         if (!meta("clientID").null())
           clientID = meta("clientID").string();
@@ -429,7 +437,7 @@ struct Client::Impl {
       }
       if (!meta("clientID").null() && meta("clientID") != Json(clientID))
         throw std::runtime_error("native Zero client identity differs from the persisted store");
-      if (!existing.null() && existing != Json(canonical)) {
+      if (!existing.null() && !sameSchema) {
         clearRows();
         sql(*statements, "DELETE FROM one_zero_shadow");
         setMeta("cookie", Json());
@@ -442,10 +450,8 @@ struct Client::Impl {
       const auto indexFields = [&](const std::string& name, const Json::Array& fields) {
         std::string expressions;
         for (const auto& field : fields) {
-          if (!table(name).columns.contains(field.string()))
-            throw std::runtime_error("unknown relationship index column");
-          expressions += (expressions.empty() ? "" : ",") + std::string("json_extract(value,") +
-                         quoted("$." + Json(field.string()).dump()) + ") COLLATE BINARY";
+          if (!expressions.empty()) expressions += ',';
+          expressions += column(name, field.string(), "");
         }
         if (expressions.empty()) return;
         indexes.emplace("one_zero_index:" + name + ":" + expressions,
@@ -469,6 +475,18 @@ struct Client::Impl {
         while (existingIndexes.step())
           if (!indexes.contains(existingIndexes.text(0)))
             staleIndexes.push_back(existingIndexes.text(0));
+      }
+      {
+        Statement watchIndexes(*statements,
+                               "SELECT tbl_name,name FROM sqlite_master WHERE type='index' AND "
+                               "substr(name,1,21)='one_zero_watch_index:'");
+        while (watchIndexes.step()) {
+          if (!sameSchema)
+            staleIndexes.push_back(watchIndexes.text(1));
+          else
+            tables.at(std::string(watchIndexes.view(0).substr(14))).watchIndexes.insert(
+                watchIndexes.text(1));
+        }
       }
       for (const auto& name : staleIndexes) sql(*statements, "DROP INDEX " + quoted(name));
       for (const auto& [name, definition] : indexes)
@@ -636,7 +654,8 @@ struct Client::Impl {
     if (!table(name).columns.contains(field))
       throw std::runtime_error("unknown query column: " + field);
     std::string path = "$." + Json(field).dump();
-    return "json_extract(" + alias + ".value," + quoted(path) + ") COLLATE BINARY";
+    const auto value = alias.empty() ? "value" : alias + ".value";
+    return "json_extract(" + value + "," + quoted(path) + ") COLLATE BINARY";
   }
   std::string operand(const Json& value, const std::string& name, const std::string& alias,
                       std::vector<Json>& args) {
@@ -651,14 +670,16 @@ struct Client::Impl {
     return "?";
   }
   std::string condition(const Json& value, const std::string& name, const std::string& alias,
-                        std::vector<Json>& args, unsigned depth) {
+                        std::vector<Json>& args, unsigned depth,
+                        std::set<std::string>* equalFields = nullptr) {
     if (depth > 32) throw std::runtime_error("query nesting exceeds 32 levels");
     std::string type = value.at("type").string();
     if (type == "and" || type == "or") {
       std::string result;
       for (const auto& item : value.at("conditions").items()) {
         if (!result.empty()) result += type == "and" ? " AND " : " OR ";
-        result += condition(item, name, alias, args, depth + 1);
+        result += condition(item, name, alias, args, depth + 1,
+                            type == "and" ? equalFields : nullptr);
       }
       return "(" + (result.empty() ? (type == "and" ? "1" : "0") : result) + ")";
     }
@@ -676,7 +697,11 @@ struct Client::Impl {
     if (type != "simple") throw std::runtime_error("unsupported query condition: " + type);
     std::string op = value.at("op").string();
     const Json& right = value.at("right");
-    std::string left = operand(value.at("left"), name, alias, args);
+    const Json& lhs = value.at("left");
+    std::string left = operand(lhs, name, alias, args);
+    if (equalFields && (op == "=" || op == "IS" || op == "IN") &&
+        lhs.at("type") == Json("column") && right.at("type") == Json("literal"))
+      equalFields->insert(lhs.at("name").string());
     if (op == "IN" || op == "NOT IN") {
       if (right.at("type").string() != "literal")
         throw std::runtime_error("IN requires bound values");
@@ -705,7 +730,7 @@ struct Client::Impl {
 
   Compiled compile(const Json& ast, const std::string& alias, const Json* correlation = nullptr,
                    const std::string& parentTable = "", const std::string& parentAlias = "",
-                   bool bindParent = false, unsigned depth = 0) {
+                   bool bindParent = false, unsigned depth = 0, bool indexWatch = false) {
     if (depth > 32) throw std::runtime_error("query nesting exceeds 32 levels");
     std::string name = ast.at("table").string();
     const auto& definition = table(name);
@@ -732,9 +757,11 @@ struct Client::Impl {
           out.sql += column(parentTable, parent[i].string(), parentAlias);
       }
     }
+    std::set<std::string> equalFields;
     if (ast.has("where")) {
       conjoin();
-      out.sql += condition(ast.at("where"), name, alias, out.args, depth + 1);
+      out.sql += condition(ast.at("where"), name, alias, out.args, depth + 1,
+                           indexWatch ? &equalFields : nullptr);
     }
     std::vector<std::pair<std::string, std::string>> ordering;
     if (ast.has("orderBy")) {
@@ -793,7 +820,40 @@ struct Client::Impl {
       out.sql += " LIMIT ?";
       out.args.push_back(static_cast<double>(integer(ast.at("limit"), "query limit")));
     }
+    if (indexWatch) ensureWatchIndex(name, equalFields, ordering);
     return out;
+  }
+
+  void ensureWatchIndex(const std::string& name, const std::set<std::string>& equalFields,
+                        const std::vector<std::pair<std::string, std::string>>& ordering) {
+    auto& definition = tables.at(name);
+    // values, limits and cursors share an index; bound write amplification per table.
+    if (definition.watchIndexes.size() >= 8 || !sqlite3_get_autocommit(db)) return;
+    std::vector<std::string> fields;
+    std::string expressions;
+    bool descending = false;
+    auto append = [&](const std::string& field, const std::string& direction) {
+      if (!expressions.empty()) expressions += ',';
+      expressions += column(name, field, "");
+      if (direction == "desc") {
+        expressions += " DESC";
+        descending = true;
+      }
+      fields.push_back(field);
+    };
+    for (const auto& field : equalFields)
+      if (definition.columns.at(field) != "json") append(field, "asc");
+    for (const auto& [field, direction] : ordering) {
+      if (definition.columns.at(field) == "json") break;
+      if (!equalFields.contains(field)) append(field, direction);
+    }
+    if (expressions.empty()) return;
+    if (fields == definition.primaryKey && !descending) return;
+    const auto index = "one_zero_watch_index:" + name + ":" + expressions;
+    if (definition.watchIndexes.contains(index)) return;
+    sql(*statements, "CREATE INDEX IF NOT EXISTS " + quoted(index) + " ON " +
+                         definition.rows + "(" + expressions + ")");
+    definition.watchIndexes.insert(index);
   }
 
   Json queryRelationship(const Json& related, const Json& childFormat, const Json& parent,
@@ -853,7 +913,9 @@ struct Client::Impl {
 
   void readQueryRows(const Json& ast, const Json* correlation, const Json* parent,
                      PreparedQuery& plan, auto&& read) {
-    if (!plan.compiled) plan.compiled.emplace(compile(ast, "r", correlation, "", "", parent != nullptr));
+    if (!plan.compiled)
+      plan.compiled.emplace(compile(ast, "r", correlation, "", "", parent != nullptr, 0,
+                                    plan.indexWatch));
     const auto& compiled = *plan.compiled;
     Statement statement(*statements, compiled.sql);
     int parameter = 1;
@@ -1129,8 +1191,16 @@ struct Client::Impl {
     if (knownQueryVersion != queryVersion) result.emplace("queries", meta("queries"));
     return result;
   }
+  void setCacheSync(bool enabled) {
+    enabled = enabled && wal;
+    if (cacheSync == enabled) return;
+    sql(*statements, enabled ? "PRAGMA synchronous=NORMAL" : "PRAGMA synchronous=FULL");
+    cacheSync = enabled;
+  }
   void begin(const std::string& kind) {
     if (!transaction.empty()) throw std::runtime_error("a native transaction is already active");
+    // cache commits can replay after a power loss; local mutation ids and writes cannot.
+    setCacheSync(kind == "pull" || kind == "queries");
     auto id = std::to_string(++nextTransaction);
     auto transactionType = kind;
     sql(*statements, "BEGIN IMMEDIATE");
@@ -1203,6 +1273,7 @@ struct Client::Impl {
       if (response.get("lastMutationIDChanges").has(clientID) &&
           integer(response.at("lastMutationIDChanges").at(clientID), "mutation acknowledgement") >=
               integer(meta("nextMutationID"), "next mutation id")) {
+        setCacheSync(false);
         setMeta("recoveryRequired", response.at("lastMutationIDChanges").at(clientID));
         throw std::runtime_error(
             "CLIENT_STATE_NOT_FOUND: server "
@@ -1430,6 +1501,7 @@ struct Client::Impl {
         WatchDefinition value{ast, format};
         watchedTables(value.ast, value.tables, 0);
         value.pointKey = pointWatchKey(value.ast);
+        value.plan.indexWatch = !value.pointKey;
         definition = watchDefinitions.emplace(std::move(key), std::move(value)).first;
       }
       try {
