@@ -4,6 +4,8 @@ import {
   type OpenNativeZeroOptions,
 } from './open.js'
 
+import { nativeZeroClient, type NativeZeroClientOptions } from './zeroClient.js'
+
 import type { Mutators } from './types.js'
 
 export * from './clientExports.js'
@@ -22,7 +24,7 @@ function isZeroEngine(value: unknown): value is NativeZeroEngine {
 }
 
 export async function createNativeZero<M extends Mutators>(
-  options: OpenNativeZeroOptions<M>
+  options: OpenNativeZeroOptions<M> & NativeZeroClientOptions
 ) {
   const proxy: unknown = Reflect.get(globalThis, 'NitroModulesProxy')
   if (
@@ -36,5 +38,6 @@ export async function createNativeZero<M extends Mutators>(
   const engine: unknown = proxy.createHybridObject('OneZero')
   if (!isZeroEngine(engine))
     throw new Error('Lime Sync native Zero has an invalid driver')
-  return openNativeZero(options, engine)
+  const client = await openNativeZero(options, engine)
+  return nativeZeroClient(client, options.schema, options.transport, options)
 }
