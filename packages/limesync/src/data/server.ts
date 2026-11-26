@@ -28,7 +28,7 @@ import type {
   QueryBuilder,
   Transaction,
 } from './types.js'
-import type { Check } from './validate.js'
+import type { ArgSchema } from './validate.js'
 
 // a host that runs these bindings off node supplies its own AsyncLocalStorage;
 // without one, every server mutator's authData and ambient context are null.
@@ -161,7 +161,7 @@ export type CreateZeroServerBindingsOptions<
   createServerActions: () => ServerActions
   actions?: ZeroServerActionsConfig<Action>
   queries?: AnyQueryRegistry
-  mutations?: Record<string, Record<string, Check<unknown>>>
+  mutations?: Record<string, Record<string, ArgSchema>>
   validateQuery?: ValidateQueryFn
   validateMutation?: ValidateMutationFn
   defaultAllowAdminRole?: AdminRoleMode

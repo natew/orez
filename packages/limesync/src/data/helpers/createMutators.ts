@@ -1,6 +1,6 @@
 import { withOptimisticAggregates } from '../../aggregate.js'
 import { getAuthData } from '../state.js'
-import { parse, type Check } from '../validate.js'
+import { checkArgs, declaresNoArgs, type ArgSchema } from '../validate.js'
 import { mapObject } from './mapObject.js'
 import { runWithContext } from './mutatorContext.js'
 import { time } from './time.js'
@@ -46,7 +46,7 @@ export function createMutators<Models extends GenericModels>({
   createServerActions?: () => Record<string, any>
   validateMutation?: ValidateMutationFn
   /** generated arg checks keyed by model.mutationName, run before each mutation */
-  mutationValidators?: Record<string, Record<string, Check<unknown>>>
+  mutationValidators?: Record<string, Record<string, ArgSchema>>
   resolveAuthData?: () => AuthData | null
   aggregates?: AggregateSet
 }): GetZeroMutators<Models> {
@@ -187,11 +187,7 @@ export function createMutators<Models extends GenericModels>({
       // was left. the case the skip exists for is a mutation that declares no
       // args at all, which zero calls with null, so ask whether the validator
       // declares anything instead: a void schema, or an object with no entries.
-      const declaresNothing =
-        validator?.kind === 'void' ||
-        (validator?.kind === 'object' &&
-          Object.keys(validator.entries ?? {}).length === 0)
-      if (validator && !declaresNothing) parse(validator, args[1])
+      if (validator && !declaresNoArgs(validator)) await checkArgs(validator, args[1])
       // then run user-provided validation hook as escape hatch
       if (validateMutation) {
         await validateMutation({

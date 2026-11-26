@@ -8,7 +8,7 @@ import {
 
 import type { AnyQueryRegistry, Schema } from '../zero/zero.js'
 import type { AuthData, GenericModels } from './types.js'
-import type { Check } from './validate.js'
+import type { ArgSchema } from './validate.js'
 
 // the public `limesync/data/server` entry: the routes plus every binding export.
 export * from './server.js'
@@ -188,7 +188,7 @@ export type DataServerApp<S extends Schema, M extends GenericModels> = {
   schema: S
   models: M
   queries: AnyQueryRegistry
-  mutationValidators: Record<string, Record<string, Check<unknown>>>
+  mutationValidators: Record<string, Record<string, ArgSchema>>
 }
 
 type DataServerOptions<

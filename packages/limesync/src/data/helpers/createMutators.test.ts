@@ -187,3 +187,37 @@ test('each mutator permission check runs against its own transaction', async () 
     { mutation: 'B', tx: 'tx-B' },
   ])
 })
+
+test('validates args with any standard schema, as deployed valibot validators are', async () => {
+  // the shape valibot's object() has: kind 'schema', type 'object', entries, ~standard
+  const valibotLike = {
+    kind: 'schema',
+    type: 'object',
+    entries: { title: {} },
+    '~standard': {
+      version: 1,
+      vendor: 'valibot',
+      validate: (value: unknown) =>
+        value &&
+        typeof value === 'object' &&
+        typeof Reflect.get(value, 'title') === 'string'
+          ? { value }
+          : { issues: [{ message: 'expected string', path: [{ key: 'title' }] }] },
+    },
+  }
+  const create = vi.fn(async () => {})
+  const mutators = createMutators({
+    environment: 'server',
+    authData: null,
+    bindCan: () => async () => {},
+    models: { task: { mutate: { create } } } as never,
+    mutationValidators: { task: { create: valibotLike } },
+  }) as any
+
+  await mutators.task.create({}, { title: 'ok' })
+  expect(create).toHaveBeenCalledTimes(1)
+  await expect(mutators.task.create({}, { title: 1 })).rejects.toThrow(
+    'invalid args at title: expected string'
+  )
+  expect(create).toHaveBeenCalledTimes(1)
+})

@@ -6,7 +6,7 @@ type Issue = { message: string; path: PropertyKey[] }
 type Result<T> = { value: T; issues?: undefined } | { issues: Issue[] }
 
 export type Check<T> = {
-  readonly kind: string
+  readonly type: string
   readonly entries?: Record<string, Check<unknown>>
   readonly test: (value: unknown, path: PropertyKey[]) => Issue | undefined
   readonly '~standard': {
@@ -19,13 +19,51 @@ export type Check<T> = {
 
 type Infer<C> = C extends Check<infer T> ? T : never
 
+type StandardIssue = {
+  readonly message: string
+  readonly path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }>
+}
+
+// what a mutation or query boundary accepts: any standard schema with a
+// `type` and object `entries`. a Check is one, and so are the valibot
+// validators that deployed projects generated before Check existed.
+export type ArgSchema = {
+  readonly type?: string
+  readonly entries?: object
+  readonly '~standard': {
+    readonly validate: (
+      value: unknown
+    ) =>
+      | { readonly issues?: ReadonlyArray<StandardIssue> }
+      | Promise<{ readonly issues?: ReadonlyArray<StandardIssue> }>
+  }
+}
+
+// a mutation that declares no args is called with null.
+export function declaresNoArgs(schema: ArgSchema): boolean {
+  return (
+    schema.type === 'void' ||
+    (schema.type === 'object' && Object.keys(schema.entries ?? {}).length === 0)
+  )
+}
+
+export async function checkArgs(schema: ArgSchema, value: unknown): Promise<void> {
+  const issue = (await schema['~standard'].validate(value)).issues?.[0]
+  if (!issue) return
+  const path = (issue.path ?? []).map((segment) =>
+    typeof segment === 'object' ? segment.key : segment
+  )
+  const at = path.length ? ` at ${path.map(String).join('.')}` : ''
+  throw new TypeError(`invalid args${at}: ${issue.message}`)
+}
+
 function check<T>(
-  kind: string,
+  type: string,
   test: Check<T>['test'],
   entries?: Record<string, Check<unknown>>
 ): Check<T> {
   return {
-    kind,
+    type,
     entries,
     test,
     '~standard': {
