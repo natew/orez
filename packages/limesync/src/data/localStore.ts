@@ -43,6 +43,27 @@ export type LocalPersistedTableSnapshot = {
   indexes?: Readonly<Record<string, OneDataIndex>>
 }
 
+export class LocalRevisionConflictError extends Error {
+  readonly expectedRevision: number
+  readonly foundRevision: number
+
+  constructor(message: string, expectedRevision: number, foundRevision: number) {
+    super(message)
+    this.name = 'LocalRevisionConflictError'
+    this.expectedRevision = expectedRevision
+    this.foundRevision = foundRevision
+  }
+}
+
+export function isLocalRevisionConflict(error: unknown): boolean {
+  if (error instanceof LocalRevisionConflictError) return true
+  return (
+    error instanceof Error &&
+    error.message.includes('concurrent local ') &&
+    error.message.includes('expected revision')
+  )
+}
+
 export type LocalPersistenceAdapter = {
   /** load persisted device tables, reconciling additive schema changes */
   open(
@@ -52,6 +73,14 @@ export type LocalPersistenceAdapter = {
   commit(ops: readonly LocalWriteOp[]): Promise<void>
   close?(): Promise<void>
   clear?(tables?: Readonly<Record<string, LocalTableMeta>>): Promise<void>
+  /** optional cross-tab / cross-process mutex around open and transaction commit */
+  withLock?<T>(work: () => Promise<T>): Promise<T>
+  /** optional peer-commit subscription (e.g. BroadcastChannel) */
+  onPeerCommit?(listener: () => void): () => void
+  /** optional peer-commit broadcast after durable commit */
+  notifyCommit?(): void
+  /** bounded conflict-rebase retry count (0 disables automatic retry) */
+  maxConflictRetries?: number
 }
 
 export type LocalSQLiteExecutor = {
@@ -888,12 +917,45 @@ const IDB_META_STORE = '__meta'
 const IDB_ROWS_STORE = '__rows'
 const IDB_REVISION_KEY = '__limesync_store_revision__'
 
+const DEFAULT_CROSS_TAB_MAX_RETRIES = 6
+
 export function createIndexedDBLocalPersistence(
-  storageKey: string
+  storageKey: string,
+  options?: { maxConflictRetries?: number }
 ): LocalPersistenceAdapter {
   const dbName = `limesync-local-${storageKey}`
   let dbPromise: Promise<IDBDatabase> | null = null
   let knownRevision = 0
+  let channel: BroadcastChannel | null = null
+  const peerListeners = new Set<() => void>()
+
+  const getChannel = (): BroadcastChannel | null => {
+    if (channel) return channel
+    // attach BroadcastChannel only in real browser/WebView tabs backed by IndexedDB;
+    // headless runtimes like Bun define BroadcastChannel globally and can stay alive while open.
+    if (
+      typeof window === 'undefined' ||
+      typeof indexedDB === 'undefined' ||
+      typeof BroadcastChannel === 'undefined'
+    ) {
+      return null
+    }
+    try {
+      const next = new BroadcastChannel(dbName)
+      next.onmessage = () => {
+        for (const listener of [...peerListeners]) {
+          try {
+            listener()
+          } catch {}
+        }
+      }
+      ;(next as { unref?: () => void }).unref?.()
+      channel = next
+      return next
+    } catch {
+      return null
+    }
+  }
 
   const openDb = (): Promise<IDBDatabase> => {
     if (dbPromise) return dbPromise
@@ -1142,8 +1204,10 @@ export function createIndexedDBLocalPersistence(
               if (currentRev !== knownRevision) {
                 fail(
                   tx,
-                  new Error(
-                    `[limesync] concurrent local store modification detected on '${dbName}' (expected revision ${knownRevision}, found ${currentRev}). Reopen the store before retrying.`
+                  new LocalRevisionConflictError(
+                    `[limesync] concurrent local store modification detected on '${dbName}' (expected revision ${knownRevision}, found ${currentRev}). Reopen the store before retrying.`,
+                    knownRevision,
+                    currentRev
                   )
                 )
                 return
@@ -1166,6 +1230,12 @@ export function createIndexedDBLocalPersistence(
     },
 
     async close() {
+      if (channel) {
+        try {
+          channel.close()
+        } catch {}
+        channel = null
+      }
       if (!dbPromise) return
       const pending = dbPromise
       dbPromise = null
@@ -1176,6 +1246,39 @@ export function createIndexedDBLocalPersistence(
         // already failed to open
       }
     },
+
+    withLock<T>(work: () => Promise<T>): Promise<T> {
+      const locks =
+        typeof navigator !== 'undefined'
+          ? (
+              navigator as {
+                locks?: {
+                  request: <R>(name: string, callback: () => Promise<R>) => Promise<R>
+                }
+              }
+            ).locks
+          : undefined
+      if (locks && typeof locks.request === 'function') {
+        return locks.request(dbName, work)
+      }
+      return work()
+    },
+
+    onPeerCommit(listener: () => void): () => void {
+      peerListeners.add(listener)
+      getChannel()
+      return () => {
+        peerListeners.delete(listener)
+      }
+    },
+
+    notifyCommit(): void {
+      try {
+        getChannel()?.postMessage({ type: 'committed' })
+      } catch {}
+    },
+
+    maxConflictRetries: options?.maxConflictRetries ?? DEFAULT_CROSS_TAB_MAX_RETRIES,
 
     async clear(tables) {
       if (typeof indexedDB === 'undefined') return
@@ -1389,8 +1492,10 @@ export function createSQLiteLocalPersistence(
             ? Number(JSON.parse(String(revRows[0].schema_json)))
             : 0
           if (currentRev !== knownRevision) {
-            throw new Error(
-              `[limesync] concurrent local SQLite modification detected (expected revision ${knownRevision}, found ${currentRev}). Reopen the store before retrying.`
+            throw new LocalRevisionConflictError(
+              `[limesync] concurrent local SQLite modification detected (expected revision ${knownRevision}, found ${currentRev}). Reopen the store before retrying.`,
+              knownRevision,
+              currentRev
             )
           }
           for (const op of serialized) {
@@ -1521,6 +1626,8 @@ export class LocalDataStore<S extends Schema = Schema> {
   #closing = false
   #closed = false
   #closePromise: Promise<void> | null = null
+  #peerDirty = false
+  #unsubPeerCommit: (() => void) | null = null
 
   constructor(
     meta: LocalSchemaMeta<S>,
@@ -1546,6 +1653,19 @@ export class LocalDataStore<S extends Schema = Schema> {
 
     this.#delegate = new LocalQueryDelegate(this.#sources, this.#ready)
     this.#queryBuilder = createBuilder(meta.schema)
+    this.#subscribePeerCommits()
+  }
+
+  #subscribePeerCommits() {
+    if (this.#unsubPeerCommit || !this.#hasDeviceTables) return
+    this.#unsubPeerCommit =
+      this.#persistence.onPeerCommit?.(() => {
+        this.#peerDirty = true
+      }) ?? null
+  }
+
+  #withPersistenceLock<T>(work: () => Promise<T>): Promise<T> {
+    return this.#persistence.withLock ? this.#persistence.withLock(work) : work()
   }
 
   get ready(): boolean {
@@ -1651,7 +1771,15 @@ export class LocalDataStore<S extends Schema = Schema> {
     if (this.#ready) return Promise.resolve()
     if (this.#openPromise) return this.#openPromise
     const epoch = this.#lifecycleEpoch
-    const pending = this.#enqueue(() => this.#hydrateUnlocked(epoch)).catch((error) => {
+    const pending = this.#enqueue(() =>
+      this.#withPersistenceLock(async () => {
+        if (this.#peerDirty) {
+          this.#peerDirty = false
+          this.#ready = false
+        }
+        await this.#hydrateUnlocked(epoch)
+      })
+    ).catch((error) => {
       if (this.#openPromise === pending) {
         this.#openPromise = null
       }
@@ -1717,247 +1845,278 @@ export class LocalDataStore<S extends Schema = Schema> {
     return new LocalQueryDelegate(stagedSources, true)
   }
 
+  /**
+   * Execute an atomic local transaction. On multi-tab adapters (IndexedDB),
+   * transactions serialize under a cross-tab lock and automatically rehydrate
+   * and retry up to `maxConflictRetries` times on concurrent revision conflicts,
+   * so `work` must be safe to replay idempotently without external side effects.
+   */
   transaction<T>(work: (tx: LocalTransaction<S>) => T | Promise<T>): Promise<T> {
-    return this.#enqueue(async (): Promise<T> => {
-      // ensure hydration completes before any transaction reads or writes
-      if (!this.#ready && this.#hasDeviceTables) {
-        await this.#hydrateUnlocked(this.#lifecycleEpoch)
-      }
+    return this.#enqueue(() =>
+      this.#withPersistenceLock(async (): Promise<T> => {
+        const maxRetries = Math.max(0, this.#persistence.maxConflictRetries ?? 0)
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          if (this.#peerDirty && this.#hasDeviceTables) {
+            this.#peerDirty = false
+            this.#ready = false
+          }
+          // ensure hydration completes before any transaction reads or writes
+          if (!this.#ready && this.#hasDeviceTables) {
+            await this.#hydrateUnlocked(this.#lifecycleEpoch)
+          }
 
-      const stagedRows = new Map<string, Map<string, Row>>()
-      const dirtyTables = new Set<string>()
-      const pendingChanges = new Map<string, Map<string, { prev?: Row; next?: Row }>>()
+          const stagedRows = new Map<string, Map<string, Row>>()
+          const dirtyTables = new Set<string>()
+          const pendingChanges = new Map<
+            string,
+            Map<string, { prev?: Row; next?: Row }>
+          >()
 
-      const getTableMap = (tableName: string): Map<string, Row> => {
-        let map = stagedRows.get(tableName)
-        if (!map) {
-          map = new Map(this.#rows.get(tableName)!)
-          stagedRows.set(tableName, map)
-        }
-        return map
-      }
+          const getTableMap = (tableName: string): Map<string, Row> => {
+            let map = stagedRows.get(tableName)
+            if (!map) {
+              map = new Map(this.#rows.get(tableName)!)
+              stagedRows.set(tableName, map)
+            }
+            return map
+          }
 
-      const getEffectiveMap = (tableName: string): ReadonlyMap<string, Row> =>
-        stagedRows.get(tableName) ?? this.#rows.get(tableName)!
+          const getEffectiveMap = (tableName: string): ReadonlyMap<string, Row> =>
+            stagedRows.get(tableName) ?? this.#rows.get(tableName)!
 
-      const recordChange = (tableName: string, pk: string, next: Row | undefined) => {
-        dirtyTables.add(tableName)
-        let tableChanges = pendingChanges.get(tableName)
-        if (!tableChanges) {
-          tableChanges = new Map()
-          pendingChanges.set(tableName, tableChanges)
-        }
-        const existing = tableChanges.get(pk)
-        if (existing) {
-          existing.next = next
-        } else {
-          tableChanges.set(pk, {
-            prev: this.#rows.get(tableName)!.get(pk),
-            next,
-          })
-        }
-      }
+          const recordChange = (tableName: string, pk: string, next: Row | undefined) => {
+            dirtyTables.add(tableName)
+            let tableChanges = pendingChanges.get(tableName)
+            if (!tableChanges) {
+              tableChanges = new Map()
+              pendingChanges.set(tableName, tableChanges)
+            }
+            const existing = tableChanges.get(pk)
+            if (existing) {
+              existing.next = next
+            } else {
+              tableChanges.set(pk, {
+                prev: this.#rows.get(tableName)!.get(pk),
+                next,
+              })
+            }
+          }
 
-      const deleteWithReferentialActions = (
-        tableName: string,
-        pk: string,
-        visited = new Set<string>()
-      ) => {
-        const visitKey = `${tableName}\0${pk}`
-        if (visited.has(visitKey)) return
-        visited.add(visitKey)
-        const map = getTableMap(tableName)
-        const deletedRow = map.get(pk)
-        if (!deletedRow) return
-        map.delete(pk)
-        recordChange(tableName, pk, undefined)
+          const deleteWithReferentialActions = (
+            tableName: string,
+            pk: string,
+            visited = new Set<string>()
+          ) => {
+            const visitKey = `${tableName}\0${pk}`
+            if (visited.has(visitKey)) return
+            visited.add(visitKey)
+            const map = getTableMap(tableName)
+            const deletedRow = map.get(pk)
+            if (!deletedRow) return
+            map.delete(pk)
+            recordChange(tableName, pk, undefined)
 
-        // apply onDelete actions for any referencing local table
-        for (const [childTable, childMeta] of Object.entries(this.tables)) {
-          for (const [colName, col] of Object.entries(childMeta.columns)) {
-            const ref = col.references
-            if (!ref || ref.table !== tableName) continue
-            const deletedVal = deletedRow[ref.column]
-            if (deletedVal === null || deletedVal === undefined) continue
-            const childMap = getTableMap(childTable)
-            for (const [childPk, childRow] of [...childMap.entries()]) {
-              if (!Object.is(childRow[colName], deletedVal)) continue
-              const action = ref.onDelete ?? 'restrict'
-              if (action === 'cascade') {
-                deleteWithReferentialActions(childTable, childPk, visited)
-              } else if (action === 'set null') {
-                if (!col.optional) {
-                  throw new Error(
-                    `[limesync] cannot set null on required foreign key '${childTable}.${colName}'`
-                  )
+            // apply onDelete actions for any referencing local table
+            for (const [childTable, childMeta] of Object.entries(this.tables)) {
+              for (const [colName, col] of Object.entries(childMeta.columns)) {
+                const ref = col.references
+                if (!ref || ref.table !== tableName) continue
+                const deletedVal = deletedRow[ref.column]
+                if (deletedVal === null || deletedVal === undefined) continue
+                const childMap = getTableMap(childTable)
+                for (const [childPk, childRow] of [...childMap.entries()]) {
+                  if (!Object.is(childRow[colName], deletedVal)) continue
+                  const action = ref.onDelete ?? 'restrict'
+                  if (action === 'cascade') {
+                    deleteWithReferentialActions(childTable, childPk, visited)
+                  } else if (action === 'set null') {
+                    if (!col.optional) {
+                      throw new Error(
+                        `[limesync] cannot set null on required foreign key '${childTable}.${colName}'`
+                      )
+                    }
+                    const updated = normalizeUpdateRow(childMeta, childRow, {
+                      [colName]: null,
+                    })
+                    childMap.set(childPk, updated)
+                    recordChange(childTable, childPk, updated)
+                  } else {
+                    throw new Error(
+                      `[limesync] cannot delete '${tableName}' (${pk}): referenced by '${childTable}.${colName}'`
+                    )
+                  }
                 }
-                const updated = normalizeUpdateRow(childMeta, childRow, {
-                  [colName]: null,
-                })
-                childMap.set(childPk, updated)
-                recordChange(childTable, childPk, updated)
-              } else {
-                throw new Error(
-                  `[limesync] cannot delete '${tableName}' (${pk}): referenced by '${childTable}.${colName}'`
-                )
               }
             }
           }
-        }
-      }
 
-      let active = true
-      const ensureActive = () => {
-        if (!active) {
-          throw new Error('[limesync] local transaction is already closed')
-        }
-      }
-
-      const mutate = Object.fromEntries(
-        Object.keys(this.tables).map((tableName) => {
-          const meta = this.#assertLocalTable(tableName)
-          return [
-            tableName,
-            {
-              insert: async (input: Record<string, unknown>) => {
-                ensureActive()
-                const row = normalizeInsertRow(meta, input)
-                const pk = primaryKeyFor(meta, row)
-                const map = getTableMap(tableName)
-                if (map.has(pk)) {
-                  throw new Error(
-                    `[limesync] duplicate primary key in local table '${tableName}': ${pk}`
-                  )
-                }
-                map.set(pk, row)
-                recordChange(tableName, pk, row)
-              },
-              upsert: async (input: Record<string, unknown>) => {
-                ensureActive()
-                const pk = primaryKeyFor(meta, input)
-                const map = getTableMap(tableName)
-                const prev = map.get(pk)
-                const row = prev
-                  ? normalizeUpdateRow(meta, prev, input)
-                  : normalizeInsertRow(meta, input)
-                map.set(pk, row)
-                recordChange(tableName, pk, row)
-              },
-              update: async (patch: Record<string, unknown>) => {
-                ensureActive()
-                const pk = primaryKeyFor(meta, patch)
-                const map = getTableMap(tableName)
-                const prev = map.get(pk)
-                if (!prev) {
-                  throw new Error(
-                    `[limesync] cannot update missing row in local table '${tableName}': ${pk}`
-                  )
-                }
-                const row = normalizeUpdateRow(meta, prev, patch)
-                map.set(pk, row)
-                recordChange(tableName, pk, row)
-              },
-              delete: async (key: Record<string, unknown>) => {
-                ensureActive()
-                const pk = primaryKeyFor(meta, key)
-                deleteWithReferentialActions(tableName, pk)
-              },
-            },
-          ]
-        })
-      ) as LocalTxMutate<S>
-
-      const tx: LocalTransaction<S> = {
-        run: async (q) => {
-          ensureActive()
-          const internals = asQueryInternals(q)
-          classifyQueryAst(internals.ast, this.tableNames)
-          if (dirtyTables.size === 0) return this.#delegate.run(q)
-          return this.#buildStagedDelegate(stagedRows).run(q)
-        },
-        mutate,
-      }
-
-      let result: T
-      try {
-        result = await work(tx)
-      } finally {
-        active = false
-      }
-
-      // 1. Validate unique constraints and local foreign keys across the final staged state
-      for (const tableName of dirtyTables) {
-        const meta = this.tables[tableName]!
-        assertUniqueConstraints(meta, getEffectiveMap(tableName).values())
-      }
-      if (dirtyTables.size > 0) {
-        assertForeignKeys(this.tables, getEffectiveMap, dirtyTables)
-      }
-
-      // 2. Build prevalidated persistence ops and IVM changes WITHOUT mutating live state yet
-      const persistOps: LocalWriteOp[] = []
-      const liveEdits: Array<{
-        tableName: string
-        pk: string
-        next?: Row
-        change: SourceChange
-      }> = []
-
-      for (const [tableName, tableChanges] of pendingChanges) {
-        const meta = this.tables[tableName]!
-        const shouldPersist = meta.persistence === 'device'
-
-        for (const [pk, { prev, next }] of tableChanges) {
-          if (prev === undefined && next === undefined) continue
-          if (prev === undefined && next !== undefined) {
-            liveEdits.push({ tableName, pk, next, change: makeSourceChangeAdd(next) })
-            if (shouldPersist) {
-              persistOps.push({ kind: 'put', table: tableName, key: pk, row: next })
-            }
-          } else if (prev !== undefined && next === undefined) {
-            liveEdits.push({
-              tableName,
-              pk,
-              next: undefined,
-              change: makeSourceChangeRemove(prev),
-            })
-            if (shouldPersist) {
-              persistOps.push({ kind: 'delete', table: tableName, key: pk })
-            }
-          } else {
-            liveEdits.push({
-              tableName,
-              pk,
-              next: next!,
-              change: makeSourceChangeEdit(next!, prev!),
-            })
-            if (shouldPersist) {
-              persistOps.push({ kind: 'put', table: tableName, key: pk, row: next! })
+          let active = true
+          const ensureActive = () => {
+            if (!active) {
+              throw new Error('[limesync] local transaction is already closed')
             }
           }
+
+          const mutate = Object.fromEntries(
+            Object.keys(this.tables).map((tableName) => {
+              const meta = this.#assertLocalTable(tableName)
+              return [
+                tableName,
+                {
+                  insert: async (input: Record<string, unknown>) => {
+                    ensureActive()
+                    const row = normalizeInsertRow(meta, input)
+                    const pk = primaryKeyFor(meta, row)
+                    const map = getTableMap(tableName)
+                    if (map.has(pk)) {
+                      throw new Error(
+                        `[limesync] duplicate primary key in local table '${tableName}': ${pk}`
+                      )
+                    }
+                    map.set(pk, row)
+                    recordChange(tableName, pk, row)
+                  },
+                  upsert: async (input: Record<string, unknown>) => {
+                    ensureActive()
+                    const pk = primaryKeyFor(meta, input)
+                    const map = getTableMap(tableName)
+                    const prev = map.get(pk)
+                    const row = prev
+                      ? normalizeUpdateRow(meta, prev, input)
+                      : normalizeInsertRow(meta, input)
+                    map.set(pk, row)
+                    recordChange(tableName, pk, row)
+                  },
+                  update: async (patch: Record<string, unknown>) => {
+                    ensureActive()
+                    const pk = primaryKeyFor(meta, patch)
+                    const map = getTableMap(tableName)
+                    const prev = map.get(pk)
+                    if (!prev) {
+                      throw new Error(
+                        `[limesync] cannot update missing row in local table '${tableName}': ${pk}`
+                      )
+                    }
+                    const row = normalizeUpdateRow(meta, prev, patch)
+                    map.set(pk, row)
+                    recordChange(tableName, pk, row)
+                  },
+                  delete: async (key: Record<string, unknown>) => {
+                    ensureActive()
+                    const pk = primaryKeyFor(meta, key)
+                    deleteWithReferentialActions(tableName, pk)
+                  },
+                },
+              ]
+            })
+          ) as LocalTxMutate<S>
+
+          const tx: LocalTransaction<S> = {
+            run: async (q) => {
+              ensureActive()
+              const internals = asQueryInternals(q)
+              classifyQueryAst(internals.ast, this.tableNames)
+              if (dirtyTables.size === 0) return this.#delegate.run(q)
+              return this.#buildStagedDelegate(stagedRows).run(q)
+            },
+            mutate,
+          }
+
+          let result: T
+          try {
+            result = await work(tx)
+          } finally {
+            active = false
+          }
+
+          // 1. Validate unique constraints and local foreign keys across the final staged state
+          for (const tableName of dirtyTables) {
+            const meta = this.tables[tableName]!
+            assertUniqueConstraints(meta, getEffectiveMap(tableName).values())
+          }
+          if (dirtyTables.size > 0) {
+            assertForeignKeys(this.tables, getEffectiveMap, dirtyTables)
+          }
+
+          // 2. Build prevalidated persistence ops and IVM changes WITHOUT mutating live state yet
+          const persistOps: LocalWriteOp[] = []
+          const liveEdits: Array<{
+            tableName: string
+            pk: string
+            next?: Row
+            change: SourceChange
+          }> = []
+
+          for (const [tableName, tableChanges] of pendingChanges) {
+            const meta = this.tables[tableName]!
+            const shouldPersist = meta.persistence === 'device'
+
+            for (const [pk, { prev, next }] of tableChanges) {
+              if (prev === undefined && next === undefined) continue
+              if (prev === undefined && next !== undefined) {
+                liveEdits.push({ tableName, pk, next, change: makeSourceChangeAdd(next) })
+                if (shouldPersist) {
+                  persistOps.push({ kind: 'put', table: tableName, key: pk, row: next })
+                }
+              } else if (prev !== undefined && next === undefined) {
+                liveEdits.push({
+                  tableName,
+                  pk,
+                  next: undefined,
+                  change: makeSourceChangeRemove(prev),
+                })
+                if (shouldPersist) {
+                  persistOps.push({ kind: 'delete', table: tableName, key: pk })
+                }
+              } else {
+                liveEdits.push({
+                  tableName,
+                  pk,
+                  next: next!,
+                  change: makeSourceChangeEdit(next!, prev!),
+                })
+                if (shouldPersist) {
+                  persistOps.push({ kind: 'put', table: tableName, key: pk, row: next! })
+                }
+              }
+            }
+          }
+
+          // 3. Durably commit device writes BEFORE publishing to live IVM sources
+          if (persistOps.length > 0) {
+            try {
+              await this.#persistence.commit(persistOps)
+            } catch (error) {
+              if (isLocalRevisionConflict(error) && attempt < maxRetries) {
+                this.#ready = false
+                this.#peerDirty = false
+                continue
+              }
+              throw error
+            }
+          }
+
+          // 4. Publish prevalidated changes atomically into live rows + IVM sources
+          if (liveEdits.length > 0) {
+            for (const edit of liveEdits) {
+              const liveMap = this.#rows.get(edit.tableName)!
+              const source = this.#sources.get(edit.tableName)!
+              if (edit.next === undefined) liveMap.delete(edit.pk)
+              else liveMap.set(edit.pk, edit.next)
+              consume(source.push(edit.change))
+            }
+            this.#version++
+            this.#delegate.notifyCommit()
+            if (persistOps.length > 0) {
+              this.#persistence.notifyCommit?.()
+            }
+          }
+
+          return result
         }
-      }
-
-      // 3. Durably commit device writes BEFORE publishing to live IVM sources
-      if (persistOps.length > 0) {
-        await this.#persistence.commit(persistOps)
-      }
-
-      // 4. Publish prevalidated changes atomically into live rows + IVM sources
-      if (liveEdits.length > 0) {
-        for (const edit of liveEdits) {
-          const liveMap = this.#rows.get(edit.tableName)!
-          const source = this.#sources.get(edit.tableName)!
-          if (edit.next === undefined) liveMap.delete(edit.pk)
-          else liveMap.set(edit.pk, edit.next)
-          consume(source.push(edit.change))
-        }
-        this.#version++
-        this.#delegate.notifyCommit()
-      }
-
-      return result
-    })
+        throw new Error('[limesync] local transaction exhausted revision conflict retries')
+      })
+    )
   }
 
   createMutators(): LocalMutators<S> {
@@ -1986,27 +2145,31 @@ export class LocalDataStore<S extends Schema = Schema> {
   }
 
   clear(): Promise<void> {
-    return this.#enqueue(async () => {
-      // clear backing storage AND atomically reinstall per-table schema metadata
-      // inside one persistence transaction so no peer can interleave in between.
-      await this.#persistence.clear?.(this.tables)
-      let mutated = false
-      for (const [tableName, map] of this.#rows) {
-        const source = this.#sources.get(tableName)!
-        for (const [pk, row] of [...map.entries()]) {
-          map.delete(pk)
-          consume(source.push(makeSourceChangeRemove(row)))
-          mutated = true
+    return this.#enqueue(() =>
+      this.#withPersistenceLock(async () => {
+        // clear backing storage AND atomically reinstall per-table schema metadata
+        // inside one persistence transaction so no peer can interleave in between.
+        await this.#persistence.clear?.(this.tables)
+        let mutated = false
+        for (const [tableName, map] of this.#rows) {
+          const source = this.#sources.get(tableName)!
+          for (const [pk, row] of [...map.entries()]) {
+            map.delete(pk)
+            consume(source.push(makeSourceChangeRemove(row)))
+            mutated = true
+          }
         }
-      }
-      this.#ready = true
-      this.#openPromise = null
-      this.#delegate.setReady(true)
-      if (mutated) {
-        this.#version++
-        this.#delegate.notifyCommit()
-      }
-    })
+        this.#ready = true
+        this.#peerDirty = false
+        this.#openPromise = null
+        this.#delegate.setReady(true)
+        if (mutated) {
+          this.#version++
+          this.#delegate.notifyCommit()
+        }
+        this.#persistence.notifyCommit?.()
+      })
+    )
   }
 
   /** reopen a closed or closing store (used when a suspended provider fiber reveals) */
@@ -2015,10 +2178,12 @@ export class LocalDataStore<S extends Schema = Schema> {
     this.#lifecycleEpoch++
     this.#closing = false
     this.#closed = false
+    this.#peerDirty = false
     this.#closePromise = null
     this.#openPromise = null
     this.#ready = !this.#hasDeviceTables
     this.#delegate.setReady(this.#ready)
+    this.#subscribePeerCommits()
     if (previousClose) {
       this.#opQueue = this.#opQueue.then(() => previousClose.catch(() => {}))
     }
@@ -2029,6 +2194,8 @@ export class LocalDataStore<S extends Schema = Schema> {
     if (this.#closePromise) return this.#closePromise
     const epoch = this.#lifecycleEpoch
     this.#closing = true
+    this.#unsubPeerCommit?.()
+    this.#unsubPeerCommit = null
     this.#closePromise = (async () => {
       await this.#opQueue.catch(() => {})
       await this.#persistence.close?.()

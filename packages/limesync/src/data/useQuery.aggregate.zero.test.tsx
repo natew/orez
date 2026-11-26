@@ -8,7 +8,7 @@ import { count, defineAggregates, sum } from '../aggregate.js'
 import { createZeroClientTransport, type HttpPullTransport } from '../client.js'
 import { createBuilder, createSchema, number, string, table } from '../zero/zero.js'
 import { onMutationError } from './helpers/useMutation.js'
-import { createZeroClientWithDirectQueries } from './multi.js'
+import { createDataClientWithDirectQueries } from './multi.js'
 import { mutations } from './mutations.js'
 
 import type { MutatorContext } from './types.js'
@@ -49,7 +49,7 @@ const expenseMutations = mutations(expense, () => true, {
 })
 const categorySpendQuery = (args: { category: string }) =>
   builder.categorySpend.where('category', args.category)
-const client = createZeroClientWithDirectQueries({
+const client = createDataClientWithDirectQueries({
   schema,
   models: { expense: { mutate: expenseMutations } },
   groupedQueries: { expense: { categorySpendQuery } },

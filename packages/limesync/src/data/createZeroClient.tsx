@@ -46,8 +46,8 @@ import {
 } from './helpers/recoverZeroClient.js'
 import { observeMutation, reportMutationInvocationError } from './helpers/useMutation.js'
 import { registerClientInstance } from './instanceRegistry.js'
+import { createLocalPersistence } from './localPersistence.js'
 import {
-  createIndexedDBLocalPersistence,
   createMemoryLocalPersistence,
   LocalDataStore,
   type LocalMutators,
@@ -129,22 +129,6 @@ export type LocalDataProviderOptions = {
   persistence?: LocalPersistenceAdapter
 }
 
-export type DefaultLocalPersistenceFactory = (
-  storageKey: string
-) => LocalPersistenceAdapter
-
-let defaultLocalPersistenceFactory: DefaultLocalPersistenceFactory | null = null
-
-/**
- * Register a runtime-default persistence adapter for `.local({ persistence: 'device' })`
- * tables on runtimes without IndexedDB (such as React Native or Bun shared SQLite).
- */
-export function registerDefaultLocalPersistence(
-  factory: DefaultLocalPersistenceFactory | null
-) {
-  defaultLocalPersistenceFactory = factory
-}
-
 export type CombinedZeroSchema<
   S extends ZeroSchema,
   L extends ZeroSchema = EmptyLocalSchema,
@@ -223,7 +207,7 @@ function createUnavailableDirectUseQuery<
 >(): UseQueryHook<Schema> {
   function useQueryDirect(): never {
     throw new Error(
-      `[limesync] direct queries are optional. Import createZeroClientWithDirectQueries from 'limesync/data/multi' for clients used outside the innermost ZeroProvider.`
+      `[limesync] direct queries are optional. Import createDataClientWithDirectQueries from 'limesync/data/multi' for clients used outside the innermost DataProvider.`
     )
   }
 
@@ -432,18 +416,7 @@ export function createZeroClientInternal<
   ): LocalPersistenceAdapter {
     if (localOptions?.persistence) return localOptions.persistence
     if (deviceLocalTables.length === 0) return createMemoryLocalPersistence()
-    if (typeof indexedDB !== 'undefined') {
-      return createIndexedDBLocalPersistence(key)
-    }
-    if (defaultLocalPersistenceFactory) {
-      return defaultLocalPersistenceFactory(key)
-    }
-    throw new Error(
-      `[limesync] local device table(s) [${deviceLocalTables.join(', ')}] require IndexedDB, ` +
-        `a registered default persistence adapter (registerDefaultLocalPersistence), or an explicit ` +
-        `local.persistence option (such as createSQLiteLocalPersistence(db)). ` +
-        `Use .local({ persistence: 'memory' }) for intentional RAM-only tables.`
-    )
+    return createLocalPersistence(key)
   }
 
   function createScopedLocalStore(
@@ -496,7 +469,7 @@ export function createZeroClientInternal<
     return store.transaction(work)
   }
 
-  function useZeroProviderGeneration(): ZeroProviderGeneration | null {
+  function useDataProviderGeneration(): ZeroProviderGeneration | null {
     return useContext(ZeroProviderGenerationContext)
   }
 
@@ -1949,11 +1922,12 @@ export function createZeroClientInternal<
     useQueryDirect,
     usePermission,
     usePermissionDirect,
-    useZeroProviderGeneration,
+    useDataProviderGeneration,
     zero: zero as ClientZero<Schema, Models, LocalSchema>,
     mutate: zero.mutate as ClientMutate<Schema, Models, LocalSchema>,
     transaction,
     useLocalStore,
+    localTableNames: new Set(localSchema ? Object.keys(localSchema.tables) : []),
     get localStore() {
       return getOrCreateImperativeLocalStore()
     },

@@ -2,6 +2,6 @@
 // a server render, which has no IndexedDB. kvStore.native.ts keeps it in
 // SQLite through zero's op-sqlite adapter. opt-in: createZeroClient's own
 // default stays 'mem'.
-export function createZeroKvStore(): 'idb' | 'mem' {
+export function createSyncKvStore(): 'idb' | 'mem' {
   return typeof indexedDB === 'undefined' ? 'mem' : 'idb'
 }

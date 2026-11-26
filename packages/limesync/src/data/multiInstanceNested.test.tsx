@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// real nested-provider tests for combineZeroClients: zero-react's useQuery
+// real nested-provider tests for combineDataClients: zero-react's useQuery
 // resolves its zero instance from the NEAREST ZeroProvider context, so under
 // nested providers an outer instance's queries must NOT ride the context
 // path — they must materialize directly on the owning instance.
@@ -12,7 +12,7 @@ import { afterEach, beforeEach, expect, test } from 'vitest'
 import { useZero } from '../zero/react.js'
 import { createSchema, string, table } from '../zero/zero.js'
 import { createZeroClient } from './createZeroClient.js'
-import { combineZeroClients, createZeroClientWithDirectQueries } from './multi.js'
+import { combineDataClients, createDataClientWithDirectQueries } from './multi.js'
 import { zql } from './zql.js'
 
 import type { MutatorContext } from './types.js'
@@ -45,7 +45,7 @@ const controlModels = {
 }
 const ctlUserById = (args: { id: string }) => (zql as any).user.where('id', args.id).one()
 
-const control = createZeroClientWithDirectQueries({
+const control = createDataClientWithDirectQueries({
   schema,
   models: controlModels,
   groupedQueries: { ctlUser: { byId: ctlUserById } },
@@ -74,7 +74,7 @@ const project = createZeroClient({
 })
 
 // default contract: last argument = inner provider
-const combined = combineZeroClients(control, project)
+const combined = combineDataClients(control, project)
 
 let root: Root
 let container: HTMLElement

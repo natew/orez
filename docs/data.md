@@ -22,23 +22,87 @@ it provides a few things:
 plus various hooks and helpers for react integration.
 
 each namespace is either one file exporting its queries and mutations, or a
-folder with `queries.ts` and `mutations.ts`. queries use the global `zql`
-builder.
+folder with `queries.ts` and `mutations.ts`. queries use the `query` builder
+(`zql` remains as an alias for existing apps).
 
 ## one apps
 
-Export your Zero schema as `schema` from `data/schema.ts` and add
+Export your `one/data` schema as `schema` from `data/schema.ts` and add
 `limesync()` from `limesync/data/bun` to `bun.plugins` in `one.config.ts`.
-The plugin discovers queries and mutations under `data/` and refreshes their
-registries when source files change.
+The plugin discovers queries and mutations under `data/` and projects one schema
+into three layers:
 
-Import `app` from `limesync:app` and render `<DataProvider app={app}>`
+- **Server DDL (`private` + `public`):** server SQLite tables and migrations via `snapshot(schema)`.
+- **Sync wire schema (`public` only):** synced tables, named queries, and permissioned mutations.
+- **Local client tables (`local` only):** device-persisted (`table(...).local()`, default `persistence: 'device'`) or RAM-only (`table(...).local({ persistence: 'memory' })`) tables that never cross the network and survive sync cache resets.
+
+Import `app` from `limesync:app` and render `<DataProvider app={app} local={{ storageKey: 'my-app' }}>`
 from `limesync/data`. The provider and `app.client` share a client.
 On the server import `app` from `limesync:app/server` and export the
 handler returned by `createDataServer` from `limesync/data/server`.
 Pass the app's `authData(request)` function, namespace executor and wake secret.
 If an embedded host already serves the sync endpoints, use its origin on
 the provider.
+
+## local tables (device and memory)
+
+Declare local-only tables right beside synced tables in `data/schema.ts` using
+`one/data`:
+
+```ts
+import { createSchema, string, table } from 'one/data'
+
+export const schema = createSchema({
+  tables: [
+    table('post').public().columns({ id: string(), title: string() }).primaryKey('id'),
+    table('draft').local().columns({ id: string(), body: string() }).primaryKey('id'),
+    table('uiFilter')
+      .local({ persistence: 'memory' })
+      .columns({ id: string(), query: string() })
+      .primaryKey('id'),
+  ],
+})
+```
+
+Local tables boot independently of auth and network, work with no server at all,
+and are untouched by `clearSyncClientData()`. Query them with the same `query`
+builder and `useQuery`, and write through `app.client.mutate` or atomic
+`app.client.transaction`:
+
+```tsx
+import { query } from 'limesync/data'
+import { app } from 'limesync:app'
+
+const [draft] = app.client.useQuery(query.draft.where('id', sessionId).one())
+
+await app.client.mutate.draft.upsert({ id: sessionId, body: text })
+
+await app.client.transaction(async (tx) => {
+  const existing = await tx.run(query.draft.where('id', sessionId).one())
+  await tx.mutate.draft.upsert({ id: sessionId, body: existing?.body ?? text })
+})
+```
+
+### platform local persistence (zero boilerplate)
+
+`limesync/data/local-persistence` selects the device persistence adapter by
+package export condition with no runtime fallback chain:
+
+- **One native (`one-native`):** shared `One.Database` WAL SQLite under
+  `Documents/SQLite/` (`Database.openAsync` on iOS). Import native-only
+  synchronous boot helpers (`readLocalTableRowsSync`, `deleteLocalTableRowsSync`)
+  from `limesync/data/local-persistence/native` for zero-flash frame-1 shell restore.
+- **Browser / WebKit (`browser` / `default`):** isolated IndexedDB
+  (`limesync-local-<storageKey>`) with built-in cross-tab `navigator.locks`,
+  `BroadcastChannel` peer invalidation, and bounded revision-conflict rebase
+  retry (up to 6 retries). Keep `transaction(work)` callbacks idempotent so a
+  rebased replay is safe.
+- **Bun host (`bun`):** `bun:sqlite` WAL file inside `options.directory` or
+  `process.env.LIMESYNC_LOCAL_DIR`. Headless Bun/Node runtimes with no
+  configured directory fail loud instead of silently dropping to RAM.
+
+`<DataProvider local={{ storageKey }}>` calls `createLocalPersistence(storageKey)`
+automatically when no custom `local.persistence` adapter is passed.
 
 One can build the virtual modules in memory. To use their types in an editor
 or load them from scripts or a worker bundler, run `limesync prepare`
@@ -571,8 +635,8 @@ identity, `ProvideZero` reconnects that cached instance with the new token. a
 logout that disables the provider and removes auth retires the authenticated
 instance instead of allowing a later sign-in to revive its closed connection.
 
-`useZeroProviderGeneration()` returns an opaque generation for the exact live
-Zero instance and `null` while the provider is disabled or rendering on the
+`useDataProviderGeneration()` returns an opaque generation for the exact live
+sync instance and `null` while the provider is disabled or rendering on the
 server. It changes in the same render that replaces the instance, including an
 in-place `remint()`. `generation.isCurrent()` stays tied to that instance after
 a late callback resumes, and becomes false when the instance is replaced,
@@ -582,17 +646,16 @@ facade.
 
 ### persistent local cache
 
-`createZeroKvStore()` from `limesync/data/kv-store` returns the local cache each
-platform keeps: IndexedDB on web (memory during a server render) and SQLite on
-native through Zero's op-sqlite adapter, which needs `@op-engineering/op-sqlite`
-installed in the app. pass it as the `kvStore` prop; without it the client
-stays in memory.
+`createSyncKvStore()` from `limesync/data/kv-store` returns the sync cache each
+platform keeps: IndexedDB on web (memory during a server render), `One.Database`
+SQLite on `one-native`, and op-sqlite on React Native. Pass it as the `kvStore`
+prop; without it the sync client stays in memory.
 
 ```tsx
-import { createZeroKvStore } from 'limesync/data/kv-store'
+import { createSyncKvStore } from 'limesync/data/kv-store'
 
-const kvStore = useMemo(() => createZeroKvStore(), [])
-<ProvideZero kvStore={kvStore} … />
+const kvStore = useMemo(() => createSyncKvStore(), [])
+<DataProvider app={app} kvStore={kvStore} … />
 ```
 
 ### multiple client instances
@@ -630,35 +693,41 @@ sync-table closure and rejects missing or multiply claimed directories,
 duplicate namespaces, missing scope columns, and cross-instance reach.
 
 ```tsx
-import { createZeroClients } from 'limesync/data/multi'
-import { instances } from '~/data/generated/instances'
+import { createDataClients } from 'limesync/data/multi'
+import { instances, localSchema } from 'limesync:app'
 
-const clients = createZeroClients(instances, { inner: 'project' })
+const clients = createDataClients(instances, { inner: 'project', localSchema })
 const control = clients.clients.control
 const project = clients.clients.project
-const ProvideControlZero = clients.providers.control
-const ProvideProjectZero = clients.providers.project
+const ProvideControl = clients.providers.control
+const ProvideProject = clients.providers.project
 
-// useQuery/run/preload/getQuery dispatch by the query fn's namespace,
-// zero.mutate.<namespace> dispatches by model namespace, and the mutation
+// useQuery/run/preload/getQuery dispatch by query fn namespace (or local table),
+// mutate.<namespace> dispatches by model or local table, and the mutation
 // lifecycle helpers dispatch to the instance that issued the mutation
 export const {
   useQuery,
-  zero,
+  mutate,
+  transaction,
+  localStore,
+  events,
   run,
   preload,
   getQuery,
-  zeroEvents,
   awaitMutationClient,
   awaitMutationServer,
   drainBackgroundMutations,
   enqueueBackgroundMutation,
 } = clients.combined
-;<ProvideControlZero cacheURL={controlUrl} userID={user.id}>
-  <ProvideProjectZero cacheURL={projectUrl} userID={`${user.id}:${projectId}`}>
+;<ProvideControl cacheURL={controlUrl} userID={user.id}>
+  <ProvideProject
+    cacheURL={projectUrl}
+    userID={`${user.id}:${projectId}`}
+    local={{ storageKey: 'my-app' }}
+  >
     <App />
-  </ProvideProjectZero>
-</ProvideControlZero>
+  </ProvideProject>
+</ProvideControl>
 ```
 
 constraints:

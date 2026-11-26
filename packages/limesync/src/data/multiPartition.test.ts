@@ -2,13 +2,13 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { createSchema, string, table } from '../zero/zero.js'
 import { getInstanceForQueryFn } from './instanceRegistry.js'
-import { createZeroClients } from './multi.js'
+import { createDataClients } from './multi.js'
 
 const schema = createSchema({
   tables: [table('message').columns({ id: string() }).primaryKey('id')],
 })
 
-describe('createZeroClients', () => {
+describe('createDataClients', () => {
   test('builds generated partitions with default as the primary client', () => {
     const instances = {
       default: {
@@ -33,7 +33,7 @@ describe('createZeroClients', () => {
       },
     } as const
 
-    const result = createZeroClients(instances, { inner: 'default' })
+    const result = createDataClients(instances, { inner: 'default' })
 
     expect(Object.keys(result.clients)).toEqual(['project', 'default'])
     expect(result.clients.default.instanceName).toBe('default')
@@ -59,7 +59,7 @@ describe('createZeroClients', () => {
   })
 
   test('requires at least one generated instance', () => {
-    expect(() => createZeroClients({}, { inner: 'missing' as never })).toThrow(
+    expect(() => createDataClients({}, { inner: 'missing' as never })).toThrow(
       /at least one instance/
     )
   })
@@ -75,11 +75,11 @@ describe('createZeroClients', () => {
       scope: null,
       defaultVisibility: null,
     }
-    createZeroClients({ default: entry }, { inner: 'default' })
+    createDataClients({ default: entry }, { inner: 'default' })
     const owner = getInstanceForQueryFn(entry.queries.preserved.current)
     expect(owner?.name).toBe('default')
     expect(() =>
-      createZeroClients({ default: entry }, { inner: 'missing' as never })
+      createDataClients({ default: entry }, { inner: 'missing' as never })
     ).toThrow(/inner instance 'missing'/)
     expect(getInstanceForQueryFn(entry.queries.preserved.current)).toBe(owner)
   })
@@ -96,7 +96,7 @@ describe('createZeroClients', () => {
       defaultVisibility: null,
     })
 
-    createZeroClients(
+    createDataClients(
       {
         default: entry({ movedNamespace: { before: () => ({}) as never } }),
         project: entry({ stableProject: { before: () => ({}) as never } }),
@@ -105,7 +105,7 @@ describe('createZeroClients', () => {
     )
 
     expect(() =>
-      createZeroClients(
+      createDataClients(
         {
           default: entry({ stableDefault: { after: () => ({}) as never } }),
           project: entry({ movedNamespace: { after: () => ({}) as never } }),

@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import { createSchema, string, table } from '../zero/zero.js'
-import { combineZeroClients } from './combineZeroClients.js'
+import { combineDataClients } from './combineZeroClients.js'
 import { createZeroClient } from './createZeroClient.js'
 import { createEmitter } from './helpers/emitter.js'
 import { createMutationLifecycle } from './helpers/mutationLifecycle.js'
@@ -268,7 +268,7 @@ describe('multi-instance isolation', () => {
   })
 })
 
-describe('combineZeroClients facade', () => {
+describe('combineDataClients facade', () => {
   test('zero.mutate dispatches by model namespace, rest forwards to primary', () => {
     const insertSpy = vi.fn()
     const updateSpy = vi.fn()
@@ -281,7 +281,7 @@ describe('combineZeroClients facade', () => {
       userID: 'project-user',
     })
 
-    const combined = combineZeroClients(control, project)
+    const combined = combineDataClients(control, project)
     const zero = combined.zero as Record<string, any>
 
     zero.mutate.fzUser.insert({ id: '1' })
@@ -300,7 +300,7 @@ describe('combineZeroClients facade', () => {
   test('retire tears down every instance, not just the primary', async () => {
     const control = fakeClient('retire-control', ['retireUser'], { mutate: {} })
     const project = fakeClient('retire-project', ['retireTask'], { mutate: {} })
-    const combined = combineZeroClients(control, project)
+    const combined = combineDataClients(control, project)
 
     await combined.retire()
 
@@ -314,7 +314,7 @@ describe('combineZeroClients facade', () => {
     const control = fakeClient('retire-fail-control', ['retireFailUser'], { mutate: {} })
     const project = fakeClient('retire-fail-project', ['retireFailTask'], { mutate: {} })
     control.retire.mockRejectedValueOnce(new Error('control teardown failed'))
-    const combined = combineZeroClients(control, project)
+    const combined = combineDataClients(control, project)
 
     await expect(combined.retire()).rejects.toThrow('control teardown failed')
     // the healthy client still tore down rather than being skipped by the throw
@@ -331,7 +331,7 @@ describe('combineZeroClients facade', () => {
 
     // project is last → inner: its hooks ride the upstream context path;
     // control is outer → its hooks go through the context-free direct path
-    const combined = combineZeroClients(control, project)
+    const combined = combineDataClients(control, project)
     const useQuery = combined.useQuery as (...args: any[]) => any
     const preload = combined.preload as (...args: any[]) => any
     const getQuery = combined.getQuery as (...args: any[]) => any
@@ -379,7 +379,7 @@ describe('combineZeroClients facade', () => {
     registerQuery(bQuery, 'innerB.byId')
 
     // a is FIRST (primary) but declared inner → context path; b becomes direct
-    const combined = combineZeroClients(a, b, { inner: 'inner-a' })
+    const combined = combineDataClients(a, b, { inner: 'inner-a' })
     const useQuery = combined.useQuery as (...args: any[]) => any
 
     useQuery(aQuery, { id: '1' })
@@ -390,7 +390,7 @@ describe('combineZeroClients facade', () => {
     expect(b.useQueryDirect).toHaveBeenCalledWith(bQuery, { id: '2' })
     expect(b.useQuery).not.toHaveBeenCalled()
 
-    expect(() => combineZeroClients(a, b, { inner: 'nope' })).toThrow(
+    expect(() => combineDataClients(a, b, { inner: 'nope' })).toThrow(
       /not one of the passed clients/
     )
   })
@@ -399,7 +399,7 @@ describe('combineZeroClients facade', () => {
     const { client: a } = makeClient('relay-a', 'relayA')
     const { client: b } = makeClient('relay-b', 'relayB')
 
-    const combined = combineZeroClients(a, b)
+    const combined = combineDataClients(a, b)
     const seen: Array<ZeroEvent | null> = []
     combined.zeroEvents.listen((event) => seen.push(event))
 
@@ -425,7 +425,7 @@ describe('combineZeroClients facade', () => {
   test('combined zeroEvents stays pending until every instance reconnects', () => {
     const { client: a } = makeClient('reconnect-a', 'reconnectA')
     const { client: b } = makeClient('reconnect-b', 'reconnectB')
-    const combined = combineZeroClients(a, b)
+    const combined = combineDataClients(a, b)
     const seen: Array<ZeroEvent | null> = []
     combined.zeroEvents.listen((event) => seen.push(event))
 
