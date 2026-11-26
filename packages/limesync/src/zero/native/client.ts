@@ -70,6 +70,16 @@ type Published = {
 }
 
 // capture inputs before a queued operation can observe a caller's edits.
+// one desired set, in any order
+function sameQueries(
+  current: readonly DesiredQuery[] | undefined,
+  next: readonly DesiredQuery[]
+) {
+  if (current?.length !== next.length) return false
+  const byHash = new Map(current.map((query) => [query.hash, query]))
+  return next.every((query) => dequal(byHash.get(query.hash), query))
+}
+
 function snapshot<T>(value: T): T
 function snapshot(value: unknown, depth?: number): unknown
 function snapshot(value: unknown, depth = 0): unknown {
@@ -168,7 +178,12 @@ export class NativeZero<M extends Mutators = Mutators> {
     }
   >()
   private manualQueries?: readonly DesiredQuery[]
-  private appliedQueries?: Pick<ClientState, 'queries' | 'queryVersion'>
+  // the desired set changes only when a view or the manual list does; a pull
+  // compares revisions instead of every query's AST.
+  private desiredRevision = 0
+  private appliedQueries?: Pick<ClientState, 'queries' | 'queryVersion'> & {
+    revision: number
+  }
   private managesQueries = false
   private queryRefreshQueued = false
   private sync?: NativeSync
@@ -256,7 +271,7 @@ export class NativeZero<M extends Mutators = Mutators> {
 
   private async requestState(
     request: EngineRequest,
-    known = this.appliedQueries
+    known: Pick<ClientState, 'queries' | 'queryVersion'> | undefined = this.appliedQueries
   ): Promise<ClientState> {
     const { queries, ...state } = await this.request<
       Omit<ClientState, 'queries'> & Partial<Pick<ClientState, 'queries'>>
@@ -553,10 +568,13 @@ export class NativeZero<M extends Mutators = Mutators> {
       if (captured !== undefined) {
         if (new Set(captured.map((query) => query.hash)).size !== captured.length)
           throw new Error('desired queries require distinct nonempty hashes')
+        if (!sameQueries(this.manualQueries, captured)) this.desiredRevision++
         this.manualQueries = captured
         this.managesQueries = true
       }
+      let revision = 0
       const state = await this.enqueue(() => {
+        revision = this.desiredRevision
         const desired = this.managesQueries
           ? new Map((this.manualQueries ?? []).map((query) => [query.hash, query]))
           : undefined
@@ -566,12 +584,9 @@ export class NativeZero<M extends Mutators = Mutators> {
             throw new Error('Native Zero query hash refers to different queries')
           desired!.set(hash, view.desired)
         }
-        const applied = this.appliedQueries?.queries
         if (
-          applied &&
-          (!desired ||
-            (desired.size === applied.length &&
-              applied.every((query) => dequal(query, desired.get(query.hash)))))
+          this.appliedQueries &&
+          (!desired || this.appliedQueries.revision === revision)
         )
           return this.requestState({ op: 'state' })
         return this.request<ClientState>({
@@ -602,10 +617,11 @@ export class NativeZero<M extends Mutators = Mutators> {
         if (invalidated) {
           this.appliedQueries = undefined
           this.refreshQueries()
-        } else if (patch) {
+        } else {
           this.appliedQueries = {
             queries: state.queries,
             queryVersion: state.queryVersion,
+            revision,
           }
         }
       } catch (error) {
@@ -698,6 +714,7 @@ export class NativeZero<M extends Mutators = Mutators> {
       throw new Error('Native Zero query hash refers to different queries')
     this.managesQueries = true
     if (existing?.timer !== undefined) clearTimeout(existing.timer)
+    if (!existing) this.desiredRevision++
     this.desiredViews.set(hash, {
       desired,
       count: (existing?.count ?? 0) + 1,
@@ -722,10 +739,12 @@ export class NativeZero<M extends Mutators = Mutators> {
           if (!this.closed && registered.ttl > 0) {
             registered.timer = setTimeout(() => {
               this.desiredViews.delete(hash)
+              this.desiredRevision++
               this.refreshQueries()
             }, registered.ttl)
           } else {
             this.desiredViews.delete(hash)
+            this.desiredRevision++
             this.refreshQueries()
           }
         }
