@@ -218,11 +218,11 @@ test('provider generation changes with the actual instance during remint', async
     instanceName: 'provider-generation-test',
   })
   const generations: Array<
-    NonNullable<ReturnType<typeof generationClient.useZeroProviderGeneration>>
+    NonNullable<ReturnType<typeof generationClient.useDataProviderGeneration>>
   > = []
 
   function GenerationProbe() {
-    const generation = generationClient.useZeroProviderGeneration()
+    const generation = generationClient.useDataProviderGeneration()
     useLayoutEffect(() => {
       if (generation) generations.push(generation)
     }, [generation])

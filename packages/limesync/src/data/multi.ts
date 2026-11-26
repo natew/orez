@@ -1,4 +1,4 @@
-import { combineZeroClients } from './combineZeroClients.js'
+import { combineDataClients } from './combineZeroClients.js'
 import { createUseQueryDirect } from './createUseQueryDirect.js'
 import {
   createZeroClientInternal,
@@ -8,25 +8,30 @@ import {
 import { releaseClientInstances } from './instanceRegistry.js'
 
 import type { AggregateSet } from '../aggregate.js'
-import type { Schema as ZeroSchema } from '../zero/zero.js'
+import type {
+  EmptyLocalSchema,
+  LocalSchemaMeta,
+  Schema as ZeroSchema,
+} from '../zero/zero.js'
 import type { GenericModels } from './types.js'
 
 export * from './combineZeroClients.js'
 
-export function createZeroClientWithDirectQueries<
+export function createDataClientWithDirectQueries<
   Schema extends ZeroSchema,
   Models extends GenericModels,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
 >(
-  options: CreateZeroClientOptions<Schema, Models>
-): ReturnType<typeof createZeroClientInternal<Schema, Models>> {
+  options: CreateZeroClientOptions<Schema, Models, LocalSchema>
+): ReturnType<typeof createZeroClientInternal<Schema, Models, LocalSchema>> {
   const createDirectUseQuery: DirectQueryAdapter<Schema> = createUseQueryDirect
-  return createZeroClientInternal<Schema, Models>({
+  return createZeroClientInternal<Schema, Models, LocalSchema>({
     ...options,
     createDirectUseQuery,
   })
 }
 
-export type ZeroInstanceManifestEntry<
+export type DataInstanceManifestEntry<
   Schema extends ZeroSchema = ZeroSchema,
   Models extends GenericModels = GenericModels,
 > = {
@@ -41,24 +46,44 @@ export type ZeroInstanceManifestEntry<
   defaultVisibility: ((value: string) => { column: string; value: string }) | null
 }
 
-type ClientFor<Entry> =
-  Entry extends ZeroInstanceManifestEntry<infer Schema, infer Models>
-    ? ReturnType<typeof createZeroClientInternal<Schema, Models>>
-    : never
+type ClientFor<
+  Entry,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
+> = Entry extends DataInstanceManifestEntry<infer Schema, infer Models>
+  ? ReturnType<typeof createZeroClientInternal<Schema, Models, LocalSchema>>
+  : never
 
-type ClientMap<Instances extends Record<string, ZeroInstanceManifestEntry>> = {
-  [Name in keyof Instances]: ClientFor<Instances[Name]>
+type ClientMap<
+  Instances extends Record<string, DataInstanceManifestEntry>,
+  Inner extends keyof Instances & string,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
+> = {
+  [Name in keyof Instances]: ClientFor<
+    Instances[Name],
+    Name extends Inner ? LocalSchema : EmptyLocalSchema
+  >
 }
 
-type ClientUnion<Instances extends Record<string, ZeroInstanceManifestEntry>> =
-  ClientMap<Instances>[keyof Instances]
+type ClientUnion<
+  Instances extends Record<string, DataInstanceManifestEntry>,
+  Inner extends keyof Instances & string,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
+> = ClientMap<Instances, Inner, LocalSchema>[keyof Instances]
 
-export function createZeroClients<
-  const Instances extends Record<string, ZeroInstanceManifestEntry>,
->(instances: Instances, options: { inner: keyof Instances & string }) {
+export function createDataClients<
+  const Instances extends Record<string, DataInstanceManifestEntry>,
+  const Inner extends keyof Instances & string,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
+>(
+  instances: Instances,
+  options: {
+    inner: Inner
+    localSchema?: LocalSchemaMeta<LocalSchema>
+  }
+) {
   const names = Object.keys(instances)
   if (names.length === 0) {
-    throw new Error('[limesync] createZeroClients requires at least one instance')
+    throw new Error('[limesync] createDataClients requires at least one instance')
   }
   if (names.includes('default')) {
     names.splice(names.indexOf('default'), 1)
@@ -68,7 +93,7 @@ export function createZeroClients<
   const innerName = options.inner
   if (!names.includes(innerName)) {
     throw new Error(
-      `[limesync] createZeroClients inner instance '${innerName}' is not in the manifest`
+      `[limesync] createDataClients inner instance '${innerName}' is not in the manifest`
     )
   }
   const clients: Record<string, any> = {}
@@ -78,8 +103,9 @@ export function createZeroClients<
   releaseClientInstances(names)
   for (const name of [...names].reverse()) {
     const instance = instances[name]!
-    const options = {
+    const clientOptions = {
       schema: instance.schema,
+      localSchema: name === innerName ? options.localSchema : undefined,
       models: instance.models,
       groupedQueries: instance.queries,
       instanceName: name,
@@ -87,26 +113,33 @@ export function createZeroClients<
     }
     clients[name] =
       name === innerName
-        ? createZeroClientInternal(options)
-        : createZeroClientWithDirectQueries(options)
+        ? createZeroClientInternal(clientOptions)
+        : createDataClientWithDirectQueries(clientOptions)
   }
 
-  const typedClients = clients as ClientMap<Instances>
+  const typedClients = clients as ClientMap<Instances, Inner, LocalSchema>
   // names is checked non-empty above. retain the union of the concrete client
-  // types so combineZeroClients can intersect every instance surface.
+  // types so combineDataClients can intersect every instance surface.
   const orderedClients = names.map(
     (name) => typedClients[name as keyof Instances]
-  ) as unknown as [ClientUnion<Instances>, ...ClientUnion<Instances>[]]
+  ) as unknown as [
+    ClientUnion<Instances, Inner, LocalSchema>,
+    ...ClientUnion<Instances, Inner, LocalSchema>[],
+  ]
   const providers = Object.fromEntries(
-    names.map((name) => [name, clients[name]!.ProvideZero])
-  ) as { [Name in keyof Instances]: ClientMap<Instances>[Name]['ProvideZero'] }
+    names.map((name) => [name, clients[name]!.ProvideData])
+  ) as {
+    [Name in keyof Instances]: ClientMap<Instances, Inner, LocalSchema>[Name]['ProvideData']
+  }
 
   return {
     clients: typedClients,
     providers,
-    combined: combineZeroClients<[ClientUnion<Instances>, ...ClientUnion<Instances>[]]>(
-      ...orderedClients,
-      { inner: innerName }
-    ),
+    combined: combineDataClients<
+      [
+        ClientUnion<Instances, Inner, LocalSchema>,
+        ...ClientUnion<Instances, Inner, LocalSchema>[],
+      ]
+    >(...orderedClients, { inner: innerName }),
   }
 }

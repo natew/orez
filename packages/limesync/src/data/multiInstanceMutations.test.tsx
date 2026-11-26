@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// mutation lifecycle across combineZeroClients, with two real Zero instances
+// mutation lifecycle across combineDataClients, with two real Zero instances
 // mounted as soot mounts them: control OUTER, project INNER. binding the
 // acknowledgement helpers to ONE instance made that instance's recovery cancel
 // every other instance's in-flight and queued mutations (soot incident: a
@@ -16,7 +16,7 @@ import { createSchema, string, table } from '../zero/zero.js'
 import { createZeroClient } from './createZeroClient.js'
 import { isStaleGenerationError } from './helpers/mutationLifecycle.js'
 import { onMutationError } from './helpers/useMutation.js'
-import { combineZeroClients, createZeroClientWithDirectQueries } from './multi.js'
+import { combineDataClients, createDataClientWithDirectQueries } from './multi.js'
 
 import type { MutatorContext } from './types.js'
 import type { ReactNode } from 'react'
@@ -37,7 +37,7 @@ const schema = createSchema({ tables: [userTable, taskTable] })
 // a test can tell "the write ran" from "the write was cancelled"
 const writes: string[] = []
 
-const control = createZeroClientWithDirectQueries({
+const control = createDataClientWithDirectQueries({
   schema,
   models: {
     mutCtlUser: {
@@ -69,7 +69,7 @@ const project = createZeroClient({
   instanceName: 'mutations-project',
 })
 
-const combined = combineZeroClients(control, project)
+const combined = combineDataClients(control, project)
 
 const controlWrite = (id: string) =>
   (combined.zero.mutate as any).mutCtlUser.seed({ id, name: id })

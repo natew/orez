@@ -20,12 +20,14 @@ import {
 import { observeMutation } from './helpers/useMutation.js'
 import {
   LocalDataStore,
+  LocalRevisionConflictError,
   classifyQueryAst,
   createMemoryLocalPersistence,
   createSQLiteLocalPersistence,
   type LocalPersistenceAdapter,
   type LocalSQLiteExecutor,
 } from './localStore.js'
+import { createDataClients } from './multi.js'
 import { query, zql } from './zql.js'
 
 import type { OneDataSchema } from './one-schema.js'
@@ -597,7 +599,7 @@ describe('local tables and query builder', () => {
     const origIdb = globalThis.indexedDB
     ;(globalThis as any).indexedDB = undefined
     try {
-      expect(() => app.client.localStore).toThrow(/require IndexedDB/)
+      expect(() => app.client.localStore).toThrow(/requires IndexedDB/)
     } finally {
       ;(globalThis as any).indexedDB = origIdb
     }
@@ -900,6 +902,179 @@ describe('local tables and query builder', () => {
         )
       })
       expect(container.textContent).toBe('from-layout')
+    } finally {
+      await act(async () => {
+        root.unmount()
+      })
+      container.remove()
+    }
+  })
+
+  it('rehydrates on peer commit, retries bounded revision conflicts, and routes local tables through createDataClients', async () => {
+    const oneSchema = {
+      tables: {
+        draft: {
+          name: 'draft',
+          public: false,
+          local: 'device' as const,
+          columns: {
+            id: { kind: 'string' as const, optional: false },
+            body: { kind: 'string' as const, optional: false },
+          },
+          primaryKey: ['id'],
+        },
+        post: {
+          name: 'post',
+          public: true,
+          columns: {
+            id: { kind: 'string' as const, optional: false },
+          },
+          primaryKey: ['id'],
+        },
+      },
+      relationships: {},
+    }
+    const localMeta = extractLocalSchema(oneSchema)
+    const syncSchema = createSchema(oneSchema)
+
+    // 1. Bounded conflict rebase retry + peer commit notification
+    const backing = createMemoryLocalPersistence()
+    let peerListener: (() => void) | null = null
+    let conflictsLeft = 2
+    let notified = 0
+    let lockCalls = 0
+    const coordinated: LocalPersistenceAdapter = {
+      open: (tables) => backing.open(tables),
+      async commit(ops) {
+        if (conflictsLeft > 0) {
+          conflictsLeft -= 1
+          await backing.commit([
+            {
+              kind: 'put',
+              table: 'draft',
+              key: JSON.stringify(['peer']),
+              row: { id: 'peer', body: 'from-peer' },
+            },
+          ])
+          throw new LocalRevisionConflictError(
+            '[limesync] concurrent local store modification detected (expected revision 0, found 1)',
+            0,
+            1
+          )
+        }
+        await backing.commit(ops)
+      },
+      clear: (t) => backing.clear?.(t) ?? Promise.resolve(),
+      withLock: async (work) => {
+        lockCalls += 1
+        return work()
+      },
+      onPeerCommit: (cb) => {
+        peerListener = cb
+        return () => {
+          if (peerListener === cb) peerListener = null
+        }
+      },
+      notifyCommit: () => {
+        notified += 1
+      },
+      maxConflictRetries: 3,
+    }
+    const store = new LocalDataStore(localMeta, coordinated)
+    let attempts = 0
+    await store.transaction(async (tx) => {
+      attempts += 1
+      await tx.mutate.draft.upsert({ id: 'mine', body: 'hello' })
+    })
+    expect(attempts).toBe(3)
+    expect(lockCalls).toBeGreaterThan(0)
+    expect(notified).toBe(1)
+    const rowsAfterRebase = await store.run(store.query.draft)
+    expect(rowsAfterRebase.map((r) => r.id).sort()).toEqual(['mine', 'peer'])
+
+    // Peer commit signal triggers fresh open on next transaction
+    await backing.commit([
+      {
+        kind: 'put',
+        table: 'draft',
+        key: JSON.stringify(['peer-2']),
+        row: { id: 'peer-2', body: 'later' },
+      },
+    ])
+    peerListener?.()
+    let seenPeer2 = false
+    await store.transaction(async (tx) => {
+      const all = await tx.run(store.query.draft)
+      seenPeer2 = all.some((r) => r.id === 'peer-2')
+    })
+    expect(seenPeer2).toBe(true)
+
+    // Exhausting maxConflictRetries surfaces the conflict error
+    conflictsLeft = 10
+    await expect(
+      store.transaction(async (tx) => {
+        await tx.mutate.draft.upsert({ id: 'fail', body: 'too-many-conflicts' })
+      })
+    ).rejects.toThrow(LocalRevisionConflictError)
+    await store.close()
+
+    // 2. Multi-client createDataClients routes local tables on combined facade
+    const localPersist = createMemoryLocalPersistence()
+    const multi = createDataClients(
+      {
+        app: {
+          schema: syncSchema,
+          queries: {},
+          models: {},
+          tables: ['post'],
+          syncTables: ['post'],
+          supportTables: [],
+          scope: null,
+          defaultVisibility: null,
+        },
+        usr: {
+          schema: syncSchema,
+          queries: {},
+          models: {},
+          tables: [],
+          syncTables: [],
+          supportTables: [],
+          scope: 'userId',
+          defaultVisibility: null,
+        },
+      },
+      { inner: 'usr', localSchema: localMeta }
+    )
+    const q = createBuilder(localMeta.schema)
+    function MultiLocalReader() {
+      const [row] = multi.combined.useQuery(q.draft.where('id', 'd1').one() as any)
+      useLayoutEffect(() => {
+        void multi.combined.mutate.draft.upsert({ id: 'd1', body: 'multi-local' })
+      }, [])
+      return <div>{(row as any)?.body ?? 'empty'}</div>
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const UsrProvider = multi.providers.usr
+    try {
+      await act(async () => {
+        root.render(
+          <UsrProvider
+            userID="u1"
+            disable
+            local={{ storageKey: 'multi-test', persistence: localPersist }}
+          >
+            <MultiLocalReader />
+          </UsrProvider>
+        )
+      })
+      expect(container.textContent).toBe('multi-local')
+      await multi.combined.transaction(async (tx) => {
+        await tx.mutate.draft.upsert({ id: 'd2', body: 'tx-multi' })
+      })
+      const saved = await multi.combined.localStore?.run(q.draft)
+      expect(saved?.map((r) => r.id).sort()).toEqual(['d1', 'd2'])
     } finally {
       await act(async () => {
         root.unmount()

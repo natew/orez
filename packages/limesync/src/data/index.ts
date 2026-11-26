@@ -12,12 +12,10 @@ export { createDataApp, DataProvider, type DataApp } from './DataProvider.js'
 export {
   createDataClient,
   createZeroClient,
-  registerDefaultLocalPersistence,
   type ClientMutate,
   type ClientZero,
   type CombinedZeroSchema,
   type CreateZeroClientOptions,
-  type DefaultLocalPersistenceFactory,
   type GroupedQueries,
   type LocalDataProviderOptions,
   type PermissionStrategy,
@@ -26,12 +24,18 @@ export {
   type ZeroProviderTransport,
 } from './createZeroClient.js'
 export {
+  createLocalPersistence,
+  type LocalPersistenceOptions,
+} from './localPersistence.js'
+export {
   classifyQueryAst,
   collectAstTables,
   createIndexedDBLocalPersistence,
   createMemoryLocalPersistence,
   createSQLiteLocalPersistence,
+  isLocalRevisionConflict,
   LocalDataStore,
+  LocalRevisionConflictError,
   type LocalDeleteID,
   type LocalInsertValue,
   type LocalMutationResult,

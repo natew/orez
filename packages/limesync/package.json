@@ -165,9 +165,23 @@
     },
     "./data": {
       "types": "./dist/data/index.d.ts",
-      "one-native": "./dist/data/index.native.js",
+      "one-native": "./dist/data/index.one.js",
       "react-native": "./dist/data/index.native.js",
+      "browser": "./dist/data/index.js",
+      "bun": "./dist/data/index.bun.js",
       "default": "./dist/data/index.js"
+    },
+    "./data/local-persistence": {
+      "types": "./dist/data/localPersistence.d.ts",
+      "one-native": "./dist/data/localPersistence.one.js",
+      "browser": "./dist/data/localPersistence.js",
+      "bun": "./dist/data/localPersistence.bun.js",
+      "default": "./dist/data/localPersistence.js"
+    },
+    "./data/local-persistence/native": {
+      "types": "./dist/data/localPersistence.one.d.ts",
+      "one-native": "./dist/data/localPersistence.one.js",
+      "default": "./dist/data/localPersistence.one.js"
     },
     "./data/server": {
       "types": "./dist/data/server-routes.d.ts",
@@ -175,8 +189,10 @@
     },
     "./data/multi": {
       "types": "./dist/data/multi.d.ts",
-      "one-native": "./dist/data/multi.native.js",
+      "one-native": "./dist/data/multi.one.js",
       "react-native": "./dist/data/multi.native.js",
+      "browser": "./dist/data/multi.js",
+      "bun": "./dist/data/multi.bun.js",
       "default": "./dist/data/multi.js"
     },
     "./data/streaming": {

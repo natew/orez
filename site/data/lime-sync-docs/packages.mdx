@@ -12,11 +12,16 @@ published as `orez-lite`; that name is deprecated.
 
 | Package/export             | Purpose                                                        | Status  |
 | -------------------------- | -------------------------------------------------------------- | ------- |
-| `limesync/client`          | Browser transport plugin for the real Zero client              | Preview |
-| `limesync/browser`         | Durable browser worker host with Bedrock SQLite and IndexedDB  | Preview |
-| `limesync/native`          | Native SQLite host entrypoint                                  | Preview |
-| `limesync/cloudflare`      | Cloudflare deployment tools                                    | Preview |
-| `limesync/cloudflare/sync` | Rust/WASM sync host for Cloudflare Workers and Durable Objects | Preview |
+| `limesync/client`                        | Browser transport plugin for the real Zero client                     | Preview |
+| `limesync/data`                          | Typed queries (`query`), mutations, `DataProvider`, and local tables  | Preview |
+| `limesync/data/multi`                    | Multi-instance client facade (`createDataClients`, `combineDataClients`) | Preview |
+| `limesync/data/kv-store`                 | Platform sync cache store (`createSyncKvStore`)                       | Preview |
+| `limesync/data/local-persistence`        | Platform device storage for `.local()` tables (One SQLite, Bun, IDB)  | Preview |
+| `limesync/data/local-persistence/native` | Native-only synchronous boot reads (`readLocalTableRowsSync`)         | Preview |
+| `limesync/browser`                       | Durable browser worker host with Bedrock SQLite and IndexedDB         | Preview |
+| `limesync/native`                        | Native SQLite host entrypoint                                         | Preview |
+| `limesync/cloudflare`                    | Cloudflare deployment tools                                           | Preview |
+| `limesync/cloudflare/sync`               | Rust/WASM sync host for Cloudflare Workers and Durable Objects        | Preview |
 
 ## Engine and host packages
 

@@ -1,5 +1,5 @@
 import { defineConfig } from 'limesync/data'
-import { createZeroClients, type ZeroInstanceManifestEntry } from 'limesync/data/multi'
+import { createDataClients, type DataInstanceManifestEntry } from 'limesync/data/multi'
 import { createSchema, string, table } from 'limesync/zero'
 
 import type { MutatorContext, ZeroEventsEmitter } from 'limesync/data'
@@ -36,8 +36,8 @@ type MessageModels = {
   }
 }
 
-declare const account: ZeroInstanceManifestEntry<typeof schema, AccountModels>
-declare const message: ZeroInstanceManifestEntry<typeof schema, MessageModels>
+declare const account: DataInstanceManifestEntry<typeof schema, AccountModels>
+declare const message: DataInstanceManifestEntry<typeof schema, MessageModels>
 
 const dataConfig = defineConfig({
   instances: {
@@ -48,13 +48,13 @@ const dataConfig = defineConfig({
 const projectScope: 'projectId' | undefined = dataConfig.instances.project.scope
 void projectScope
 
-const { clients, combined } = createZeroClients(
+const { clients, combined } = createDataClients(
   { default: account, project: message },
   { inner: 'project' }
 )
 // @ts-expect-error the inner provider must name an instance from the manifest
-createZeroClients({ default: account, project: message }, { inner: 'missing' })
-const publicEvents: ZeroEventsEmitter = combined.zeroEvents
+createDataClients({ default: account, project: message }, { inner: 'missing' })
+const publicEvents: ZeroEventsEmitter = combined.events
 
 void publicEvents
 

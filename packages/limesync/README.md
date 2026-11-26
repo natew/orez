@@ -17,9 +17,16 @@
 - `limesync/cloudflare` provides the Cloudflare runtime and data-worker factory.
 - `limesync/cloudflare/build` provides Node-side worker build and deployment tools.
 - `limesync/data` turns plain query and mutation files under `data/` into typed
-  synced queries, permissioned mutations and React hooks. `limesync/data/bun`
-  serves virtual registries for One apps. `limesync/data/server` runs them on the server. See
-  [the data guide](../../docs/data.md).
+  synced queries, permissioned mutations, local client tables (`table.local()`),
+  and React hooks (`DataProvider`, `query`, `useQuery`, `useMutation`).
+  `limesync/data/multi` combines multi-instance apps (`createDataClients`,
+  `combineDataClients`). `limesync/data/kv-store` supplies `createSyncKvStore`.
+  `limesync/data/local-persistence` supplies platform-conditioned device
+  persistence (`One.Database` SQLite on `one-native`, `bun:sqlite` on `bun`,
+  cross-tab IndexedDB on browser), with native-only synchronous boot reads on
+  `limesync/data/local-persistence/native`. `limesync/data/bun` serves virtual
+  registries for One apps and `limesync/data/server` runs them on the server.
+  See [the data guide](../../docs/data.md).
 
 The package derives its database projection from the application’s Zero schema.
 Applications do not maintain separate table or column maps.
