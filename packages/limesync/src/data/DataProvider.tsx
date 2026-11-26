@@ -1,13 +1,15 @@
 import { createZeroClient, type CreateZeroClientOptions } from './createZeroClient.js'
 
-import type { Schema } from '../zero/zero.js'
+import type { EmptyLocalSchema, Schema } from '../zero/zero.js'
 import type { GenericModels } from './types.js'
 import type { ComponentProps } from 'react'
 
-export function createDataApp<S extends Schema, M extends GenericModels>(
-  options: CreateZeroClientOptions<S, M>
-) {
-  let client: ReturnType<typeof createZeroClient<S, M>> | undefined
+export function createDataApp<
+  S extends Schema,
+  M extends GenericModels,
+  L extends Schema = EmptyLocalSchema,
+>(options: CreateZeroClientOptions<S, M, L>) {
+  let client: ReturnType<typeof createZeroClient<S, M, L>> | undefined
   return {
     ...options,
     get client() {
@@ -16,14 +18,22 @@ export function createDataApp<S extends Schema, M extends GenericModels>(
   }
 }
 
-export type DataApp<S extends Schema, M extends GenericModels> = ReturnType<
-  typeof createDataApp<S, M>
->
+export type DataApp<
+  S extends Schema,
+  M extends GenericModels,
+  L extends Schema = EmptyLocalSchema,
+> = ReturnType<typeof createDataApp<S, M, L>>
 
-export function DataProvider<S extends Schema, M extends GenericModels>({
+export function DataProvider<
+  S extends Schema,
+  M extends GenericModels,
+  L extends Schema = EmptyLocalSchema,
+>({
   app,
   ...props
-}: ComponentProps<DataApp<S, M>['client']['ProvideZero']> & { app: DataApp<S, M> }) {
+}: ComponentProps<DataApp<S, M, L>['client']['ProvideZero']> & {
+  app: DataApp<S, M, L>
+}) {
   const { ProvideZero } = app.client
   return <ProvideZero {...props} />
 }

@@ -74,14 +74,16 @@ const noSnapshot = () => undefined
 
 export function useQueryFault(
   faults: QueryFaults | undefined,
-  request: { query: { queryName: string }; args?: unknown },
+  request: { query?: { queryName: string }; args?: unknown } | undefined,
   out: readonly [unknown, { type: string; retry?: () => void }],
   useSnapshot: ReturnType<typeof selectSnapshotHook>
 ) {
-  const key = JSON.stringify([
-    request.query.queryName,
-    request.args === undefined ? [] : [request.args],
-  ])
+  const key = request?.query
+    ? JSON.stringify([
+        request.query.queryName,
+        request.args === undefined ? [] : [request.args],
+      ])
+    : ''
   const getSnapshot = useMemo(() => () => faults?.get(key), [faults, key])
   const subscribe = useMemo(
     () =>

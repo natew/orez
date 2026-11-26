@@ -1,9 +1,17 @@
-import { useContext, useEffect, useMemo, useRef, type Context } from 'react'
+import {
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+  type Context,
+} from 'react'
 
 import { addContextToQuery, asQueryInternals } from '../zero/bindings.js'
 import { useQuery as zeroUseQuery, useZero } from '../zero/react.js'
 import { IS_SERVER_RUNTIME } from './helpers/platform.js'
 import { useZeroDebug } from './helpers/useZeroDebug.js'
+import { classifyQueryAst, type LocalDataStore } from './localStore.js'
 import {
   QueryErrorRecovery,
   useQueryFault,
@@ -35,14 +43,20 @@ export type QueryResult<TReturn> = readonly [HumanReadable<TReturn>, QueryResult
 export type { PlainQueryFn }
 
 export type UseQueryHook<Schema extends ZeroSchema> = {
-  // overload 1: plain function with params
+  // overload 1: inline local query expression (e.g. `query.uiShell.where('id', 'main').one()`)
+  <TTable extends keyof Schema['tables'] & string, TReturn>(
+    queryExpr: Query<TTable, Schema, TReturn>,
+    options?: UseQueryOptions | boolean
+  ): QueryResult<TReturn>
+
+  // overload 2: plain function with params
   <TArg, TTable extends keyof Schema['tables'] & string, TReturn>(
     fn: PlainQueryFn<TArg, Query<TTable, Schema, TReturn>>,
     params: TArg,
     options?: UseQueryOptions | boolean
   ): QueryResult<TReturn>
 
-  // overload 2: plain function with no params
+  // overload 3: plain function with no params
   <TTable extends keyof Schema['tables'] & string, TReturn>(
     fn: PlainQueryFn<void, Query<TTable, Schema, TReturn>>,
     options?: UseQueryOptions | boolean
@@ -55,8 +69,167 @@ export type UseQueryHook<Schema extends ZeroSchema> = {
 // obvious .filter / .find / .length on the result during the first render.
 const EMPTY_PLURAL = Object.freeze([])
 const RESULT_UNKNOWN = Object.freeze({ type: 'unknown' as const })
+const RESULT_COMPLETE = Object.freeze({ type: 'complete' as const })
 const EMPTY_RESPONSE_PLURAL = Object.freeze([EMPTY_PLURAL, RESULT_UNKNOWN]) as never
 const EMPTY_RESPONSE_SINGULAR = Object.freeze([undefined, RESULT_UNKNOWN]) as never
+
+function isInlineQueryObject(value: unknown): value is Query<any, any, any> {
+  return Boolean(value && typeof value === 'object' && 'ast' in value)
+}
+
+function useLocalQuerySubscription(
+  localStore: LocalDataStore | null,
+  localQuery: Query<any, any, any> | null,
+  enabled: boolean
+): readonly [unknown, { type: 'unknown' | 'complete' }] | null {
+  const subscriptionKey = useMemo(() => {
+    if (!localQuery || !enabled) return null
+    try {
+      const internals = asQueryInternals(localQuery)
+      return `${internals.hash()}|${JSON.stringify(internals.format)}`
+    } catch {
+      return null
+    }
+  }, [localQuery, enabled])
+
+  const latestQueryRef = useRef(localQuery)
+  latestQueryRef.current = localQuery
+
+  const activeSubRef = useRef<{
+    store: LocalDataStore
+    key: string
+    view: ReturnType<LocalDataStore['materialize']>
+  } | null>(null)
+
+  const snapshotCacheRef = useRef<{
+    store: LocalDataStore
+    key: string
+    version: number
+    ready: boolean
+    value: readonly [unknown, { type: 'unknown' | 'complete' }]
+  } | null>(null)
+
+  const subscribe = useMemo(
+    () => (onStoreChange: () => void) => {
+      const currentQuery = latestQueryRef.current
+      if (!localStore || !currentQuery || !subscriptionKey || !enabled) {
+        return () => {}
+      }
+      const view = localStore.materialize(currentQuery as any)
+      activeSubRef.current = { store: localStore, key: subscriptionKey, view }
+
+      const updateSnapshot = (data: unknown): boolean => {
+        const prev = snapshotCacheRef.current
+        const ready = localStore.ready
+        if (
+          prev &&
+          prev.store === localStore &&
+          prev.key === subscriptionKey &&
+          prev.ready === ready &&
+          Object.is(prev.value[0], data)
+        ) {
+          prev.version = localStore.version
+          return false
+        }
+        const nextTuple: readonly [unknown, { type: 'unknown' | 'complete' }] = [
+          data,
+          ready ? RESULT_COMPLETE : RESULT_UNKNOWN,
+        ]
+        snapshotCacheRef.current = {
+          store: localStore,
+          key: subscriptionKey,
+          version: localStore.version,
+          ready,
+          value: nextTuple,
+        }
+        return true
+      }
+
+      if (updateSnapshot(view.data)) {
+        onStoreChange()
+      }
+
+      let attaching = true
+      const unsubView = view.addListener((data) => {
+        const changed = updateSnapshot(data)
+        if (!attaching && changed) {
+          onStoreChange()
+        }
+      })
+      attaching = false
+      const unsubReady = localStore.subscribeReady(() => {
+        if (updateSnapshot(view.data)) {
+          onStoreChange()
+        }
+      })
+
+      return () => {
+        unsubView()
+        unsubReady()
+        view.destroy()
+        if (activeSubRef.current?.view === view) {
+          activeSubRef.current = null
+        }
+      }
+    },
+    [localStore, subscriptionKey, enabled]
+  )
+
+  const getSnapshot = useMemo(
+    () => () => {
+      const currentQuery = latestQueryRef.current
+      if (!localStore || !currentQuery || !subscriptionKey || !enabled) return null
+      const cached = snapshotCacheRef.current
+      if (
+        cached &&
+        cached.store === localStore &&
+        cached.key === subscriptionKey &&
+        cached.version === localStore.version &&
+        cached.ready === localStore.ready
+      ) {
+        return cached.value
+      }
+      const active = activeSubRef.current
+      const data =
+        active && active.store === localStore && active.key === subscriptionKey
+          ? active.view.data
+          : localStore.readSnapshot(currentQuery as any)
+      if (
+        cached &&
+        cached.store === localStore &&
+        cached.key === subscriptionKey &&
+        cached.ready === localStore.ready &&
+        Object.is(cached.value[0], data)
+      ) {
+        cached.version = localStore.version
+        return cached.value
+      }
+      const value: readonly [unknown, { type: 'unknown' | 'complete' }] = [
+        data,
+        localStore.ready ? RESULT_COMPLETE : RESULT_UNKNOWN,
+      ]
+      snapshotCacheRef.current = {
+        store: localStore,
+        key: subscriptionKey,
+        version: localStore.version,
+        ready: localStore.ready,
+        value,
+      }
+      return value
+    },
+    [localStore, subscriptionKey, enabled]
+  )
+
+  const getServerSnapshot = useMemo(
+    () => () => {
+      const currentQuery = latestQueryRef.current
+      return currentQuery ? emptyResponseFor(currentQuery) : null
+    },
+    [subscriptionKey]
+  )
+
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot as any) as any
+}
 
 // inspect a resolved query (a Query OR a QueryRequest, i.e. what resolveQuery
 // returns from a defineQueries-registered fn) to find its singular/plural
@@ -95,56 +268,41 @@ export function parseUseQueryArgs(paramsOrOptions: any, optionsArg: any) {
 
 export function createUseQuery<Schema extends ZeroSchema>({
   DisabledContext,
+  LocalDataContext,
   customQueries,
   getQueryFaults,
   getQueryScope,
   snapshotDelivery,
 }: {
   DisabledContext: Context<QueryControlMode>
+  LocalDataContext?: Context<LocalDataStore | null>
   customQueries: AnyQueryRegistry
   getQueryFaults: (zero: object) => QueryFaults | undefined
   getQueryScope?: (zero: object) => number | undefined
   snapshotDelivery?: SnapshotDelivery
 }): UseQueryHook<Schema> {
   const useSnapshot = selectSnapshotHook(snapshotDelivery)
-  // SSG: return an inert hook. limesync's bundled React copy isn't the same
-  // one the SSG build's renderer initialises, so hook dispatch returns null.
-  // an empty response matches how the wrapper behaves under DisabledContext
-  // anyway, so consumers see the same shape across SSG and the disabled
-  // client path. no hooks are called inside the returned function so
-  // rules-of-hooks isn't affected. resolve each call's query shape so
-  // singular queries get [undefined, info] and plural queries get [[], info]
-  // — matching the typed contract and the steady-state client path. without
-  // this, a singular query (e.g. projectById().one()) returned [] on SSR
-  // while the client returned undefined, which manifested as a hydration
-  // mismatch on every caller that destructured `[row] = useQuery(singular)`
-  // and looked at row.name / row.id etc.
   if (IS_SERVER_RUNTIME) {
-    return ((fn: any, paramsOrOptions: any, optionsArg: any) => {
+    return ((fnOrQuery: any, paramsOrOptions: any, optionsArg: any) => {
+      if (isInlineQueryObject(fnOrQuery)) {
+        return emptyResponseFor(fnOrQuery)
+      }
       const { params } = parseUseQueryArgs(paramsOrOptions, optionsArg)
-      const queryRequest = resolveQuery({ customQueries, fn, params })
+      const queryRequest = resolveQuery({ customQueries, fn: fnOrQuery, params })
       return emptyResponseFor(queryRequest)
     }) as UseQueryHook<Schema>
   }
 
   function useQuery(...args: any[]): any {
     const disableMode = useContext(DisabledContext)
+    const localStore = LocalDataContext ? useContext(LocalDataContext) : null
     const lastRef = useRef<any>(EMPTY_RESPONSE_PLURAL)
-    const [fn, paramsOrOptions, optionsArg] = args
+    const [fnOrQuery, paramsOrOptions, optionsArg] = args
 
-    const { params, options } = parseUseQueryArgs(paramsOrOptions, optionsArg)
-
-    // value-keyed memoization. callers conventionally pass inline objects to
-    // useQuery (`useQuery(byId, {id})`), so a raw identity dep would bust
-    // resolveQuery and re-create the query every render. JSON is faster than
-    // generic deep-equal for the small, simple-valued objects zero calls
-    // actually take, and matches what createUseQueryDirect does.
-    const paramsKey = serializeQueryParams(fn, params)
-    const queryRequest = useMemo(
-      () => resolveQuery({ customQueries, fn, params }),
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      [fn, paramsKey]
-    )
+    const isInline = isInlineQueryObject(fnOrQuery)
+    const { params, options } = isInline
+      ? { params: undefined, options: paramsOrOptions }
+      : parseUseQueryArgs(paramsOrOptions, optionsArg)
 
     // extract option values as primitives — a fresh options object each render
     // shouldn't propagate as a new ref into zero-react.
@@ -157,13 +315,59 @@ export function createUseQuery<Schema extends ZeroSchema>({
       optionTTL = options.ttl
     }
 
-    // when disabled, force enabled=false through to zero's useQuery so its
-    // viewStore returns a disabled view (no zero.clientID read, no view
-    // subscription) and the stub Zero handed in by ProvideZero stays inert.
-    // we still call zeroUseQuery unconditionally so hook order stays stable
-    // across DisabledContext changes — the disable check after only affects
-    // the return value.
-    const effectiveEnabled = disableMode ? false : optionEnabled
+    const paramsKey = isInline ? '' : serializeQueryParams(fnOrQuery, params)
+
+    const resolved = useMemo(() => {
+      if (isInline) {
+        const internals = asQueryInternals(fnOrQuery)
+        const tableNames = localStore?.tableNames ?? new Set<string>()
+        const kind = classifyQueryAst(internals.ast, tableNames)
+        if (kind !== 'local') {
+          throw new Error(
+            `[limesync] inline query expressions in useQuery are only supported for .local() tables. ` +
+              `Use a named query function for synced table '${internals.ast.table}'.`
+          )
+        }
+        return { kind: 'local' as const, localQuery: fnOrQuery, queryRequest: fnOrQuery }
+      }
+      // check if this plain function returns a local-only query (unregistered local helper)
+      if (localStore && localStore.tableNames.size > 0) {
+        try {
+          const candidate = fnOrQuery(params)
+          if (isInlineQueryObject(candidate)) {
+            const internals = asQueryInternals(candidate)
+            const kind = classifyQueryAst(internals.ast, localStore.tableNames)
+            if (kind === 'local') {
+              return {
+                kind: 'local' as const,
+                localQuery: candidate,
+                queryRequest: candidate,
+              }
+            }
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.includes('mixed local and synced')) {
+            throw err
+          }
+          // fall through to synced registry resolution
+        }
+      }
+      const queryRequest = resolveQuery({ customQueries, fn: fnOrQuery, params })
+      return { kind: 'sync' as const, localQuery: null, queryRequest }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [fnOrQuery, isInline, paramsKey, localStore])
+
+    const isLocal = resolved.kind === 'local'
+    const localResult = useLocalQuerySubscription(
+      isLocal ? localStore : null,
+      resolved.localQuery,
+      isLocal && optionEnabled !== false
+    )
+
+    // when disabled or routed to local store, force enabled=false through to
+    // zero's useQuery so its viewStore stays completely inert while preserving
+    // unconditional hook order.
+    const effectiveEnabled = isLocal || disableMode ? false : optionEnabled
     const effectiveOptions = useMemo(
       () => ({ enabled: effectiveEnabled, ttl: optionTTL }),
       [effectiveEnabled, optionTTL]
@@ -171,8 +375,10 @@ export function createUseQuery<Schema extends ZeroSchema>({
     const zero = useZero()
     const scope = getQueryScope?.(zero)
     const reactQuery = useMemo(() => {
-      if (scope === undefined) return queryRequest
-      const query = asQueryInternals(addContextToQuery(queryRequest, zero.context))
+      if (isLocal || scope === undefined) return resolved.queryRequest
+      const query = asQueryInternals(
+        addContextToQuery(resolved.queryRequest, zero.context)
+      )
       // zero-react keys its global views by clientID, which a native store retains across opens.
       return new Proxy(query, {
         get(target, property) {
@@ -181,20 +387,24 @@ export function createUseQuery<Schema extends ZeroSchema>({
           return typeof value === 'function' ? value.bind(target) : value
         },
       })
-    }, [queryRequest, zero, scope])
+    }, [resolved.queryRequest, zero, scope, isLocal])
     const rawOut = zeroUseQuery(reactQuery, effectiveOptions)
     const faultOut = useQueryFault(
-      effectiveEnabled === false ? undefined : getQueryFaults(zero),
-      queryRequest,
+      isLocal || effectiveEnabled === false ? undefined : getQueryFaults(zero),
+      resolved.queryRequest,
       rawOut,
       useSnapshot
     )
-    const recovery = useMemo(() => new QueryErrorRecovery(), [queryRequest])
+    const recovery = useMemo(() => new QueryErrorRecovery(), [resolved.queryRequest])
     useEffect(() => {
-      if (recovery.changed(rawOut[0], rawOut[1].type) && rawOut[1].type === 'error') {
+      if (
+        !isLocal &&
+        recovery.changed(rawOut[0], rawOut[1].type) &&
+        rawOut[1].type === 'error'
+      ) {
         rawOut[1].retry?.()
       }
-    }, [rawOut, recovery])
+    }, [rawOut, recovery, isLocal])
 
     // normalize the rare null-data first snapshot for plural queries to []:
     // zero-react's viewStore briefly hands us [null, {type:'unknown'}] when a
@@ -203,18 +413,32 @@ export function createUseQuery<Schema extends ZeroSchema>({
     // callers must never see null here. cheap drop-in: only allocates a new
     // tuple in the (rare) null case; the steady-state pass-through is one
     // identity check per render.
-    let out: any = faultOut
-    if (faultOut?.[0] === null) {
-      const fallback = emptyResponseFor(queryRequest)
+    let out: any = isLocal ? localResult : faultOut
+    if (!isLocal && faultOut?.[0] === null) {
+      const fallback = emptyResponseFor(resolved.queryRequest)
       if (fallback === EMPTY_RESPONSE_PLURAL) {
         out = [EMPTY_PLURAL, faultOut[1] ?? RESULT_UNKNOWN]
       }
     }
 
+    // call debug instrumentation unconditionally before any early return so
+    // switching a mounted hook between local and sync keeps hook order stable.
     if (process.env.NODE_ENV === 'development') {
       if (process.env.DEBUG_ZERO_QUERIES === '1')
         // eslint-disable-next-line react-hooks/rules-of-hooks
-        useZeroDebug(queryRequest, options, out)
+        useZeroDebug(resolved.queryRequest, isLocal ? { enabled: false } : options, out)
+    }
+
+    if (isLocal) {
+      if (optionEnabled === false) {
+        return emptyResponseFor(resolved.localQuery)
+      }
+      if (!localStore) {
+        throw new Error(
+          `[limesync] local table query requires mounting <DataProvider local={{ storageKey }} ...> with localSchema.`
+        )
+      }
+      return localResult ?? emptyResponseFor(resolved.localQuery)
     }
 
     if (!disableMode) {
@@ -227,12 +451,12 @@ export function createUseQuery<Schema extends ZeroSchema>({
       // reshape to match this query's actual format so a singular query gets
       // undefined instead of [].
       if (lastRef.current === EMPTY_RESPONSE_PLURAL) {
-        return emptyResponseFor(queryRequest)
+        return emptyResponseFor(resolved.queryRequest)
       }
       return lastRef.current
     }
 
-    return emptyResponseFor(queryRequest)
+    return emptyResponseFor(resolved.queryRequest)
   }
 
   return useQuery as UseQueryHook<Schema>

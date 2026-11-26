@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-// a Zero mutator call returns this — two promises for the optimistic-local and
-// the authoritative-server phases. we never make callers await either one.
+// a Zero mutator call returns client + server promises; a local-table mutation
+// returns client only (no server phase). we never make callers await either one.
 type MutatorResultLike = {
   client: Promise<unknown>
-  server: Promise<unknown>
+  server?: Promise<unknown>
 }
 
 // normalized error from either phase. `scope` says which run failed:
@@ -140,10 +140,15 @@ export function observeMutation(
   const client = result.client
     .then((d) => report(toMutationError('client', d)))
     .catch((e) => report(rejectionToError('client', e)))
-  const server = result.server
-    .then((d) => report(toMutationError('server', d)))
-    .catch((e) => report(rejectionToError('server', e)))
-  observation.done = Promise.all([client, server]).then(() => {
+  const phases: Promise<void>[] = [client]
+  if (result.server) {
+    phases.push(
+      result.server
+        .then((d) => report(toMutationError('server', d)))
+        .catch((e) => report(rejectionToError('server', e)))
+    )
+  }
+  observation.done = Promise.all(phases).then(() => {
     observation.settled = true
     observation.listeners.clear()
   })

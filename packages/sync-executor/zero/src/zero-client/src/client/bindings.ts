@@ -7,7 +7,16 @@ export {assert, unreachable} from '../../../shared/src/asserts.ts';
 export {deepClone} from '../../../shared/src/deep-clone.ts';
 export type {Immutable} from '../../../shared/src/immutable.ts';
 export {must} from '../../../shared/src/must.ts';
+export {MemorySource} from '../../../zql/src/ivm/memory-source.ts';
+export {MemoryStorage} from '../../../zql/src/ivm/memory-storage.ts';
 export {skipYields} from '../../../zql/src/ivm/operator.ts';
+export {
+  makeSourceChangeAdd,
+  makeSourceChangeEdit,
+  makeSourceChangeRemove,
+  type Source,
+  type SourceChange,
+} from '../../../zql/src/ivm/source.ts';
 export {consume} from '../../../zql/src/ivm/stream.ts';
 export {
   applyChange,
@@ -15,7 +24,11 @@ export {
   refCountSymbol,
   type ViewChange,
 } from '../../../zql/src/ivm/view-apply-change.ts';
-export type {QueryDelegate} from '../../../zql/src/query/query-delegate.ts';
+export type {
+  CommitListener,
+  QueryDelegate,
+} from '../../../zql/src/query/query-delegate.ts';
+export {QueryDelegateBase} from '../../../zql/src/query/query-delegate-base.ts';
 export {newQuery, type QueryImpl} from '../../../zql/src/query/query-impl.ts';
 export {
   asQueryInternals,

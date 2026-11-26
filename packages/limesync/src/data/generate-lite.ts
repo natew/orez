@@ -122,6 +122,8 @@ export type LiteParsedFile = {
   queries: LiteQueryExport[]
   relations?: LiteRelationInfo[]
   tables?: LiteTableInfo[]
+  // local-only tables declared via `.local(...)` in a one/data schema file.
+  localTables?: string[]
   // source and target table names declared by exported aggregate definitions.
   aggregateTables?: string[]
   // static table names reached through tx.mutate.<table> or tx.query.<table>.
@@ -666,6 +668,15 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     }
     owners.set(table, namespace.instance)
   }
+  const localTables = new Set<string>()
+  if (opts.oneSchema && files[opts.oneSchema]) {
+    try {
+      const parsedSchema = parse(files[opts.oneSchema]!, opts.oneSchema)
+      for (const t of parsedSchema.localTables ?? []) localTables.add(t)
+    } catch {}
+  }
+  const localQueryKeys = new Set<string>()
+
   const relatedOwners = new Map<string, string>()
   const directTables = new Map<string, string[]>()
   const syncTables = new Map<string, string[]>()
@@ -674,6 +685,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
       instance.namespaces
         .filter((namespace) => namespace.modelPath !== null)
         .map((namespace) => modelTables.get(namespace.name)!)
+        .filter((table) => !localTables.has(table))
     )
     const synced = new Set(direct)
     for (const namespace of instance.namespaces) {
@@ -690,6 +702,34 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         synced.add(table)
       }
       for (const query of queryPaths.get(namespace.name) ?? []) {
+        const reachedTargets: string[] = []
+        for (const path of query.paths) {
+          let sourceTable = query.rootTable
+          for (const relationName of path) {
+            const target = relations.get(sourceTable)?.get(relationName)
+            if (!target) {
+              throw new Error(
+                `[limesync] ${namespace.name}.${query.query} related('${relationName}') cannot be resolved ` +
+                  `from table '${sourceTable}' through relations.ts`
+              )
+            }
+            reachedTargets.push(target)
+            sourceTable = target
+          }
+        }
+        const allReached = [query.rootTable, ...reachedTargets]
+        const hasLocal = allReached.some((t) => localTables.has(t))
+        const hasSync = allReached.some((t) => !localTables.has(t))
+        if (hasLocal && hasSync) {
+          throw new Error(
+            `[limesync] ${namespace.name}.${query.query} mixes local and synced tables ` +
+              `([${[...new Set(allReached)].join(', ')}]), which is not supported in v1.`
+          )
+        }
+        if (hasLocal) {
+          localQueryKeys.add(`${namespace.name}.${query.query}`)
+          continue
+        }
         const rootOwner =
           owners.get(query.rootTable) ?? relatedOwners.get(query.rootTable)
         if (rootOwner && rootOwner !== instance.name) {
@@ -701,27 +741,16 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         relatedOwners.set(query.rootTable, instance.name)
         direct.add(query.rootTable)
         synced.add(query.rootTable)
-        for (const path of query.paths) {
-          let sourceTable = query.rootTable
-          for (const relationName of path) {
-            const target = relations.get(sourceTable)?.get(relationName)
-            if (!target) {
-              throw new Error(
-                `[limesync] ${namespace.name}.${query.query} related('${relationName}') cannot be resolved ` +
-                  `from table '${sourceTable}' through relations.ts`
-              )
-            }
-            const owner = owners.get(target) ?? relatedOwners.get(target)
-            if (owner && owner !== instance.name) {
-              throw new Error(
-                `[limesync] ${namespace.name}.${query.query} in instance '${instance.name}' reaches ` +
-                  `table '${target}' owned by instance '${owner}'`
-              )
-            }
-            relatedOwners.set(target, instance.name)
-            synced.add(target)
-            sourceTable = target
+        for (const target of reachedTargets) {
+          const owner = owners.get(target) ?? relatedOwners.get(target)
+          if (owner && owner !== instance.name) {
+            throw new Error(
+              `[limesync] ${namespace.name}.${query.query} in instance '${instance.name}' reaches ` +
+                `table '${target}' owned by instance '${owner}'`
+            )
           }
+          relatedOwners.set(target, instance.name)
+          synced.add(target)
         }
       }
     }
@@ -808,7 +837,10 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   out['README.md'] = generateReadmeFile()
 
   out['groupedQueries.ts'] = generateGroupedQueriesFile(allQueries)
-  out['syncedQueries.ts'] = generateSyncedQueriesFile(allQueries)
+  const syncedQueries = allQueries.filter(
+    (q) => !localQueryKeys.has(`${q.sourceFile}.${q.name}`)
+  )
+  out['syncedQueries.ts'] = generateSyncedQueriesFile(syncedQueries)
   out['instances.ts'] = generateInstancesFile(
     instances.map((instance) => ({
       name: instance.name,

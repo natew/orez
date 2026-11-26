@@ -10,14 +10,42 @@ export { setAuthData, setEnvironment } from './state.js'
 export { createDataApp, DataProvider, type DataApp } from './DataProvider.js'
 
 export {
+  createDataClient,
   createZeroClient,
+  registerDefaultLocalPersistence,
+  type ClientMutate,
+  type ClientZero,
+  type CombinedZeroSchema,
   type CreateZeroClientOptions,
+  type DefaultLocalPersistenceFactory,
   type GroupedQueries,
+  type LocalDataProviderOptions,
   type PermissionStrategy,
   type WaitForZeroOptions,
   type ZeroProviderGeneration,
   type ZeroProviderTransport,
 } from './createZeroClient.js'
+export {
+  classifyQueryAst,
+  collectAstTables,
+  createIndexedDBLocalPersistence,
+  createMemoryLocalPersistence,
+  createSQLiteLocalPersistence,
+  LocalDataStore,
+  type LocalDeleteID,
+  type LocalInsertValue,
+  type LocalMutationResult,
+  type LocalMutators,
+  type LocalPersistenceAdapter,
+  type LocalRow,
+  type LocalSQLiteExecutor,
+  type LocalTableMutator,
+  type LocalTransaction,
+  type LocalTxMutate,
+  type LocalUpdateValue,
+  type LocalWriteOp,
+  type SharedSQLiteLocalPersistence,
+} from './localStore.js'
 export * from './createUseQuery.js'
 export * from './resolveQuery.js'
 export * from './run.js'
@@ -32,7 +60,10 @@ export { defineQuery, defineQueries } from '../zero/zero.js'
 export type * from './types.js'
 
 export {
+  clearSyncClientData,
   clearZeroClientData,
+  isLocalDataDB,
+  matchesSyncDB,
   type ClearZeroClientDataOptions,
 } from './helpers/clearZeroClientData.js'
 export {

@@ -1417,7 +1417,13 @@ async function emitModules({
     'groupedQueries.ts',
     generateGroupedQueriesFile(allQueries)
   )
-  const syncedChanged = write('syncedQueries.ts', generateSyncedQueriesFile(allQueries))
+  const syncedQueries = allQueries.filter(
+    (q) => !layout.localQueries.has(`${q.sourceFile}.${q.name}`)
+  )
+  const syncedChanged = write(
+    'syncedQueries.ts',
+    generateSyncedQueriesFile(syncedQueries)
+  )
 
   if (groupedChanged) filesChanged++
   if (syncedChanged) filesChanged++

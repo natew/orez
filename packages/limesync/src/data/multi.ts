@@ -71,7 +71,7 @@ export function createZeroClients<
       `[limesync] createZeroClients inner instance '${innerName}' is not in the manifest`
     )
   }
-  const clients: Record<string, ReturnType<typeof createZeroClientInternal>> = {}
+  const clients: Record<string, any> = {}
 
   // release the complete old partition atomically before any new instance
   // claims namespaces that may have moved during hot reload.

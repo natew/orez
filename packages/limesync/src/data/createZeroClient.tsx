@@ -46,6 +46,14 @@ import {
 } from './helpers/recoverZeroClient.js'
 import { observeMutation, reportMutationInvocationError } from './helpers/useMutation.js'
 import { registerClientInstance } from './instanceRegistry.js'
+import {
+  createIndexedDBLocalPersistence,
+  createMemoryLocalPersistence,
+  LocalDataStore,
+  type LocalMutators,
+  type LocalPersistenceAdapter,
+  type LocalTransaction,
+} from './localStore.js'
 import { getAllMutationsPermissions, getMutationsPermissions } from './modelRegistry.js'
 import { QueryFaults } from './queryErrorRecovery.js'
 import { assertQueryJson } from './queryJson.js'
@@ -61,6 +69,8 @@ import type { AggregateSet } from '../aggregate.js'
 import type { HttpPullLifecycleEvent, HttpPullTransport } from '../client.js'
 import type {
   AnyQueryRegistry,
+  EmptyLocalSchema,
+  LocalSchemaMeta,
   Query,
   Row,
   Zero,
@@ -114,11 +124,60 @@ export type WaitForZeroOptions = {
   signal?: AbortSignal
 }
 
+export type LocalDataProviderOptions = {
+  storageKey?: string
+  persistence?: LocalPersistenceAdapter
+}
+
+export type DefaultLocalPersistenceFactory = (
+  storageKey: string
+) => LocalPersistenceAdapter
+
+let defaultLocalPersistenceFactory: DefaultLocalPersistenceFactory | null = null
+
+/**
+ * Register a runtime-default persistence adapter for `.local({ persistence: 'device' })`
+ * tables on runtimes without IndexedDB (such as React Native or Bun shared SQLite).
+ */
+export function registerDefaultLocalPersistence(
+  factory: DefaultLocalPersistenceFactory | null
+) {
+  defaultLocalPersistenceFactory = factory
+}
+
+export type CombinedZeroSchema<
+  S extends ZeroSchema,
+  L extends ZeroSchema = EmptyLocalSchema,
+> = keyof L['tables'] extends never
+  ? S
+  : {
+      tables: S['tables'] & L['tables']
+      relationships: S['relationships'] & L['relationships']
+    }
+
+const EMPTY_AUTH_DATA = Object.freeze({}) as AuthData
+
+function shallowEqualRecord(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false
+  const aObj = a as Record<string, unknown>
+  const bObj = b as Record<string, unknown>
+  const aKeys = Object.keys(aObj)
+  const bKeys = Object.keys(bObj)
+  if (aKeys.length !== bKeys.length) return false
+  for (const key of aKeys) {
+    if (!Object.hasOwn(bObj, key) || !Object.is(aObj[key], bObj[key])) return false
+  }
+  return true
+}
+
 export type CreateZeroClientOptions<
   Schema extends ZeroSchema,
   Models extends GenericModels,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
 > = {
   schema: Schema
+  localSchema?: LocalSchemaMeta<LocalSchema>
   models: Models
   groupedQueries: GroupedQueries
   aggregates?: AggregateSet<Schema>
@@ -171,17 +230,34 @@ function createUnavailableDirectUseQuery<
   return useQueryDirect as UseQueryHook<Schema>
 }
 
-export function createZeroClient<Schema extends ZeroSchema, Models extends GenericModels>(
-  options: CreateZeroClientOptions<Schema, Models>
-) {
+export type ClientZero<
+  S extends ZeroSchema,
+  M extends GenericModels,
+  L extends ZeroSchema = EmptyLocalSchema,
+> = Zero<S, GetZeroMutators<M>> &
+  (keyof L['tables'] extends never ? unknown : { readonly mutate: LocalMutators<L> })
+
+export type ClientMutate<
+  S extends ZeroSchema,
+  M extends GenericModels,
+  L extends ZeroSchema = EmptyLocalSchema,
+> = ClientZero<S, M, L>['mutate']
+
+export function createZeroClient<
+  Schema extends ZeroSchema,
+  Models extends GenericModels,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
+>(options: CreateZeroClientOptions<Schema, Models, LocalSchema>) {
   return createZeroClientInternal(options)
 }
 
 export function createZeroClientInternal<
   Schema extends ZeroSchema,
   Models extends GenericModels,
+  LocalSchema extends ZeroSchema = EmptyLocalSchema,
 >({
   schema,
+  localSchema,
   models,
   groupedQueries,
   aggregates,
@@ -190,14 +266,22 @@ export function createZeroClientInternal<
   serverAckTimeoutRecoveryThreshold = 2,
   snapshotDelivery,
   createDirectUseQuery,
-}: CreateZeroClientOptions<Schema, Models> & {
+}: CreateZeroClientOptions<Schema, Models, LocalSchema> & {
   createDirectUseQuery?: DirectQueryAdapter<Schema>
 }) {
   type ZeroMutators = GetZeroMutators<Models>
   type ZeroInstance = Zero<Schema, ZeroMutators>
+  type ClientSchema = CombinedZeroSchema<Schema, LocalSchema>
   type TableName = keyof Schema['tables'] & string
 
-  setSchema(schema, createBuilder(schema))
+  const combinedSchema: ZeroSchema = localSchema
+    ? {
+        tables: { ...schema.tables, ...localSchema.schema.tables },
+        relationships: { ...schema.relationships, ...localSchema.schema.relationships },
+      }
+    : schema
+
+  setSchema(combinedSchema, createBuilder(combinedSchema))
 
   // only set environment to 'client' if server hasn't already claimed it
   // server bindings may set this first during SSR
@@ -323,8 +407,94 @@ export function createZeroClientInternal<
   setCustomQueries(customQueries)
 
   const DisabledContext = createContext<QueryControlMode>(false)
+  const LocalDataContext = createContext<LocalDataStore<LocalSchema> | null>(null)
   const ZeroProviderGenerationContext = createContext<ZeroProviderGeneration | null>(null)
   const zeroProviderGenerations = new WeakMap<object, ZeroProviderGeneration>()
+
+  const hasLocalTables = Boolean(
+    localSchema && Object.keys(localSchema.tables).length > 0
+  )
+  const deviceLocalTables = localSchema
+    ? Object.values(localSchema.tables)
+        .filter((t) => t.persistence === 'device')
+        .map((t) => t.name)
+    : []
+
+  function resolveLocalStorageKey(localOptions?: LocalDataProviderOptions): string {
+    const hostScope = readHostStorageScope()
+    const baseKey = localOptions?.storageKey ?? instanceName
+    return hostScope ? `${hostScope}-${baseKey}` : baseKey
+  }
+
+  function resolveLocalPersistence(
+    key: string,
+    localOptions?: LocalDataProviderOptions
+  ): LocalPersistenceAdapter {
+    if (localOptions?.persistence) return localOptions.persistence
+    if (deviceLocalTables.length === 0) return createMemoryLocalPersistence()
+    if (typeof indexedDB !== 'undefined') {
+      return createIndexedDBLocalPersistence(key)
+    }
+    if (defaultLocalPersistenceFactory) {
+      return defaultLocalPersistenceFactory(key)
+    }
+    throw new Error(
+      `[limesync] local device table(s) [${deviceLocalTables.join(', ')}] require IndexedDB, ` +
+        `a registered default persistence adapter (registerDefaultLocalPersistence), or an explicit ` +
+        `local.persistence option (such as createSQLiteLocalPersistence(db)). ` +
+        `Use .local({ persistence: 'memory' }) for intentional RAM-only tables.`
+    )
+  }
+
+  function createScopedLocalStore(
+    key: string,
+    localOptions?: LocalDataProviderOptions
+  ): LocalDataStore<LocalSchema> {
+    const persistence = resolveLocalPersistence(key, localOptions)
+    return new LocalDataStore(localSchema!, persistence)
+  }
+
+  // activeLocalStore is published ONLY at commit phase (useLayoutEffect) or
+  // via headless imperative fallback — never mutated during React render.
+  let activeLocalStore: LocalDataStore<LocalSchema> | null = null
+  let activeLocalStoreKey: string | null = null
+  let activeLocalPersistence: LocalPersistenceAdapter | undefined
+  let activeLocalMutators: LocalMutators<LocalSchema> | null = null
+  let committedLocalProviderCount = 0
+  const pendingRetireLocalStores = new Set<LocalDataStore<LocalSchema>>()
+
+  function getOrCreateImperativeLocalStore(): LocalDataStore<LocalSchema> | null {
+    if (!hasLocalTables) return null
+    if (activeLocalStore && !activeLocalStore.closed) return activeLocalStore
+    const key = resolveLocalStorageKey()
+    const store = createScopedLocalStore(key)
+    activeLocalStore = store
+    activeLocalStoreKey = key
+    activeLocalPersistence = undefined
+    activeLocalMutators = store.createMutators()
+    if (!IS_SERVER_RUNTIME) {
+      void store.open().catch((error) => {
+        console.error('[limesync] failed to open local data store:', error)
+      })
+    }
+    return store
+  }
+
+  function useLocalStore(): LocalDataStore<LocalSchema> | null {
+    return useContext(LocalDataContext)
+  }
+
+  function transaction<T>(
+    work: (tx: LocalTransaction<LocalSchema>) => T | Promise<T>
+  ): Promise<T> {
+    const store = getOrCreateImperativeLocalStore()
+    if (!store) {
+      throw new Error(
+        '[limesync] transaction() requires at least one .local() table in the schema.'
+      )
+    }
+    return store.transaction(work)
+  }
 
   function useZeroProviderGeneration(): ZeroProviderGeneration | null {
     return useContext(ZeroProviderGenerationContext)
@@ -534,6 +704,31 @@ export function createZeroClientInternal<
         return lazyMutatePath([...path, key])
       },
       apply(_, __, args) {
+        // route local-table mutations directly to the local store, independent
+        // of sync readiness or auth.
+        if (
+          path.length === 2 &&
+          localSchema &&
+          Object.hasOwn(localSchema.tables, path[0]!)
+        ) {
+          getOrCreateImperativeLocalStore()
+          const localFn = (activeLocalMutators as Record<string, any> | null)?.[
+            path[0]!
+          ]?.[path[1]!]
+          if (typeof localFn !== 'function') {
+            throw new Error(
+              `[limesync] local mutation '${path.join('.')}' is not available.`
+            )
+          }
+          try {
+            const result = localFn(...args)
+            void observeMutation(result)
+            return result
+          } catch (error) {
+            reportMutationInvocationError(error)
+            throw error
+          }
+        }
         // a queued background write pins the instance it was queued against;
         // this throws StaleGenerationError (before the catch below, so it is
         // never reported as a mutation failure) when that instance is gone.
@@ -616,8 +811,9 @@ export function createZeroClientInternal<
 
   const AuthDataContext = createContext<AuthData>({} as AuthData)
 
-  const useQuery = createUseQuery<Schema>({
+  const useQuery = createUseQuery<ClientSchema>({
     DisabledContext,
+    LocalDataContext: LocalDataContext as unknown as Context<LocalDataStore | null>,
     customQueries,
     getQueryFaults: (zero) => queryFaults.get(zero),
     getQueryScope: (zero) => externalInstances.keys.get(zero),
@@ -642,7 +838,7 @@ export function createZeroClientInternal<
   // SSG: return an inert hook — see createUseQuery for rationale. checking
   // here (factory-time) instead of per-call keeps hook order stable so
   // rules-of-hooks stays happy.
-  const createUsePermission = (useQueryImpl: UseQueryHook<Schema>) => {
+  const createUsePermission = (useQueryImpl: UseQueryHook<any>) => {
     if (IS_SERVER_RUNTIME) {
       return (() => null) as (
         table: TableName | (string & {}),
@@ -980,44 +1176,21 @@ export function createZeroClientInternal<
     }),
   } as unknown as ZeroInstance
 
-  type ProvideZeroProps = Omit<
-    ZeroOptions<Schema, ZeroMutators>,
-    'schema' | 'mutators'
+  type ProvideZeroProps = Partial<
+    Omit<ZeroOptions<Schema, ZeroMutators>, 'schema' | 'mutators'>
   > & {
     children: ReactNode
     zero?: ZeroInstance
     authData?: AuthData | null
-    // when true, ProvideZero renders a stable shell with stub Zero — no real
-    // client is created, no websocket is opened, no IDB store is touched.
-    // useQuery descendants receive EMPTY_RESPONSE via DisabledContext='empty'.
-    // toggling this on/off NEVER re-parents children: the React tree shape is
-    // identical in both modes (active just mounts a sibling lifecycle, which
-    // doesn't shift children's position). use this when consumers need the
-    // provider tree mounted (e.g. inside a marketing splash that lazily
-    // upgrades to the real IDE) without paying for Zero until activation.
+    /** configure isolated local-table persistence (works with or without sync/auth) */
+    local?: LocalDataProviderOptions
     disable?: boolean
-    // install a client transport before constructing Zero so its first sync
-    // connection uses the transport supplied by the application.
     transport?: ZeroProviderTransport
-    // awaited before a self-healing recovery reload — e.g. wait for the dev
-    // origin to be reachable so the reload doesn't hit a restarting server.
     beforeReload?: () => Promise<void>
-    // take over WHEN/HOW the recovery reload happens (IDE gate + countdown,
-    // native expo-updates reload, …) while still driving the same
-    // deletes-then-reload work via ctx.performReload. default: immediate reload.
     scheduleReload?: (ctx: ScheduleReloadContext) => void
-    // cross-reload loop-guard backing store; defaults to sessionStorage on web.
-    // inject a native KV so Hermes gets real cross-reload protection.
     guardStorage?: RecoveryGuardStorage
-    // expected recovery signatures supplied as data. transport patterns and app
-    // patterns are combined; neither replaces the built-in classification.
     benignLogPatterns?: readonly ZeroLogPattern[]
-    // called when the connection needs auth; return a fresh token to reconnect
-    // in place. lets an expired token auto-recover without a reload.
     refreshAuth?: () => Promise<string | undefined>
-    // when true, mirror this instance's connection state onto
-    // document.body.dataset.zero* for e2e/diagnostics. enable on ONE instance
-    // (the control/primary) so multiple instances don't fight over the dataset.
     connectionDataset?: boolean
   }
 
@@ -1028,260 +1201,354 @@ export function createZeroClientInternal<
   // hooks, regardless of `disable`.
   const ProvideZeroServer = ({ children, authData: authDataIn }: ProvideZeroProps) => {
     return (
-      <AuthDataContext.Provider value={(authDataIn ?? {}) as AuthData}>
-        <DisabledContext.Provider value="empty">
-          <ZeroContext.Provider value={DISABLED_ZERO_STUB as any}>
-            <ZeroProviderGenerationContext.Provider value={null}>
-              {/* match the active path's 3-child layout exactly so descendant
-                  useId() lands at the same fiber index in both branches. the
-                  two leading nulls reserve the SetZeroInstance + ConnectionMonitor
-                  slots; the active path puts those components there only once
-                  an instance exists. without these placeholder slots, children
-                  would sit at child index 0 here but index 2 in the active
-                  path, shifting every descendant useId. */}
-              {null}
-              {null}
-              {children}
-            </ZeroProviderGenerationContext.Provider>
-          </ZeroContext.Provider>
-        </DisabledContext.Provider>
-      </AuthDataContext.Provider>
+      <LocalDataContext.Provider value={null}>
+        <AuthDataContext.Provider value={(authDataIn ?? EMPTY_AUTH_DATA) as AuthData}>
+          <DisabledContext.Provider value="empty">
+            <ZeroContext.Provider value={DISABLED_ZERO_STUB as any}>
+              <ZeroProviderGenerationContext.Provider value={null}>
+                {/* match the active path's 3-child layout exactly so descendant
+                    useId() lands at the same fiber index in both branches. the
+                    two leading nulls reserve the SetZeroInstance + ConnectionMonitor
+                    slots; the active path puts those components there only once
+                    an instance exists. without these placeholder slots, children
+                    would sit at child index 0 here but index 2 in the active
+                    path, shifting every descendant useId. */}
+                {null}
+                {null}
+                {children}
+              </ZeroProviderGenerationContext.Provider>
+            </ZeroContext.Provider>
+          </DisabledContext.Provider>
+        </AuthDataContext.Provider>
+      </LocalDataContext.Provider>
     )
   }
 
-  const ProvideZeroClient = ({
-    children,
-    zero: externalZero,
-    authData: authDataIn,
-    transport,
-    beforeReload,
-    scheduleReload,
-    guardStorage,
-    benignLogPatterns,
-    refreshAuth,
-    connectionDataset,
-    disable,
-    ...props
-  }: ProvideZeroProps) => {
-    if (externalZero && transport)
-      throw new Error('a supplied Zero instance owns its transport')
-    // resolve the auth token first: a real logout (token gone) must clear
-    // authData so client mutators don't keep running as the old user, while a
-    // transient authData blip with the token still present (session refresh, tab
-    // wake) keeps the last value so mutations never see null mid-transition.
-    const auth = 'auth' in props ? (props as { auth?: string | null }).auth : undefined
-    const hasAuth = typeof auth === 'string'
+  const ProvideZeroClient = memo(
+    ({
+      children,
+      zero: externalZero,
+      authData: authDataIn,
+      local: localOptions,
+      transport,
+      beforeReload,
+      scheduleReload,
+      guardStorage,
+      benignLogPatterns,
+      refreshAuth,
+      connectionDataset,
+      disable,
+      ...props
+    }: ProvideZeroProps) => {
+      if (externalZero && transport)
+        throw new Error('a supplied Zero instance owns its transport')
 
-    // stabilize authData across transient gaps, but ONLY while authed — bakes in
-    // what consumers hand-rolled with a ref, and additionally clears on logout
-    // (the bare ref pattern does not, leaving mutators running as the old user
-    // until the instance rotates).
-    const stableAuthDataRef = useRef<AuthData | null>(authDataIn ?? null)
-    if (authDataIn) {
-      stableAuthDataRef.current = authDataIn
-    } else if (!hasAuth) {
-      stableAuthDataRef.current = null
-    }
-    const authData = (authDataIn ?? stableAuthDataRef.current ?? null) as AuthData
+      const localStorageKey = hasLocalTables ? resolveLocalStorageKey(localOptions) : null
+      const localPersistence = localOptions?.persistence
 
-    // update global authData synchronously during render so mutations always have latest auth
-    // (mutations read auth dynamically via getAuthData() to avoid stale closure race condition)
-    setAuthData(authData)
-
-    // host-scoped storage: composed here so embedding hosts isolate co-located
-    // apps without app code carrying host globals. static per page load — the
-    // host injects the scope before the app's module graph evaluates.
-    const hostScope = readHostStorageScope()
-    const scopedProps = hostScope
-      ? { ...props, storageKey: `${hostScope}-${props.storageKey ?? 'zero'}` }
-      : props
-
-    // expose the client proxy for harnesses/tests — set from the mounted
-    // provider (not module scope) so hot-reloaded trees always point at the
-    // live client.
-    ;(globalThis as { __testZero?: unknown }).__testZero = zero
-
-    // `?reset` on any URL clears local zero state, then reloads without the
-    // param — a universal escape hatch for corrupt local data.
-    useEffect(() => {
-      if (typeof window === 'undefined' || typeof window.location === 'undefined') return
-      if (!new URLSearchParams(window.location.search).has('reset')) return
-      const url = new URL(window.location.href)
-      url.searchParams.delete('reset')
-      void clearZeroClientData({
-        closeZero: async () => zero.close(),
-        reload: false,
-      }).then(() => {
-        window.location.replace(url.toString())
-      })
-    }, [])
-
-    // remint() reconstructs the client in place by bumping this counter, which
-    // changes instanceKey and drives the rotate effect exactly as a real
-    // identity change does. register the bump so the imperative remint() API can
-    // reach this mounted provider.
-    const [remintGeneration, setRemintGeneration] = useState(0)
-    useEffect(() => {
-      remintControl.bump = () => setRemintGeneration((generation) => generation + 1)
-      return () => {
-        remintControl.bump = null
-      }
-    }, [])
-
-    // identity = every primitive option except the auth token value (token
-    // changes refresh in place below; logged-in <-> logged-out still rotates
-    // via hasAuth, matching zero's documented provider semantics). function
-    // props (callbacks, logSink, batchViewUpdates) are bound at construction.
-    // remintGeneration is included so remint() forces a fresh instance.
-    let externalKey: number | undefined
-    if (externalZero) {
-      externalKey = externalInstances.keys.get(externalZero) ?? ++externalInstances.next
-      externalInstances.keys.set(externalZero, externalKey)
-    }
-    const instanceKey = externalKey
-      ? `external:${externalKey}`
-      : JSON.stringify([
-          Object.entries({ kvStore: 'mem', ...scopedProps })
-            .filter(
-              ([key, value]) =>
-                key !== 'auth' && typeof value !== 'function' && value !== undefined
-            )
-            .sort(([a], [b]) => (a < b ? -1 : 1)),
-          hasAuth,
-          transport,
-          benignLogPatterns?.map((pattern) =>
-            typeof pattern === 'string' ? pattern : `/${pattern.source}/${pattern.flags}`
-          ),
-          remintGeneration,
-        ])
-
-    // create/rotate DURING RENDER. a consumer that reads `zero`, or a
-    // transport that has to be installed before the first connect, has to find
-    // a live client in its very first render — an effect is one tick too late,
-    // and in any environment where passive effects are delayed, discarded, or
-    // never flushed (workers, double-rendered roots, concurrent react) that
-    // tick may never arrive at all. idempotent by instanceKey, so strictmode's
-    // double-invoked render and a suspense hide/reveal both hit the cache: no
-    // churn, no second client.
-    //
-    // disable=true creates nothing. an identity change while disabled still
-    // retires the old instance: logout commonly removes auth and disables in
-    // the same render, and keeping the authenticated key cached would revive
-    // its already-closed connection when the next session signs in. a plain
-    // disable with the same identity remains a gate and keeps its warm cache.
-    let liveInstance: ZeroInstance | undefined
-    if (disable && cachedZero && cachedZero.key !== instanceKey) {
-      retiredZero.set(cachedZero.key, cachedZero)
-      cachedZero = null
-    }
-    let activeZero: CachedZeroEntry | null = null
-    if (!disable) {
-      if (cachedZero?.key !== instanceKey) {
-        if (cachedZero) retiredZero.set(cachedZero.key, cachedZero)
-        const revived = retiredZero.get(instanceKey)
-        retiredZero.delete(instanceKey)
-        const nextCachedZero = revived ?? {
-          key: instanceKey,
-          auth,
-          external: !!externalZero,
-          instance:
-            externalZero ??
-            constructZeroInstance({
-              options: scopedProps as Omit<
-                ZeroOptions<Schema, ZeroMutators>,
-                'schema' | 'mutators'
-              >,
-              transport,
-              beforeReload,
-              scheduleReload,
-              guardStorage,
-              benignLogPatterns,
-            }),
+      // construct the provider's store without mutating global/active state during
+      // render. if an identical committed store is already active, share it.
+      const localStore = useMemo<LocalDataStore<LocalSchema> | null>(() => {
+        if (!hasLocalTables || !localStorageKey) return null
+        if (
+          activeLocalStore &&
+          !activeLocalStore.closed &&
+          activeLocalStoreKey === localStorageKey &&
+          activeLocalPersistence === localPersistence
+        ) {
+          return activeLocalStore
         }
-        cachedZero = nextCachedZero
+        return createScopedLocalStore(localStorageKey, localOptions)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [localStorageKey, localPersistence])
+
+      // publish the active local store in useInsertionEffect so it is committed
+      // BEFORE any descendant useLayoutEffect runs, and enforce a single active
+      // provider scope per client instance so reads and imperative writes never
+      // silently target different stores. on Suspense reveal, reopen the context
+      // store if it was retired while hidden.
+      useInsertionEffect(() => {
+        if (!localStore || !localStorageKey) return
+        pendingRetireLocalStores.delete(localStore)
+        if (
+          committedLocalProviderCount > 0 &&
+          activeLocalStore &&
+          activeLocalStore !== localStore
+        ) {
+          throw new Error(
+            `[limesync] multiple <DataProvider> instances with different local stores ` +
+              `('${activeLocalStoreKey}' vs '${localStorageKey}') cannot be mounted simultaneously ` +
+              `on the same client. Create a separate client instance or share the same storageKey.`
+          )
+        }
+        const prevStore = activeLocalStore
+        activeLocalStore = localStore
+        activeLocalStoreKey = localStorageKey
+        activeLocalPersistence = localPersistence
+        activeLocalMutators = localStore.createMutators()
+        committedLocalProviderCount++
+        if (prevStore && prevStore !== localStore && !prevStore.closed) {
+          pendingRetireLocalStores.delete(prevStore)
+          void prevStore.close()
+        }
+        if (!IS_SERVER_RUNTIME) {
+          const boot = localStore.closed ? localStore.reopen() : localStore.open()
+          void boot.catch((error) => {
+            console.error('[limesync] failed to open local data store:', error)
+          })
+        }
+        return () => {
+          committedLocalProviderCount = Math.max(0, committedLocalProviderCount - 1)
+          if (committedLocalProviderCount === 0 && activeLocalStore === localStore) {
+            activeLocalStore = null
+            activeLocalStoreKey = null
+            activeLocalPersistence = undefined
+            activeLocalMutators = null
+          }
+          // defer close to a microtask so React Strict Mode's synchronous
+          // unmount+remount cancels retirement while real unmounts drain & close.
+          pendingRetireLocalStores.add(localStore)
+          queueMicrotask(() => {
+            if (!pendingRetireLocalStores.delete(localStore)) return
+            if (activeLocalStore !== localStore && !localStore.closed) {
+              void localStore.close()
+            }
+          })
+        }
+      }, [localStore, localStorageKey, localPersistence])
+
+      const hasSyncTables = Object.keys(schema.tables).length > 0
+      const hasExplicitSync =
+        Boolean(externalZero) ||
+        Boolean(transport) ||
+        typeof (props as { cacheURL?: string }).cacheURL === 'string' ||
+        typeof (props as { server?: string }).server === 'string'
+      const syncDisabled =
+        Boolean(disable) || (!hasExplicitSync && !hasSyncTables && Boolean(localStore))
+      // resolve the auth token first: a real logout (token gone) must clear
+      // authData so client mutators don't keep running as the old user, while a
+      // transient authData blip with the token still present (session refresh, tab
+      // wake) keeps the last value so mutations never see null mid-transition.
+      const auth = 'auth' in props ? (props as { auth?: string | null }).auth : undefined
+      const hasAuth = typeof auth === 'string'
+
+      // stabilize authData across transient gaps AND across structurally equal
+      // object literals so callers passing inline `{ id, email }` do not cascade
+      // re-renders through AuthDataContext.
+      const stableAuthDataRef = useRef<AuthData | null>(authDataIn ?? null)
+      if (authDataIn) {
+        if (!shallowEqualRecord(stableAuthDataRef.current, authDataIn)) {
+          stableAuthDataRef.current = authDataIn
+        }
+      } else if (!hasAuth) {
+        stableAuthDataRef.current = null
       }
-      activeZero = cachedZero
-      liveInstance = activeZero.instance
+      const authData = (stableAuthDataRef.current ?? null) as AuthData
+
+      // update global authData synchronously during render so mutations always have latest auth
+      // (mutations read auth dynamically via getAuthData() to avoid stale closure race condition)
+      setAuthData(authData)
+
+      // host-scoped storage: composed here so embedding hosts isolate co-located
+      // apps without app code carrying host globals. static per page load — the
+      // host injects the scope before the app's module graph evaluates.
+      const hostScope = readHostStorageScope()
+      const scopedProps = hostScope
+        ? { ...props, storageKey: `${hostScope}-${props.storageKey ?? 'zero'}` }
+        : props
+
+      // expose the client proxy for harnesses/tests — set from the mounted
+      // provider (not module scope) so hot-reloaded trees always point at the
+      // live client.
+      ;(globalThis as { __testZero?: unknown }).__testZero = zero
+
+      // `?reset` on any URL clears local zero state, then reloads without the
+      // param — a universal escape hatch for corrupt local data.
+      useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.location === 'undefined')
+          return
+        if (!new URLSearchParams(window.location.search).has('reset')) return
+        const url = new URL(window.location.href)
+        url.searchParams.delete('reset')
+        void clearZeroClientData({
+          closeZero: async () => zero.close(),
+          reload: false,
+        }).then(() => {
+          window.location.replace(url.toString())
+        })
+      }, [])
+
+      // remint() reconstructs the client in place by bumping this counter, which
+      // changes instanceKey and drives the rotate effect exactly as a real
+      // identity change does. register the bump so the imperative remint() API can
+      // reach this mounted provider.
+      const [remintGeneration, setRemintGeneration] = useState(0)
+      useEffect(() => {
+        remintControl.bump = () => setRemintGeneration((generation) => generation + 1)
+        return () => {
+          remintControl.bump = null
+        }
+      }, [])
+
+      // identity = every primitive option except the auth token value (token
+      // changes refresh in place below; logged-in <-> logged-out still rotates
+      // via hasAuth, matching zero's documented provider semantics). function
+      // props (callbacks, logSink, batchViewUpdates) are bound at construction.
+      // remintGeneration is included so remint() forces a fresh instance.
+      let externalKey: number | undefined
+      if (externalZero) {
+        externalKey = externalInstances.keys.get(externalZero) ?? ++externalInstances.next
+        externalInstances.keys.set(externalZero, externalKey)
+      }
+      const instanceKey = externalKey
+        ? `external:${externalKey}`
+        : JSON.stringify([
+            Object.entries({ kvStore: 'mem', ...scopedProps })
+              .filter(
+                ([key, value]) =>
+                  key !== 'auth' && typeof value !== 'function' && value !== undefined
+              )
+              .sort(([a], [b]) => (a < b ? -1 : 1)),
+            hasAuth,
+            transport,
+            benignLogPatterns?.map((pattern) =>
+              typeof pattern === 'string'
+                ? pattern
+                : `/${pattern.source}/${pattern.flags}`
+            ),
+            remintGeneration,
+          ])
+
+      // create/rotate DURING RENDER. a consumer that reads `zero`, or a
+      // transport that has to be installed before the first connect, has to find
+      // a live client in its very first render — an effect is one tick too late,
+      // and in any environment where passive effects are delayed, discarded, or
+      // never flushed (workers, double-rendered roots, concurrent react) that
+      // tick may never arrive at all. idempotent by instanceKey, so strictmode's
+      // double-invoked render and a suspense hide/reveal both hit the cache: no
+      // churn, no second client.
+      //
+      // disable=true creates nothing. an identity change while disabled still
+      // retires the old instance: logout commonly removes auth and disables in
+      // the same render, and keeping the authenticated key cached would revive
+      // its already-closed connection when the next session signs in. a plain
+      // disable with the same identity remains a gate and keeps its warm cache.
+      let liveInstance: ZeroInstance | undefined
+      if (syncDisabled && cachedZero && cachedZero.key !== instanceKey) {
+        retiredZero.set(cachedZero.key, cachedZero)
+        cachedZero = null
+      }
+      let activeZero: CachedZeroEntry | null = null
+      if (!syncDisabled) {
+        if (cachedZero?.key !== instanceKey) {
+          if (cachedZero) retiredZero.set(cachedZero.key, cachedZero)
+          const revived = retiredZero.get(instanceKey)
+          retiredZero.delete(instanceKey)
+          const nextCachedZero = revived ?? {
+            key: instanceKey,
+            auth,
+            external: !!externalZero,
+            instance:
+              externalZero ??
+              constructZeroInstance({
+                options: scopedProps as Omit<
+                  ZeroOptions<Schema, ZeroMutators>,
+                  'schema' | 'mutators'
+                >,
+                transport,
+                beforeReload,
+                scheduleReload,
+                guardStorage,
+                benignLogPatterns,
+              }),
+          }
+          cachedZero = nextCachedZero
+        }
+        activeZero = cachedZero
+        liveInstance = activeZero.instance
+      }
+
+      // a disabled provider stops being ready before descendant passive effects
+      // run. the instance stays cached — disable is a gate, not a teardown — so
+      // flipping back on reuses it. a rotation needs nothing here: the render
+      // above already published the replacement.
+      useLayoutEffect(() => {
+        if (syncDisabled && zeroRuntime.zero) {
+          mutationLifecycle.fence()
+          unpublishZeroInstance(zeroRuntime.zero)
+        }
+      }, [syncDisabled])
+
+      // disposal is commit-only, so construction and teardown are deliberately
+      // asymmetric. render can be thrown away and a provider can render without
+      // ever mounting; closing an instance the committed tree still holds would
+      // blank the app, so the render phase only retires and this closes. runs
+      // after every commit because a discarded rotation can retire an instance
+      // without instanceKey ever changing between two committed renders.
+      useEffect(() => {
+        if (retiredZero.size === 0) return
+        const outgoing = [...retiredZero.values()]
+        retiredZero.clear()
+        // close only. the replacement is already published and already fenced
+        // the outgoing client's writes, and SetZeroInstance's effect emits the
+        // one version change a rotation is allowed to produce.
+        for (const { instance: zeroInstance, external } of outgoing)
+          if (!external) zeroInstance.close()
+      })
+
+      // a changed token on the same identity refreshes auth in place — zero
+      // sends an auth update over the live connection instead of reconnecting
+      // (upstream ZeroProvider does exactly this). string <-> undefined flips
+      // rotate the instance via hasAuth in the identity key instead. the compare
+      // reads the CACHE rather than a ref, so a provider that unmounted during
+      // sign-out and remounted after sign-in still sees the new token; and it
+      // happens HERE rather than during render, because render runs twice under
+      // strictmode and a render-phase write makes the second pass read its own
+      // update and skip the reconnect entirely.
+      useEffect(() => {
+        if (!activeZero || typeof auth !== 'string' || activeZero.auth === auth) return
+        activeZero.auth = auth
+        activeZero.instance.connection.connect({ auth })
+      }, [activeZero, auth])
+
+      // Always render the same shell shape, with or without an instance, and
+      // whether disable is true or false. While disable=true we hand descendants
+      // the stub Zero plus DisabledContext='empty' so useZero/useQuery
+      // short-circuit instead of throwing. SetZeroInstance + ConnectionMonitor
+      // only mount once an active instance exists, as siblings of children —
+      // they NEVER wrap children, so toggling them never re-parents.
+      return (
+        <LocalDataContext.Provider value={localStore}>
+          <AuthDataContext.Provider value={authData}>
+            <DisabledContext.Provider value={liveInstance ? false : 'empty'}>
+              <ZeroContext.Provider value={liveInstance ?? (DISABLED_ZERO_STUB as any)}>
+                <ZeroProviderGenerationContext.Provider
+                  value={liveInstance ? getZeroProviderGeneration(liveInstance) : null}
+                >
+                  {liveInstance ? <SetZeroInstance /> : null}
+                  {liveInstance ? (
+                    <ConnectionMonitor
+                      zeroEvents={zeroEvents}
+                      auth={auth}
+                      refreshAuth={refreshAuth}
+                      exposeDataset={connectionDataset}
+                      datasetCacheUrl={
+                        connectionDataset
+                          ? ((props as { cacheURL?: string; server?: string }).cacheURL ??
+                            (props as { cacheURL?: string; server?: string }).server)
+                          : undefined
+                      }
+                    />
+                  ) : null}
+                  {children}
+                </ZeroProviderGenerationContext.Provider>
+              </ZeroContext.Provider>
+            </DisabledContext.Provider>
+          </AuthDataContext.Provider>
+        </LocalDataContext.Provider>
+      )
     }
-
-    // a disabled provider stops being ready before descendant passive effects
-    // run. the instance stays cached — disable is a gate, not a teardown — so
-    // flipping back on reuses it. a rotation needs nothing here: the render
-    // above already published the replacement.
-    useLayoutEffect(() => {
-      if (disable && zeroRuntime.zero) {
-        mutationLifecycle.fence()
-        unpublishZeroInstance(zeroRuntime.zero)
-      }
-    }, [disable])
-
-    // disposal is commit-only, so construction and teardown are deliberately
-    // asymmetric. render can be thrown away and a provider can render without
-    // ever mounting; closing an instance the committed tree still holds would
-    // blank the app, so the render phase only retires and this closes. runs
-    // after every commit because a discarded rotation can retire an instance
-    // without instanceKey ever changing between two committed renders.
-    useEffect(() => {
-      if (retiredZero.size === 0) return
-      const outgoing = [...retiredZero.values()]
-      retiredZero.clear()
-      // close only. the replacement is already published and already fenced
-      // the outgoing client's writes, and SetZeroInstance's effect emits the
-      // one version change a rotation is allowed to produce.
-      for (const { instance: zeroInstance, external } of outgoing)
-        if (!external) zeroInstance.close()
-    })
-
-    // a changed token on the same identity refreshes auth in place — zero
-    // sends an auth update over the live connection instead of reconnecting
-    // (upstream ZeroProvider does exactly this). string <-> undefined flips
-    // rotate the instance via hasAuth in the identity key instead. the compare
-    // reads the CACHE rather than a ref, so a provider that unmounted during
-    // sign-out and remounted after sign-in still sees the new token; and it
-    // happens HERE rather than during render, because render runs twice under
-    // strictmode and a render-phase write makes the second pass read its own
-    // update and skip the reconnect entirely.
-    useEffect(() => {
-      if (!activeZero || typeof auth !== 'string' || activeZero.auth === auth) return
-      activeZero.auth = auth
-      activeZero.instance.connection.connect({ auth })
-    }, [activeZero, auth])
-
-    // Always render the same shell shape, with or without an instance, and
-    // whether disable is true or false. While disable=true we hand descendants
-    // the stub Zero plus DisabledContext='empty' so useZero/useQuery
-    // short-circuit instead of throwing. SetZeroInstance + ConnectionMonitor
-    // only mount once an active instance exists, as siblings of children —
-    // they NEVER wrap children, so toggling them never re-parents.
-    return (
-      <AuthDataContext.Provider value={authData}>
-        <DisabledContext.Provider value={liveInstance ? false : 'empty'}>
-          <ZeroContext.Provider value={liveInstance ?? (DISABLED_ZERO_STUB as any)}>
-            <ZeroProviderGenerationContext.Provider
-              value={liveInstance ? getZeroProviderGeneration(liveInstance) : null}
-            >
-              {liveInstance ? <SetZeroInstance /> : null}
-              {liveInstance ? (
-                <ConnectionMonitor
-                  zeroEvents={zeroEvents}
-                  auth={auth}
-                  refreshAuth={refreshAuth}
-                  exposeDataset={connectionDataset}
-                  datasetCacheUrl={
-                    connectionDataset
-                      ? ((props as { cacheURL?: string; server?: string }).cacheURL ??
-                        (props as { cacheURL?: string; server?: string }).server)
-                      : undefined
-                  }
-                />
-              ) : null}
-              {children}
-            </ZeroProviderGenerationContext.Provider>
-          </ZeroContext.Provider>
-        </DisabledContext.Provider>
-      </AuthDataContext.Provider>
-    )
-  }
+  )
 
   const ProvideZero = IS_SERVER_RUNTIME ? ProvideZeroServer : ProvideZeroClient
 
@@ -1672,8 +1939,10 @@ export function createZeroClientInternal<
   return {
     instanceName,
     zeroEvents,
+    events: zeroEvents,
     reloadPage,
     ProvideZero,
+    ProvideData: ProvideZero,
     connectHeadless,
     ControlQueries,
     useQuery,
@@ -1681,7 +1950,13 @@ export function createZeroClientInternal<
     usePermission,
     usePermissionDirect,
     useZeroProviderGeneration,
-    zero,
+    zero: zero as ClientZero<Schema, Models, LocalSchema>,
+    mutate: zero.mutate as ClientMutate<Schema, Models, LocalSchema>,
+    transaction,
+    useLocalStore,
+    get localStore() {
+      return getOrCreateImperativeLocalStore()
+    },
     preload,
     getQuery,
     waitForZero,
@@ -1695,3 +1970,5 @@ export function createZeroClientInternal<
     awaitMutationServer: mutationLifecycle.awaitMutationServer,
   }
 }
+
+export const createDataClient = createZeroClient

@@ -32,6 +32,7 @@ export type DataLayout = {
   namespaces: DataNamespace[]
   metadataPaths: string[]
   sourceRoots: string[]
+  localQueries: Set<string>
 }
 
 const isSourceFile = (name: string) =>
@@ -220,6 +221,91 @@ function readDataConfig(
  * `zero.mutate.*` call site in the app to an untyped error. Folder namespaces
  * already get this right by construction (no `mutations.ts` means no model).
  */
+const BUILDER_IMPORT_SOURCES = new Set([
+  'limesync/data',
+  'limesync/zero',
+  'on-zero',
+  '~/zero/core',
+])
+const BUILDER_EXPORT_NAMES = new Set(['query', 'zql', 'builder'])
+
+function collectBuilderBindings(source: ts.SourceFile): Set<string> {
+  const bindings = new Set<string>(['zql'])
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement)) continue
+    if (statement.importClause?.phaseModifier === ts.SyntaxKind.TypeKeyword) continue
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) continue
+    const spec = statement.moduleSpecifier.text
+    const isBuilderSource =
+      BUILDER_IMPORT_SOURCES.has(spec) ||
+      /(?:^|\/)(?:schema|syncedQueries|generated)(?:\.[cm]?[jt]sx?)?$/.test(spec)
+    if (!isBuilderSource) continue
+    const named = statement.importClause?.namedBindings
+    if (!named || !ts.isNamedImports(named)) continue
+    for (const el of named.elements) {
+      if (el.isTypeOnly) continue
+      const imported = el.propertyName ? el.propertyName.text : el.name.text
+      if (BUILDER_EXPORT_NAMES.has(imported)) bindings.add(el.name.text)
+    }
+  }
+  return bindings
+}
+
+function collectParamNamesFromBinding(name: ts.BindingName, out: Set<string>) {
+  if (ts.isIdentifier(name)) {
+    out.add(name.text)
+  } else if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+    for (const el of name.elements) {
+      if (ts.isBindingElement(el) && el.name) collectParamNamesFromBinding(el.name, out)
+    }
+  }
+}
+
+function collectShadowedParams(fn: ts.Node): Set<string> {
+  const out = new Set<string>()
+  if (
+    ts.isArrowFunction(fn) ||
+    ts.isFunctionExpression(fn) ||
+    ts.isFunctionDeclaration(fn) ||
+    ts.isMethodDeclaration(fn)
+  ) {
+    for (const p of fn.parameters) collectParamNamesFromBinding(p.name, out)
+  }
+  return out
+}
+
+function extendScopeForNode(
+  node: ts.Node,
+  parentShadowed: ReadonlySet<string>
+): Set<string> {
+  const next = new Set(parentShadowed)
+  if (
+    ts.isArrowFunction(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node)
+  ) {
+    for (const p of node.parameters) collectParamNamesFromBinding(p.name, next)
+    if (ts.isFunctionExpression(node) && node.name) next.add(node.name.text)
+    return next
+  }
+  if (ts.isBlock(node)) {
+    for (const stmt of node.statements) {
+      if (ts.isVariableStatement(stmt)) {
+        for (const decl of stmt.declarationList.declarations) {
+          collectParamNamesFromBinding(decl.name, next)
+        }
+      } else if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+        next.add(stmt.name.text)
+      }
+    }
+  }
+  if (ts.isCatchClause(node) && node.variableDeclaration) {
+    collectParamNamesFromBinding(node.variableDeclaration.name, next)
+  }
+  return next
+}
+
 type NamespaceExportKinds = { model: boolean; query: boolean }
 
 function namespaceExportKinds(
@@ -234,7 +320,8 @@ function namespaceExportKinds(
     console.warn(`[limesync] ignoring ${displayPath}: no recognized data exports`)
     return none
   }
-  const functions = new Map<string, ts.ConciseBody>()
+  const builderBindings = collectBuilderBindings(source)
+  const functions = new Map<string, { body: ts.ConciseBody; shadowed: Set<string> }>()
   const exported = new Set<string>()
 
   for (const statement of source.statements) {
@@ -257,14 +344,20 @@ function namespaceExportKinds(
           }
         }
         if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) {
-          functions.set(name, initializer.body)
+          functions.set(name, {
+            body: initializer.body,
+            shadowed: collectShadowedParams(initializer),
+          })
           if (isExported) exported.add(name)
         }
       }
       continue
     }
     if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) {
-      functions.set(statement.name.text, statement.body)
+      functions.set(statement.name.text, {
+        body: statement.body,
+        shadowed: collectShadowedParams(statement),
+      })
       if (
         statement.modifiers?.some(
           (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
@@ -276,9 +369,23 @@ function namespaceExportKinds(
   }
 
   const visiting = new Set<string>()
-  const reachesQuery = (node: ts.Node): boolean => {
+  const reachesQuery = (node: ts.Node, shadowed: ReadonlySet<string>): boolean => {
+    const nextShadowed =
+      ts.isArrowFunction(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isBlock(node) ||
+      ts.isCatchClause(node)
+        ? extendScopeForNode(node, shadowed)
+        : shadowed
     if (ts.isPropertyAccessExpression(node)) {
-      if (ts.isIdentifier(node.expression) && node.expression.text === 'zql') return true
+      if (
+        ts.isIdentifier(node.expression) &&
+        builderBindings.has(node.expression.text) &&
+        !nextShadowed.has(node.expression.text)
+      )
+        return true
       if (
         ts.isPropertyAccessExpression(node.expression) &&
         node.expression.name.text === 'query'
@@ -290,19 +397,22 @@ function namespaceExportKinds(
       const helper = functions.get(name)
       if (helper && !visiting.has(name)) {
         visiting.add(name)
-        const found = reachesQuery(helper)
+        const found = reachesQuery(helper.body, helper.shadowed)
         visiting.delete(name)
         if (found) return true
       }
     }
     let found = false
     node.forEachChild((child) => {
-      if (!found && reachesQuery(child)) found = true
+      if (!found && reachesQuery(child, nextShadowed)) found = true
     })
     return found
   }
 
-  const query = [...exported].some((name) => reachesQuery(functions.get(name)!))
+  const query = [...exported].some((name) => {
+    const fn = functions.get(name)!
+    return reachesQuery(fn.body, fn.shadowed)
+  })
   return { model: false, query }
 }
 
@@ -502,6 +612,161 @@ function relationTargets(
   return relations
 }
 
+function extractOneTableChainTs(node: ts.Expression): {
+  name: string
+  visibility?: 'local' | 'public' | 'private'
+  chainNodes: ts.Node[]
+} | null {
+  let cur: ts.Expression | undefined = node
+  let visibility: 'local' | 'public' | 'private' | undefined
+  let tableName: string | null = null
+  const chainNodes: ts.Node[] = []
+  while (cur && ts.isCallExpression(cur)) {
+    chainNodes.push(cur)
+    if (ts.isPropertyAccessExpression(cur.expression)) {
+      const method = cur.expression.name.text
+      if (
+        visibility === undefined &&
+        (method === 'local' || method === 'public' || method === 'private')
+      ) {
+        visibility = method
+      }
+      cur = cur.expression.expression
+      continue
+    }
+    if (
+      ts.isIdentifier(cur.expression) &&
+      cur.expression.text === 'table' &&
+      cur.arguments[0] &&
+      ts.isStringLiteral(cur.arguments[0])
+    ) {
+      tableName = cur.arguments[0].text
+    }
+    break
+  }
+  return tableName ? { name: tableName, visibility, chainNodes } : null
+}
+
+function collectCreateSchemaLocalTables(
+  expr: ts.Expression,
+  bindingTables: ReadonlyMap<
+    string,
+    { name: string; visibility?: 'local' | 'public' | 'private' }
+  >,
+  localTables: Set<string>
+): boolean {
+  if (
+    !ts.isCallExpression(expr) ||
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== 'createSchema' ||
+    !expr.arguments[0] ||
+    !ts.isObjectLiteralExpression(expr.arguments[0])
+  ) {
+    return false
+  }
+  for (const prop of expr.arguments[0].properties) {
+    if (
+      ts.isPropertyAssignment(prop) &&
+      propertyName(prop.name) === 'tables' &&
+      ts.isArrayLiteralExpression(prop.initializer)
+    ) {
+      for (const el of prop.initializer.elements) {
+        if (ts.isIdentifier(el)) {
+          const bound = bindingTables.get(el.text)
+          if (bound?.visibility === 'local') localTables.add(bound.name)
+        } else if (ts.isCallExpression(el)) {
+          const extracted = extractOneTableChainTs(el)
+          if (extracted?.visibility === 'local') localTables.add(extracted.name)
+        }
+      }
+      return true
+    }
+  }
+  return false
+}
+
+function oneLocalTables(source: ts.SourceFile): Set<string> {
+  const localTables = new Set<string>()
+  const bindingTables = new Map<
+    string,
+    { name: string; visibility?: 'local' | 'public' | 'private' }
+  >()
+  const topLevelSchemaExprs: Array<{
+    expr: ts.Expression
+    exported: boolean
+    isSchemaName: boolean
+  }> = []
+
+  // inspect ONLY top-level module statements so nested helper declarations and
+  // uncalled decoy createSchema() calls never shadow the exported module schema.
+  for (const stmt of source.statements) {
+    if (ts.isVariableStatement(stmt)) {
+      const isExported = Boolean(
+        stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+      )
+      for (const decl of stmt.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || !decl.initializer) continue
+        const extracted = extractOneTableChainTs(decl.initializer)
+        if (extracted) {
+          bindingTables.set(decl.name.text, {
+            name: extracted.name,
+            visibility: extracted.visibility,
+          })
+          continue
+        }
+        if (
+          ts.isCallExpression(decl.initializer) &&
+          ts.isIdentifier(decl.initializer.expression) &&
+          decl.initializer.expression.text === 'createSchema'
+        ) {
+          topLevelSchemaExprs.push({
+            expr: decl.initializer,
+            exported: isExported,
+            isSchemaName: decl.name.text === 'schema',
+          })
+        }
+      }
+    } else if (ts.isExportAssignment(stmt)) {
+      if (
+        ts.isCallExpression(stmt.expression) &&
+        ts.isIdentifier(stmt.expression.expression) &&
+        stmt.expression.expression.text === 'createSchema'
+      ) {
+        topLevelSchemaExprs.push({
+          expr: stmt.expression,
+          exported: true,
+          isSchemaName: true,
+        })
+      }
+    }
+  }
+
+  // prefer `export const schema = createSchema(...)` / `export default createSchema(...)`,
+  // then any exported createSchema(...), then any top-level createSchema(...).
+  const preferred = topLevelSchemaExprs.filter((s) => s.exported && s.isSchemaName)
+  const candidates =
+    preferred.length > 0
+      ? preferred
+      : topLevelSchemaExprs.filter((s) => s.exported).length > 0
+        ? topLevelSchemaExprs.filter((s) => s.exported)
+        : topLevelSchemaExprs
+
+  let foundCreateSchema = false
+  for (const candidate of candidates) {
+    if (collectCreateSchemaLocalTables(candidate.expr, bindingTables, localTables)) {
+      foundCreateSchema = true
+    }
+  }
+
+  if (!foundCreateSchema) {
+    for (const bound of bindingTables.values()) {
+      if (bound.visibility === 'local') localTables.add(bound.name)
+    }
+  }
+
+  return localTables
+}
+
 function oneRelationTargets(source: ts.SourceFile) {
   const tables = new Map<string, string>()
   const visitTable = (node: ts.Node) => {
@@ -637,7 +902,9 @@ function queriedTables(
   if (!namespace.queryPath) return []
   const source = project.sourceFile(namespace.queryPath)
   const reached: Array<{ table: string; query: string; root: boolean }> = []
+  const builderBindings = collectBuilderBindings(source)
   const functions = new Map<string, ts.ConciseBody>()
+  const functionShadowed = new Map<string, Set<string>>()
   const exported = new Set<string>()
 
   for (const statement of source.statements) {
@@ -653,11 +920,16 @@ function queriedTables(
             ts.isFunctionExpression(declaration.initializer))
         ) {
           functions.set(declaration.name.text, declaration.initializer.body)
+          functionShadowed.set(
+            declaration.name.text,
+            collectShadowedParams(declaration.initializer)
+          )
           if (isExported) exported.add(declaration.name.text)
         }
       }
     } else if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) {
       functions.set(statement.name.text, statement.body)
+      functionShadowed.set(statement.name.text, collectShadowedParams(statement))
       if (
         statement.modifiers?.some(
           (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
@@ -668,13 +940,61 @@ function queriedTables(
     }
   }
 
-  const rootTable = (node: ts.Node): string | null => {
-    const text = node.getText(source)
-    return text.match(/(?:\bzql|\.query)\.([A-Za-z_$][\w$]*)/)?.[1] ?? null
+  const rootTable = (
+    node: ts.Node,
+    initialShadowed: ReadonlySet<string>
+  ): string | null => {
+    let found: string | null = null
+    const walk = (n: ts.Node, shadowed: ReadonlySet<string>) => {
+      if (found) return
+      const nextShadowed =
+        ts.isArrowFunction(n) ||
+        ts.isFunctionExpression(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isMethodDeclaration(n) ||
+        ts.isBlock(n) ||
+        ts.isCatchClause(n)
+          ? extendScopeForNode(n, shadowed)
+          : shadowed
+      if (ts.isPropertyAccessExpression(n)) {
+        if (
+          ts.isIdentifier(n.expression) &&
+          builderBindings.has(n.expression.text) &&
+          !nextShadowed.has(n.expression.text)
+        ) {
+          found = n.name.text
+          return
+        }
+        if (
+          ts.isPropertyAccessExpression(n.expression) &&
+          n.expression.name.text === 'query'
+        ) {
+          found = n.name.text
+          return
+        }
+      }
+      n.forEachChild((child) => walk(child, nextShadowed))
+    }
+    walk(node, initialShadowed)
+    return found
   }
 
   const visiting = new Set<string>()
-  const visit = (node: ts.Node, currentTable: string, query: string) => {
+  const visit = (
+    node: ts.Node,
+    currentTable: string,
+    query: string,
+    shadowed: ReadonlySet<string>
+  ) => {
+    const nextShadowed =
+      ts.isArrowFunction(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isBlock(node) ||
+      ts.isCatchClause(node)
+        ? extendScopeForNode(node, shadowed)
+        : shadowed
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
@@ -687,7 +1007,8 @@ function queriedTables(
             `sync membership must be statically derivable`
         )
       }
-      const sourceTable = rootTable(node.expression.expression) ?? currentTable
+      const sourceTable =
+        rootTable(node.expression.expression, nextShadowed) ?? currentTable
       const target = relations.get(sourceTable)?.get(nameArg.text)
       if (!target) {
         throw new Error(
@@ -696,13 +1017,14 @@ function queriedTables(
         )
       }
       reached.push({ table: target, query, root: false })
-      visit(node.expression.expression, currentTable, query)
+      visit(node.expression.expression, currentTable, query, nextShadowed)
       const callback = node.arguments[1]
       if (
         callback &&
         (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
       ) {
-        visit(callback.body, target, query)
+        const cbShadowed = extendScopeForNode(callback, nextShadowed)
+        visit(callback.body, target, query, cbShadowed)
       }
       return
     }
@@ -711,21 +1033,25 @@ function queriedTables(
       const key = `${query}:${node.expression.text}`
       if (helper && !visiting.has(key)) {
         visiting.add(key)
-        const helperRoot = rootTable(helper)
+        // helper traversal uses ONLY the helper's own lexical scope, never the caller's params
+        const helperShadowed =
+          functionShadowed.get(node.expression.text) ?? new Set<string>()
+        const helperRoot = rootTable(helper, helperShadowed)
         if (helperRoot) reached.push({ table: helperRoot, query, root: true })
-        visit(helper, helperRoot ?? currentTable, query)
+        visit(helper, helperRoot ?? currentTable, query, helperShadowed)
         visiting.delete(key)
       }
     }
-    node.forEachChild((child) => visit(child, currentTable, query))
+    node.forEachChild((child) => visit(child, currentTable, query, nextShadowed))
   }
 
   for (const name of exported) {
     if (['mutate', 'schema', 'where'].includes(name)) continue
     const body = functions.get(name)!
-    const queryRoot = rootTable(body)
+    const queryShadowed = functionShadowed.get(name) ?? new Set<string>()
+    const queryRoot = rootTable(body, queryShadowed)
     if (queryRoot) reached.push({ table: queryRoot, query: name, root: true })
-    visit(body, queryRoot ?? namespace.name, name)
+    visit(body, queryRoot ?? namespace.name, name, queryShadowed)
   }
   return reached
 }
@@ -995,6 +1321,10 @@ export function discoverDataLayout(
   const relations = oneSchema
     ? oneRelationTargets(project.sourceFile(oneSchema))
     : relationTargets(project, metadata)
+  const localTables = oneSchema
+    ? oneLocalTables(project.sourceFile(oneSchema))
+    : new Set<string>()
+  const localQueries = new Set<string>()
   tableColumns(
     project,
     new Set(namespaces.flatMap((namespace) => namespace.sourcePaths)),
@@ -1005,7 +1335,7 @@ export function discoverDataLayout(
     const tables = new Set(
       instance.namespaces
         .map((namespace) => namespace.table)
-        .filter((table): table is string => table !== null)
+        .filter((table): table is string => table !== null && !localTables.has(table))
     )
     const syncTables = new Set(tables)
     for (const namespace of instance.namespaces) {
@@ -1021,17 +1351,39 @@ export function discoverDataLayout(
         tables.add(table)
         syncTables.add(table)
       }
-      for (const reached of queriedTables(project, namespace, relations)) {
-        const owner = tableOwners.get(reached.table) ?? relatedOwners.get(reached.table)
-        if (owner && owner !== instance.name) {
+      const reachedEntries = queriedTables(project, namespace, relations)
+      const byQuery = new Map<string, typeof reachedEntries>()
+      for (const entry of reachedEntries) {
+        const list = byQuery.get(entry.query) ?? []
+        list.push(entry)
+        byQuery.set(entry.query, list)
+      }
+      for (const [queryName, entries] of byQuery) {
+        const hasLocal = entries.some((e) => localTables.has(e.table))
+        const hasSync = entries.some((e) => !localTables.has(e.table))
+        if (hasLocal && hasSync) {
           throw new Error(
-            `[limesync] ${namespace.name}.${reached.query} in instance '${instance.name}' reaches ` +
-              `table '${reached.table}' owned by instance '${owner}'`
+            `[limesync] ${namespace.name}.${queryName} mixes local and synced tables ` +
+              `([${[...new Set(entries.map((e) => e.table))].join(', ')}]), which is not supported in v1.`
           )
         }
-        relatedOwners.set(reached.table, instance.name)
-        if (reached.root) tables.add(reached.table)
-        syncTables.add(reached.table)
+        if (hasLocal) {
+          // named local queries stay in the client registry only, never syncTables or server registry
+          localQueries.add(`${namespace.name}.${queryName}`)
+          continue
+        }
+        for (const reached of entries) {
+          const owner = tableOwners.get(reached.table) ?? relatedOwners.get(reached.table)
+          if (owner && owner !== instance.name) {
+            throw new Error(
+              `[limesync] ${namespace.name}.${reached.query} in instance '${instance.name}' reaches ` +
+                `table '${reached.table}' owned by instance '${owner}'`
+            )
+          }
+          relatedOwners.set(reached.table, instance.name)
+          if (reached.root) tables.add(reached.table)
+          syncTables.add(reached.table)
+        }
       }
     }
     instance.tables = [...tables].sort()
@@ -1076,6 +1428,7 @@ export function discoverDataLayout(
     namespaces,
     metadataPaths: config ? [...metadata, config.path].sort() : metadata,
     sourceRoots,
+    localQueries,
   }
 }
 
