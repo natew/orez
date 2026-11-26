@@ -68,7 +68,8 @@ export async function nativeZeroClient<M extends Mutators>(
       } else if (state.name === 'closed') {
         publish({ name: 'closed', reason: 'Native Zero client closed' })
       } else if (state.name === 'disconnected') {
-        if (!needsAuth) publish({ name: 'disconnected', reason: 'Native Zero sync paused' })
+        if (!needsAuth)
+          publish({ name: 'disconnected', reason: 'Native Zero sync paused' })
       } else publish({ name: state.name })
     },
   })

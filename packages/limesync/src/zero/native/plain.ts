@@ -3,7 +3,6 @@ import {
   type NativeZeroEngine,
   type OpenNativeZeroOptions,
 } from './open.js'
-
 import { nativeZeroClient, type NativeZeroClientOptions } from './zeroClient.js'
 
 import type { Mutators } from './types.js'
