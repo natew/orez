@@ -35,6 +35,10 @@ const emptyBytes = new Uint8Array(0)
 const envelopePrefix = 'orez-e1.'
 const base64URLAlphabet =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+const base64URLValues = new Uint8Array(128)
+for (let index = 0; index < base64URLAlphabet.length; index++) {
+  base64URLValues[base64URLAlphabet.charCodeAt(index)] = index
+}
 
 const hpkeKEMID = 0x0020
 const hpkeKDFID = 0x0001
@@ -170,16 +174,7 @@ export function createEncryptedColumnCodec(options: {
       assertPullResponse(response)
       if (response.unchanged) return response
 
-      const epochKeys = new Map<number, Promise<Uint8Array | undefined>>()
-      const getEpochKey = (epoch: number) => {
-        let promise = epochKeys.get(epoch)
-        if (!promise) {
-          promise = options.keyring.get(epoch).then((key) => validateEpochKey(epoch, key))
-          epochKeys.set(epoch, promise)
-        }
-        return promise
-      }
-
+      const epochKeys = new Map<number, ReturnType<typeof deriveColumnKeys> | undefined>()
       let rowsPatch: JSONValue[] | undefined
       for (let index = 0; index < response.rowsPatch.length; index++) {
         const patch = response.rowsPatch[index]
@@ -188,13 +183,48 @@ export function createEncryptedColumnCodec(options: {
         const table = manifest.tablesByPhysicalName.get(patch.tableName)
         if (!table || !isJSONObject(patch.value)) continue
 
-        const decodedValue = await decodePullValue(
-          patch.value,
-          table,
-          manifest,
-          getEpochKey
-        )
-        if (decodedValue === patch.value) continue
+        let decodedValue: Record<string, JSONValue> | undefined
+        let primaryKeyTuple: readonly JSONValue[] | undefined
+        for (const column of table.columns) {
+          if (!Object.hasOwn(patch.value, column.physicalName)) continue
+          const encoded = patch.value[column.physicalName]
+          if (typeof encoded !== 'string' || !encoded.startsWith(envelopePrefix)) {
+            throw codecError(
+              manifest,
+              `table ${table.logicalName} has plaintext in encrypted column ${column.logicalName}`
+            )
+          }
+          const envelope = parseEnvelope(encoded)
+          if (!epochKeys.has(envelope.epoch)) {
+            const key = validateEpochKey(
+              envelope.epoch,
+              await options.keyring.get(envelope.epoch)
+            )
+            epochKeys.set(
+              envelope.epoch,
+              key && deriveColumnKeys(key, manifest.networkID)
+            )
+          }
+          const keys = epochKeys.get(envelope.epoch)
+          if (!keys) continue
+          primaryKeyTuple ??= readPrimaryKeyTuple(
+            patch.value,
+            table,
+            manifest,
+            'physical'
+          )
+          const decoded = decryptEnvelopeValue(
+            envelope,
+            keys,
+            manifest,
+            table,
+            column,
+            primaryKeyTuple
+          )
+          decodedValue ??= { ...patch.value }
+          decodedValue[column.physicalName] = decoded
+        }
+        if (!decodedValue) continue
         rowsPatch ??= [...response.rowsPatch]
         rowsPatch[index] = { ...patch, value: decodedValue }
       }
@@ -360,7 +390,14 @@ async function encodeRowMutation(
             'no key is available for encoded retry'
           )
         }
-        decryptEnvelopeValue(existing, key, manifest, table, column, primaryKeyTuple)
+        decryptEnvelopeValue(
+          existing,
+          deriveColumnKeys(key, manifest.networkID),
+          manifest,
+          table,
+          column,
+          primaryKeyTuple
+        )
         continue
       }
 
@@ -409,42 +446,6 @@ async function encodeRowMutation(
   const args = [...mutation.args]
   args[argumentIndex] = nextBatch
   return { ...mutation, args } as PushMutation
-}
-
-async function decodePullValue(
-  originalValue: JSONObject,
-  table: NormalizedTable,
-  manifest: NormalizedManifest,
-  getEpochKey: (epoch: number) => Promise<Uint8Array | undefined>
-): Promise<JSONObject> {
-  let value = originalValue
-  let primaryKeyTuple: readonly JSONValue[] | undefined
-
-  for (const column of table.columns) {
-    if (!Object.hasOwn(originalValue, column.physicalName)) continue
-    const encoded = originalValue[column.physicalName]
-    if (typeof encoded !== 'string' || !encoded.startsWith(envelopePrefix)) {
-      throw codecError(
-        manifest,
-        `table ${table.logicalName} has plaintext in encrypted column ${column.logicalName}`
-      )
-    }
-    const envelope = parseEnvelope(encoded)
-    const key = await getEpochKey(envelope.epoch)
-    if (!key) continue
-    primaryKeyTuple ??= readPrimaryKeyTuple(originalValue, table, manifest, 'physical')
-    const decoded = decryptEnvelopeValue(
-      envelope,
-      key,
-      manifest,
-      table,
-      column,
-      primaryKeyTuple
-    )
-    value = { ...value, [column.physicalName]: decoded }
-  }
-
-  return value
 }
 
 function normalizeManifest(input: EncryptedColumnManifest): NormalizedManifest {
@@ -694,7 +695,7 @@ function readPrimaryKeyTuple(
 
 function decryptEnvelopeValue(
   envelope: ParsedEnvelope,
-  key: Uint8Array,
+  { dataKey, nonceKey }: ReturnType<typeof deriveColumnKeys>,
   manifest: NormalizedManifest,
   table: NormalizedTable,
   column: NormalizedColumn,
@@ -708,7 +709,6 @@ function decryptEnvelopeValue(
     envelope.epoch,
     envelope.mutationTag
   )
-  const { dataKey, nonceKey } = deriveColumnKeys(key, manifest.networkID)
   const nonce = envelope.payload.subarray(0, 24)
   const ciphertext = envelope.payload.subarray(24)
 
@@ -1038,22 +1038,21 @@ function base64URLEncode(bytes: Uint8Array) {
 }
 
 function base64URLDecode(value: string) {
-  if (!value || value.length % 4 === 1 || /[^A-Za-z0-9_-]/.test(value)) {
-    throw new Error('invalid base64url')
-  }
+  if (value.length % 4 === 1) throw new Error('invalid base64url')
   const result = new Uint8Array(Math.floor((value.length * 6) / 8))
   let accumulator = 0
   let bits = 0
   let outputIndex = 0
-  for (const character of value) {
-    accumulator = (accumulator << 6) | base64URLAlphabet.indexOf(character)
+  // parseEnvelope has already checked the alphabet.
+  for (let index = 0; index < value.length; index++) {
+    accumulator = (accumulator << 6) | base64URLValues[value.charCodeAt(index)]
     bits += 6
     if (bits >= 8) {
       bits -= 8
       result[outputIndex++] = (accumulator >>> bits) & 0xff
     }
   }
-  if (base64URLEncode(result) !== value) throw new Error('non-canonical base64url')
+  if ((accumulator & ((1 << bits) - 1)) !== 0) throw new Error('non-canonical base64url')
   return result
 }
 

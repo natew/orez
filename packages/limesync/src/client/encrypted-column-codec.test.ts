@@ -219,6 +219,31 @@ describe('orez-e1 encrypted column codec', () => {
     )
   })
 
+  test('rejects pull envelopes with nonzero unused base64url bits', async () => {
+    const codec = createEncryptedColumnCodec({ manifest, keyring: keyring(contentKey) })
+    const source = pushRequest()
+    encodedPut(source).body = 'a'
+    const { body } = encodedPut(await codec.encodePush(source))
+    if (typeof body !== 'string') throw new Error('expected a column envelope')
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+    const alias = body.slice(0, -1) + alphabet[alphabet.indexOf(body.slice(-1)) ^ 1]
+    const payload = (envelope: string) => Buffer.from(envelope.split('.')[3], 'base64url')
+    expect(payload(alias)).toEqual(payload(body))
+    await expect(
+      codec.decodePull({
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch: [
+          {
+            op: 'put',
+            tableName: 'message_record',
+            value: { id: 'message-1', body_cipher: alias },
+          },
+        ],
+      })
+    ).rejects.toThrow('non-canonical base64url')
+  })
+
   test('rejects malformed retry envelopes instead of encrypting them as plaintext', async () => {
     const malformed = pushRequest()
     encodedPut(malformed).body = 'orez-e1.3.invalid'
