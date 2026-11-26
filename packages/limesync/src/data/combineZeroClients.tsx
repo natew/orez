@@ -240,9 +240,7 @@ export function combineDataClients<
       }
       reconnecting.set(client.instanceName, event)
       const pending = [...reconnecting.values()]
-      events.emit(
-        pending.find((candidate) => candidate.status === 'waiting') ?? event
-      )
+      events.emit(pending.find((candidate) => candidate.status === 'waiting') ?? event)
     })
   }
 

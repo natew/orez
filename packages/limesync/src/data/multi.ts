@@ -46,12 +46,10 @@ export type DataInstanceManifestEntry<
   defaultVisibility: ((value: string) => { column: string; value: string }) | null
 }
 
-type ClientFor<
-  Entry,
-  LocalSchema extends ZeroSchema = EmptyLocalSchema,
-> = Entry extends DataInstanceManifestEntry<infer Schema, infer Models>
-  ? ReturnType<typeof createZeroClientInternal<Schema, Models, LocalSchema>>
-  : never
+type ClientFor<Entry, LocalSchema extends ZeroSchema = EmptyLocalSchema> =
+  Entry extends DataInstanceManifestEntry<infer Schema, infer Models>
+    ? ReturnType<typeof createZeroClientInternal<Schema, Models, LocalSchema>>
+    : never
 
 type ClientMap<
   Instances extends Record<string, DataInstanceManifestEntry>,
@@ -129,7 +127,11 @@ export function createDataClients<
   const providers = Object.fromEntries(
     names.map((name) => [name, clients[name]!.ProvideData])
   ) as {
-    [Name in keyof Instances]: ClientMap<Instances, Inner, LocalSchema>[Name]['ProvideData']
+    [Name in keyof Instances]: ClientMap<
+      Instances,
+      Inner,
+      LocalSchema
+    >[Name]['ProvideData']
   }
 
   return {

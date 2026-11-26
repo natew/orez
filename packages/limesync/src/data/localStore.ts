@@ -2114,7 +2114,9 @@ export class LocalDataStore<S extends Schema = Schema> {
 
           return result
         }
-        throw new Error('[limesync] local transaction exhausted revision conflict retries')
+        throw new Error(
+          '[limesync] local transaction exhausted revision conflict retries'
+        )
       })
     )
   }
