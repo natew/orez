@@ -1,12 +1,28 @@
 import { addContextToQuery, asQueryInternals } from '../bindings.js'
 
-import type { ConnectionState, CustomMutatorDefs, Schema, Zero } from '../zero.js'
+import type {
+  ConnectionState,
+  CustomMutatorDefs,
+  ReadonlyJSONValue,
+  Schema,
+  Zero,
+} from '../zero.js'
 import type { NativeZero } from './client.js'
 import type { OrezTransport } from './orez.js'
 import type { SyncState } from './sync.js'
-import type { Mutators, Query, Transport, TTL } from './types.js'
+import type { JSONValue, Mutators, Query, Transport, TTL } from './types.js'
 
 type QueryInput = Parameters<typeof addContextToQuery>[0]
+
+// what a named query's args become on the wire: undefined object members drop out
+function wireJSON(value: ReadonlyJSONValue): JSONValue {
+  if (value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map(wireJSON)
+  const entries: [string, JSONValue][] = []
+  for (const [key, member] of Object.entries(value))
+    if (member !== undefined) entries.push([key, wireJSON(member)])
+  return Object.fromEntries(entries)
+}
 
 // a transport's fetch throws this on a 401 or 403; the client then reports
 // needs-auth and stays offline until connect() brings a new token.
@@ -76,8 +92,16 @@ export async function nativeZeroClient<
       } else publish({ name: state.name })
     },
   })
-  const resolveQuery = (input: QueryInput) =>
-    asQueryInternals(addContextToQuery(input, client.context)) as unknown as Query
+  const resolveQuery = (input: QueryInput): Query => {
+    const query = asQueryInternals(addContextToQuery(input, client.context))
+    const named = query.customQueryID
+    return {
+      ast: query.ast,
+      format: query.format,
+      hash: () => query.hash(),
+      ...(named && { name: named.name, args: named.args.map(wireJSON) }),
+    }
+  }
 
   const watch = (query: Query, ttl?: TTL) => {
     const view = client.materialize(query, { ttl })

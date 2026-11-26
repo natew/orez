@@ -689,7 +689,10 @@ export class NativeZero<M extends Mutators = Mutators> {
     if (!hash) throw new Error('Native Zero materialization requires a query hash')
     let ttl = queryTTL(options.ttl)
     const captured = snapshot({ ast: query.ast, format: query.format })
-    const desired: DesiredQuery = { hash, ast: captured.ast }
+    const desired: DesiredQuery =
+      query.name === undefined
+        ? { hash, ast: captured.ast }
+        : { hash, name: query.name, args: snapshot(query.args ?? []) }
     const existing = this.desiredViews.get(hash)
     if (existing && !dequal(existing.desired, desired))
       throw new Error('Native Zero query hash refers to different queries')

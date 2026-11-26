@@ -14,6 +14,9 @@ export type Query = {
   ast: unknown
   format?: Format
   hash?: () => string
+  // a named query syncs by name and args; the server resolves its rows
+  name?: string
+  args?: readonly JSONValue[]
 }
 export type QueryResultType = 'unknown' | 'complete' | 'error'
 export type TTL = number | 'none' | 'forever' | `${number}${'s' | 'm' | 'h' | 'd' | 'y'}`
