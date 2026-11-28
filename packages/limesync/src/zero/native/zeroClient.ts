@@ -10,7 +10,17 @@ import type {
 import type { NativeZero } from './client.js'
 import type { OrezTransport } from './orez.js'
 import type { SyncState } from './sync.js'
-import type { JSONValue, Mutators, Query, Transport, TTL } from './types.js'
+import type {
+  JSONValue,
+  MutateRequest,
+  MutationPromise,
+  MutationResult,
+  Mutators,
+  NativeMutate,
+  Query,
+  Transport,
+  TTL,
+} from './types.js'
 
 type QueryInput = Parameters<typeof addContextToQuery>[0]
 
@@ -40,6 +50,35 @@ export type NativeZeroClientOptions = {
   auth?: string
   onAuthChange?: (auth: string) => void
   active?: boolean
+}
+
+// Zero's mutate hands back a plain { client, server } result. the engine's result
+// is also a promise of the mutator's return value, which an await or an async
+// return unwraps in place of the result, so the provider hands out only the two
+// settlements.
+function settlementsOnly(mutation: MutationPromise): MutationResult {
+  return { client: mutation.client, server: mutation.server }
+}
+
+type ZeroMutateFunctions = {
+  [name: string]: ((args?: JSONValue) => MutationResult) | ZeroMutateFunctions
+}
+
+function zeroMutateFunctions(functions: object): ZeroMutateFunctions {
+  const wrapped: ZeroMutateFunctions = {}
+  for (const [name, value] of Object.entries(functions)) {
+    wrapped[name] =
+      typeof value === 'function'
+        ? (args?: JSONValue) => settlementsOnly(value(args))
+        : zeroMutateFunctions(value)
+  }
+  return wrapped
+}
+
+function zeroMutate<M extends Mutators>(mutate: NativeMutate<M>) {
+  const call = (request: string | MutateRequest, args?: JSONValue) =>
+    settlementsOnly(typeof request === 'string' ? mutate(request, args) : mutate(request))
+  return Object.assign(call, zeroMutateFunctions(mutate))
 }
 
 function hasWake(transport: Transport | undefined): transport is OrezTransport {
@@ -153,7 +192,7 @@ export async function nativeZeroClient<
     context: client.context,
     schema,
     userID: options.userID,
-    mutate: client.mutate,
+    mutate: zeroMutate(client.mutate),
     get closed() {
       return closed
     },
